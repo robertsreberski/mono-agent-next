@@ -1,53 +1,97 @@
-import { ProcessTerminal } from "@earendil-works/pi-tui";
-import type { Terminal } from "@earendil-works/pi-tui";
+import { ProcessTerminal, type Terminal } from "@earendil-works/pi-tui";
+import {
+  createOperatorClientForEntry,
+  discoverOperators,
+  OperatorClient,
+  OperatorDirectory,
+  type DiscoveredOperator,
+} from "@mono-agent/operator";
 
 import { MonoAgentTuiApp } from "../ui/app.js";
-import type { MonoAgentTuiAppOptions } from "../ui/app.js";
 
-export interface StartMonoAgentTuiOptions extends Omit<MonoAgentTuiAppOptions, "terminal"> {
-  /** Test seam: inject a Terminal implementation; defaults to the real TTY. */
+export interface StartMonoAgentTuiOptions {
+  /** Direct authenticated loopback endpoint. Omit to use shared registry discovery. */
+  readonly endpoint?: string;
+  readonly token?: string;
+  readonly registryDirectories?: readonly string[];
+  readonly operatorId?: string;
+  readonly conversationId?: string;
+  readonly title?: string;
+  readonly model?: string;
+  readonly effort?: string;
   readonly terminal?: Terminal;
+  readonly fetch?: typeof globalThis.fetch;
+  readonly env?: Readonly<Record<string, string | undefined>>;
+  readonly requestTimeoutMs?: number;
 }
 
 export interface StartMonoAgentTuiHandle {
-  /** Resolves once the app exits (user quit or programmatic stop). */
   waitUntilExit(): Promise<void>;
-  /** Stop the app and restore the TTY. Idempotent. */
   stop(): Promise<void>;
 }
 
 /**
- * Start the pi-tui operator console. Exactly one connection mode applies:
- * `responder` (in-process/embedded), `connection` (direct remote endpoint), or
- * `discovery` (open on the agent picker). Replay/config views activate when
- * `instance`/`config` provide data roots.
+ * Start the standalone renderer. A manually injected Terminal is the supported
+ * non-TTY test seam; production calls require an interactive stdin.
  */
-export function startMonoAgentTui(options: StartMonoAgentTuiOptions): StartMonoAgentTuiHandle {
-  const modes = [options.responder, options.connection, options.discovery].filter(
-    (mode) => mode !== undefined,
-  ).length;
-  if (modes !== 1) {
-    throw new Error(
-      "startMonoAgentTui requires exactly one of `responder`, `connection`, or `discovery`.",
-    );
+export async function startMonoAgentTui(
+  options: StartMonoAgentTuiOptions = {},
+): Promise<StartMonoAgentTuiHandle> {
+  if (options.endpoint !== undefined && options.registryDirectories !== undefined) {
+    throw new Error("startMonoAgentTui accepts either endpoint or registryDirectories, not both");
+  }
+  if (options.token !== undefined && options.endpoint === undefined) {
+    throw new Error("startMonoAgentTui token requires a direct endpoint");
+  }
+  if (options.endpoint !== undefined && options.operatorId !== undefined) {
+    throw new Error("startMonoAgentTui operatorId applies only to discovery");
   }
   if (options.terminal === undefined && process.stdin.isTTY !== true) {
-    throw new Error("startMonoAgentTui requires a TTY stdin. Pass a terminal manually for non-TTY use.");
+    throw new Error("startMonoAgentTui requires a TTY; inject terminal for non-TTY tests");
   }
 
-  const { terminal, ...appOptions } = options;
+  const clientOptions = {
+    ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    ...(options.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: options.requestTimeoutMs }),
+  };
+  let discoveredOperator: DiscoveredOperator | undefined;
+  let client: OperatorClient;
+  if (options.endpoint === undefined) {
+    discoveredOperator = new OperatorDirectory(await discoverOperators(
+        options.registryDirectories === undefined
+          ? {}
+          : { registryDirectories: options.registryDirectories },
+      )).select(options.operatorId);
+    client = createOperatorClientForEntry(discoveredOperator, {
+      ...clientOptions,
+      ...(options.env === undefined ? {} : { env: options.env }),
+    });
+  } else {
+    client = new OperatorClient({
+        endpoint: options.endpoint,
+        ...(options.token === undefined ? {} : { token: options.token }),
+        ...clientOptions,
+      });
+  }
+
   const app = new MonoAgentTuiApp({
-    ...appOptions,
-    terminal: terminal ?? new ProcessTerminal(),
+    client,
+    terminal: options.terminal ?? new ProcessTerminal(),
+    conversationId: options.conversationId ?? `tui-${crypto.randomUUID()}`,
+    ...(options.title === undefined ? {} : { title: options.title }),
+    ...(options.model === undefined ? {} : { model: options.model }),
+    ...(options.effort === undefined ? {} : { effort: options.effort }),
+    ...(discoveredOperator === undefined ? {} : { discoveredOperator }),
   });
-  app.start();
+  try {
+    await app.start();
+  } catch (error) {
+    app.stop();
+    throw error;
+  }
 
   return {
-    async waitUntilExit(): Promise<void> {
-      await app.waitUntilExit();
-    },
-    async stop(): Promise<void> {
-      app.stop();
-    },
+    waitUntilExit: () => app.waitUntilExit(),
+    async stop(): Promise<void> { app.stop(); },
   };
 }

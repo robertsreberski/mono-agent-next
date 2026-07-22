@@ -1,12 +1,12 @@
 {
   "name": "@mono-agent/tui",
   "version": "0.15.0",
-  "description": "pi-tui operator console for mono-agent: live chat with structured stream-event insight, bounded recorded-run replay, and read-only config view for running agents.",
+  "description": "Standalone pi-tui operator console over the shared mono-agent operator protocol.",
   "type": "module",
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/robertsreberski/mono-agent.git",
+    "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
     "directory": "packages/tui"
   },
   "private": false,
@@ -26,7 +26,8 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -35,14 +36,9 @@
   },
   "dependencies": {
     "@earendil-works/pi-tui": "0.79.10",
-    "@mono-agent/agent-contracts": "workspace:0.15.0",
-    "@mono-agent/config": "workspace:0.15.0",
-    "@mono-agent/observability": "workspace:0.15.0"
+    "@mono-agent/operator": "workspace:0.15.0"
   },
   "publishConfig": {
     "access": "public"
-  },
-  "devDependencies": {
-    "@mono-agent/operator-adapter": "workspace:0.15.0"
   }
 }

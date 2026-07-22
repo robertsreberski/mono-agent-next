@@ -1,501 +1,396 @@
-import { lstat, readFile, readdir, writeFile } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { isAllowedWebHostname, startWebServer, type WebServerHandle } from "../server.js";
-import { prepareWebStatePaths } from "../state-paths.js";
-import { fakeDiscoveredAgent, operatorFetch, temporaryRoot } from "./helpers.js";
+import { OPERATOR_PROTOCOL, OPERATOR_REGISTRY_SCHEMA } from "@mono-agent/operator";
 
-const cleanup: string[] = [];
-const servers: WebServerHandle[] = [];
+import type { WebConfig } from "../config.js";
+import type { WebAgent } from "../contracts.js";
+import { startWebServer, type WebServerHandle } from "../server.js";
+import type { WebOperatorGateway } from "../service.js";
+import { DurableWebStore } from "../store.js";
+import { cleanup, temporaryDirectory } from "./helpers.js";
+
+const WEB_TOKEN = "web-browser-token-0123456789";
+const OPERATOR_TOKEN = "operator-token-0123456789";
+const webServers = new Set<WebServerHandle>();
+const operatorServers = new Set<Server>();
 
 afterEach(async () => {
-  await Promise.all(servers.splice(0).map(async (server) => server.stop()));
-  const { rm } = await import("node:fs/promises");
-  await Promise.all(cleanup.splice(0).map(async (path) => rm(path, { recursive: true, force: true })));
+  await Promise.all([...webServers].map(async (server) => server.stop()));
+  await Promise.all([...operatorServers].map(closeNodeServer));
+  webServers.clear();
+  operatorServers.clear();
+  await cleanup();
 });
 
-async function start(options: Partial<Parameters<typeof startWebServer>[0]> = {}): Promise<{ handle: WebServerHandle; baseUrl: string; root: string }> {
-  const root = await temporaryRoot();
-  cleanup.push(root);
-  // Managed runtimes live below ~/.mono-agent. Keep a hidden parent in the
-  // fixture so SPA fallback tests exercise Express's dotfile handling.
-  const staticDir = join(root, ".mono-agent", "static");
-  const { mkdir } = await import("node:fs/promises");
-  await mkdir(staticDir, { recursive: true });
-  await writeFile(join(staticDir, "index.html"), "<!doctype html><title>web</title>");
-  const handle = await startWebServer({
-    port: 0,
-    stateDir: join(root, "state"),
-    staticDir,
-    discoveryIntervalMs: 0,
-    purgeIntervalMs: 0,
-    discoverImpl: async () => [fakeDiscoveredAgent()],
-    fetchImpl: operatorFetch(),
-    ...options,
-  });
-  servers.push(handle);
-  return { handle, baseUrl: `http://127.0.0.1:${handle.port}`, root };
-}
+describe("standalone web product", () => {
+  it("authenticates browser APIs and rejects cross-origin or browser-simple mutations", async () => {
+    const root = await temporaryDirectory();
+    const gateway = immediateGateway();
+    const server = await startWebServer({ config: config(join(root, "state")), operatorGateway: gateway });
+    webServers.add(server);
 
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return response.json() as Promise<Record<string, unknown>>;
-}
-
-describe("web HTTP server", () => {
-  it("defaults to a LAN bind with no application auth or CORS grant", async () => {
-    const { handle, baseUrl } = await start();
-    expect(handle.host).toBe("0.0.0.0");
-    const health = await fetch(`${baseUrl}/healthz`);
-    expect(health.status).toBe(200);
-    expect(await health.json()).toEqual({ status: "ok", version: 1 });
-    const root = await fetch(`${baseUrl}/`);
-    expect(root.status).toBe(200);
-    expect(await root.text()).toContain("<title>web</title>");
-    const clientRoute = await fetch(`${baseUrl}/conversations/example`);
-    expect(clientRoute.status).toBe(200);
-    expect(await clientRoute.text()).toContain("<title>web</title>");
-    const bootstrap = await fetch(`${baseUrl}/api/v1/bootstrap`);
-    expect(bootstrap.status).toBe(200);
-    expect(bootstrap.headers.get("cache-control")).toBe("no-store");
-    expect(bootstrap.headers.get("access-control-allow-origin")).toBeNull();
-    const body = await bootstrap.json() as { agents: unknown[] };
-    expect(body.agents[0]).toMatchObject({ sourceId: "agent-one", status: "online", supportsAttachments: true });
-  });
-
-  it("publishes an owner-private loopback ingress and removes only its live record on stop", async () => {
-    const recorded: unknown[] = [];
-    const { handle, baseUrl } = await start({
-      host: "127.0.0.1",
-      fetchImpl: operatorFetch({
-        supportsHistoryAppend: true,
-        onVerbatim: async (conversationId, body) => void recorded.push({ conversationId, body }),
-      }),
-    });
-    const ingressPath = join(handle.stateDir, "notify-ingress.json");
-    expect((await lstat(ingressPath)).mode & 0o777).toBe(0o600);
-    const ingress = JSON.parse(await readFile(ingressPath, "utf8")) as { url: string; token: string };
-    expect(new URL(ingress.url).hostname).toBe("127.0.0.1");
-
-    const unauthorized = await fetch(ingress.url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        sourceId: "agent-one",
-        triggerKind: "cron",
-        deliveryKey: "cron:daily:one:success",
-        text: "Morning brief",
-      }),
-    });
+    const unauthorized = await fetch(`${server.url}api/v1/bootstrap`);
     expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get("www-authenticate")).toContain("Bearer");
 
-    const accepted = await fetch(ingress.url, {
+    const page = await fetch(server.url);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-security-policy")).toContain("script-src 'self'");
+    expect(await page.text()).toContain("mono-agent web");
+
+    const forgedAuthority = `attacker.invalid:${server.port}`;
+    expect(await getWithAuthority(server, "/", forgedAuthority, false)).toBe(421);
+    expect(await getWithAuthority(server, "/api/v1/bootstrap", forgedAuthority, true)).toBe(421);
+
+    const crossOrigin = await fetch(`${server.url}api/v1/threads`, {
       method: "POST",
-      headers: {
-        authorization: `Bearer ${ingress.token}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        sourceId: "agent-one",
-        triggerKind: "cron",
-        deliveryKey: "cron:daily:one:success",
-        text: "Morning brief",
-      }),
-    });
-    expect(accepted.status).toBe(201);
-    const delivered = await json(accepted) as { threadId: string; duplicate: boolean };
-    expect(delivered.duplicate).toBe(false);
-    expect(recorded).toEqual([{
-      conversationId: `web:${delivered.threadId}`,
-      body: { text: "Morning brief", idempotencyKey: "cron:daily:one:success" },
-    }]);
-    const bootstrap = await json(await fetch(`${baseUrl}/api/v1/bootstrap`)) as { threads: unknown[] };
-    expect(bootstrap.threads).toEqual([
-      expect.objectContaining({
-        id: delivered.threadId,
-        title: "Cron notification",
-        trigger: { kind: "cron" },
-      }),
-    ]);
-
-    await handle.stop();
-    await expect(lstat(ingressPath)).rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  it("rejects DNS-rebinding hosts and cross-origin mutations while accepting the exact configured hostname", async () => {
-    const { baseUrl } = await start({ host: "127.0.0.1" });
-    expect(isAllowedWebHostname("mickey.home.arpa", "mickey.home.arpa", "mickey")).toBe(true);
-    expect(isAllowedWebHostname("attacker.home.arpa", "mickey.home.arpa", "mickey")).toBe(false);
-    expect(isAllowedWebHostname("attacker.local", "0.0.0.0", "mickey")).toBe(false);
-    expect(isAllowedWebHostname("attacker.ts.net", "0.0.0.0", "mickey")).toBe(false);
-    expect(isAllowedWebHostname("mickey-home.tailnet.ts.net", "0.0.0.0", "mickey", ["mickey-home.tailnet.ts.net"]))
-      .toBe(true);
-
-    const target = new URL(baseUrl);
-    const rebindingStatus = await new Promise<number>((resolvePromise, reject) => {
-      const request = httpRequest({
-        hostname: target.hostname,
-        port: target.port,
-        path: "/healthz",
-        headers: { Host: "attacker" },
-      }, (response) => {
-        response.resume();
-        resolvePromise(response.statusCode ?? 0);
-      });
-      request.once("error", reject);
-      request.end();
-    });
-    expect(rebindingStatus).toBe(421);
-    const crossOrigin = await fetch(`${baseUrl}/api/v1/threads`, {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: "https://evil.example" },
-      body: JSON.stringify({ sourceId: "agent-one" }),
+      headers: authHeaders({ origin: "http://attacker.invalid", "content-type": "application/json" }),
+      body: JSON.stringify({ agentId: "personal" }),
     });
     expect(crossOrigin.status).toBe(403);
-    const sameOrigin = await fetch(`${baseUrl}/api/v1/threads`, {
+
+    expect(await mutationWithAuthority(server, forgedAuthority)).toBe(421);
+
+    const loopbackAuthority = `localhost:${server.port}`;
+    expect(await mutationWithAuthority(server, loopbackAuthority)).toBe(201);
+
+    const simple = await fetch(`${server.url}api/v1/threads`, {
       method: "POST",
-      headers: { "content-type": "application/json", origin: baseUrl },
-      body: JSON.stringify({ sourceId: "agent-one" }),
+      headers: authHeaders({ "content-type": "text/plain" }),
+      body: JSON.stringify({ agentId: "personal" }),
     });
-    expect(sameOrigin.status).toBe(201);
+    expect(simple.status).toBe(415);
   });
 
-  it("maps oversized JSON to 413 instead of a generic server error", async () => {
-    const { baseUrl } = await start({ host: "127.0.0.1" });
-    const response = await fetch(`${baseUrl}/api/v1/threads`, {
+  it("discovers through operator, streams one real turn, and reloads durable state", async () => {
+    const root = await temporaryDirectory();
+    const registry = join(root, "registry");
+    await mkdir(registry, { mode: 0o700 });
+    const operator = await startOperatorFixture();
+    const now = new Date().toISOString();
+    await writeFile(join(registry, "personal.json"), JSON.stringify({
+      schema: OPERATOR_REGISTRY_SCHEMA,
+      agent: { id: "personal", label: "Personal Agent" },
+      operator: { endpoint: operator.url, tokenEnvironment: "OPERATOR_TEST_TOKEN" },
+      pid: process.pid,
+      startedAt: operator.startedAt,
+      heartbeatAt: now,
+      capabilities: capabilities(),
+    }), { mode: 0o600 });
+    await chmod(join(registry, "personal.json"), 0o600);
+    const productConfig = config(join(root, "state"), { agentRegistries: [registry] });
+    const environment = { OPERATOR_TEST_TOKEN: OPERATOR_TOKEN };
+    const first = await startWebServer({ config: productConfig, environment });
+    webServers.add(first);
+
+    const bootstrap = await json(first, "/api/v1/bootstrap");
+    expect(bootstrap).toMatchObject({ agents: [{ id: "personal", label: "Personal Agent", online: true }], threads: [] });
+    const thread = await json(first, "/api/v1/threads", {
+      method: "POST", body: JSON.stringify({ agentId: "personal", title: "Durable operator turn" }),
+    }) as { id: string };
+    const turnResponse = await fetch(`${first.url}api/v1/threads/${thread.id}/turns`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sourceId: "x".repeat(300_000) }),
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({ text: "hello operator" }),
     });
-    expect(response.status).toBe(413);
-    expect(await json(response)).toMatchObject({ error: { code: "request_too_large" } });
+    expect(turnResponse.status).toBe(200);
+    expect(turnResponse.headers.get("content-type")).toContain("application/x-ndjson");
+    const events = (await turnResponse.text()).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(events.at(-1)).toMatchObject({ type: "done", detail: { thread: { status: "complete" } } });
+    expect(events.some((event) => JSON.stringify(event).includes("hello from agent"))).toBe(true);
+
+    await first.stop();
+    webServers.delete(first);
+    const second = await startWebServer({ config: productConfig, environment });
+    webServers.add(second);
+    await expect(json(second, `/api/v1/threads/${thread.id}`)).resolves.toMatchObject({
+      thread: { status: "complete", title: "Durable operator turn" },
+      messages: [
+        { role: "user", text: "hello operator", status: "complete" },
+        { role: "assistant", text: "hello from agent", status: "complete" },
+      ],
+    });
   });
 
-  it("validates exact host configuration before acquiring the persistent service lease", async () => {
-    const root = await temporaryRoot();
-    cleanup.push(root);
-    const staticDir = join(root, "static");
-    const { mkdir } = await import("node:fs/promises");
-    await mkdir(staticDir);
-    await writeFile(join(staticDir, "index.html"), "ok");
-    const options = {
-      host: "127.0.0.1",
-      port: 0,
-      stateDir: join(root, "state"),
-      staticDir,
-      discoveryIntervalMs: 0,
-      purgeIntervalMs: 0,
-      discoverImpl: async () => [],
-    } as const;
-
-    await expect(startWebServer({ ...options, allowedHosts: ["bad:host"] }))
-      .rejects.toMatchObject({ code: "invalid_allowed_host" });
-    const handle = await startWebServer(options);
-    servers.push(handle);
-    expect(handle.port).toBeGreaterThan(0);
-  });
-
-  it("streams raw uploads, rejects encoded/wrong-size bodies, and serves non-images as safe downloads", async () => {
-    const { baseUrl } = await start({ host: "127.0.0.1" });
-    const unsupported = await fetch(`${baseUrl}/api/v1/uploads`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "raw.bin", contentType: "application/octet-stream", sizeBytes: 1 }),
-    });
-    expect(unsupported.status).toBe(415);
-
-    const created = await fetch(`${baseUrl}/api/v1/uploads`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "page('x').html", contentType: "text/html", sizeBytes: 5 }),
-    });
-    const attachment = (await json(created)).attachment as { id: string };
-    const wrongMime = await fetch(`${baseUrl}/api/v1/uploads/${attachment.id}/content`, {
-      method: "PUT", headers: { "content-type": "text/html" }, body: "hello",
-    });
-    expect(wrongMime.status).toBe(415);
-    const encoded = await fetch(`${baseUrl}/api/v1/uploads/${attachment.id}/content`, {
-      method: "PUT", headers: { "content-type": "application/octet-stream", "content-encoding": "gzip" }, body: "hello",
-    });
-    expect(encoded.status).toBe(415);
-    const uploaded = await fetch(`${baseUrl}/api/v1/uploads/${attachment.id}/content`, {
-      method: "PUT", headers: { "content-type": "application/octet-stream" }, body: "hello",
-    });
-    expect(uploaded.status).toBe(200);
-
-    const content = await fetch(`${baseUrl}/api/v1/uploads/${attachment.id}/content`);
-    expect(content.status).toBe(200);
-    expect(content.headers.get("content-type")).toBe("application/octet-stream");
-    expect(content.headers.get("x-content-type-options")).toBe("nosniff");
-    expect(content.headers.get("content-disposition")).toContain("attachment;");
-    expect(content.headers.get("content-disposition")).toContain("%27");
-    expect(await content.text()).toBe("hello");
-  });
-
-  it("keeps failed upload bytes staged/retryable and removes only staged attachments", async () => {
-    const { baseUrl, handle } = await start({ host: "127.0.0.1" });
-    const created = await fetch(`${baseUrl}/api/v1/uploads`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "notes.txt", contentType: "text/plain", sizeBytes: 5 }),
-    });
-    const attachment = (await json(created)).attachment as { id: string };
-    const mismatch = await fetch(`${baseUrl}/api/v1/uploads/${attachment.id}/content`, {
-      method: "PUT", headers: { "content-type": "application/octet-stream" }, body: "four",
-    });
-    expect(mismatch.status).toBe(400);
-    expect((await readdir(join(handle.stateDir, "uploads"))).filter((name) => name.includes("partial"))).toEqual([]);
-    const retried = await fetch(`${baseUrl}/api/v1/uploads/${attachment.id}/content`, {
-      method: "PUT", headers: { "content-type": "application/octet-stream" }, body: "hello",
-    });
-    expect(retried.status).toBe(200);
-    const committedDelete = await fetch(`${baseUrl}/api/v1/uploads/${attachment.id}`, { method: "DELETE" });
-    expect(committedDelete.status).toBe(204); // uploaded but still staged until a turn commits it
-    expect(await fetch(`${baseUrl}/api/v1/uploads/${attachment.id}/content`)).toMatchObject({ status: 404 });
-  });
-
-  it("cleans validated crash-residue partial uploads before accepting traffic", async () => {
-    const root = await temporaryRoot();
-    cleanup.push(root);
-    const stateDir = join(root, "state");
-    const paths = await prepareWebStatePaths({ stateDir });
-    const partial = join(paths.uploads, "11111111-1111-4111-8111-111111111111.bin.partial-22222222-2222-4222-8222-222222222222");
-    await writeFile(partial, "orphan", { mode: 0o600 });
-    const staticDir = join(root, "static");
-    const { mkdir } = await import("node:fs/promises");
-    await mkdir(staticDir);
-    await writeFile(join(staticDir, "index.html"), "ok");
-    const handle = await startWebServer({
-      host: "127.0.0.1", port: 0, stateDir, staticDir,
-      discoveryIntervalMs: 0, purgeIntervalMs: 0, discoverImpl: async () => [],
-    });
-    servers.push(handle);
-    await expect(lstat(partial)).rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  it("supports create/read/archive/turn API flow with a source-bound conversation", async () => {
-    const { baseUrl } = await start({ host: "127.0.0.1" });
-    const created = await fetch(`${baseUrl}/api/v1/threads`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ sourceId: "agent-one" }),
-    });
-    const thread = (await json(created)).thread as { id: string; sourceId: string };
-    expect(thread.sourceId).toBe("agent-one");
-    const turn = await fetch(`${baseUrl}/api/v1/threads/${thread.id}/turns`, {
-      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "hello", model: "provider/default", effort: "high" }),
-    });
-    expect(turn.status).toBe(202);
-    let detail: Record<string, unknown> = {};
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      detail = await json(await fetch(`${baseUrl}/api/v1/threads/${thread.id}`));
-      if ((detail.thread as { runState?: { status?: string } }).runState?.status === "complete") break;
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-    }
-    expect(detail).toMatchObject({ thread: { sourceId: "agent-one", runState: { status: "complete" } } });
-    const archived = await fetch(`${baseUrl}/api/v1/threads/${thread.id}`, {
-      method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ archived: true }),
-    });
-    expect((await json(archived)).thread).toMatchObject({ id: thread.id });
-    const deleted = await fetch(`${baseUrl}/api/v1/threads/${thread.id}`, { method: "DELETE" });
-    expect(deleted.status).toBe(204);
-    expect(await fetch(`${baseUrl}/api/v1/threads/${thread.id}`)).toMatchObject({ status: 404 });
-  });
-
-  it("accepts a live follow-up for the active web turn and exposes its applied status", async () => {
-    const encoder = new TextEncoder();
-    let finishTurn = () => undefined;
-    const liveInputs: Array<{ conversationId: string; body: Record<string, unknown> }> = [];
-    const { baseUrl } = await start({
-      host: "127.0.0.1",
-      fetchImpl: operatorFetch({
-        supportsLiveInput: true,
-        turns: () => new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(encoder.encode(`${JSON.stringify({ kind: "append", delta: "Working" })}\n`));
-            finishTurn = () => {
-              controller.enqueue(encoder.encode(`${JSON.stringify({ kind: "finish", finalText: "Done" })}\n`));
-              controller.close();
-            };
-          },
-        }),
-        onLiveInput: async (conversationId, body) => {
-          liveInputs.push({ conversationId, body });
-          return { status: "applied", runId: "run-live" };
-        },
-      }),
-    });
-    const created = await fetch(`${baseUrl}/api/v1/threads`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sourceId: "agent-one" }),
-    });
-    const thread = (await json(created)).thread as { id: string };
-    const started = await fetch(`${baseUrl}/api/v1/threads/${thread.id}/turns`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: "Start the work" }),
-    });
-    expect(started.status).toBe(202);
-
-    const response = await fetch(`${baseUrl}/api/v1/threads/${thread.id}/live-input`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: "Use the smaller scope" }),
-    });
-    expect(response.status).toBe(202);
-    expect(await json(response)).toMatchObject({
-      disposition: "pending",
-      message: { role: "user", liveInputStatus: "pending" },
-    });
-
-    let detail = await json(await fetch(`${baseUrl}/api/v1/threads/${thread.id}`));
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const messages = detail.messages as Array<{ liveInputStatus?: string }>;
-      if (messages.some((message) => message.liveInputStatus === "applied")) break;
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 10));
-      detail = await json(await fetch(`${baseUrl}/api/v1/threads/${thread.id}`));
-    }
-    expect(detail.messages).toEqual(expect.arrayContaining([
-      expect.objectContaining({ liveInputStatus: "applied" }),
-    ]));
-    expect(liveInputs).toEqual([{
-      conversationId: `web:${thread.id}`,
-      body: expect.objectContaining({ text: "Use the smaller scope" }),
-    }]);
-    finishTurn();
-  });
-
-  it("proxies pending and submitted AskUser state for a web conversation", async () => {
-    const submissions: Record<string, unknown>[] = [];
-    const snapshot = {
-      interactionId: "ask-test",
-      questions: [{
-        id: "q0",
-        header: "Delivery",
-        question: "Send the draft?",
-        options: [
-          { id: "q0o0", label: "Send", description: "Send it now." },
-          { id: "q0o1", label: "Skip", description: "Leave it unsent." },
-        ],
-      }],
-      answers: [],
-      activeQuestionIndex: 0,
-      status: "pending",
-      createdAt: "2026-07-21T09:00:00.000Z",
-      expiresAt: "2026-07-21T09:10:00.000Z",
+  it("cancels the exact active process turn and persists cancellation", async () => {
+    const root = await temporaryDirectory();
+    const cancelled = vi.fn();
+    const gateway: WebOperatorGateway = {
+      async listAgents() { return [agent()]; },
+      async runTurn(input) {
+        await input.onText("working");
+        if (input.signal.aborted) throw input.signal.reason;
+        await new Promise<never>((_resolve, reject) => {
+          input.signal.addEventListener("abort", () => reject(input.signal.reason), { once: true });
+        });
+      },
+      async cancel(_agentId, conversationId) { cancelled(conversationId); },
     };
-    const { baseUrl } = await start({
-      host: "127.0.0.1",
-      fetchImpl: operatorFetch({
-        supportsAskUser: true,
-        pendingAsk: snapshot,
-        onAskSubmit: (body) => submissions.push(body),
-      }),
+    const server = await startWebServer({ config: config(join(root, "state")), operatorGateway: gateway });
+    webServers.add(server);
+    const thread = await json(server, "/api/v1/threads", {
+      method: "POST", body: JSON.stringify({ agentId: "personal" }),
+    }) as { id: string };
+    const streaming = await fetch(`${server.url}api/v1/threads/${thread.id}/turns`, {
+      method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify({ text: "wait" }),
     });
-    const created = await fetch(`${baseUrl}/api/v1/threads`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sourceId: "agent-one" }),
-    });
-    const thread = (await json(created)).thread as { id: string };
-
-    const pending = await fetch(`${baseUrl}/api/v1/threads/${thread.id}/ask`);
-    expect(await json(pending)).toEqual({ ask: snapshot });
-    const submitted = await fetch(`${baseUrl}/api/v1/threads/${thread.id}/ask`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        interactionId: "ask-test",
-        answers: [{ questionId: "q0", selectedOptionIds: ["q0o0"] }],
-      }),
-    });
-    expect(await json(submitted)).toMatchObject({ accepted: true, snapshot: { status: "answered" } });
-    expect(submissions).toEqual([{
-      interactionId: "ask-test",
-      answers: [{ questionId: "q0", selectedOptionIds: ["q0o0"] }],
-    }]);
+    const detail = await json(server, `/api/v1/threads/${thread.id}/cancel`, { method: "POST", body: "{}" });
+    expect(detail).toMatchObject({ thread: { status: "cancelled" } });
+    expect(cancelled).toHaveBeenCalledWith(`web:${thread.id}`);
+    await streaming.text();
   });
 
-  it("validates the public quote payload before starting a turn", async () => {
-    const { baseUrl } = await start({ host: "127.0.0.1" });
-    const created = await fetch(`${baseUrl}/api/v1/threads`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ sourceId: "agent-one" }),
+  it("keeps the service-owned turn running after the browser stream disconnects", async () => {
+    const root = await temporaryDirectory();
+    let finish!: () => void;
+    let started!: () => void;
+    const finishGate = new Promise<void>((resolve) => { finish = resolve; });
+    const startedGate = new Promise<void>((resolve) => { started = resolve; });
+    const gateway: WebOperatorGateway = {
+      async listAgents() { return [agent()]; },
+      async runTurn(input) {
+        await input.onText("partial");
+        started();
+        await finishGate;
+        expect(input.signal.aborted).toBe(false);
+        await input.onText("settled after reload");
+      },
+      async cancel() {},
+    };
+    const server = await startWebServer({ config: config(join(root, "state")), operatorGateway: gateway });
+    webServers.add(server);
+    const thread = await json(server, "/api/v1/threads", {
+      method: "POST", body: JSON.stringify({ agentId: "personal" }),
+    }) as { id: string };
+    const streaming = await fetch(`${server.url}api/v1/threads/${thread.id}/turns`, {
+      method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify({ text: "continue" }),
     });
-    const thread = (await json(created)).thread as { id: string };
-    const response = await fetch(`${baseUrl}/api/v1/threads/${thread.id}/turns`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        text: "Follow up",
-        quote: { text: "", messageId: "message" },
-      }),
-    });
+    await startedGate;
+    const reader = streaming.body!.getReader();
+    await reader.read();
+    await reader.cancel("simulated reload");
+    finish();
 
-    expect(response.status).toBe(400);
-    expect(await json(response)).toMatchObject({ error: { code: "invalid_request" } });
-  });
-
-  it("validates and persists agent pins with pinned-first bootstrap ordering", async () => {
-    const first = fakeDiscoveredAgent();
-    const second = fakeDiscoveredAgent({
-      source: { ...first.source, sourceId: "agent-two", label: "Agent Two" },
-    });
-    const { baseUrl } = await start({
-      host: "127.0.0.1",
-      discoverImpl: async () => [first, second],
-    });
-    const headers = { "content-type": "application/json" };
-
-    const invalid = await fetch(`${baseUrl}/api/v1/agents/agent-two`, {
-      method: "PATCH", headers, body: JSON.stringify({ pinned: "yes" }),
-    });
-    expect(invalid.status).toBe(400);
-    expect(await json(invalid)).toMatchObject({ error: { code: "invalid_request" } });
-    const missing = await fetch(`${baseUrl}/api/v1/agents/missing`, {
-      method: "PATCH", headers, body: JSON.stringify({ pinned: true }),
-    });
-    expect(missing.status).toBe(404);
-    expect(await json(missing)).toMatchObject({ error: { code: "agent_not_found" } });
-
-    const pinned = await fetch(`${baseUrl}/api/v1/agents/agent-two`, {
-      method: "PATCH", headers, body: JSON.stringify({ pinned: true }),
-    });
-    expect(pinned.status).toBe(200);
-    expect(await json(pinned)).toMatchObject({ agent: { sourceId: "agent-two", pinned: true } });
-    const bootstrap = await json(await fetch(`${baseUrl}/api/v1/bootstrap`)) as { agents: Array<{ sourceId: string; pinned: boolean }> };
-    expect(bootstrap.agents.map(({ sourceId, pinned: isPinned }) => ({ sourceId, pinned: isPinned }))).toEqual([
-      { sourceId: "agent-two", pinned: true },
-      { sourceId: "agent-one", pinned: false },
-    ]);
-
-    const unpinned = await fetch(`${baseUrl}/api/v1/agents/agent-two`, {
-      method: "PATCH", headers, body: JSON.stringify({ pinned: false }),
-    });
-    expect(unpinned.status).toBe(200);
-    expect(await json(unpinned)).toMatchObject({ agent: { sourceId: "agent-two", pinned: false } });
-  });
-
-  it("caps SSE clients and permits reconnect/bootstrap semantics", async () => {
-    const { baseUrl } = await start({ host: "127.0.0.1" });
-    const streams = await Promise.all(Array.from({ length: 64 }, async () => fetch(`${baseUrl}/api/v1/events`)));
-    expect(streams.every((response) => response.status === 200)).toBe(true);
-    const firstChunk = await streams[0]?.body?.getReader().read();
-    expect(new TextDecoder().decode(firstChunk?.value)).toContain("event: ready");
-    const overflow = await fetch(`${baseUrl}/api/v1/events`);
-    expect(overflow.status).toBe(503);
-    await Promise.all(streams.map(async (response) => response.body?.cancel().catch(() => undefined)));
-    let reconnected: Response | undefined;
+    let detail: unknown;
     for (let attempt = 0; attempt < 100; attempt += 1) {
-      const candidate = await fetch(`${baseUrl}/api/v1/events`);
-      if (candidate.status === 200) {
-        reconnected = candidate;
-        break;
-      }
-      expect(candidate.status).toBe(503);
-      await candidate.body?.cancel();
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+      detail = await json(server, `/api/v1/threads/${thread.id}`);
+      if ((detail as { thread: { status: string } }).thread.status === "complete") break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    expect(reconnected?.status).toBe(200);
-    await reconnected?.body?.cancel();
-  }, 15_000);
+    expect(detail).toMatchObject({
+      thread: { status: "complete" },
+      messages: [{ role: "user" }, { role: "assistant", text: "settled after reload", status: "complete" }],
+    });
+  });
+
+  it("fails closed before binding a non-loopback listener without a strong token", async () => {
+    const root = await temporaryDirectory();
+    await expect(startWebServer({
+      config: config(join(root, "state"), { host: "0.0.0.0", token: "sixteen-char-key!", allowInsecureHttp: true }),
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "unsafe_non_loopback_bind" });
+  });
+
+  it("requires an explicit plaintext trusted-network opt-in for every non-loopback bind", async () => {
+    const root = await temporaryDirectory();
+    await expect(startWebServer({
+      config: config(join(root, "state"), { host: "0.0.0.0" }),
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "insecure_http_opt_in_required" });
+  });
+
+  it("accepts a direct Tailscale address origin on an authenticated wildcard listener", async () => {
+    const root = await temporaryDirectory();
+    const server = await startWebServer({
+      config: config(join(root, "state"), { host: "0.0.0.0", allowInsecureHttp: true }),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(server);
+    const tailscaleAuthority = `100.100.100.100:${server.port}`;
+    expect(await mutationWithAuthority(server, tailscaleAuthority)).toBe(201);
+  });
+
+  it("destroys sockets on deadline and returns after an upstream ignores shutdown", async () => {
+    const root = await temporaryDirectory();
+    const dataDirectory = join(root, "state");
+    let gatewayStarted!: () => void;
+    const started = new Promise<void>((resolve) => { gatewayStarted = resolve; });
+    const never = new Promise<void>(() => undefined);
+    const gateway: WebOperatorGateway = {
+      async listAgents() { return [agent()]; },
+      async runTurn() { gatewayStarted(); await never; },
+      async cancel() { await never; },
+    };
+    const server = await startWebServer({
+      config: config(dataDirectory),
+      operatorGateway: gateway,
+      shutdownTimeoutMs: 25,
+    });
+    webServers.add(server);
+    const thread = await json(server, "/api/v1/threads", {
+      method: "POST", body: JSON.stringify({ agentId: "personal" }),
+    }) as { id: string };
+    const streaming = await fetch(`${server.url}api/v1/threads/${thread.id}/turns`, {
+      method: "POST", headers: authHeaders({ "content-type": "application/json" }), body: JSON.stringify({ text: "hang" }),
+    });
+    await started;
+
+    const stopStarted = Date.now();
+    await server.stop();
+    expect(Date.now() - stopStarted).toBeLessThan(500);
+    webServers.delete(server);
+    await streaming.body?.cancel().catch(() => undefined);
+
+    const reopened = await DurableWebStore.open(dataDirectory);
+    expect(reopened.getThreadDetail(thread.id)).toMatchObject({ thread: { status: "interrupted" } });
+    await reopened.close();
+  });
 });
+
+function config(
+  dataDirectory: string,
+  overrides: { readonly host?: string; readonly token?: string; readonly allowInsecureHttp?: boolean; readonly agentRegistries?: readonly string[] } = {},
+): WebConfig {
+  return {
+    configVersion: 1,
+    listen: { host: overrides.host ?? "127.0.0.1", port: 0 },
+    auth: { token: overrides.token ?? WEB_TOKEN },
+    allowInsecureHttp: overrides.allowInsecureHttp ?? false,
+    dataDirectory,
+    agentRegistries: overrides.agentRegistries ?? [join(dataDirectory, "missing-registry")],
+    sourcePath: join(dataDirectory, "web.config.json"),
+  };
+}
+
+function agent(): WebAgent {
+  return { id: "personal", label: "Personal Agent", endpoint: "http://127.0.0.1:1", online: true, capabilities: capabilities() };
+}
+
+function immediateGateway(): WebOperatorGateway {
+  return {
+    async listAgents() { return [agent()]; },
+    async runTurn(input) { await input.onText("fixture response"); },
+    async cancel() {},
+  };
+}
+
+function capabilities(): Record<string, boolean> {
+  return {
+    attachments: false, liveInput: false, askUser: false, cancellation: true, quotes: false,
+    runtimeOverrides: true, proactive: false, configView: true, replay: true, health: true,
+  };
+}
+
+async function startOperatorFixture(): Promise<{ readonly url: string; readonly startedAt: string }> {
+  const startedAt = new Date().toISOString();
+  const server = createServer(async (request, response) => {
+    if (request.headers.authorization !== `Bearer ${OPERATOR_TOKEN}`) {
+      response.writeHead(401, { "content-type": "application/json" }); response.end('{"error":"unauthorized"}'); return;
+    }
+    if (request.method === "POST" && request.url === "/v1/turns") {
+      const body = JSON.parse(await bodyText(request)) as { conversationId: string };
+      const now = new Date().toISOString();
+      const frames = [
+        { type: "accepted", turnId: "turn-1", conversationId: body.conversationId, startedAt: now },
+        { type: "capabilities", turnId: "turn-1", capabilities: capabilities() },
+        { type: "delta", turnId: "turn-1", target: "assistant", mode: "append", text: "hello from " },
+        { type: "delta", turnId: "turn-1", target: "assistant", mode: "append", text: "agent" },
+        { type: "completed", turnId: "turn-1", finalMessage: { role: "assistant", text: "hello from agent" }, finishedAt: now, stopReason: "completed" },
+      ];
+      response.writeHead(200, { "content-type": "application/x-ndjson" });
+      response.end(`${frames.map((frame) => JSON.stringify(frame)).join("\n")}\n`);
+      return;
+    }
+    if (request.method === "POST" && request.url?.endsWith("/cancel")) {
+      response.writeHead(200, { "content-type": "application/json" }); response.end('{"status":"accepted"}'); return;
+    }
+    if (request.method === "GET" && request.url === "/v1/info") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ protocol: OPERATOR_PROTOCOL, agent: { id: "personal", label: "Personal Agent" }, process: { pid: process.pid, startedAt }, capabilities: capabilities() }));
+      return;
+    }
+    response.writeHead(404, { "content-type": "application/json" }); response.end('{"error":"not_found"}');
+  });
+  operatorServers.add(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new Error("fixture did not bind");
+  return { url: `http://127.0.0.1:${address.port}`, startedAt };
+}
+
+async function bodyText(request: AsyncIterable<unknown>): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of request) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array));
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return { authorization: `Bearer ${WEB_TOKEN}`, ...extra };
+}
+
+function mutationWithAuthority(server: WebServerHandle, authority: string): Promise<number> {
+  const body = JSON.stringify({ agentId: "personal" });
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port: server.port,
+      path: "/api/v1/threads",
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${WEB_TOKEN}`,
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        host: authority,
+        origin: `http://${authority}`,
+      },
+    }, (response) => {
+      response.resume();
+      response.once("end", () => resolve(response.statusCode ?? 0));
+    });
+    request.once("error", reject);
+    request.end(body);
+  });
+}
+
+function getWithAuthority(
+  server: WebServerHandle,
+  path: string,
+  authority: string,
+  authenticated: boolean,
+): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port: server.port,
+      path,
+      method: "GET",
+      headers: {
+        host: authority,
+        ...(authenticated ? { authorization: `Bearer ${WEB_TOKEN}` } : {}),
+      },
+    }, (response) => {
+      response.resume();
+      response.once("end", () => resolve(response.statusCode ?? 0));
+    });
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+async function json(server: WebServerHandle, path: string, init: RequestInit = {}): Promise<unknown> {
+  const response = await fetch(`${server.url}${path.replace(/^\//u, "")}`, {
+    ...init,
+    headers: authHeaders(init.body === undefined ? {} : { "content-type": "application/json" }),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+  return response.json();
+}
+
+function closeNodeServer(server: Server): Promise<void> {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
+}

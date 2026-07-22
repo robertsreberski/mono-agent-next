@@ -1,8 +1,8 @@
 # @mono-agent/web
 
-The persistent browser console for mono-agent. It discovers every running local
-agent, keeps multiple independent conversations in owner-private SQLite state,
-and serves the assistant-ui PWA from one always-on process.
+Standalone, authenticated browser operator for one or more locally registered
+mono-agent processes. It is a separate product with its own config, process,
+listener, and durable state; it is never selected by agent config.
 
 ## Category
 
@@ -11,177 +11,135 @@ and serves the assistant-ui PWA from one always-on process.
 
 Category: `operator-surface`
 Tier: `core`
-Catalog responsibility: Serves the always-on browser operator console for persistent multi-agent conversations, streamed turns, and local-device attachments.
+Catalog responsibility: Runs the standalone authenticated browser product over the shared operator protocol with owner-private durable conversations.
 
 <!-- package-metadata:end -->
 
 ## Responsibility
 
-- Discover local agents through the shared trace-source registry and probe their
-  loopback operator endpoints.
-- Persist agents, threads, messages, structured reasoning/tool/telemetry parts,
-  revisions, turns, attachments, and agent pin preferences under
-  `~/.mono-agent/web`.
-- Keep an upstream turn running when a browser reloads or disconnects, and expose
-  state invalidations over SSE so any connected browser can catch up.
-- Offer plain-text follow-ups to a capable active provider run, persist their
-  pending/applied/queued state, and promote safe fallbacks into normal turns.
-- Render a running agent's structured `AskUser` interaction as one complete web
-  form and proxy validated answer submission back to that same model run.
-- Accept browser-selected files through bounded staged uploads and forward the
-  exact transport-neutral `AgentAttachment` contract used by Telegram.
-- Serve the assistant-ui PWA and its versioned JSON/SSE API.
-- Accept explicit cron/webhook `web:new` notification delivery through an
-  owner-private, bearer-authenticated loopback ingress; persist one marked,
-  assistant-only conversation per distinct result only after agent history is
-  durably appended.
+- Load one strict `web.config.json` independently of agent configuration.
+- Discover owner-private operator registry entries through `@mono-agent/operator`.
+- Authenticate every browser API request and reject cross-origin mutations.
+- Persist conversations and messages through atomic owner-private state commits.
+- Stream turns through the shared operator client and reducer, and cancel the
+  exact active conversation only on explicit operator cancellation or product shutdown.
+- Keep a service-owned turn running and durably settling when its browser stream
+  disconnects or reloads.
+- Serve a small dependency-free browser UI from the same process.
 
 ## Install / Usage
-
-`@mono-agent/agent-app` provides the normal managed-service lifecycle:
-
-```bash
-mono-agent web start
-mono-agent web status
-mono-agent web
-```
-
-Bare `mono-agent web` reports status and usable URLs; it does not implicitly
-start or mutate the service. Use `mono-agent web run` for a foreground process
-or `--loopback` to bind only `127.0.0.1`.
-
-Install this package directly only when embedding the server in another host:
 
 ```bash
 pnpm add @mono-agent/web
 ```
 
+Create `web.config.json`:
+
+```json
+{
+  "$schema": "./.mono-agent/web.config.schema.json",
+  "configVersion": 1,
+  "listen": { "host": "127.0.0.1", "port": 5050 },
+  "auth": { "token": { "$env": "MONO_AGENT_WEB_AUTH_TOKEN" } },
+  "allowInsecureHttp": false,
+  "dataDirectory": "./.mono-agent/web",
+  "agentRegistries": ["../personal-agent/.mono-agent/trace-sources"]
+}
+```
+
+The secret must contain at least 16 characters. Literal secrets in the config
+file are rejected.
+
+Loopback is the safe default. For LAN or direct Tailscale-IP HTTP, a token of at
+least 24 characters and the explicit `"allowInsecureHttp": true` opt-in are both
+required. This is plaintext trusted-network mode: the token and conversation
+state are not transport-encrypted. Prefer keeping web on loopback behind an
+HTTPS reverse proxy or Tailscale Serve. The opt-in acknowledges risk; it does
+not add TLS.
+
+```bash
+MONO_AGENT_WEB_AUTH_TOKEN='replace-with-a-long-random-token' \
+  mono-agent-web ./web.config.json
+```
+
+The browser shell contains no state. It prompts for the token and keeps it in
+`sessionStorage`; every `/api/v1/*` request uses bearer auth. Shell, health, and
+API requests must also use a listener-approved local authority and actual port,
+which closes the DNS-rebinding/forged-Host boundary. The health probe is
+`GET /healthz`.
+
+Programmatic startup is equivalent:
+
 ```ts
 import { startWebServer } from "@mono-agent/web";
 
-const server = await startWebServer(); // 0.0.0.0:5050
+const server = await startWebServer({ configPath: "./web.config.json" });
 console.log(server.url);
 await server.stop();
 ```
-
-The interface is deliberately single-user and has no application login. Anyone
-who can reach port 5050 can inspect conversations and operate discovered agents;
-use host firewall/LAN policy and Tailscale ACLs as the access boundary. The
-server emits no CORS permission and rejects cross-origin mutations.
-
-Private IP literals, localhost, the machine hostname, and its exact `.local`
-name are accepted as browser hosts. Set `MONO_AGENT_WEB_ALLOWED_HOSTS` to a
-comma-separated list of any additional exact DNS names (for example the node's
-Tailscale DNS name); suffix wildcards are intentionally not trusted. When a
-managed agent protects its loopback operator endpoint, discovery reads only
-`MONO_AGENT_TUI_API_KEY` from that agent's attested, owner-owned dotenv file.
-
-On desktop, the agent rail has fixed compact and expanded layouts selected by
-an explicit expand/collapse control. That choice is remembered by the browser.
-Offline agents are hidden behind a subtle count by default; pinned agents and
-the currently selected agent remain visible even while offline. The same
-filter applies to the desktop rail, mobile picker, and command palette. Pin or
-unpin with the star control; pins live in the web service so favorites stay
-consistent over localhost, LAN, and Tailscale.
-
-The assistant-ui run-settings popover combines searchable model selection with
-the selected model's supported reasoning-effort choices and becomes a
-viewport-safe bottom sheet on narrow screens. Usage telemetry remains internal
-and is summarized through a context display that keeps exact Pi, Codex, and
-OpenCode provider-request snapshots separate from last-turn processed tokens and
-conversation cost. Running turns are labeled `Updating`; failed turns and model
-changes are `Last measured`. A running or successful compaction suppresses the
-older number until the next exact snapshot, while legacy and unsupported-runtime
-threads show `Context —` instead of deriving a percentage from aggregate work.
-Structured reasoning, routine tools, and one update-in-place row per compaction
-share the stream-aware Activity disclosure, which collapses at every terminal
-message state without reordering answer parts.
-Typing `/` in an empty composer opens the available command triggers.
-
-Select rendered message text to quote it into the composer. One quote is kept
-with the authored user message and supplied to the operator as Markdown
-blockquote context; it does not rewrite the visible message text. The public
-turn DTO exposes this as `quote: { text, messageId }`, and the source message
-must belong to the same thread.
-
-The composer remains sendable while a response is running. A text-only send is
-persisted immediately and offered to the active provider as live guidance. Its
-message shows `pending`, `applied`, `queued`, or `cancelled`; an unsupported
-provider, delivery failure, end-of-turn race, or web-service restart queues it
-as the next normal turn instead of dropping it. Attachments keep the ordinary
-turn path, and cancelling the active turn also cancels its pending or queued
-live follow-ups. Live follow-ups are capped at 8,000 characters and 100
-unsettled messages per thread.
-
-Once the provider applies a follow-up, the assistant's Activity disclosure also
-receives one completed `↪️ Steered: “<safe preview>”` tool row with result
-`Applied to current run`. The original follow-up remains the full human message;
-the synthetic activity carries only a one-line, redacted, 40-code-point preview.
-
-The header bell explicitly enables browser notifications for successful
-responses that arrive while the console is hidden or unfocused. Notifications
-include a short response preview and open the exact conversation. Permission
-is requested only from the bell, the preference is browser-origin-local, and
-the page/PWA must remain alive: this is not a Web Push subscription and does
-not notify after the application is fully closed. Cron/webhook notification
-threads use the same bell and are marked `CRON` / `WEBHOOK` in the sidebar,
-header, and browser notification title.
-
-An app-managed cron job or webhook endpoint can set `notify: true` with the
-exact destination `notifyConversationId: "web:new"`. Each distinct result gets
-a new thread without changing the selected thread. Delivery is idempotent,
-best-effort, attempted once with a five-second bound, and has no outbox when the
-web service is unavailable. Other `web:*` destinations are not accepted.
-
-When the selected agent advertises `capabilities.askUser`, a running `AskUser`
-tool call appears as one form containing all remaining questions. Each question
-has two or three described choices plus an **Other** custom-reply field;
-multi-select questions accept several choices and custom text. The browser
-submits the form atomically and the agent resumes the existing run. Cancelling
-the turn also cancels its pending form.
 
 ## Architecture
 
 ### Data flow
 
-1. `server.ts` accepts the versioned browser API, staged uploads, and SSE
-   subscriptions, then delegates stateful work to `WebConsoleService`.
-2. The service discovers agents from the trace-source registry, persists agent,
-   thread, message, part, turn, live-input, upload, and preference records through the
-   SQLite store, and drives each agent over its loopback operator endpoint.
-3. Service mutations publish invalidations. Browsers consume `/api/v1/events`
-   and refetch authoritative projections, so reloads and concurrent tabs do not
-   own or interrupt upstream turns.
-4. The bundled assistant-ui webapp maps those DTOs into its external store,
-   thread list, messages, composer, attachments, activity, and notification UI.
-5. `deliverWebNotification` reads the owner-private live ingress record and
-   performs one bearer-authenticated loopback delivery. The service first
-   appends the result to agent history, then atomically exposes an idempotent
-   assistant-only cron or webhook thread.
+```text
+web.config.json -> web server -> @mono-agent/operator directory
+                                -> strict OperatorClient NDJSON decoder
+                                -> shared reducer/action eligibility
+                                -> atomic owner-private conversation state
+browser UI       <- browser-state NDJSON snapshots <- web server
+```
+
+Web never parses the agent wire or implements a second action reducer. Its
+browser stream contains web-owned thread snapshots, not raw operator frames.
 
 ### Package structure
 
-| Source area | Responsibility |
+| Source | Ownership |
 | --- | --- |
-| [`server.ts`](https://github.com/robertsreberski/mono-agent/blob/main/packages/web/src/server.ts) | HTTP service, `/api/v1` routes, uploads, SSE invalidations, host/origin checks, and static webapp serving. |
-| [`service.ts`](https://github.com/robertsreberski/mono-agent/blob/main/packages/web/src/service.ts) | Application lifecycle for discovery, threads, turns, live-input delivery/fallback, attachments, `AskUser` snapshots/submission, cancellation, notifications, and invalidation. |
-| [`store.ts`](https://github.com/robertsreberski/mono-agent/blob/main/packages/web/src/store.ts) | Owner-private SQLite schema and transactional persistence. |
-| [`operator-client.ts`](https://github.com/robertsreberski/mono-agent/blob/main/packages/web/src/operator-client.ts) | Structured turn streaming, info/capabilities, live-input settlement, pending/submitted `AskUser`, cancellation, and durable history append over the operator protocol. |
-| [`notification-client.ts`](https://github.com/robertsreberski/mono-agent/blob/main/packages/web/src/notification-client.ts) and [`notification-ingress.ts`](https://github.com/robertsreberski/mono-agent/blob/main/packages/web/src/notification-ingress.ts) | Bounded, authenticated cron/webhook notification delivery. |
-| [`webapp/`](https://github.com/robertsreberski/mono-agent/tree/main/packages/web/webapp) | Isolated assistant-ui PWA, including atomic `AskUser` forms, tests, and its own dependency lockfile. |
+| `config.ts` | Strict product config, environment secret resolution, and JSON Schema. |
+| `operator-gateway.ts` | Thin binding to the shared directory, client, reducer, and action policy. |
+| `store.ts` | Versioned state, exclusive process lease, atomic commits, and restart recovery. |
+| `service.ts` | Conversation/turn process lifecycle and exact cancellation. |
+| `server.ts` | Authenticated HTTP API, origin/media-type enforcement, streaming, and shutdown. |
+| `ui.ts` | Bundled dependency-free browser shell. |
+| `bin.ts` | Foreground standalone process entrypoint. |
+
+### Durable-state contract
+
+`dataDirectory` is created as `0700`; its marker, lease, and `state.json` are
+`0600`, current-user-owned, single-link regular files. Existing permissive,
+linked, corrupt, or wrong-owner paths fail closed and are never repaired or
+overwritten. Each mutation writes and fsyncs a same-directory exclusive temp
+file, atomically renames it to `state.json`, then fsyncs the directory. A crash
+therefore exposes either the previous complete state or the next complete
+state. The singleton lease uses an OS-released exclusive SQLite transaction, so
+a crash cannot leave a PID file that another process races to unlink. If rename
+succeeds but directory durability cannot be proven, the open store is poisoned
+against reads and writes until close/reopen, preventing a stale in-memory
+snapshot from overwriting the visible commit. Turns left `running` by an
+unclean stop become explicitly `interrupted` on the next exclusive open.
+
+State schema version 1 has no automatic retention or purge. For backup, stop
+the process and copy `state.json` plus `.mono-agent-web-state`; preserve modes.
+For restore, stop the process, restore those exact regular files into an empty
+`0700` data directory, enforce `0600`, and start. Corrupt or unknown-version
+state is preserved for inspection. There is deliberately no remote reset or
+delete-all endpoint.
 
 ## Public API
 
 ### Start here
 
-| API | Use it for |
+| Export | Use |
 | --- | --- |
-| `startWebServer` | Start the persistent browser service and receive the actual bound URL plus idempotent stop methods. |
-| `prepareWebState` / `prepareWebStatePaths` | Create and validate the owner-private state layout before starting a custom service. |
-| `resetWebState` | Perform the explicit whole-store reset used by host lifecycle commands. |
-| `deliverWebNotification` | Deliver one idempotent cron/webhook result through the private loopback ingress. |
-| `discoverOperatorAgents` | Read trusted operator endpoints from trace-source manifests. |
-| `WebBootstrap`, `WebThreadDetail`, `WebEvent`, and related `Web*` DTOs | Build another client against the versioned browser API. |
+| `startWebServer` | Start the authenticated standalone product and receive an idempotent stop handle. |
+| `loadWebConfig` | Read, resolve, and strictly validate `web.config.json`. |
+| `parseWebConfig` | Validate an already parsed authoring object with explicit source path and environment. |
+| `webConfigJsonSchema` | Write editor/schema artifacts from the executable product contract. |
+| `WEB_API_VERSION` | Negotiate the browser-facing API. |
+| `WebConfig`, `WebServerHandle`, and `Web*` DTOs | Embed the product or build another browser client. |
+| `WebOperatorGateway` | Provide a deterministic embedding/test seam without adding another wire decoder. |
 
 <!-- public-api-inventory:start -->
 <!-- Generated by scripts/generate-public-api-docs.mjs. Do not edit by hand. -->
@@ -192,125 +150,71 @@ Every symbol exported by each public code entrypoint is listed below.
 
 ```text
 CreateWebThreadInput
-CreateWebUploadInput
-DEFAULT_WEB_HOST
-DEFAULT_WEB_PORT
-DeliverWebNotificationInput
-DeliverWebNotificationOptions
-DeliverWebNotificationResult
-DiscoverOperatorAgentsOptions
-DiscoveredOperatorAgent
-PatchWebAgentInput
-PatchWebThreadInput
-StartWebLiveInputInput
+LoadWebConfigOptions
+ParseWebConfigOptions
 StartWebServerOptions
 StartWebTurnInput
 WEB_API_VERSION
-WEB_MAX_ACTIVE_ATTACHMENT_TURN_BYTES
-WEB_MAX_CONCURRENT_UPLOADS
-WEB_MAX_FILES_PER_TURN
-WEB_MAX_LIVE_INPUTS_PER_THREAD
-WEB_MAX_QUEUED_ATTACHMENT_TURNS
-WEB_MAX_STAGED_UPLOADS
-WEB_MAX_STAGED_UPLOAD_BYTES
-WEB_MAX_TURN_ATTACHMENT_BYTES
-WEB_STAGED_UPLOAD_TTL_MS
-WebAgentStatus
-WebAgentSummary
-WebAttachment
+WebAgent
 WebBootstrap
-WebConsoleError
-WebEvent
-WebEventType
-WebLiveInputReceipt
+WebConfig
+WebListenConfig
 WebMessage
-WebMessagePart
-WebMessageStatus
-WebModelOption
-WebNotificationTriggerKind
-WebQuote
-WebRunState
-WebRunStatus
+WebOperatorGateway
+WebOperatorTurnInput
+WebProductError
 WebServerHandle
-WebStatePathOptions
-WebStatePaths
 WebThread
 WebThreadDetail
-WebThreadTrigger
-defaultTraceRegistryDir
-defaultWebStateDir
-deliverWebNotification
-discoverOperatorAgents
-isTrustedOperatorBaseUrl
-operatorBaseUrlFromMetadata
-prepareWebState
-prepareWebStatePaths
-resetWebState
-resolveWebStatePaths
+WebTurnStatus
+loadWebConfig
+parseWebConfig
 startWebServer
+webConfigJsonSchema
 ```
 
 <!-- public-api-inventory:end -->
 
-The primary exports are `startWebServer`, `prepareWebState`, `resetWebState`,
-`defaultWebStateDir`, the versioned `Web*` DTOs, API/upload limit constants, and
-the trace-registry discovery helpers. `startWebServer()` returns a handle with
-the actual bound address/port plus idempotent `stop()` and `close()` methods.
+The browser API is:
 
-The browser API is rooted at `/api/v1`:
-
-- `GET /bootstrap`, `PATCH /agents/:id`, and `GET/PATCH/DELETE /threads/:id`
-- `POST /threads`, `/threads/:id/turns`, `/threads/:id/live-input`, and
-  `/threads/:id/cancel`
-- `GET /threads/:id/ask` and `POST /threads/:id/ask` for the current structured
-  `AskUser` snapshot and atomic answer submission
-- `POST /uploads`, `PUT/GET /uploads/:id/content`, and `DELETE /uploads/:id`
-- `GET /events` (SSE)
-
-`GET /healthz` is intentionally outside the versioned API for service probes.
-`POST /threads/:id/turns` accepts optional
-`quote: { text, messageId }` metadata in addition to the authored `text`.
-`POST /threads/:id/live-input` accepts `{ text }` and returns a persisted message
-with `disposition: "pending" | "queued"`; SSE invalidation exposes its later
-`liveInputStatus` settlement.
-Permanent deletion is limited to archived, inactive conversations. It removes
-database descendants transactionally and deletes committed attachment files;
-startup and scheduled cleanup remove any file orphaned by a crash or transient
-filesystem failure after the database commit.
+- `GET /api/v1/bootstrap`
+- `POST /api/v1/threads`
+- `GET /api/v1/threads/:id`
+- `POST /api/v1/threads/:id/turns` (web-state NDJSON)
+- `POST /api/v1/threads/:id/cancel`
 
 ## Dependency Boundary
 
-The server depends only on the `core` `@mono-agent/agent-contracts` and
-`@mono-agent/config` packages, the `observability` trace-source registry, and
-Express. Its compiled browser bundle additionally contains the production graph
-from the isolated `webapp` lockfile: assistant-ui, Base UI, cmdk, React, and
-Workbox plus their transitive dependencies. The repository advisory and license
-gates audit that nested production graph separately because it ships inside this
-package even though it is not part of the root pnpm workspace. Running agents
-are reached over their loopback HTTP operator endpoints; this package does not
-import a communication adapter or another operator surface.
+The only package dependency is `@mono-agent/operator`. Node HTTP, filesystem,
+and crypto primitives own product transport, state, and authentication. Web
+does not depend on core, module-sdk, a runtime, a channel implementation,
+agent-contracts, v0 config, or observability.
 
 ## What This Package Does Not Own
 
-- Agent runtime/provider execution or conversation history inside an agent.
-- The operator-adapter HTTP server published by each agent.
-- CLI background-process, launchd, or conflict-safe Tailscale Serve lifecycle.
-- Recorded-run replay, which belongs to `@mono-agent/tui`.
-- Authentication. Network reachability is the intentional security boundary.
-- Host filesystem browsing: attachments come only from the browser device's
-  native file picker.
+- Agent lifecycle, agent config, runtime/provider behavior, or channel modules.
+- Operator wire decoding, capability negotiation, or action eligibility.
+- OS service installation or supervision.
+- Uploads, proactive browser notifications, and multi-user accounts in this
+  first runnable v1 product slice.
+- Automatic data deletion, remote reset, release, deployment, or migration.
 
 ## Related Documentation
 
-- [Always-on web console guide](https://mono-agent-docs.vercel.app/observability/web-console/)
-- [Operator stream endpoint](https://mono-agent-docs.vercel.app/channels/tui/)
-- [Sessions and concurrency](https://mono-agent-docs.vercel.app/runtime/sessions-concurrency/)
-- [Artifacts and traces](https://mono-agent-docs.vercel.app/observability/artifacts-and-traces/)
+- [v1 architecture](../../docs/reference/v1-architecture.md)
+- [v1 product requirements](../../refactor/mono-agent-v1-prd.md)
+- [`@mono-agent/operator`](../operator/README.md)
+- [`@mono-agent/channel-operator`](../channel-operator/README.md)
 
 ## Verification
 
-```sh
-pnpm --filter @mono-agent/web run typecheck
-pnpm --filter @mono-agent/web run test
-pnpm --filter @mono-agent/web run build
+```bash
+pnpm --filter @mono-agent/web build
+pnpm --filter @mono-agent/web typecheck
+pnpm --filter @mono-agent/web test
 ```
+
+Focused tests cover strict secret resolution, body bounds, bearer auth,
+cross-origin rejection, real shared-client turn streaming, cancellation,
+restart persistence, exclusive ownership, atomic recovery, corruption
+preservation, modes, and symlink rejection.

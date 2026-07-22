@@ -11,13 +11,6 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const ISOLATED_DEPENDENCY_GRAPHS = Object.freeze([
   Object.freeze({
     kind: "pnpm",
-    label: "bundled web console",
-    cwd: "packages/web/webapp",
-    rootPackageNames: Object.freeze(["mono-agent-web-console"]),
-    dispositions: "scripts/webapp-dependency-vulnerability-dispositions.json",
-  }),
-  Object.freeze({
-    kind: "pnpm",
     label: "documentation website",
     cwd: "website",
     rootPackageNames: Object.freeze(["mono-agent-docs"]),

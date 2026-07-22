@@ -1,7 +1,8 @@
 # @mono-agent/tui
 
-Operate a running mono-agent from the terminal with live structured chat,
-recorded-run replay, and a read-only resolved-config view.
+Standalone terminal operator for a running mono-agent. It renders with
+`@earendil-works/pi-tui` and delegates protocol decoding, discovery, domain
+state, and action eligibility to `@mono-agent/operator`.
 
 ## Category
 
@@ -10,129 +11,93 @@ recorded-run replay, and a read-only resolved-config view.
 
 Category: `operator-surface`
 Tier: `core`
-Catalog responsibility: pi-tui operator console: live chat with structured stream-event insight, bounded recorded-run replay, and read-only config view for running agents.
+Catalog responsibility: Runs the standalone pi-tui renderer over the shared operator client, directory, state, and action contracts.
 
 <!-- package-metadata:end -->
 
 ## Responsibility
 
-This operator-surface package renders:
+This package owns terminal layout, keyboard input, and rendering. It connects
+to an already-running agent through the shared operator client, shows streamed
+assistant text and activity, and lets the operator cancel or select eligible
+model and effort overrides. Closing the renderer never stops the agent.
 
-- live Markdown answers, structured reasoning, tools, warnings, provider
-  lifecycle, usage, and cost;
-- bounded replay of recorded runs;
-- source-annotated, redacted config; and
-- a picker for running agents discovered through the trace-source registry.
-
-Its primary mode is a remote client of the running agent's NDJSON operator
-endpoint. Custom hosts can instead embed the UI around a structural responder.
-The package renders with `@earendil-works/pi-tui`; it does not use React or Ink.
+There is no embedded agent/responder mode, agent-config reader, replay parser,
+self-configuration flow, or second protocol reducer in this package.
 
 ## Install / Usage
 
-The normal path comes from `@mono-agent/agent-app`. Start the managed agent,
-then open the console from any directory:
-
 ```bash
-mono-agent tui
-mono-agent tui --agent personal-agent
-mono-agent tui --conversation ops
+pnpm add -g @mono-agent/tui
+export MONO_AGENT_OPERATOR_TOKEN="owner-only-token"
+mono-agent-tui --endpoint http://127.0.0.1:52341
 ```
 
-With one running agent, discovery connects directly; with several, it opens the
-picker. Open the managed macOS agent's dedicated self-configuration session
-from that agent's project directory:
+To use another environment variable, pass its name. The secret itself never
+appears in the process arguments. Direct CLI connections require the selected
+environment variable; the default is `MONO_AGENT_OPERATOR_TOKEN`.
 
 ```bash
-mono-agent tui --configure
+mono-agent-tui --endpoint http://127.0.0.1:52341 --token-env PERSONAL_OPERATOR_TOKEN
 ```
 
-`--configure` is a host-owned mode. `@mono-agent/agent-app` supplies the
-configuration controller, validates a proposed config or Role edit, owns the
-approval card's consequences, writes atomically, restarts the background agent,
-checks readiness, and rolls back on failure. This package only keeps the
-`[SELF-CONFIG]` boundary visible and renders/sequences that controller. An
-embedded responder and `--local` are ordinary chat paths and cannot acquire
-configuration authority.
-
-Install the package directly only when building a custom terminal host:
+Without `--endpoint`, the product asks `@mono-agent/operator` to discover a
+running agent. Registry roots can be supplied explicitly and repeatedly:
 
 ```bash
-pnpm add @mono-agent/tui
+mono-agent-tui --registry ~/.mono-agent/trace-sources --agent personal
 ```
+
+Controls:
+
+- submit ordinary text to start a turn;
+- submit during an active turn to offer eligible live input;
+- `Escape` or `/cancel` cancels the active conversation when eligible;
+- `/model <ref|default>` and `/effort <level|default>` set the next-turn
+  override when permitted; advertised catalogs act as allowlists;
+- `/answer <question-id>=<value>` answers a pending AskUser interaction;
+- `/exit` or `/quit` closes this TUI only.
+
+Model and effort catalogs are optional allowlists. When an endpoint omits one,
+the shared operator contract accepts any bounded, protocol-valid value and
+leaves final validation to the selected runtime.
+
+Programmatic hosts can inject a terminal for testing without a process TTY:
 
 ```ts
 import { startMonoAgentTui } from "@mono-agent/tui";
 
-// Embedded host:
-const handle = startMonoAgentTui({ responder, title: "My Agent", conversationId: "local" });
+const handle = await startMonoAgentTui({
+  endpoint: "http://127.0.0.1:52341",
+  token: process.env.OPERATOR_TOKEN,
+  terminal,
+});
 await handle.waitUntilExit();
-
-// Remote client:
-startMonoAgentTui({ connection: { baseUrl: "http://127.0.0.1:52341/gui" } });
-
-// Discovery (agent picker):
-startMonoAgentTui({ discovery: {} });
 ```
-
-Exactly one of `responder` | `connection` | `discovery` is required. Replay
-and config views activate when `instance`/`config` provide the agent's
-`artifactDir`/`configPath` (both are read directly from disk — the manifest
-carries the paths).
-
-### Views and controls
-
-| View | Content |
-| --- | --- |
-| chat | Streaming markdown answer, collapsed thinking cells (`ctrl+t` expands), tool panels (including completed `↪️ Steered` activity after applied live guidance), warnings/failover notices, status bar (model · tokens · cost · hints). |
-| replay | Recorded runs from the agent's artifact dir; open any run for the redacted, bounded events that reached terminal JSONL persistence. Non-numeric values under sensitive-looking object keys are redacted; numeric values under matched keys are retained; retained free text is scanned for a closed set of high-confidence credential shapes. Recorder-capped payload tails and RAM-buffered events lost to a crash cannot be replayed. |
-| config | Redacted, source-annotated resolved config (same builder as `mono-agent config`). |
-| agents | Running-instance picker over the trace-source registry. |
-
-Keys: `f2`–`f5` switch views (`tab` cycles when the chat editor is empty),
-`esc` cancels an in-flight turn or goes back, `ctrl+t` toggles reasoning, and
-`ctrl+c` twice quits.
-
-Important slash commands:
-
-- `/model [ref|default]` sets or clears a session model override; bare
-  `/model` opens the advertised-model picker. Switching model starts each turn
-  with a fresh provider session.
-- `/effort [level|default]` sets or clears the session effort override; bare
-  `/effort` opens choices appropriate to the effective model.
-- `/new [label]` inserts a visual transcript break. It does not change the
-  configured conversation id or erase durable history.
-- `/exit` and `/quit` close this console only; they do not stop the background
-  agent. In self-config, those commands or `ctrl+c` twice are the only exits.
-- `/agents`, `/replay`, `/config`, `/configure`, `/cancel`, and `/thinking`
-  navigate or control the corresponding surface.
 
 ## Architecture
 
 ### Data flow
 
-1. Discovery reads the trace-source registry and resolves each agent's trusted
-   operator base URL and optional key.
-2. `RemoteAgentResponder` reads `/v1/info`, forwards turns with session-scoped
-   model/effort metadata, and decodes structured NDJSON stream frames.
-3. `MonoAgentTuiApp` routes frames into `TurnPresenter` and the chat, replay,
-   config, and picker views; the in-memory history store exists only for display.
-4. Replay readers load bounded terminal artifacts directly. Config readers build
-   a redacted source summary directly from the selected agent's config path.
-5. In managed self-config, the host-provided controller owns every mutation,
-   restart, readiness check, and rollback; the UI gates input while that
-   transaction settles.
+1. `startMonoAgentTui` creates the shared `OperatorClient`, directly or from
+   a shared-directory selection.
+2. Discovered connections bind registry id, PID, and start time to `/v1/info`
+   at startup and immediately before every turn.
+3. A submitted prompt calls `OperatorClient.streamTurn`.
+4. Every normalized frame passes through `reduceOperatorFrame`; the renderer
+   never parses NDJSON or invents domain state.
+5. Cancel, live-input, AskUser, model, and effort controls are gated by
+   `availableOperatorActions`.
+6. `MonoAgentTuiApp` makes C0/C1 and bidi controls visible and inert before
+   mapping normalized state and activity to pi-tui components.
 
 ### Package structure
 
-| Source area | Responsibility |
+| Source | Responsibility |
 | --- | --- |
-| [`remote/`](https://github.com/robertsreberski/mono-agent/tree/main/packages/tui/src/remote) | Conversational operator-protocol client. |
-| [`data/`](https://github.com/robertsreberski/mono-agent/tree/main/packages/tui/src/data) | Running-agent discovery and recorded-run replay readers. |
-| [`config/`](https://github.com/robertsreberski/mono-agent/tree/main/packages/tui/src/config) | Redacted, source-annotated config summaries. |
-| [`ui/`](https://github.com/robertsreberski/mono-agent/tree/main/packages/tui/src/ui) | pi-tui application, views, presentation, safe terminal text, and configuration boundary. |
-| [`runtime/start.ts`](https://github.com/robertsreberski/mono-agent/blob/main/packages/tui/src/runtime/start.ts) | Validates one connection mode and starts/stops the console. |
-| [`bin/`](https://github.com/robertsreberski/mono-agent/tree/main/packages/tui/src/bin) | Low-level `mono-agent-tui` executable for custom hosts. |
+| `src/bin/` | Pure CLI parsing and the `mono-agent-tui` executable. |
+| `src/runtime/start.ts` | Direct/discovered client setup and renderer lifecycle. |
+| `src/ui/app.ts` | Terminal-only presentation and input handling. |
 
 ## Public API
 
@@ -140,12 +105,9 @@ Important slash commands:
 
 | API | Use it for |
 | --- | --- |
-| `startMonoAgentTui` | Start the console with exactly one embedded, direct-remote, or discovery connection mode. |
-| `RemoteAgentResponder` | Drive the conversational NDJSON endpoint from a custom terminal integration. |
-| `discoverInstances` / `toInstance` | Read and normalize running-agent registry entries. |
-| `listReplayRuns` / `readReplayRun` | Build a bounded recorded-run browser without starting the full UI. |
-| `buildTuiConfigSummary` | Produce the redacted, source-annotated config projection. |
-| `MonoAgentTuiApp` / `TurnPresenter` | Integrate lower-level app or event-presentation components. |
+| `startMonoAgentTui` | Start a direct-endpoint or discovered terminal renderer. |
+| `MonoAgentTuiApp` | Embed the renderer around an `OperatorClient`. |
+| `parseArgs` | Test or wrap the standalone executable's argument contract. |
 
 <!-- public-api-inventory:start -->
 <!-- Generated by scripts/generate-public-api-docs.mjs. Do not edit by hand. -->
@@ -155,84 +117,36 @@ Every symbol exported by each public code entrypoint is listed below.
 **`@mono-agent/tui`**
 
 ```text
-AgentMessageStreamLike
-AgentRequestLike
-AgentResponderLike
-AgentResponseLike
-BuildTuiConfigSummaryInput
-ConfigurationProposalCard
-ConfigurationProposalResult
-CreateInMemoryTuiHistoryOptions
-DiscoverInstancesOptions
-DiscoveredInstance
-ListReplayRunsOptions
-ListReplayRunsResult
 MonoAgentTuiApp
 MonoAgentTuiAppOptions
-RemoteAgentResponder
-RemoteAgentResponderError
-RemoteAgentResponderOptions
-ReplayRunConfig
-ReplayRunDetail
-ReplayRunListItem
-ReplayTimelineItem
+ParseArgsResult
+ParsedArgs
 StartMonoAgentTuiHandle
 StartMonoAgentTuiOptions
-TimelineTurn
-TraceSourceListItem
-TuiAppLogger
-TuiConfigFieldSource
-TuiConfigFieldSummary
-TuiConfigSummarySection
-TuiConfigurationController
-TuiHistoryMessage
-TuiHistoryRole
-TuiHistoryStatus
-TuiHistoryStore
-TuiViewId
-TurnPresenter
-TurnPresenterOptions
-buildTuiConfigSummary
-createInMemoryTuiHistory
-defaultTraceRegistryDir
-discoverInstances
-listReplayRuns
-readReplayRun
-resolveInstanceApiKey
+parseArgs
 startMonoAgentTui
-toInstance
 ```
 
 <!-- public-api-inventory:end -->
 
 ## Dependency Boundary
 
-Depends on `@earendil-works/pi-tui` plus `@mono-agent/agent-contracts`,
-`@mono-agent/config`, and `@mono-agent/observability` (replay + discovery
-readers). It must not depend on the agent harness, runtime adapter, memory,
-communication adapters (`@mono-agent/operator-adapter` is a **dev**-only dependency
-for wire round-trip tests — the runtime client speaks the shared
-`stream-wire` contract from agent-contracts), or host/demo code.
+Runtime dependencies are only `@mono-agent/operator` and
+`@earendil-works/pi-tui`. The product does not import core, a runtime or
+channel module, v0 contracts/config/observability packages, or an operator
+server implementation.
 
 ## What This Package Does Not Own
 
-It does not boot a harness, run models, persist conversations (its history
-store is display-only), serve the stream endpoint (that is
-`@mono-agent/operator-adapter`), write run artifacts/config, validate proposals,
-or register agents in the trace-source registry. The config view remains
-read-only. `@mono-agent/agent-app` owns the managed configuration capability,
-proposal validation, atomic writes, approval consequences, background restart,
-readiness check, and rollback; the supplied controller only lets this package
-render and sequence that host-owned lifecycle. Ordinary turns submitted during
-that boundary remain gated until a fresh or recovered endpoint is proven; an
-unrecovered error cancels them and disconnects the unverified endpoint.
+It does not run an agent, serve the operator endpoint, decode the wire format,
+decide action eligibility, persist conversations, read agent config, own web
+state, stop a background service, or mutate a running agent when the renderer
+exits.
 
 ## Related Documentation
 
-- [Terminal UI guide](https://mono-agent-docs.vercel.app/observability/tui/)
-- [Operator stream endpoint](https://mono-agent-docs.vercel.app/channels/tui/)
-- [Artifacts and traces](https://mono-agent-docs.vercel.app/observability/artifacts-and-traces/)
-- [Configuration blueprint](https://mono-agent-docs.vercel.app/config/blueprint/)
+- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Capability ladder](../../docs/reference/capability-ladder.md)
 
 ## Verification
 

@@ -252,13 +252,33 @@ framework semantic; a UI is a product over the operator protocol.
 
 ## Product and operator boundaries
 
-- `channel-operator` is the selected agent endpoint for the shared operator
-  protocol.
-- `operator` is the headless protocol, single NDJSON client, directory,
-  capability negotiation, domain state, actions, and fixtures.
-- TUI and web are independently installed products. They share decoded state
-  and action eligibility while retaining native presentation and persistence.
-  The HTTP plus NDJSON protocol and disconnect-aborts-turn behavior remain.
+- `channel-operator` is an explicitly selected, bearer-authenticated loopback
+  endpoint for the shared operator protocol. It owns HTTP lifecycle and maps a
+  client disconnect, explicit cancel, drain, and stop to the exact Core
+  dispatch signal. It does not publish discovery state or start a product.
+- `operator` is the headless strict protocol, single bounded NDJSON client,
+  owner-private directory reader, identity binding, capability negotiation,
+  deterministic domain reducer/action eligibility, and golden fixtures. TUI
+  and web may not implement a second decoder or action policy.
+- TUI is a standalone pi-tui renderer. It accepts a direct authenticated
+  loopback endpoint or an owner-private registry selection; it has no embedded
+  responder, agent-config reader, local runtime, replay/config pane, or
+  self-configuration authority.
+- Web is a separately configured authenticated product. Its strict
+  `web.config.json` owns listener, environment-referenced bearer,
+  `allowInsecureHttp`, data directory, and registry roots. Loopback is the
+  default. Plaintext non-loopback use requires an explicit risk opt-in and a
+  stronger token, and HTTPS remains the recommended boundary.
+- Web owns service turns and owner-private atomic JSON conversation state, so
+  browser response disconnect/reload does not abort upstream work. Product
+  stop or explicit cancel does. Its SQLite file is an exclusive process lease,
+  not the conversation store.
+- The first runnable operator slice implements text turns, streaming assistant
+  deltas/activity, cancellation, runtime overrides, health, durable web
+  conversations, and browser-disconnect survival. Attachments, quotes, live
+  input, AskUser in the web renderer, proactive delivery, config/replay views,
+  notifications, multi-user accounts, TLS, and product service management are
+  not implied by the shared schema and remain outside this slice.
 - `service-macos` is a separate desired-state product over launchd. It can
   inspect, plan, apply, and remove a validated runner, but it does not own agent
   turns, channels, memory, products, dependency installation, or agent config.
@@ -330,9 +350,9 @@ host grants, `context.soulPath`, user-facing compaction tuning,
 
 The self-configuration cut removes the generated
 `mono-agent-configure` skill and its default selection, proposal authority,
-transactions, and configure-only UI. Ordinary `tui --local` remains;
-V1-006 must extract and preserve the non-configuring behavior currently reached
-through `createLocalConfigurationSession()`.
+transactions, configure-only UI, and the embedded/local TUI responder path.
+Run the agent in the foreground when a supervisor is absent, select
+`channel-operator`, and connect the separate `mono-agent-tui` product.
 
 The historical-backfill cut removes only the backfill CLI/application.
 `packages/observability/src/run-export-mapping.ts` and

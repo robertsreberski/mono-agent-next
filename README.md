@@ -139,28 +139,22 @@ The catalog groups packages by ownership boundary:
 - `core` defines adapter-neutral contracts and configuration.
 - `context` owns optional memory and documentation retrieval.
 - `observability` records and reads run artifacts and exports traces.
-- `operator-surface` presents local terminal and browser experiences without hosting the agent runtime.
+- `operator-surface` owns the shared headless operator contract and the independently launched terminal and browser products; it never hosts the agent runtime.
 
 ## Dependency Direction
 
 ```text
 Static manifest dependencies (abridged; see PACKAGES.md for every edge)
 
-@mono-agent/agent-app
-  ├─ config + agent-contracts
-  ├─ agent-harness
-  ├─ runtime-adapter ── agent-runtime
-  ├─ memory + observability
-  ├─ built-in channel adapters
-  ├─ operator-adapter
-  └─ tui + web
-
-agent-harness ── agent-contracts + runtime-adapter + observability
-tui / web ── agent-contracts + config + observability
+create-mono-agent ──> cli ──> core ──> module-sdk
+runtime-pi ──────────────────────────> module-sdk
+channel-webhook ─────────────────────> module-sdk
+channel-operator ──> module-sdk + operator
+tui / web ─────────> operator
 
 Runtime-only composition (not manifest dependency edges)
 
-tui / web ── HTTP operator protocol ──> operator-adapter
+tui / web ── authenticated HTTP + NDJSON ──> channel-operator
 agent-app ── channels.plugins[] ──> a2a-adapter / whatsapp-adapter
 agent-app ── selected memory backend ──> memory-supermemory
 custom host ── request-scoped extension ──> agent-orchestrator
@@ -172,9 +166,9 @@ Rules for future packages:
 - New publishable packages live under `packages/<package-name>` and publish as `@mono-agent/<package-name>`.
 - Optional plugin-tier add-ons may live under `extras/<package-name>` when cataloged with `publishable: true` and `tier: "plugin"` (published in the lockstep but outside the core app closure).
 - Add every workspace package to `scripts/package-catalog.mjs` with category, responsibility, and allowed dependency categories.
-- Communication packages use `*-adapter` naming and must not depend on other adapters, the harness, or operator surfaces.
+- V1 communication packages use `channel-*` naming and must not depend on other channels or application hosts. `channel-operator` may depend on the headless `operator` contract only.
 - Core config stays adapter-neutral; adapter credentials and allowlists live with the adapter package.
-- Operator surfaces register field groups from other packages; they do not hardcode adapter settings.
+- TUI and web import the shared operator client, directory, reducer, and action eligibility; renderers do not decode the wire independently.
 - The final demo composes packages but is not a publishable package.
 
 ## Final Demo

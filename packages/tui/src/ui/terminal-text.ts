@@ -1,33 +1,36 @@
 const BIDI_CONTROL = /\p{Bidi_Control}/u;
 
-export interface EscapeTerminalControlsOptions {
-  /** Preserve LF when it is the renderer's intentional multi-line separator. */
-  readonly allowLineFeed?: boolean;
+export interface SanitizeTerminalTextOptions {
+  /** Preserve LF only for renderer surfaces that deliberately support multiple lines. */
+  readonly multiline?: boolean;
 }
 
 /**
- * Render untrusted persisted text without letting terminal controls execute or
- * visually reorder the surrounding UI. Controls remain inspectable as
- * lowercase `\\uXXXX` escapes; intentional raw-view LF separators may be kept.
+ * Make untrusted text inert before pi-tui sees it.
+ *
+ * C0/C1 and bidi controls are rendered as visible lowercase Unicode escapes,
+ * so OSC/CSI/DCS payloads cannot execute and invisible direction overrides
+ * cannot reorder surrounding terminal chrome. LF survives only on explicitly
+ * multiline surfaces.
  */
-export function escapeTerminalControls(
+export function sanitizeTerminalText(
   value: string,
-  options: EscapeTerminalControlsOptions = {},
+  options: SanitizeTerminalTextOptions = {},
 ): string {
-  let escaped = "";
+  let sanitized = "";
   for (const character of value) {
     const codePoint = character.codePointAt(0)!;
-    if (options.allowLineFeed === true && codePoint === 0x0a) {
-      escaped += character;
+    if (options.multiline === true && codePoint === 0x0a) {
+      sanitized += character;
     } else if (
       codePoint <= 0x1f
       || (codePoint >= 0x7f && codePoint <= 0x9f)
       || BIDI_CONTROL.test(character)
     ) {
-      escaped += `\\u${codePoint.toString(16).padStart(4, "0")}`;
+      sanitized += `\\u${codePoint.toString(16).padStart(4, "0")}`;
     } else {
-      escaped += character;
+      sanitized += character;
     }
   }
-  return escaped;
+  return sanitized;
 }

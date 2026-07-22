@@ -32,6 +32,9 @@ importers:
       '@mono-agent/agent-orchestrator':
         specifier: workspace:0.15.0
         version: link:extras/agent-orchestrator
+      '@mono-agent/channel-operator':
+        specifier: workspace:0.15.0
+        version: link:packages/channel-operator
       '@mono-agent/channel-webhook':
         specifier: workspace:0.15.0
         version: link:packages/channel-webhook
@@ -65,9 +68,9 @@ importers:
       '@mono-agent/openai-api-adapter':
         specifier: workspace:0.15.0
         version: link:packages/openai-api-adapter
-      '@mono-agent/operator-adapter':
+      '@mono-agent/operator':
         specifier: workspace:0.15.0
-        version: link:packages/operator-adapter
+        version: link:packages/operator
       '@mono-agent/runtime-adapter':
         specifier: workspace:0.15.0
         version: link:packages/runtime-adapter
@@ -270,6 +273,15 @@ importers:
         specifier: ^4.3.6
         version: 4.4.3
 
+  packages/channel-operator:
+    dependencies:
+      '@mono-agent/module-sdk':
+        specifier: workspace:0.15.0
+        version: link:../module-sdk
+      '@mono-agent/operator':
+        specifier: workspace:0.15.0
+        version: link:../operator
+
   packages/channel-webhook:
     dependencies:
       '@mono-agent/module-sdk':
@@ -361,6 +373,8 @@ importers:
         specifier: ^5.0.2
         version: 5.0.6
 
+  packages/operator: {}
+
   packages/operator-adapter:
     dependencies:
       '@mono-agent/agent-contracts':
@@ -428,38 +442,15 @@ importers:
       '@earendil-works/pi-tui':
         specifier: 0.79.10
         version: 0.79.10
-      '@mono-agent/agent-contracts':
+      '@mono-agent/operator':
         specifier: workspace:0.15.0
-        version: link:../agent-contracts
-      '@mono-agent/config':
-        specifier: workspace:0.15.0
-        version: link:../config
-      '@mono-agent/observability':
-        specifier: workspace:0.15.0
-        version: link:../observability
-    devDependencies:
-      '@mono-agent/operator-adapter':
-        specifier: workspace:0.15.0
-        version: link:../operator-adapter
+        version: link:../operator
 
   packages/web:
     dependencies:
-      '@mono-agent/agent-contracts':
+      '@mono-agent/operator':
         specifier: workspace:0.15.0
-        version: link:../agent-contracts
-      '@mono-agent/config':
-        specifier: workspace:0.15.0
-        version: link:../config
-      '@mono-agent/observability':
-        specifier: workspace:0.15.0
-        version: link:../observability
-      express:
-        specifier: ^5.1.0
-        version: 5.2.1
-    devDependencies:
-      '@types/express':
-        specifier: ^5.0.2
-        version: 5.0.6
+        version: link:../operator
 
   packages/webhook-adapter:
     dependencies:

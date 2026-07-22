@@ -24,6 +24,7 @@ const requiredReadmeSections = REQUIRED_PACKAGE_README_SECTIONS.map((section) =>
 const v1ModuleKinds = new Map([
   ["@mono-agent/runtime-pi", "runtime"],
   ["@mono-agent/channel-webhook", "channel"],
+  ["@mono-agent/channel-operator", "channel"],
 ]);
 const v1InternalDependencyClosure = new Map([
   ["@mono-agent/module-sdk", []],
@@ -31,6 +32,10 @@ const v1InternalDependencyClosure = new Map([
   ["@mono-agent/cli", ["@mono-agent/core"]],
   ["@mono-agent/runtime-pi", ["@mono-agent/module-sdk"]],
   ["@mono-agent/channel-webhook", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/operator", []],
+  ["@mono-agent/channel-operator", ["@mono-agent/module-sdk", "@mono-agent/operator"]],
+  ["@mono-agent/tui", ["@mono-agent/operator"]],
+  ["@mono-agent/web", ["@mono-agent/operator"]],
   ["create-mono-agent", ["@mono-agent/cli"]],
 ]);
 
