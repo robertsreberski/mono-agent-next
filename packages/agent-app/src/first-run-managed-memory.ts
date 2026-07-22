@@ -303,7 +303,22 @@ async function commitOwnedMarker(
 const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const INITIALIZED_MARKER_PATTERN = new RegExp(`^initialized:${UUID_SOURCE}\\n$`, "u");
 
-async function canonicalMarkerIsCommitted(root: string, rootIdentity: ClaimedDirectoryIdentity): Promise<boolean> {
+async function readExactHandleBytes(handle: FileHandle, size: number): Promise<Buffer | undefined> {
+  const content = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < content.length) {
+    const { bytesRead } = await handle.read(content, offset, content.length - offset, offset);
+    if (bytesRead === 0) return undefined;
+    offset += bytesRead;
+  }
+  return content;
+}
+
+async function canonicalMarkerIsCommitted(
+  root: string,
+  rootIdentity: ClaimedDirectoryIdentity,
+  afterMarkerRead?: (markerPath: string) => void | Promise<void>,
+): Promise<boolean> {
   const markerPath = join(root, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
   let handle: FileHandle;
   try {
@@ -314,17 +329,27 @@ async function canonicalMarkerIsCommitted(root: string, rootIdentity: ClaimedDir
   try {
     const opened = await handle.stat();
     if (!isOwnerPrivateSingleLinkFile(opened) || opened.size > 64) return false;
-    const content = await handle.readFile();
-    if (!INITIALIZED_MARKER_PATTERN.test(content.toString("utf8"))) {
+    const content = await readExactHandleBytes(handle, opened.size);
+    if (content === undefined || !INITIALIZED_MARKER_PATTERN.test(content.toString("utf8"))) {
       return false;
     }
+    await afterMarkerRead?.(markerPath);
+
+    // This proves a stable state during this bounded inspection; it does not
+    // claim that a same-user process cannot mutate the inode after return.
+    // Re-read through the descriptor opened with O_NOFOLLOW so a same-inode
+    // rewrite after the first read cannot pass on pathname identity alone.
+    const contentAfterRead = await readExactHandleBytes(handle, opened.size);
     const openedAfterRead = await handle.stat();
     const namedAfterRead = await optionalLstat(markerPath);
     const rootAfterRead = await optionalLstat(root);
-    return sameIdentity(openedAfterRead, opened)
-      && openedAfterRead.nlink === 1
-      && namedAfterRead !== undefined && !namedAfterRead.isSymbolicLink() && namedAfterRead.isFile()
+    return contentAfterRead !== undefined && contentAfterRead.equals(content)
+      && isOwnerPrivateSingleLinkFile(openedAfterRead) && sameIdentity(openedAfterRead, opened)
+      && openedAfterRead.size === content.length
+      && namedAfterRead !== undefined && !namedAfterRead.isSymbolicLink()
+      && isOwnerPrivateSingleLinkFile(namedAfterRead)
       && sameIdentity(namedAfterRead, opened)
+      && namedAfterRead.size === content.length
       && rootAfterRead !== undefined && !rootAfterRead.isSymbolicLink() && rootAfterRead.isDirectory()
       && sameIdentity(rootAfterRead, rootIdentity);
   } finally {
@@ -333,7 +358,11 @@ async function canonicalMarkerIsCommitted(root: string, rootIdentity: ClaimedDir
 }
 
 /** Treat every in-flight/malformed canonical marker or legacy released marker as incomplete. */
-export async function firstRunMemoryInitializationIsIncomplete(root: string): Promise<boolean> {
+export async function firstRunMemoryInitializationIsIncomplete(
+  root: string,
+  /** @internal Deterministic test seam for a mutation immediately after the first descriptor read. */
+  hooks: { readonly afterMarkerRead?: (markerPath: string) => void | Promise<void> } = {},
+): Promise<boolean> {
   let rootStat: Stats;
   let names: readonly string[];
   try {
@@ -349,7 +378,7 @@ export async function firstRunMemoryInitializationIsIncomplete(root: string): Pr
   const rootIdentity = { dev: rootStat.dev, ino: rootStat.ino };
   if (names.some((name) => name.startsWith(FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX))) return true;
   if (!names.includes(FIRST_RUN_MEMORY_INITIALIZING_MARKER)) return false;
-  if (!await canonicalMarkerIsCommitted(root, rootIdentity)) return true;
+  if (!await canonicalMarkerIsCommitted(root, rootIdentity, hooks.afterMarkerRead)) return true;
   try {
     const namesAfterRead = await readdir(root);
     return !namesAfterRead.includes(FIRST_RUN_MEMORY_INITIALIZING_MARKER)

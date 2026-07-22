@@ -22,6 +22,7 @@ import { validateMonoAgentFolder } from "../doctor.js";
 import {
   FIRST_RUN_MEMORY_INITIALIZING_MARKER,
   FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX,
+  firstRunMemoryInitializationIsIncomplete,
   initializeFirstRunManagedMemory,
 } from "../first-run-managed-memory.js";
 import { composeWizardPlan } from "../wizard/answers.js";
@@ -324,6 +325,35 @@ describe("initializeFirstRunManagedMemory", () => {
       status: "error",
       details: expect.arrayContaining([expect.stringMatching(/initialization is incomplete/u)]),
     });
+  });
+
+  it("fails closed when committed marker bytes change after the first descriptor read", async () => {
+    const result = await initializeFirstRunManagedMemory({ agentRoot: dir, plan: localPrivatePlan() });
+    const markerPath = join(result.root!, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
+    const forged = "initialized:00000000-0000-4000-8000-000000000000\n";
+
+    await expect(firstRunMemoryInitializationIsIncomplete(result.root!, {
+      afterMarkerRead: async (candidate) => {
+        expect(candidate).toBe(markerPath);
+        await writeFile(candidate, forged);
+      },
+    })).resolves.toBe(true);
+
+    expect(await readFile(markerPath, "utf8")).toBe(forged);
+  });
+
+  it("fails closed when committed marker permissions change after the first descriptor read", async () => {
+    const result = await initializeFirstRunManagedMemory({ agentRoot: dir, plan: localPrivatePlan() });
+    const markerPath = join(result.root!, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
+
+    await expect(firstRunMemoryInitializationIsIncomplete(result.root!, {
+      afterMarkerRead: async (candidate) => {
+        expect(candidate).toBe(markerPath);
+        await chmod(candidate, 0o644);
+      },
+    })).resolves.toBe(true);
+
+    expect((await lstat(markerPath)).mode & 0o777).toBe(0o644);
   });
 
   it("does not replace an external final root created at promotion time", async () => {
