@@ -9,6 +9,8 @@ import {
   collectTrackedTreeEvidence,
   compareComplexitySnapshots,
   evaluateGate,
+  G0_AUTHORITY_PATH,
+  loadComplexityG0Authority,
   loadComplexityBaseline,
   stablePrettyJson,
   validateComplexitySnapshot,
@@ -17,6 +19,7 @@ import {
 export function parseV1ComplexityArgs(argv) {
   const options = {
     baseline: undefined,
+    authority: G0_AUTHORITY_PATH,
     gate: undefined,
     help: false,
     json: false,
@@ -31,6 +34,8 @@ export function parseV1ComplexityArgs(argv) {
       options.json = true;
     } else if (arg === "--baseline") {
       options.baseline = requiredValue(argv, ++index, arg);
+    } else if (arg === "--authority") {
+      options.authority = requiredValue(argv, ++index, arg);
     } else if (arg === "--verify-baseline") {
       options.verifyBaseline = requiredValue(argv, ++index, arg);
     } else if (arg === "--gate") {
@@ -74,16 +79,29 @@ export function runV1ComplexityReport(options = {}) {
     });
     const baselinePath = parsed.verifyBaseline ?? parsed.baseline;
     let comparison;
+    let authorityEvidence;
     if (baselinePath !== undefined) {
-      const loaded = (options.loadBaseline ?? loadComplexityBaseline)({
+      const authority = parsed.gate === undefined
+        ? undefined
+        : (options.loadAuthority ?? loadComplexityG0Authority)({
+          cwd,
+          path: parsed.authority,
+          baselinePath,
+          gate: parsed.gate,
+        });
+      const loaded = authority?.baseline ?? (options.loadBaseline ?? loadComplexityBaseline)({
         cwd,
         path: baselinePath,
-        requireCommitted: parsed.gate !== undefined,
+        requireCommitted: false,
       });
       validateComplexitySnapshot(loaded.snapshot);
       comparison = {
         ...compareComplexitySnapshots(snapshot, loaded.snapshot),
         baselineEvidence: loaded.evidence,
+      };
+      authorityEvidence = authority === undefined ? undefined : {
+        artifact: authority.authorityEvidence,
+        ref: authority.refEvidence,
       };
     }
     const treeEvidenceAfter = parsed.gate === undefined
@@ -95,6 +113,7 @@ export function runV1ComplexityReport(options = {}) {
       ...snapshot,
       ...(treeEvidenceAfter === undefined ? {} : { currentTreeEvidence: treeEvidenceAfter }),
       ...(comparison === undefined ? {} : { comparison }),
+      ...(authorityEvidence === undefined ? {} : { g0AuthorityEvidence: authorityEvidence }),
     };
     stdout.write(parsed.json ? stablePrettyJson(report) : renderHumanReport(report, parsed.gate));
 
@@ -108,17 +127,17 @@ export function runV1ComplexityReport(options = {}) {
     if (treeEvidenceAfter !== undefined && treeEvidenceAfter.unstagedPaths.length > 0) {
       failures.push(`tracked tree has unstaged changes relative to the index: ${treeEvidenceAfter.unstagedPaths.join(", ")}`);
     }
-    if (parsed.gate !== undefined
+    if (parsed.gate === "G0"
       && comparison?.baselineEvidence.commit !== treeEvidenceAfter?.commit) {
       failures.push("baseline evidence commit does not match the measured HEAD");
     }
     if (parsed.gate !== undefined && comparison?.algorithmMatches !== true) {
       failures.push("current report algorithm does not match the committed baseline");
     }
-    if (parsed.gate !== undefined && comparison?.policyMatches !== true) {
-      failures.push("current policy digest does not match the committed baseline");
+    if (parsed.gate !== undefined && comparison?.classificationAuthorityMatches !== true) {
+      failures.push("current classification authority does not match the frozen G0 baseline");
     }
-    if (parsed.verifyBaseline !== undefined && comparison?.matches !== true) {
+    if ((parsed.gate === "G0" || parsed.verifyBaseline !== undefined) && comparison?.matches !== true) {
       failures.push(`current snapshot ${snapshot.snapshotSha256} does not match baseline ${comparison?.baselineSnapshotSha256}`);
     }
     if (parsed.verifyBaseline !== undefined && snapshot.issues.length > 0) {
@@ -178,6 +197,13 @@ export function renderHumanReport(report, gate) {
       `tracked tree: ${report.currentTreeEvidence.trackedClean ? "clean" : "dirty"}`,
     );
   }
+  if (report.g0AuthorityEvidence !== undefined) {
+    lines.push(
+      "",
+      `G0 authority: ${report.g0AuthorityEvidence.artifact.contentSha256}`,
+      `authority ref: ${report.g0AuthorityEvidence.ref.ref} (${report.g0AuthorityEvidence.ref.status})`,
+    );
+  }
   if (gate !== undefined) lines.push("", `gate: ${gate}`);
   if (report.issues.length > 0) lines.push("", ...report.issues.map((issue) => `- ${issue}`));
   return `${lines.join("\n")}\n`;
@@ -197,9 +223,9 @@ function usage() {
   return [
     "Usage:",
     "  node scripts/v1-complexity-report.mjs [--json] [--baseline PATH] [--gate GATE]",
-    "  node scripts/v1-complexity-report.mjs [--json] --verify-baseline PATH [--gate GATE]",
+    "  node scripts/v1-complexity-report.mjs [--json] --verify-baseline PATH [--gate GATE] [--authority PATH]",
     "",
-    "Reads stage-0 Git blobs and emits a deterministic classified source manifest. Gate mode requires the full tracked tree and baseline blob to be clean at HEAD.",
+    "Reads stage-0 Git blobs and emits a deterministic classified source manifest. Gate mode requires a clean tracked tree and the digest-bound G0 authority artifact.",
     `Known gates: ${GATE_ORDER.join(", ")}`,
   ].join("\n");
 }

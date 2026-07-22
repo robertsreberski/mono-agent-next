@@ -26,22 +26,19 @@ represented in several parallel forms, the default application closure includes
 many integrations a project did not select, setup and diagnostics understand
 concrete providers, and operator products duplicate protocol and state logic.
 The authoritative stacked clean-successor G0 production-source baseline is
-182,217 lines across 523 files. Its snapshot digest is
-`3e5ffd9a140519f490f391f5f3dc470269e68711ab72e6189a1089004e770054`
+187,005 lines across 536 files. Its snapshot digest is
+`ff1cb5900de51f954d68133295f26af8bc7572a99dc5e883afc6c905c201c313`
 and its classified-file manifest digest is
-`ad3c3255dbd404ea51a5f52814968d6a8499a1224b6f3db71eca6b793aa92b65`.
+`7c29e9894e498248cd2bb7d75d4253fd7100319cc9a0e10144eb70c2c6b7343f`.
 The committed baseline-file digest is
-`a984af137989d798c800202c37905c1a28deaf21d0d40da3961bbb4d888a441b`.
-The preliminary counter reported 182,118; normalization reclassified 83
-test-helper lines and the nine-line TUI Vitest config to produce an original-v0
-baseline of 182,026. The bootstrap initially removed one meaningless terminal
-blank line, then its reviewed security and portability fixes added 192 net
-production lines: 30 in owner-only SQLite creation, 160 in permanent
-descriptor-bound first-run managed-memory marker hardening, and 2 in doctor
-integration for that marker contract. Thus `182,026 - 1 + 192 = 182,217` at the
-exact stacked successor head measured by V1-002. The same snapshot classifies
-179,145 test lines across 439 files and 17,659 excluded-with-reason lines across
-62 files, for 379,021 executable lines across 1,024 files.
+`18e8a2461abebcadd079dd9ce6f3de11df47842528688d3978d94ba81495f4f6`.
+Algorithm v1 produced 182,217 lines but omitted shipped non-JavaScript inputs.
+The fail-closed v2 authority adds the config schema, shipped skill resources,
+and the web app's reachable HTML, CSS, and SVG: 13 files / 4,788 lines. Thus
+`182,217 + 4,788 = 187,005`. The same snapshot classifies 180,248 test lines
+across 472 files and 36,728 excluded-with-evidence lines across 169 files, for
+403,981 accounted lines across 1,177 files. Generated, vendored, and
+unclassified totals are zero.
 
 The v1 goal is not a package rename or an add-only replacement beside v0. It is
 a smaller system with explicit ownership, direct dependency selection, preserved
@@ -359,21 +356,24 @@ to core.
 
 ## Complexity and maintainability gates
 
-V1-002 commits and reproduces the authoritative 182,217-line, 523-file
-measurement with a tracked-file classifier, included-file manifest, snapshot
-and manifest digests, and separate production/test reports. The complete
-snapshot is 523 production files / 182,217 lines, 439 test files / 179,145
-lines, and 62 excluded-with-reason files / 17,659 lines: 1,024 executable files
-and 379,021 lines in total. Generated files are excluded only with a recorded
-generator and reproducibility proof. Every executable source file is
-classified; unknown files fail the gate report.
+V1-002 commits and reproduces the authoritative 187,005-line, 536-file
+measurement with a stage-0 classifier, closed shipped-source/import graph,
+exact included-file manifest, snapshot and manifest digests, and separate
+production/test reports. The complete snapshot is 536 production files /
+187,005 lines, 472 test files / 180,248 lines, and 169
+excluded-with-evidence files / 36,728 lines: 1,177 accounted files and 403,981
+lines in total. Generated files require an exact digest plus executed generator
+and reproducibility commands; vendored files also bind upstream and license
+digests. Production reachability overrides test-looking paths and rejects
+discretionary exclusion. Unknown files and source without exact catalog
+ownership fail the gate report.
 
 Binding gates are:
 
 | Measure | Gate |
 | --- | --- |
 | `core` + `module-sdk` + `cli` production source | At most 15,000 lines |
-| Repository production source at G8 | At most 130,000 lines from the 182,217 baseline; roadmap-rounded 28.66% reduction and 71.34% retained |
+| Repository production source at G8 | At most 130,000 lines from the 187,005 baseline; roadmap-rounded 30.48% reduction and 69.52% retained |
 | Config representation | One authoritative schema field; projections generated |
 | Operator implementation | One shared wire client and domain state |
 | Minimal no-memory scaffold | Zero native modules |
@@ -385,14 +385,17 @@ tests never satisfies the production budget. A line target never justifies
 weaker reliability, mixed lifecycles, removed required tests, or unreadable
 compression.
 
-The 130,000-line cap is binding. The 28.66% reduction and 71.34% retained share
+The 130,000-line cap is binding. The 30.48% reduction and 69.52% retained share
 are roadmap-rounded labels, not second gates; the report records the exact
-reduction from the 182,217-line successor baseline.
+reduction from the 187,005-line successor baseline.
 
 ## Migration, rollback, and release
 
 G0 first accepts this ADR, then V1-002 commits the reproducible normalized
-baseline artifact, then V1-003 classifies every behavior against it. No product
+baseline and independently bound G0 authority artifact, then V1-003 classifies
+every behavior against it. After V1-002 merges, later gates require the
+protected annotated `refs/tags/authority/v1-complexity-g0` tag; classification
+and baseline evidence remain frozen while inventory can ratchet. No product
 deletion starts before all three are complete.
 
 Task completion and aggregate gate closure are separate at G0.25. V1-004's two

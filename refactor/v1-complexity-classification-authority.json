@@ -1,0 +1,123 @@
+{
+  "schema": "mono-agent.v1-complexity-classification-authority.v1",
+  "algorithmVersion": 2,
+  "executableExtensions": [
+    ".bash",
+    ".cjs",
+    ".cts",
+    ".js",
+    ".jsx",
+    ".mjs",
+    ".mts",
+    ".py",
+    ".sh",
+    ".ts",
+    ".tsx",
+    ".zsh"
+  ],
+  "packageTextExtensions": [
+    ".css",
+    ".gql",
+    ".graphql",
+    ".html",
+    ".json",
+    ".jsonc",
+    ".md",
+    ".sql",
+    ".svg",
+    ".vue",
+    ".yaml",
+    ".yml"
+  ],
+  "sourceDirectorySegments": [
+    "bin",
+    "resources",
+    "schema",
+    "scripts",
+    "skills",
+    "src"
+  ],
+  "testPathSegments": [
+    "__fixtures__",
+    "__tests__",
+    "fixtures",
+    "test",
+    "testdata",
+    "tests"
+  ],
+  "testFilenameMarkers": [
+    ".spec.",
+    ".test.",
+    "vitest.config."
+  ],
+  "productionRoots": [
+    "extras/",
+    "packages/"
+  ],
+  "nonShippingRules": [
+    {
+      "id": "repository-tooling",
+      "reason": "Repository verification and build tooling is reported but is outside the shipped-package production budget.",
+      "match": {
+        "paths": [
+          "vitest.config.mjs"
+        ],
+        "prefixes": [
+          "scripts/"
+        ]
+      }
+    },
+    {
+      "id": "non-shipping-demo",
+      "reason": "Demonstration source is reported but is not part of a published package.",
+      "match": {
+        "prefixes": [
+          "demos/"
+        ]
+      }
+    },
+    {
+      "id": "documentation-site",
+      "reason": "The separately deployed documentation site is reported but is outside the shipped-package production budget.",
+      "match": {
+        "prefixes": [
+          "website/"
+        ]
+      }
+    }
+  ],
+  "declarationSuffixes": [
+    ".d.cts",
+    ".d.mts",
+    ".d.ts"
+  ],
+  "packageDocumentationNames": [
+    "AGENTS.md",
+    "ARCHITECTURE.md",
+    "LICENSE",
+    "MIGRATION.md",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "packageMetadataNames": [
+    ".gitignore",
+    ".npmignore",
+    "package-lock.json",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml"
+  ],
+  "buildConfigFilenameMarkers": [
+    "tsconfig"
+  ],
+  "binaryAssetExtensions": [
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".webp",
+    ".woff",
+    ".woff2"
+  ]
+}

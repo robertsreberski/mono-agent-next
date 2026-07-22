@@ -7,18 +7,27 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  COMPLEXITY_ALGORITHM_VERSION,
+  G0_AUTHORITY_REF,
   SOURCE_EXTENSIONS,
   buildComplexitySnapshot,
   buildFileManifest,
+  buildShippedReachability,
   classifySourcePath,
   collectComplexitySnapshot,
   compareComplexitySnapshots,
   configSchemaFields,
   countPhysicalLines,
   evaluateGate,
+  loadIndexedPackageCatalog,
   loadComplexityBaseline,
+  loadComplexityG0Authority,
   normalizeSourceText,
+  resolveComplexityPolicy,
+  sha256,
   stablePrettyJson,
+  validateComplexityClassificationAuthority,
+  validateComplexityG0Authority,
   validateComplexityPolicy,
   validateComplexitySnapshot,
 } from "../lib/v1-complexity.mjs";
@@ -105,12 +114,17 @@ describe("v1 complexity source accounting", () => {
   });
 
   it("rejects incomplete provenance rules and reports overlapping explicit classifications", () => {
-    const invalid = testPolicy({
-      generatedRules: [rule("generated-client", { prefixes: ["packages/a/generated/"] })],
+    const invalid = testInventoryPolicy({
+      generatedFiles: [{
+        id: "generated-client",
+        path: "packages/a/generated/client.ts",
+        reason: "Generated client.",
+        contentSha256: "a".repeat(64),
+      }],
     });
     expect(validateComplexityPolicy(invalid)).toEqual(expect.arrayContaining([
-      "generatedRules[0] is missing required key generator",
-      "generatedRules[0] is missing required key reproducibilityCheck",
+      "generatedFiles[0] is missing required key generator",
+      "generatedFiles[0] is missing required key reproducibilityCheck",
     ]));
 
     const overlapping = testPolicy({
@@ -129,15 +143,19 @@ describe("v1 complexity source accounting", () => {
   });
 
   it("rejects unknown policy keys, unsupported algorithms/extensions, and weakened binding contracts", () => {
-    const valid = testPolicy();
+    const valid = testInventoryPolicy();
     expect(validateComplexityPolicy(valid)).toEqual([]);
 
-    expect(validateComplexityPolicy({ ...valid, surprise: true })).toContain("policy contains unknown key surprise");
-    expect(validateComplexityPolicy({ ...valid, algorithmVersion: 999 })).toContain(
-      "policy.algorithmVersion must be exactly 1",
+    expect(validateComplexityPolicy({ ...valid, surprise: true })).toContain(
+      "inventory policy contains unknown key surprise",
     );
-    expect(validateComplexityPolicy({ ...valid, sourceExtensions: [".js"] })).toContain(
-      `sourceExtensions must exactly equal ${SOURCE_EXTENSIONS.join(", ")}`,
+    const authority = testClassificationAuthority();
+    expect(validateComplexityClassificationAuthority(authority)).toEqual([]);
+    expect(validateComplexityClassificationAuthority({ ...authority, algorithmVersion: 999 })).toContain(
+      `classification authority.algorithmVersion must be exactly ${COMPLEXITY_ALGORITHM_VERSION}`,
+    );
+    expect(validateComplexityClassificationAuthority({ ...authority, packageTextExtensions: [".json"] })).toContain(
+      `classification source extensions must exactly equal ${SOURCE_EXTENSIONS.join(", ")}`,
     );
     expect(validateComplexityPolicy({ ...valid, budgets: [] })).toEqual(expect.arrayContaining([
       "required budget kernel-production is missing",
@@ -159,33 +177,42 @@ describe("v1 complexity source accounting", () => {
   });
 
   it("requires safe vendored provenance and fails when the declared license is not tracked", () => {
-    const unsafe = testPolicy({
-      vendoredRules: [{
-        ...rule("vendored-client", { paths: ["packages/a/src/vendor.ts"] }),
+    const unsafe = testInventoryPolicy({
+      vendoredFiles: [{
+        id: "vendored-client",
+        path: "packages/a/src/vendor.ts",
+        reason: "Vendored client.",
+        contentSha256: "a".repeat(64),
         upstream: "http://user:secret@example.invalid/client",
         version: "latest build",
         licensePath: "../LICENSE",
+        licenseSha256: "b".repeat(64),
       }],
     });
     expect(validateComplexityPolicy(unsafe)).toEqual(expect.arrayContaining([
-      "vendoredRules[0].licensePath must be a safe repository-relative path",
-      "vendoredRules[0].upstream must be an HTTPS URL without credentials",
-      "vendoredRules[0].version must be a non-empty whitespace-free version",
+      "vendoredFiles[0].licensePath must be a safe repository-relative path",
+      "vendoredFiles[0].upstream must be an HTTPS URL without credentials",
+      "vendoredFiles[0].version must be a non-empty whitespace-free version",
     ]));
 
-    const configured = testPolicy({
-      vendoredRules: [{
-        ...rule("vendored-client", { paths: ["packages/a/src/vendor.ts"] }),
+    const vendorBytes = Buffer.from("export {};\n");
+    const configured = testPolicy({ inventoryPolicy: {
+      vendoredFiles: [{
+        id: "vendored-client",
+        path: "packages/a/src/vendor.ts",
+        reason: "Vendored client.",
+        contentSha256: sha256(vendorBytes),
         upstream: "https://example.invalid/client",
         version: "1.0.0",
         licensePath: "vendor/client/LICENSE",
+        licenseSha256: "b".repeat(64),
       }],
-    });
+    } });
     const entries = [entry("packages/a/src/vendor.ts", "vendor")];
-    const blobsByOid = new Map([["vendor", Buffer.from("export {};\n")]]);
+    const blobsByOid = new Map([["vendor", vendorBytes]]);
     const snapshot = snapshotFor(entries, blobsByOid, configured);
     expect(snapshot.issues).toContain(
-      "vendored rule vendored-client license vendor/client/LICENSE is not tracked",
+      "vendored evidence vendored-client license vendor/client/LICENSE is not tracked",
     );
   });
 
@@ -247,10 +274,15 @@ describe("v1 complexity source accounting", () => {
       entries,
       blobsByOid,
       policy: configured,
-      catalog: [],
+      catalog: [catalogEntry()],
       unstagedPaths: ["packages/a/src/index.ts"],
     });
-    const snapshot = buildComplexitySnapshot({ manifest, policy: configured, entries, blobsByOid, catalog: [] });
+    const snapshot = buildComplexitySnapshot({
+      manifest,
+      policy: configured,
+      ...inventoryInputs(entries, blobsByOid, [catalogEntry()]),
+      catalog: [catalogEntry()],
+    });
 
     expect(evaluateGate(snapshot, "G0")).toEqual([
       "classification rule never-used did not match any tracked source file",
@@ -279,7 +311,12 @@ describe("v1 complexity source accounting", () => {
       implementationFamilies: [
         {
           id: "one-client",
-          members: ["packages/a/src/index.ts"],
+          detection: {
+            allContentMarkers: ["export"],
+            pathPrefixes: ["packages/"],
+          },
+          registeredMember: "packages/a/src/index.ts",
+          minMembers: 0,
           maxMembers: 0,
           enforceAt: "G8",
         },
@@ -298,11 +335,205 @@ describe("v1 complexity source accounting", () => {
   });
 });
 
+describe("v1 complexity adversarial closure", () => {
+  it("accounts for unknown mode-0644 package source instead of silently omitting it", () => {
+    const configured = testPolicy();
+    const entries = [
+      entry("packages/known/src/opaque.custom", "known"),
+      entry("packages/rogue/src/payload.custom", "rogue"),
+    ];
+    const blobsByOid = new Map([
+      ["known", Buffer.from("opaque product source\n")],
+      ["rogue", Buffer.from("uncatalogued product source\n")],
+    ]);
+    const manifest = buildFileManifest({
+      entries,
+      blobsByOid,
+      policy: configured,
+      catalog: [catalogEntry({ name: "@test/known", path: "packages/known" })],
+    });
+
+    expect(manifest.files.map(({ path }) => path)).toEqual(entries.map(({ path }) => path));
+    expect(manifest.files.find(({ path }) => path.includes("rogue"))).toMatchObject({
+      classification: "unclassified",
+      ruleId: "uncatalogued-package-source",
+    });
+    expect(manifest.issues).toEqual(expect.arrayContaining([
+      "packages/known/src/opaque.custom has an unknown source extension under packages/known",
+      "packages/rogue/src/payload.custom is source-shaped under a package root but has no exact package-catalog owner",
+    ]));
+  });
+
+  it("makes stage-0 runtime reachability override test-looking paths and includes CSS, HTML, build config, and packed source", () => {
+    const configured = testPolicy();
+    const manifestValue = {
+      name: "@test/a",
+      exports: "./dist/main.js",
+      files: ["src/test/packed.ts"],
+      scripts: { build: "vite build" },
+    };
+    const entries = [
+      entry("packages/a/package.json", "manifest"),
+      entry("packages/a/index.html", "html"),
+      entry("packages/a/vite.config.ts", "vite"),
+      entry("packages/a/src/main.ts", "main"),
+      entry("packages/a/src/styles.css", "css"),
+      entry("packages/a/src/test/product.ts", "product"),
+      entry("packages/a/src/test/helper.ts", "helper"),
+      entry("packages/a/src/test/packed.ts", "packed"),
+    ];
+    const blobsByOid = new Map([
+      ["manifest", jsonBuffer(manifestValue)],
+      ["html", Buffer.from('<script type="module" src="./src/main.ts"></script>\n')],
+      ["vite", Buffer.from("export default {};\n")],
+      ["main", Buffer.from('import "./styles.css";\nimport "./test/product.ts";\n')],
+      ["css", Buffer.from("body { color: black; }\n")],
+      ["product", Buffer.from("export const product = true;\n")],
+      ["helper", Buffer.from("export const helper = true;\n")],
+      ["packed", Buffer.from("export const packed = true;\n")],
+    ]);
+    const catalog = [catalogEntry()];
+    const reachability = buildShippedReachability({ entries, blobsByOid, catalog, policy: configured });
+    const fileManifest = buildFileManifest({ entries, blobsByOid, catalog, policy: configured, reachability });
+    const byPath = new Map(fileManifest.files.map((file) => [file.path, file]));
+
+    for (const path of [
+      "packages/a/index.html",
+      "packages/a/vite.config.ts",
+      "packages/a/src/main.ts",
+      "packages/a/src/styles.css",
+      "packages/a/src/test/product.ts",
+      "packages/a/src/test/packed.ts",
+    ]) {
+      expect(byPath.get(path)?.classification, path).toBe("production");
+    }
+    expect(byPath.get("packages/a/src/test/helper.ts")?.classification).toBe("test");
+    expect(reachability.production.has("packages/a/src/test/product.ts")).toBe(true);
+    expect(reachability.packed.has("packages/a/src/test/packed.ts")).toBe(true);
+  });
+
+  it("forbids broad exclusion syntax and refuses to downgrade production-reachable exact exclusions", () => {
+    const bytes = Buffer.from("export const product = true;\n");
+    const invalid = testInventoryPolicy({
+      excludedFiles: [{
+        id: "broad-exclusion",
+        path: "packages/a/src/product.ts",
+        reason: "Attempted downgrade.",
+        evidence: "Review note.",
+        contentSha256: sha256(bytes),
+        match: { prefixes: ["packages/a/src/"] },
+      }],
+    });
+    expect(validateComplexityPolicy(invalid)).toContain("excludedFiles[0] contains unknown key match");
+
+    const policy = testPolicy({ inventoryPolicy: {
+      excludedFiles: [{
+        id: "exact-exclusion",
+        path: "packages/a/src/product.ts",
+        reason: "Attempted exact downgrade.",
+        evidence: "Review note.",
+        contentSha256: sha256(bytes),
+      }],
+    } });
+    const entries = [entry("packages/a/src/product.ts", "product")];
+    const blobsByOid = new Map([["product", bytes]]);
+    const manifest = buildFileManifest({
+      entries,
+      blobsByOid,
+      policy,
+      catalog: [catalogEntry()],
+      reachability: {
+        production: new Set(["packages/a/src/product.ts"]),
+        packed: new Set(),
+        issues: [],
+      },
+    });
+    expect(manifest.files[0]).toMatchObject({
+      classification: "unclassified",
+      ruleId: "reachable-production-exclusion",
+    });
+    expect(manifest.issues).toContain(
+      "packages/a/src/product.ts is production-reachable and cannot be downgraded to excluded",
+    );
+  });
+
+  it("enforces zero, exactly-one registered, and unknown operator-client states at G8", () => {
+    const markers = Buffer.from([
+      'const endpoint = "/v1/turns";',
+      'const contentType = "application/x-ndjson";',
+      "const fetchImpl = fetch;",
+      "",
+    ].join("\n"));
+    const empty = snapshotFor([], new Map(), testPolicy());
+    expect(evaluateGate(empty, "G0").filter(operatorFailure)).toEqual([]);
+    expect(evaluateGate(empty, "G8").filter(operatorFailure)).toEqual(expect.arrayContaining([
+      "operator-wire-client has 0 implementations, below 1",
+      "operator-wire-client has no registered canonical implementation",
+    ]));
+
+    const canonicalPath = "packages/a/src/operator-client.ts";
+    const onePolicy = testPolicy({ inventoryPolicy: {
+      implementationFamilies: [{
+        ...testInventoryPolicy().implementationFamilies[0],
+        registeredMember: canonicalPath,
+      }],
+    } });
+    const one = snapshotFor(
+      [entry(canonicalPath, "one")],
+      new Map([["one", markers]]),
+      onePolicy,
+    );
+    expect(evaluateGate(one, "G8").filter(operatorFailure)).toEqual([]);
+
+    const two = snapshotFor(
+      [entry(canonicalPath, "one"), entry("packages/b/src/operator-client.ts", "two")],
+      new Map([["one", markers], ["two", markers]]),
+      onePolicy,
+    );
+    expect(evaluateGate(two, "G8").filter(operatorFailure)).toEqual(expect.arrayContaining([
+      "operator-wire-client has 2 implementations, exceeding 1",
+      "operator-wire-client has unregistered implementations: packages/b/src/operator-client.ts",
+    ]));
+  });
+
+  it("fails exact catalog identity mismatches and overlapping ownership roots", () => {
+    const entries = [
+      entry("packages/a/package.json", "manifest"),
+      entry("packages/a/src/index.ts", "source"),
+    ];
+    const blobsByOid = new Map([
+      ["manifest", jsonBuffer({ name: "@test/wrong" })],
+      ["source", Buffer.from("export {};\n")],
+    ]);
+    const policy = testPolicy();
+    const catalog = [catalogEntry({ name: "@test/expected" })];
+    const manifest = buildFileManifest({ entries, blobsByOid, policy, catalog });
+    const snapshot = buildComplexitySnapshot({ manifest, policy, entries, blobsByOid, catalog });
+    expect(snapshot.issues).toContain(
+      "packages/a/package.json: manifest name must exactly match catalog identity @test/expected",
+    );
+
+    const catalogSource = [
+      'export const PACKAGE_CATEGORIES = ["core"];',
+      "export const packageCatalog = [",
+      '  { allowedDependencyCategories: [], category: "core", name: "@test/a", path: "packages/a", publishable: true, responsibility: "A." },',
+      '  { allowedDependencyCategories: [], category: "core", name: "@test/nested", path: "packages/a/nested", publishable: true, responsibility: "Nested." },',
+      "];",
+      "export function packageRelativePath(entry) { return entry.path; }",
+      "",
+    ].join("\n");
+    expect(() => loadIndexedPackageCatalog({
+      entries: [entry("scripts/package-catalog.mjs", "catalog")],
+      blobsByOid: new Map([["catalog", Buffer.from(catalogSource)]]),
+    })).toThrow("Indexed package catalog paths overlap: packages/a and packages/a/nested");
+  });
+});
+
 describe("v1 complexity architecture inventory", () => {
   it("accounts for production dependency edges and cycles, code export subpaths, closures, and native dependencies", () => {
     const catalog = [
-      { dir: "a", name: "@test/a", publishable: true },
-      { dir: "b", name: "@test/b", publishable: false },
+      catalogEntry({ name: "@test/a", path: "packages/a" }),
+      catalogEntry({ name: "@test/b", path: "packages/b", publishable: false }),
     ];
     const packageA = {
       name: "@test/a",
@@ -451,12 +682,53 @@ describe("v1 complexity architecture inventory", () => {
 });
 
 describe("v1 complexity Git-index integration", () => {
+  it("executes the declared generator and detects a non-reproducible tracked result", async () => {
+    const cwd = await tempGitRepository();
+    const generatedPath = "packages/a/src/generated.ts";
+    const generatedBytes = Buffer.from("export const generated = 1;\n");
+    await writeJson(
+      join(cwd, "refactor/v1-complexity-classification-authority.json"),
+      testClassificationAuthority(),
+    );
+    await writeJson(join(cwd, "refactor/v1-complexity-policy.json"), testInventoryPolicy({
+      generatedFiles: [{
+        id: "generated-client",
+        path: generatedPath,
+        reason: "Generated fixture.",
+        contentSha256: sha256(generatedBytes),
+        generator: {
+          command: process.execPath,
+          args: [
+            "-e",
+            "require('node:fs').writeFileSync('packages/a/src/generated.ts', 'export const generated = 2;\\n')",
+          ],
+        },
+        reproducibilityCheck: {
+          command: "git",
+          args: ["diff", "--exit-code", "--", generatedPath],
+        },
+      }],
+    }));
+    await writeJson(join(cwd, "packages/a/package.json"), { name: "@test/a" });
+    await writeFile(join(cwd, generatedPath), generatedBytes);
+    git(cwd, "add", ".");
+    git(cwd, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "fixture");
+
+    const snapshot = collectComplexitySnapshot({ cwd, catalog: [catalogEntry()] });
+    expect(readFileSync(join(cwd, generatedPath), "utf8")).toContain("generated = 2");
+    expect(snapshot.issues).toEqual(expect.arrayContaining([
+      expect.stringContaining("generated evidence generated-client reproducibility check exited 1"),
+      "generated evidence generated-client reproducibility run changed the repository tree",
+    ]));
+  });
+
   it("reads stage-0 blobs, ignores untracked files, and flags a dirty indexed source", async () => {
     const cwd = await tempGitRepository();
-    const configured = testPolicy({
-      nonShippingRules: [rule("repository-tooling", { prefixes: ["scripts/"] })],
-    });
-    await writeJson(join(cwd, "refactor/v1-complexity-policy.json"), configured);
+    await writeJson(
+      join(cwd, "refactor/v1-complexity-classification-authority.json"),
+      testClassificationAuthority({ nonShippingRules: [rule("repository-tooling", { prefixes: ["scripts/"] })] }),
+    );
+    await writeJson(join(cwd, "refactor/v1-complexity-policy.json"), testInventoryPolicy());
     await writeJson(join(cwd, "packages/a/package.json"), {
       name: "@test/a",
       version: "1.0.0",
@@ -467,7 +739,7 @@ describe("v1 complexity Git-index integration", () => {
     await writeFile(join(cwd, "scripts/check.mjs"), "#!/usr/bin/env node\n", "utf8");
     git(cwd, "add", ".");
 
-    const catalog = [{ dir: "a", name: "@test/a", publishable: true }];
+    const catalog = [catalogEntry()];
     const beforeUntracked = collectComplexitySnapshot({ cwd, catalog });
     await writeFile(join(cwd, "packages/a/src/untracked.ts"), "throw new Error();\n", "utf8");
     const clean = collectComplexitySnapshot({ cwd, catalog });
@@ -477,9 +749,9 @@ describe("v1 complexity Git-index integration", () => {
     expect(clean.issues).toEqual([]);
     expect(clean.totals.byClassification.production).toEqual({ files: 1, lines: 1 });
     expect(clean.totals.byClassification.test).toEqual({ files: 1, lines: 1 });
-    expect(clean.totals.byClassification.excluded).toEqual({ files: 1, lines: 1 });
+    expect(clean.totals.byClassification.excluded).toEqual({ files: 2, lines: 6 });
     expect(clean.files.map((file) => file.path)).not.toContain("packages/a/src/untracked.ts");
-    expect(clean.inventory.workspacePackages).toEqual({ total: 1, publishable: 1 });
+    expect(clean.inventory.workspacePackages).toMatchObject({ total: 1, publishable: 1 });
 
     await writeFile(join(cwd, "packages/a/src/index.ts"), "export const value = 2;\n", "utf8");
     const dirty = collectComplexitySnapshot({ cwd, catalog });
@@ -491,10 +763,11 @@ describe("v1 complexity Git-index integration", () => {
 
   it("derives package catalog paths and publishability from stage-0 rather than the worktree", async () => {
     const cwd = await tempGitRepository();
-    const configured = testPolicy({
-      nonShippingRules: [rule("repository-tooling", { prefixes: ["scripts/"] })],
-    });
-    await writeJson(join(cwd, "refactor/v1-complexity-policy.json"), configured);
+    await writeJson(
+      join(cwd, "refactor/v1-complexity-classification-authority.json"),
+      testClassificationAuthority({ nonShippingRules: [rule("repository-tooling", { prefixes: ["scripts/"] })] }),
+    );
+    await writeJson(join(cwd, "refactor/v1-complexity-policy.json"), testInventoryPolicy());
     await writeJson(join(cwd, "packages/a/package.json"), {
       name: "@test/a",
       version: "1.0.0",
@@ -503,8 +776,9 @@ describe("v1 complexity Git-index integration", () => {
     await writeFile(join(cwd, "packages/a/src/index.ts"), "export const value = 1;\n", "utf8");
     const catalogPath = join(cwd, "scripts/package-catalog.mjs");
     const indexedCatalog = [
+      "export const PACKAGE_CATEGORIES = [\"core\"];",
       "export const packageCatalog = [",
-      "  { dir: \"a\", name: \"@test/a\", publishable: true },",
+      "  { allowedDependencyCategories: [], category: \"core\", dir: \"a\", name: \"@test/a\", publishable: true, responsibility: \"Test package.\" },",
       "];",
       "export function packageRelativePath(entry) {",
       "  return entry.path ?? `packages/${entry.dir}`;",
@@ -518,7 +792,7 @@ describe("v1 complexity Git-index integration", () => {
     await writeFile(catalogPath, indexedCatalog.replace("publishable: true", "publishable: false"), "utf8");
     const dirty = collectComplexitySnapshot({ cwd });
 
-    expect(clean.inventory.workspacePackages).toEqual({ total: 1, publishable: 1 });
+    expect(clean.inventory.workspacePackages).toMatchObject({ total: 1, publishable: 1 });
     expect(dirty.inventory.workspacePackages).toEqual(clean.inventory.workspacePackages);
     expect(dirty.manifestSha256).toBe(clean.manifestSha256);
     expect(dirty.snapshotSha256).toBe(clean.snapshotSha256);
@@ -526,6 +800,116 @@ describe("v1 complexity Git-index integration", () => {
       "scripts/package-catalog.mjs has unstaged report-input changes",
       "scripts/package-catalog.mjs has unstaged source changes",
     ]));
+  });
+});
+
+describe("v1 complexity frozen G0 authority", () => {
+  it("uses a non-release authority tag that cannot match the npm v* release trigger", () => {
+    const workflow = readFileSync(join(process.cwd(), ".github/workflows/npm-release.yml"), "utf8");
+    const releasePattern = /tags:\s*\n\s*-\s*"([^"]+)"/u.exec(workflow)?.[1];
+    const authorityTag = G0_AUTHORITY_REF.replace(/^refs\/tags\//u, "");
+
+    expect(releasePattern).toBe("v*");
+    expect(matchesSimpleTagPattern(authorityTag, releasePattern)).toBe(false);
+    expect(authorityTag).toBe("authority/v1-complexity-g0");
+  });
+
+  it("requires exact paths, internally consistent totals, and a non-release ref", () => {
+    const valid = g0AuthorityFixture();
+    expect(() => validateComplexityG0Authority(valid)).not.toThrow();
+    expect(() => validateComplexityG0Authority({
+      ...valid,
+      authorityRef: "refs/tags/v1-complexity-g0",
+    })).toThrow(`must be non-release annotated tag ${G0_AUTHORITY_REF}`);
+    expect(() => validateComplexityG0Authority({
+      ...valid,
+      totals: {
+        ...valid.totals,
+        allAccounted: { files: 1, lines: 1 },
+      },
+    })).toThrow("totals.allAccounted must equal the classification sum");
+    expect(() => validateComplexityG0Authority({
+      ...valid,
+      baseline: { ...valid.baseline, path: "refactor/baselines/weaker.json" },
+    })).toThrow("baseline.path must be refactor/baselines/v1-complexity-baseline.json");
+  });
+
+  it("bootstraps only at G0, requires an annotated digest-bound tag later, and ignores rewritten baseline bytes", async () => {
+    const cwd = await tempGitRepository();
+    await mkdir(join(cwd, "refactor/baselines"), { recursive: true });
+    const classificationAuthority = testClassificationAuthority();
+    const inventoryPolicy = testInventoryPolicy();
+    const policy = resolveComplexityPolicy(classificationAuthority, inventoryPolicy);
+    const baseline = snapshotFor([], new Map(), policy);
+    const classificationPath = "refactor/v1-complexity-classification-authority.json";
+    const inventoryPath = "refactor/v1-complexity-policy.json";
+    const baselinePath = "refactor/baselines/v1-complexity-baseline.json";
+    const authorityPath = "refactor/baselines/v1-complexity-g0-authority.json";
+    await writeJson(join(cwd, classificationPath), classificationAuthority);
+    await writeJson(join(cwd, inventoryPath), inventoryPolicy);
+    await writeFile(join(cwd, baselinePath), stablePrettyJson(baseline), "utf8");
+
+    const authority = g0AuthorityFixture({
+      baseline: {
+        contentSha256: sha256(readFileSync(join(cwd, baselinePath))),
+        gitBlobOid: git(cwd, "hash-object", baselinePath).trim(),
+        manifestSha256: baseline.manifestSha256,
+        path: baselinePath,
+        snapshotSha256: baseline.snapshotSha256,
+      },
+      classificationAuthority: {
+        canonicalSha256: baseline.classificationAuthoritySha256,
+        contentSha256: sha256(readFileSync(join(cwd, classificationPath))),
+        gitBlobOid: git(cwd, "hash-object", classificationPath).trim(),
+        path: classificationPath,
+      },
+      initialInventoryPolicy: {
+        canonicalSha256: baseline.inventoryPolicySha256,
+        contentSha256: sha256(readFileSync(join(cwd, inventoryPath))),
+        gitBlobOid: git(cwd, "hash-object", inventoryPath).trim(),
+        path: inventoryPath,
+      },
+      totals: {
+        allAccounted: baseline.totals.allExecutable,
+        ...baseline.totals.byClassification,
+      },
+    });
+    await writeJson(join(cwd, authorityPath), authority);
+    git(cwd, "add", ".");
+    git(cwd, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "G0");
+
+    const bootstrap = loadComplexityG0Authority({ cwd, path: authorityPath, baselinePath, gate: "G0" });
+    expect(bootstrap.refEvidence).toMatchObject({ status: "pending-post-merge", annotated: false });
+    expect(() => loadComplexityG0Authority({ cwd, path: authorityPath, baselinePath, gate: "G0.25" })).toThrow(
+      `Annotated G0 authority ref ${G0_AUTHORITY_REF} is required after G0`,
+    );
+
+    const shortRef = G0_AUTHORITY_REF.replace(/^refs\/tags\//u, "");
+    git(cwd, "tag", shortRef);
+    expect(() => loadComplexityG0Authority({ cwd, path: authorityPath, baselinePath, gate: "G0.25" })).toThrow(
+      "must be an annotated tag object",
+    );
+    git(cwd, "tag", "-d", shortRef);
+
+    const authorityDigest = sha256(readFileSync(join(cwd, authorityPath)));
+    git(
+      cwd,
+      "-c", "user.name=Test",
+      "-c", "user.email=test@example.invalid",
+      "tag", "-a", shortRef,
+      "-m", "Freeze V1 complexity G0 authority.",
+      "-m", `Complexity-Authority-SHA256: ${authorityDigest}`,
+    );
+    const anchored = loadComplexityG0Authority({ cwd, path: authorityPath, baselinePath, gate: "G0.25" });
+    expect(anchored.refEvidence).toMatchObject({ status: "anchored", annotated: true });
+    expect(anchored.baseline.snapshot.snapshotSha256).toBe(baseline.snapshotSha256);
+
+    await writeFile(join(cwd, baselinePath), "{}\n", "utf8");
+    git(cwd, "add", baselinePath);
+    git(cwd, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "Attempt rewrite");
+    const afterRewrite = loadComplexityG0Authority({ cwd, path: authorityPath, baselinePath, gate: "G0.25" });
+    expect(afterRewrite.baseline.snapshot.snapshotSha256).toBe(baseline.snapshotSha256);
+    expect(afterRewrite.baseline.evidence.source).toBe("annotated-authority-ref");
   });
 });
 
@@ -556,10 +940,7 @@ describe("v1 complexity report CLI", () => {
     const result = runV1ComplexityReport({
       argv: ["--json", "--gate", "G0", "--baseline", "base.json"],
       collectSnapshot: () => snapshot,
-      loadBaseline: () => ({
-        snapshot,
-        evidence: baselineEvidence(snapshot),
-      }),
+      loadAuthority: () => authorityResult(snapshot),
       collectTreeEvidence: () => currentTreeEvidence(),
       stdout,
       stderr,
@@ -582,6 +963,9 @@ describe("v1 complexity report CLI", () => {
       `baseline evidence: committed-git-blob ${baselineEvidence(snapshot).contentSha256}`,
     );
     expect(renderHumanReport(result.report, "G0")).toContain(`current tree: ${currentTreeEvidence().tree}`);
+    expect(renderHumanReport(result.report, "G0")).toContain(
+      `authority ref: ${G0_AUTHORITY_REF} (pending-post-merge)`,
+    );
     expect(renderHumanReport(result.report, "G0")).toContain("gate: G0");
   });
 
@@ -638,6 +1022,7 @@ describe("v1 complexity report CLI", () => {
       argv: ["--gate", "G0", "--verify-baseline", baselinePath],
       cwd,
       collectSnapshot: () => snapshot,
+      loadAuthority: () => authorityResult(snapshot, loaded.evidence),
       stdout: sink(),
       stderr: sink(),
     });
@@ -652,6 +1037,7 @@ describe("v1 complexity report CLI", () => {
       argv: ["--gate", "G0", "--verify-baseline", baselinePath],
       cwd,
       collectSnapshot: () => snapshot,
+      loadAuthority: () => authorityResult(snapshot, loaded.evidence),
       stdout: sink(),
       stderr: sink(),
     });
@@ -665,6 +1051,7 @@ describe("v1 complexity report CLI", () => {
       argv: ["--gate", "G0", "--verify-baseline", baselinePath],
       cwd,
       collectSnapshot: () => snapshot,
+      loadAuthority: () => authorityResult(snapshot, loaded.evidence),
       stdout: sink(),
       stderr: sink(),
     });
@@ -684,26 +1071,28 @@ describe("v1 complexity report CLI", () => {
     );
   });
 
-  it("fails a gate when the current policy digest differs from committed baseline evidence", () => {
+  it("requires an exact frozen snapshot at G0 even when report mode uses --baseline", () => {
     const configured = testPolicy();
     const entries = [entry("packages/a/src/index.ts", "a")];
     const blobsByOid = new Map([["a", Buffer.from("export {};\n")]]);
     const baseline = snapshotFor(entries, blobsByOid, configured);
-    const currentPolicy = testPolicy({ knownNativeDependencies: ["native-addon"] });
+    const currentPolicy = testPolicy({ inventoryPolicy: { knownNativeDependencies: ["native-addon"] } });
     const current = snapshotFor(entries, blobsByOid, currentPolicy);
     const stdout = sink();
     const stderr = sink();
     const result = runV1ComplexityReport({
       argv: ["--gate", "G0", "--baseline", "baseline.json"],
       collectSnapshot: () => current,
-      loadBaseline: () => ({ snapshot: baseline, evidence: baselineEvidence(baseline) }),
+      loadAuthority: () => authorityResult(baseline),
       collectTreeEvidence: () => currentTreeEvidence(),
       stdout,
       stderr,
     });
 
     expect(result.exitCode).toBe(1);
-    expect(result.failures).toContain("current policy digest does not match the committed baseline");
+    expect(result.failures).toContain(
+      `current snapshot ${current.snapshotSha256} does not match baseline ${baseline.snapshotSha256}`,
+    );
   });
 
   it("rejects transient workspace issues while preserving the measured snapshot digest", () => {
@@ -726,18 +1115,38 @@ describe("v1 complexity report CLI", () => {
   });
 });
 
-function testPolicy(overrides = {}) {
+function testClassificationAuthority(overrides = {}) {
   return {
-    schema: "mono-agent.v1-complexity-policy.v1",
-    algorithmVersion: 1,
-    sourceExtensions: [...SOURCE_EXTENSIONS],
-    testPathSegments: ["test", "tests"],
-    testFilenameMarkers: [".test.", "vitest.config."],
+    schema: "mono-agent.v1-complexity-classification-authority.v1",
+    algorithmVersion: COMPLEXITY_ALGORITHM_VERSION,
+    executableExtensions: [
+      ".bash", ".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".py", ".sh", ".ts", ".tsx", ".zsh",
+    ],
+    packageTextExtensions: [
+      ".css", ".gql", ".graphql", ".html", ".json", ".jsonc", ".md", ".sql", ".svg", ".vue", ".yaml", ".yml",
+    ],
+    sourceDirectorySegments: ["bin", "resources", "schema", "scripts", "skills", "src"],
+    testPathSegments: ["__fixtures__", "__tests__", "fixtures", "test", "testdata", "tests"],
+    testFilenameMarkers: [".spec.", ".test.", "vitest.config."],
     productionRoots: ["packages/"],
-    generatedRules: [],
-    vendoredRules: [],
-    excludedRules: [],
     nonShippingRules: [],
+    declarationSuffixes: [".d.cts", ".d.mts", ".d.ts"],
+    packageDocumentationNames: [
+      "AGENTS.md", "ARCHITECTURE.md", "LICENSE", "MIGRATION.md", "README.md", "THIRD_PARTY_NOTICES.md",
+    ],
+    packageMetadataNames: [
+      ".gitignore", ".npmignore", "package-lock.json", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml",
+    ],
+    buildConfigFilenameMarkers: ["tsconfig"],
+    binaryAssetExtensions: [".gif", ".ico", ".jpeg", ".jpg", ".png", ".webp", ".woff", ".woff2"],
+    ...overrides,
+  };
+}
+
+function testInventoryPolicy(overrides = {}) {
+  return {
+    schema: "mono-agent.v1-complexity-inventory-policy.v1",
+    classificationAuthorityPath: "refactor/v1-complexity-classification-authority.json",
     budgets: [
       {
         id: "repository-production",
@@ -759,14 +1168,34 @@ function testPolicy(overrides = {}) {
     knownNativeDependencies: [],
     implementationFamilies: [{
       id: "operator-wire-client",
-      members: [
-        "packages/tui/src/remote/client.ts",
-        "packages/web/src/operator-client.ts",
-      ],
+      detection: {
+        allContentMarkers: ["/v1/turns", "application/x-ndjson", "fetchImpl"],
+        pathPrefixes: ["extras/", "packages/"],
+      },
+      registeredMember: null,
+      minMembers: 1,
       maxMembers: 1,
       enforceAt: "G8",
     }],
+    generatedFiles: [],
+    vendoredFiles: [],
+    excludedFiles: [],
     ...overrides,
+  };
+}
+
+function testPolicy(overrides = {}) {
+  const {
+    classificationAuthority: classificationAuthorityOverrides = {},
+    inventoryPolicy: inventoryPolicyOverrides = {},
+    ...resolvedOverrides
+  } = overrides;
+  return {
+    ...resolveComplexityPolicy(
+      testClassificationAuthority(classificationAuthorityOverrides),
+      testInventoryPolicy(inventoryPolicyOverrides),
+    ),
+    ...resolvedOverrides,
   };
 }
 
@@ -795,6 +1224,25 @@ function baselineEvidence(snapshot) {
   };
 }
 
+function authorityResult(snapshot, evidence = baselineEvidence(snapshot)) {
+  return {
+    baseline: { snapshot, evidence },
+    authorityEvidence: {
+      source: "committed-git-blob",
+      path: "refactor/baselines/v1-complexity-g0-authority.json",
+      commit: evidence.commit,
+      gitBlobOid: "e".repeat(40),
+      contentSha256: "f".repeat(64),
+    },
+    refEvidence: {
+      status: "pending-post-merge",
+      ref: G0_AUTHORITY_REF,
+      annotated: false,
+      commit: null,
+    },
+  };
+}
+
 function currentTreeEvidence(overrides = {}) {
   return {
     source: "git-head",
@@ -807,9 +1255,52 @@ function currentTreeEvidence(overrides = {}) {
   };
 }
 
-function snapshotFor(entries, blobsByOid, policy) {
-  const manifest = buildFileManifest({ entries, blobsByOid, policy, catalog: [] });
-  return buildComplexitySnapshot({ manifest, policy, entries, blobsByOid, catalog: [] });
+function snapshotFor(entries, blobsByOid, policy, catalog = catalogForEntries(entries)) {
+  const manifest = buildFileManifest({ entries, blobsByOid, policy, catalog });
+  return buildComplexitySnapshot({
+    manifest,
+    policy,
+    ...inventoryInputs(entries, blobsByOid, catalog),
+    catalog,
+  });
+}
+
+function inventoryInputs(entries, blobsByOid, catalog) {
+  const augmentedEntries = [...entries];
+  const augmentedBlobs = new Map(blobsByOid);
+  const paths = new Set(entries.map(({ path }) => path));
+  for (const [index, catalogRecord] of catalog.entries()) {
+    const manifestPath = `${catalogRecord.path}/package.json`;
+    if (paths.has(manifestPath)) continue;
+    const oid = `synthetic-manifest-${index}`;
+    augmentedEntries.push(entry(manifestPath, oid));
+    augmentedBlobs.set(oid, jsonBuffer({ name: catalogRecord.name }));
+  }
+  return { entries: augmentedEntries, blobsByOid: augmentedBlobs };
+}
+
+function catalogForEntries(entries) {
+  const roots = new Set(entries.flatMap(({ path }) => {
+    const match = /^(packages|extras)\/([^/]+)\//u.exec(path);
+    return match === null ? [] : [`${match[1]}/${match[2]}`];
+  }));
+  return [...roots].sort().map((path) => catalogEntry({
+    path,
+    name: `@test/${path.split("/")[1]}`,
+  }));
+}
+
+function catalogEntry(overrides = {}) {
+  return {
+    allowedDependencyCategories: [],
+    category: "core",
+    name: "@test/a",
+    path: "packages/a",
+    publishable: true,
+    responsibility: "Test package.",
+    tier: null,
+    ...overrides,
+  };
 }
 
 async function tempGitRepository() {
@@ -837,5 +1328,61 @@ function sink() {
       this.text += String(chunk);
       return true;
     },
+  };
+}
+
+function operatorFailure(message) {
+  return message.startsWith("operator-wire-client");
+}
+
+function matchesSimpleTagPattern(tag, pattern) {
+  if (pattern.endsWith("*") && !pattern.slice(0, -1).includes("*")) {
+    return tag.startsWith(pattern.slice(0, -1));
+  }
+  return tag === pattern;
+}
+
+function g0AuthorityFixture(overrides = {}) {
+  const zero = { files: 0, lines: 0 };
+  return {
+    schema: "mono-agent.v1-complexity-g0-authority.v1",
+    algorithmVersion: COMPLEXITY_ALGORITHM_VERSION,
+    authorityRef: G0_AUTHORITY_REF,
+    baseline: {
+      contentSha256: "a".repeat(64),
+      gitBlobOid: "b".repeat(40),
+      manifestSha256: "c".repeat(64),
+      path: "refactor/baselines/v1-complexity-baseline.json",
+      snapshotSha256: "d".repeat(64),
+    },
+    classificationAuthority: {
+      canonicalSha256: "e".repeat(64),
+      contentSha256: "f".repeat(64),
+      gitBlobOid: "1".repeat(40),
+      path: "refactor/v1-complexity-classification-authority.json",
+    },
+    initialInventoryPolicy: {
+      canonicalSha256: "2".repeat(64),
+      contentSha256: "3".repeat(64),
+      gitBlobOid: "4".repeat(40),
+      path: "refactor/v1-complexity-policy.json",
+    },
+    totals: {
+      allAccounted: zero,
+      excluded: zero,
+      generated: zero,
+      production: zero,
+      test: zero,
+      unclassified: zero,
+      vendored: zero,
+    },
+    postMergeRefContract: {
+      annotatedTagRequired: true,
+      authorityDigestTrailer: "Complexity-Authority-SHA256",
+      protectedRefRequired: true,
+      releaseWorkflowMustNotMatch: true,
+      targetMustContainExactBlobs: true,
+    },
+    ...overrides,
   };
 }

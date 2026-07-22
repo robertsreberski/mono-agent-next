@@ -1,0 +1,61 @@
+{
+  "schema": "mono-agent.v1-complexity-g0-authority.v1",
+  "algorithmVersion": 2,
+  "authorityRef": "refs/tags/authority/v1-complexity-g0",
+  "baseline": {
+    "contentSha256": "18e8a2461abebcadd079dd9ce6f3de11df47842528688d3978d94ba81495f4f6",
+    "gitBlobOid": "758caf7210fad702dc5331a3cc311a8ae875c36b",
+    "manifestSha256": "7c29e9894e498248cd2bb7d75d4253fd7100319cc9a0e10144eb70c2c6b7343f",
+    "path": "refactor/baselines/v1-complexity-baseline.json",
+    "snapshotSha256": "ff1cb5900de51f954d68133295f26af8bc7572a99dc5e883afc6c905c201c313"
+  },
+  "classificationAuthority": {
+    "canonicalSha256": "fa674ebaa4e80165745d7dfa2f51f500772f314855ac20d4d140c04719d14e7b",
+    "contentSha256": "09fa679c6e8a60701efc07be3153a1fd81d66ca0c4b7fa3bc50fde2918105a81",
+    "gitBlobOid": "5cb1eb102b97291cb97f06a77a2f34a9ff82268c",
+    "path": "refactor/v1-complexity-classification-authority.json"
+  },
+  "initialInventoryPolicy": {
+    "canonicalSha256": "51dd60ebc86aafe25c0c03ee8071ad38f85045d22814dfd662d42c5fbef4d3cf",
+    "contentSha256": "7587f359df2b8a429bf60cd959f8266990f01b872ca8d176702bf62f9213ab97",
+    "gitBlobOid": "b5ee46fa30b2cfd285da115d9b7c30acc67376c2",
+    "path": "refactor/v1-complexity-policy.json"
+  },
+  "totals": {
+    "allAccounted": {
+      "files": 1177,
+      "lines": 403981
+    },
+    "excluded": {
+      "files": 169,
+      "lines": 36728
+    },
+    "generated": {
+      "files": 0,
+      "lines": 0
+    },
+    "production": {
+      "files": 536,
+      "lines": 187005
+    },
+    "test": {
+      "files": 472,
+      "lines": 180248
+    },
+    "unclassified": {
+      "files": 0,
+      "lines": 0
+    },
+    "vendored": {
+      "files": 0,
+      "lines": 0
+    }
+  },
+  "postMergeRefContract": {
+    "annotatedTagRequired": true,
+    "authorityDigestTrailer": "Complexity-Authority-SHA256",
+    "protectedRefRequired": true,
+    "releaseWorkflowMustNotMatch": true,
+    "targetMustContainExactBlobs": true
+  }
+}

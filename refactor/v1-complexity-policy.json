@@ -1,80 +1,6 @@
 {
-  "schema": "mono-agent.v1-complexity-policy.v1",
-  "algorithmVersion": 1,
-  "sourceExtensions": [
-    ".cjs",
-    ".cts",
-    ".js",
-    ".jsx",
-    ".mjs",
-    ".mts",
-    ".ts",
-    ".tsx"
-  ],
-  "testPathSegments": [
-    "__fixtures__",
-    "__tests__",
-    "fixtures",
-    "test",
-    "testdata",
-    "tests"
-  ],
-  "testFilenameMarkers": [
-    ".spec.",
-    ".test.",
-    "vitest.config."
-  ],
-  "productionRoots": [
-    "extras/",
-    "packages/"
-  ],
-  "generatedRules": [],
-  "vendoredRules": [],
-  "excludedRules": [
-    {
-      "id": "typescript-declaration-only",
-      "reason": "Type-only declarations are not executable production source.",
-      "match": {
-        "suffixes": [
-          ".d.cts",
-          ".d.mts",
-          ".d.ts"
-        ]
-      }
-    }
-  ],
-  "nonShippingRules": [
-    {
-      "id": "repository-tooling",
-      "reason": "Repository verification and build tooling is reported but is outside the shipped-package production budget.",
-      "match": {
-        "paths": [
-          "vitest.config.mjs"
-        ],
-        "prefixes": [
-          "scripts/"
-        ]
-      }
-    },
-    {
-      "id": "non-shipping-demo",
-      "reason": "Demonstration source is reported but is not part of a published package.",
-      "match": {
-        "prefixes": [
-          "demos/"
-        ]
-      }
-    },
-    {
-      "id": "documentation-site",
-      "reason": "The separately deployed documentation site is reported but is outside the shipped-package production budget.",
-      "match": {
-        "prefixes": [
-          "website/"
-        ]
-      }
-    }
-  ],
+  "schema": "mono-agent.v1-complexity-inventory-policy.v1",
+  "classificationAuthorityPath": "refactor/v1-complexity-classification-authority.json",
   "budgets": [
     {
       "id": "repository-production",
@@ -111,12 +37,24 @@
   "implementationFamilies": [
     {
       "id": "operator-wire-client",
-      "members": [
-        "packages/tui/src/remote/client.ts",
-        "packages/web/src/operator-client.ts"
-      ],
+      "detection": {
+        "allContentMarkers": [
+          "/v1/turns",
+          "application/x-ndjson",
+          "fetchImpl"
+        ],
+        "pathPrefixes": [
+          "extras/",
+          "packages/"
+        ]
+      },
+      "registeredMember": null,
+      "minMembers": 1,
       "maxMembers": 1,
       "enforceAt": "G8"
     }
-  ]
+  ],
+  "generatedFiles": [],
+  "vendoredFiles": [],
+  "excludedFiles": []
 }

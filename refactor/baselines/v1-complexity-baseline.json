@@ -1,8 +1,8 @@
 {
-  "algorithmVersion": 1,
+  "algorithmVersion": 2,
   "budgets": [
     {
-      "actualLines": 182217,
+      "actualLines": 187005,
       "classification": "production",
       "enforceAt": "G8",
       "id": "repository-production",
@@ -36,8 +36,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 373
         },
         "generated": {
           "files": 0,
@@ -65,8 +65,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 213
         },
         "generated": {
           "files": 0,
@@ -94,8 +94,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 1,
-          "lines": 4
+          "files": 6,
+          "lines": 264
         },
         "generated": {
           "files": 0,
@@ -123,16 +123,16 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 280
         },
         "generated": {
           "files": 0,
           "lines": 0
         },
         "production": {
-          "files": 5,
-          "lines": 746
+          "files": 6,
+          "lines": 804
         },
         "test": {
           "files": 4,
@@ -152,8 +152,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 298
         },
         "generated": {
           "files": 0,
@@ -181,20 +181,20 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 8,
+          "lines": 876
         },
         "generated": {
           "files": 0,
           "lines": 0
         },
         "production": {
-          "files": 143,
-          "lines": 66539
+          "files": 152,
+          "lines": 70510
         },
         "test": {
-          "files": 110,
-          "lines": 58968
+          "files": 119,
+          "lines": 59280
         },
         "unclassified": {
           "files": 0,
@@ -210,8 +210,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 336
         },
         "generated": {
           "files": 0,
@@ -239,8 +239,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 332
         },
         "generated": {
           "files": 0,
@@ -251,8 +251,8 @@
           "lines": 9126
         },
         "test": {
-          "files": 27,
-          "lines": 10532
+          "files": 32,
+          "lines": 10560
         },
         "unclassified": {
           "files": 0,
@@ -268,8 +268,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 6,
+          "lines": 2448
         },
         "generated": {
           "files": 0,
@@ -297,8 +297,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 431
         },
         "generated": {
           "files": 0,
@@ -326,8 +326,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 190
         },
         "generated": {
           "files": 0,
@@ -355,8 +355,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 291
         },
         "generated": {
           "files": 0,
@@ -384,8 +384,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 578
         },
         "generated": {
           "files": 0,
@@ -413,8 +413,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 443
         },
         "generated": {
           "files": 0,
@@ -425,8 +425,8 @@
           "lines": 7830
         },
         "test": {
-          "files": 22,
-          "lines": 6997
+          "files": 41,
+          "lines": 7213
         },
         "unclassified": {
           "files": 0,
@@ -442,8 +442,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 336
         },
         "generated": {
           "files": 0,
@@ -471,8 +471,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 240
         },
         "generated": {
           "files": 0,
@@ -500,8 +500,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 391
         },
         "generated": {
           "files": 0,
@@ -529,8 +529,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 490
         },
         "generated": {
           "files": 0,
@@ -558,8 +558,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 441
         },
         "generated": {
           "files": 0,
@@ -587,8 +587,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 311
         },
         "generated": {
           "files": 0,
@@ -616,16 +616,16 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 1,
-          "lines": 2
+          "files": 17,
+          "lines": 8047
         },
         "generated": {
           "files": 0,
           "lines": 0
         },
         "production": {
-          "files": 36,
-          "lines": 11147
+          "files": 39,
+          "lines": 11906
         },
         "test": {
           "files": 30,
@@ -645,8 +645,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 0,
-          "lines": 0
+          "files": 4,
+          "lines": 321
         },
         "generated": {
           "files": 0,
@@ -733,7 +733,7 @@
       "byClassification": {
         "excluded": {
           "files": 47,
-          "lines": 16226
+          "lines": 17371
         },
         "generated": {
           "files": 0,
@@ -745,7 +745,7 @@
         },
         "test": {
           "files": 36,
-          "lines": 14857
+          "lines": 15404
         },
         "unclassified": {
           "files": 0,
@@ -788,6 +788,7 @@
       "owner": "repo:website"
     }
   ],
+  "classificationAuthoritySha256": "fa674ebaa4e80165745d7dfa2f51f500772f314855ac20d4d140c04719d14e7b",
   "files": [
     {
       "classification": "test",
@@ -878,6 +879,24 @@
       "owner": "repo:demos",
       "path": "demos/final-agent/src/final-demo.ts",
       "ruleId": "non-shipping-demo"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "3253b09a6093e6388446d341f4f754b7b440c1229693b442b8ed6df9d01e7f31",
+      "gitMode": "100644",
+      "lines": 316,
+      "owner": "extras/a2a-adapter",
+      "path": "extras/a2a-adapter/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "e6edb620869c028496b3174ee274e8898a00bd06745fed780f6c15978b3de894",
+      "gitMode": "100644",
+      "lines": 44,
+      "owner": "extras/a2a-adapter",
+      "path": "extras/a2a-adapter/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -979,6 +998,42 @@
       "ruleId": "shipped-workspace-source"
     },
     {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "extras/a2a-adapter",
+      "path": "extras/a2a-adapter/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "extras/a2a-adapter",
+      "path": "extras/a2a-adapter/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b9918f69b997f416bb9aa2208e12cf5d0b4df0231cdc25ca89e0dd58c4aa6342",
+      "gitMode": "100644",
+      "lines": 158,
+      "owner": "extras/agent-orchestrator",
+      "path": "extras/agent-orchestrator/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "5a383d386cb17316aa7fdf90b4680d99784c40d0c7822bc2110d663e275ed197",
+      "gitMode": "100644",
+      "lines": 41,
+      "owner": "extras/agent-orchestrator",
+      "path": "extras/agent-orchestrator/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
       "classification": "test",
       "contentSha256": "92366b62aabef9ad1e37fa4c37ee807f4f876f322165ab846b476550217c9108",
       "gitMode": "100644",
@@ -1004,6 +1059,51 @@
       "owner": "extras/agent-orchestrator",
       "path": "extras/agent-orchestrator/src/index.ts",
       "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "extras/agent-orchestrator",
+      "path": "extras/agent-orchestrator/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "225981eeafafd467b56b2f0172463e4992b1b39bdc38fd82c35c676c1f8163ab",
+      "gitMode": "100644",
+      "lines": 10,
+      "owner": "extras/agent-orchestrator",
+      "path": "extras/agent-orchestrator/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "34072ad0c1263a30f44bee9f340642bd4dd35b0185d90734b4157ee95c6e1d60",
+      "gitMode": "100644",
+      "lines": 183,
+      "owner": "extras/docs-mcp",
+      "path": "extras/docs-mcp/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "2c04ee35f939faa71824cc9b2d698813fc86bda077cd9a84d77157127b18dc03",
+      "gitMode": "100644",
+      "lines": 14,
+      "owner": "extras/docs-mcp",
+      "path": "extras/docs-mcp/THIRD_PARTY_NOTICES.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "a2b59410f96b956c769e02d7aa69889941afc3a35f781802f28e4c2529293154",
+      "gitMode": "100644",
+      "lines": 49,
+      "owner": "extras/docs-mcp",
+      "path": "extras/docs-mcp/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "production",
@@ -1114,12 +1214,57 @@
       "ruleId": "shipped-workspace-source"
     },
     {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "extras/docs-mcp",
+      "path": "extras/docs-mcp/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "225981eeafafd467b56b2f0172463e4992b1b39bdc38fd82c35c676c1f8163ab",
+      "gitMode": "100644",
+      "lines": 10,
+      "owner": "extras/docs-mcp",
+      "path": "extras/docs-mcp/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "86936d28aff3ac1b1dcf99d2df481b382d2347a59613e47fb565d9367347b827",
+      "gitMode": "100644",
+      "lines": 223,
+      "owner": "extras/memory-supermemory",
+      "path": "extras/memory-supermemory/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "537bafeb8f5d7ee3c2bb732b073f0f00944f862233ab32788a4efb7894e3d17f",
+      "gitMode": "100644",
+      "lines": 43,
+      "owner": "extras/memory-supermemory",
+      "path": "extras/memory-supermemory/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
       "classification": "production",
       "contentSha256": "928a22347fb5a203f7ba0ab848ce625281847379b16f6b4ab5c3b0183fa5b1ec",
       "gitMode": "100644",
       "lines": 41,
       "owner": "extras/memory-supermemory",
       "path": "extras/memory-supermemory/scripts/smoke.mjs",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "6b375c6f717591542caf36d2bbe7cb1e0939365e10fa075c5de779100ddf3856",
+      "gitMode": "100644",
+      "lines": 58,
+      "owner": "extras/memory-supermemory",
+      "path": "extras/memory-supermemory/skills/mono-agent-supermemory/SKILL.md",
       "ruleId": "shipped-workspace-source"
     },
     {
@@ -1193,6 +1338,42 @@
       "owner": "extras/memory-supermemory",
       "path": "extras/memory-supermemory/src/store.ts",
       "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "extras/memory-supermemory",
+      "path": "extras/memory-supermemory/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "225981eeafafd467b56b2f0172463e4992b1b39bdc38fd82c35c676c1f8163ab",
+      "gitMode": "100644",
+      "lines": 10,
+      "owner": "extras/memory-supermemory",
+      "path": "extras/memory-supermemory/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "53cdc3ccbcc0cbc6c8c3b41654ed3a4a15554dde421c50c1713514760359be2c",
+      "gitMode": "100644",
+      "lines": 245,
+      "owner": "extras/whatsapp-adapter",
+      "path": "extras/whatsapp-adapter/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "0a016cc19f8ac48fc97df06da1af92dd285d5d985b1d9fef78ba1edef188a61b",
+      "gitMode": "100644",
+      "lines": 40,
+      "owner": "extras/whatsapp-adapter",
+      "path": "extras/whatsapp-adapter/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -1345,6 +1526,141 @@
       "lines": 86,
       "owner": "extras/whatsapp-adapter",
       "path": "extras/whatsapp-adapter/src/types.ts",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "extras/whatsapp-adapter",
+      "path": "extras/whatsapp-adapter/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "extras/whatsapp-adapter",
+      "path": "extras/whatsapp-adapter/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b40a65161afba0e798a751d39966b77ba2fb8a8c9453ea475a8c2d557ff779be",
+      "gitMode": "100644",
+      "lines": 720,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "a6c508fbe8f84ab7bfb7b942a5e2b2df8b2ad761930ffba6893a9fb375127e55",
+      "gitMode": "100644",
+      "lines": 65,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "0f34561ddc700ad43c31f254beb0e1e4b87bae61795acac5d7fa890dd5890924",
+      "gitMode": "100644",
+      "lines": 66,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/resources/srt/package-lock.json",
+      "ruleId": "package-metadata"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "5623902d952c3f41a817cd2ad00da29ac750a0d5d429fcab9772b4551ec8548d",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/resources/srt/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "80db6aeeb9c4b52237f0a17d9549bb0584b6fe7bd6d156a815b7381852611d88",
+      "gitMode": "100644",
+      "lines": 2476,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/schema/mono-agent.config.schema.json",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "e2294cb4f48dddf2f4d297862f39f985e47a32529be786ab97a3fb73b06120a3",
+      "gitMode": "100644",
+      "lines": 116,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/skills/mono-agent-composer/SKILL.md",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "3c5e90a5138af22e9f87dacb8d35136bd584dc52c93fd67644f8baf837522300",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/skills/mono-agent-composer/agents/openai.yaml",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "54ae969889ecd219cc767d6d1503535d5ad6f9ee45dbad35b621d91535553c20",
+      "gitMode": "100644",
+      "lines": 428,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/skills/mono-agent-composer/references/config-blueprint.md",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "b804f8dfc5c8f455f8378050788c7e97f8c46d932592ea3ff05a56d5e442a62d",
+      "gitMode": "100644",
+      "lines": 271,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/skills/mono-agent-composer/references/discovery-questions.md",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "661e0ae6c44ab90b88bdcebb31759492edf6e8c5c09f5239fb032132feb8808e",
+      "gitMode": "100644",
+      "lines": 108,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/skills/mono-agent-composer/references/feature-coverage.md",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "366392372666f0f78247e25a99aec023e95c8e9ab02fa1f6547173857f9bb623",
+      "gitMode": "100644",
+      "lines": 141,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/skills/mono-agent-composer/references/package-map.md",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "8fe66fd50c853ef700f38aa70daa94c67ec11f3f3607821204ff65784ddf15bb",
+      "gitMode": "100644",
+      "lines": 289,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/skills/mono-agent-composer/references/playbooks.md",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "682d3514015eb4e6ae04058e3460897e625e422534044bb69e5df1770ae4a4bb",
+      "gitMode": "100644",
+      "lines": 138,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/skills/mono-agent-composer/references/validation.md",
       "ruleId": "shipped-workspace-source"
     },
     {
@@ -1832,6 +2148,105 @@
       "owner": "packages/agent-app",
       "path": "packages/agent-app/src/__tests__/first-run-readiness.test.ts",
       "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "4bb114db63233708b1d3e442d196500a67cc7283ba84868ea56be32397a1500c",
+      "gitMode": "100644",
+      "lines": 1,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/src/__tests__/fixtures/composer-reference-synthetic-config-row.md",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "0d7cc7478fa4151b02fdb836df60b9940baa89f12f9f8271e36b240851e7d5ca",
+      "gitMode": "100644",
+      "lines": 3,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-alpha/IDENTITY.md",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "b22057d78d22c560d741ace62ba428d78617f3dfda6d61286ac7b826037563e9",
+      "gitMode": "100644",
+      "lines": 8,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-alpha/cron/fixture.md",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "d8e397af03b5b032f21d0aa967086f0c78b33c87b76f2e9898ae0a144df7de02",
+      "gitMode": "100644",
+      "lines": 3,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-alpha/mcp.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "13f3715767ef784319b5a20d9f9e5441c75718a4348011c86e164c960464c878",
+      "gitMode": "100644",
+      "lines": 154,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-alpha/mono-agent.config.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "gitMode": "100644",
+      "lines": 1,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-alpha/skills/.gitkeep",
+      "ruleId": "package-metadata"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "014f4f3f924c54877e2964491e8c907dad9f536257349e91437d1ef6bc56f14e",
+      "gitMode": "100644",
+      "lines": 3,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-beta/IDENTITY.md",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "4a979aebed80b62db967f929f238f0c70307c3d99319fba69b20a2db550785a6",
+      "gitMode": "100644",
+      "lines": 8,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-beta/cron/fixture.md",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "d8e397af03b5b032f21d0aa967086f0c78b33c87b76f2e9898ae0a144df7de02",
+      "gitMode": "100644",
+      "lines": 3,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-beta/mcp.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "f977db0681d7cf9bfc33c69c90bfda2b416c81386289c06419d86ae11e1200ff",
+      "gitMode": "100644",
+      "lines": 129,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-beta/mono-agent.config.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
+      "gitMode": "100644",
+      "lines": 1,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-beta/skills/.gitkeep",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -3625,6 +4040,42 @@
       "ruleId": "shipped-workspace-source"
     },
     {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "225981eeafafd467b56b2f0172463e4992b1b39bdc38fd82c35c676c1f8163ab",
+      "gitMode": "100644",
+      "lines": 10,
+      "owner": "packages/agent-app",
+      "path": "packages/agent-app/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "32a08b427fa81e0b22c08210f8063be5998788292d47f1cb92ceefb9fbc59cc4",
+      "gitMode": "100644",
+      "lines": 286,
+      "owner": "packages/agent-contracts",
+      "path": "packages/agent-contracts/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "e90493fe22e863549cf67bcdec0366a28e3f1cd28207e183edf2d6dd42a0d459",
+      "gitMode": "100644",
+      "lines": 36,
+      "owner": "packages/agent-contracts",
+      "path": "packages/agent-contracts/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
       "classification": "test",
       "contentSha256": "3ad62ca393d5ebcad9b1c14bd486a0c5736c593e3e90d528e0f589e0d3f9ddf3",
       "gitMode": "100644",
@@ -3859,6 +4310,42 @@
       "ruleId": "shipped-workspace-source"
     },
     {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/agent-contracts",
+      "path": "packages/agent-contracts/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "225981eeafafd467b56b2f0172463e4992b1b39bdc38fd82c35c676c1f8163ab",
+      "gitMode": "100644",
+      "lines": 10,
+      "owner": "packages/agent-contracts",
+      "path": "packages/agent-contracts/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "ea8b483f206d2aba9d79758b589a27349acb36485a1a04aee428d6da167f7d69",
+      "gitMode": "100644",
+      "lines": 277,
+      "owner": "packages/agent-harness",
+      "path": "packages/agent-harness/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "008103148cd3a46ad9c5c34ff46cb6ec4d21252b0371af6f2cbe602ef8571eba",
+      "gitMode": "100644",
+      "lines": 41,
+      "owner": "packages/agent-harness",
+      "path": "packages/agent-harness/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
       "classification": "test",
       "contentSha256": "9a2db3f0c6a35d39262a471e5325b378ae0db95d0b7faa3a99b36f95e51b438f",
       "gitMode": "100644",
@@ -4036,6 +4523,51 @@
       "lines": 10,
       "owner": "packages/agent-harness",
       "path": "packages/agent-harness/src/__tests__/skills-public-api.test.ts",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "235456f6a048c53c06000c7a53ad78db701af97455bb91b0e9af37b8c5bae581",
+      "gitMode": "100644",
+      "lines": 3,
+      "owner": "packages/agent-harness",
+      "path": "packages/agent-harness/src/context/__fixtures__/files/IDENTITY.md",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "757a8b416f365038191caec21597a2dd90209ec803eb482c3e8ecf4bada548ee",
+      "gitMode": "100644",
+      "lines": 3,
+      "owner": "packages/agent-harness",
+      "path": "packages/agent-harness/src/context/__fixtures__/files/SOUL.md",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "ce15c8295860f5e528d5b70b909d01b88263c091ec2e2e3d904d08b064ec3754",
+      "gitMode": "100644",
+      "lines": 12,
+      "owner": "packages/agent-harness",
+      "path": "packages/agent-harness/src/context/__fixtures__/skills-frontmatter/frontmatter/SKILL.md",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "68491df6721fd0a5f138595cabc21b504e17499c0ca3576d39e76dd952f83f89",
+      "gitMode": "100644",
+      "lines": 3,
+      "owner": "packages/agent-harness",
+      "path": "packages/agent-harness/src/context/__fixtures__/skills-invalid/empty/SKILL.md",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "1015821c9bd523b95d635a465b47bcb9d2a4851331d2210f9bd9dae1c34369f5",
+      "gitMode": "100644",
+      "lines": 7,
+      "owner": "packages/agent-harness",
+      "path": "packages/agent-harness/src/context/__fixtures__/skills-valid/research/SKILL.md",
       "ruleId": "test-path-or-filename"
     },
     {
@@ -4505,6 +5037,69 @@
       "owner": "packages/agent-harness",
       "path": "packages/agent-harness/src/types.ts",
       "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/agent-harness",
+      "path": "packages/agent-harness/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "225981eeafafd467b56b2f0172463e4992b1b39bdc38fd82c35c676c1f8163ab",
+      "gitMode": "100644",
+      "lines": 10,
+      "owner": "packages/agent-harness",
+      "path": "packages/agent-harness/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "e925114f3ae1c4c79c238515741dfd1f9f645aa6000ec381cc8b70cb6f3259b1",
+      "gitMode": "100644",
+      "lines": 328,
+      "owner": "packages/agent-runtime",
+      "path": "packages/agent-runtime/ARCHITECTURE.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "gitMode": "100644",
+      "lines": 674,
+      "owner": "packages/agent-runtime",
+      "path": "packages/agent-runtime/LICENSE",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "50d3fd1639a6a3e6f373d4bf07cab104db2f7945dead919535ecbd41ddcea3d8",
+      "gitMode": "100644",
+      "lines": 320,
+      "owner": "packages/agent-runtime",
+      "path": "packages/agent-runtime/MIGRATION.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "9fb3e78e4798efadf116346b16c75d1b15a199131ea38cddeeaa9c45aef7b2f2",
+      "gitMode": "100644",
+      "lines": 956,
+      "owner": "packages/agent-runtime",
+      "path": "packages/agent-runtime/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b0efa77d68b1621338ceecb819e2a8a04f83b5ba84d9cd62751ec096418c6fd4",
+      "gitMode": "100644",
+      "lines": 150,
+      "owner": "packages/agent-runtime",
+      "path": "packages/agent-runtime/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -5623,6 +6218,33 @@
       "ruleId": "shipped-workspace-source"
     },
     {
+      "classification": "excluded",
+      "contentSha256": "0f46fd4d68db6be477936580f13124a9e858a9b337cd4cfad92d32202791fc89",
+      "gitMode": "100644",
+      "lines": 20,
+      "owner": "packages/agent-runtime",
+      "path": "packages/agent-runtime/tsconfig.types.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b354d8bccc5596890abf6dca829f68344379d55d3eb5f617bc655319b98e6252",
+      "gitMode": "100644",
+      "lines": 378,
+      "owner": "packages/config",
+      "path": "packages/config/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "5a9d3e6d94518dc404b2bb709576134793c3d1a73502bf34586e08a48f71fe7a",
+      "gitMode": "100644",
+      "lines": 40,
+      "owner": "packages/config",
+      "path": "packages/config/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
       "classification": "test",
       "contentSha256": "d3d2f6548fa02173f92455829b351d203568261d2e68690221fa4f6f4a7b9c74",
       "gitMode": "100644",
@@ -5749,6 +6371,42 @@
       "ruleId": "shipped-workspace-source"
     },
     {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/config",
+      "path": "packages/config/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/config",
+      "path": "packages/config/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "e3244e894cc23fa480c599b58712666dbf3d2c758da824355360bcae68853383",
+      "gitMode": "100644",
+      "lines": 142,
+      "owner": "packages/create-mono-agent",
+      "path": "packages/create-mono-agent/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "3e1131dc3f83babfa0aa3194a9883023a9681bb8b40ecf12829df70e0367c805",
+      "gitMode": "100644",
+      "lines": 35,
+      "owner": "packages/create-mono-agent",
+      "path": "packages/create-mono-agent/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
       "classification": "test",
       "contentSha256": "7f79eac5986313d14944e8d7b83844f591e43c6f546101612a40060a9ab974e2",
       "gitMode": "100644",
@@ -5792,6 +6450,42 @@
       "owner": "packages/create-mono-agent",
       "path": "packages/create-mono-agent/src/resolve-agent-app-cli.ts",
       "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/create-mono-agent",
+      "path": "packages/create-mono-agent/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/create-mono-agent",
+      "path": "packages/create-mono-agent/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "6db4864a3dfb482c6661341e5078790c3b756384cfe09de31ccfe0997b1fcdca",
+      "gitMode": "100644",
+      "lines": 238,
+      "owner": "packages/cron-adapter",
+      "path": "packages/cron-adapter/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "c48e6376b13ec3432ec11f4c8fb7ed2794bdbbdb760cb918b34dcda85ace3e8a",
+      "gitMode": "100644",
+      "lines": 40,
+      "owner": "packages/cron-adapter",
+      "path": "packages/cron-adapter/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -5882,6 +6576,42 @@
       "owner": "packages/cron-adapter",
       "path": "packages/cron-adapter/src/scheduler.ts",
       "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/cron-adapter",
+      "path": "packages/cron-adapter/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/cron-adapter",
+      "path": "packages/cron-adapter/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "99b038a10c64b55dccf0614ab193f7db584873b8742fd10aa49b082775c69ca5",
+      "gitMode": "100644",
+      "lines": 514,
+      "owner": "packages/memory",
+      "path": "packages/memory/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "9beec1143fc4c34863eb0b42124ca18acadb835e3191fcd2fc54a5248c7abbac",
+      "gitMode": "100644",
+      "lines": 50,
+      "owner": "packages/memory",
+      "path": "packages/memory/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -6874,6 +7604,159 @@
       "ruleId": "shipped-workspace-source"
     },
     {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/memory",
+      "path": "packages/memory/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "225981eeafafd467b56b2f0172463e4992b1b39bdc38fd82c35c676c1f8163ab",
+      "gitMode": "100644",
+      "lines": 10,
+      "owner": "packages/memory",
+      "path": "packages/memory/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "335d41002d3638c084c1d59a19b0682df9135d1b4fa6453e2f322f39b1f38e3a",
+      "gitMode": "100644",
+      "lines": 376,
+      "owner": "packages/observability",
+      "path": "packages/observability/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "2012d00e66d81cba937cbaef56a36160ff324c7936f7376b8559c92bea14e2e1",
+      "gitMode": "100644",
+      "lines": 53,
+      "owner": "packages/observability",
+      "path": "packages/observability/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "0e2017fc63602e2eaeca89e2d85281d17518a062941785465507ca180e478249",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/01-running-stale.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "8d54bf2b5880ce1aec0232aed095e893096d652783e4cd8d6ccfc92a03f7d447",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/02-running-live.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "700896e33659d0c785ff0ef360ab8fe2e209443fad4d11b9b91e45c38724c750",
+      "gitMode": "100644",
+      "lines": 10,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/03-succeeded.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "aa9a4b00c62090b2bb8c4110110ba6f5f960789d8887c7e0b25760331250c073",
+      "gitMode": "100644",
+      "lines": 11,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/04-failed-provider-unavailable.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "02b9ad6f33a3e853a2ed5d256b8af184eba8487eaeeb5dea5655a68d418eafb5",
+      "gitMode": "100644",
+      "lines": 11,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/05-failed-provider-unavailable-exhausted.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "0f3cff3a4b8626c1666abca71e1a0f028f8165f7100e0c79da996f265663eb25",
+      "gitMode": "100644",
+      "lines": 11,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/06-failed-usage-limit.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "f40ecf58599aee462f46a6611740d0feaec694aede969d73f7b04f5e02399384",
+      "gitMode": "100644",
+      "lines": 11,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/07-failed-process-death.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "1993e22f6c18da4f5cd536846c1259fe7253d56f6237c8b23a7a6ba51c5e3094",
+      "gitMode": "100644",
+      "lines": 11,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/08-failed-runtime-error.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "012127ef01572a25c8932d18a5e4fcfbaaadde78cd0a453ee0e30f32614a6e37",
+      "gitMode": "100644",
+      "lines": 11,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/09-cancelled.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "3675202e70da56b5fbc65afcbccd30db7aedcae809e7666eb092f13987444947",
+      "gitMode": "100644",
+      "lines": 11,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/10-interrupted.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "8dadd7ca55044fe8fba97af2806c7b3990e9e2cbe70996b2870f9f364e76ae9b",
+      "gitMode": "100644",
+      "lines": 10,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/11-unknown-status.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "8c1cc5d346a311a36c1faa09cefb8a1c6674db19809739424f1ccd6fadb24867",
+      "gitMode": "100644",
+      "lines": 11,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/12-unknown-failure-kind.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "8f01fd736332d5d85b6851e4bbffa8ccd19dbe6485f65afc916eea2d54169d3c",
+      "gitMode": "100644",
+      "lines": 2,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__fixtures__/artifact-audit/13-malformed.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
       "classification": "test",
       "contentSha256": "2d6e9a45d206dbe24c1b78aa526f4ab98357c13d1a55180591d4c45c703528d0",
       "gitMode": "100644",
@@ -6943,6 +7826,60 @@
       "lines": 102,
       "owner": "packages/observability",
       "path": "packages/observability/src/__tests__/failure-kinds.test.ts",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "b3f3c862aea53af74488a94d97d36ff9a38a55956e6e09a7524a5ebc5186eac0",
+      "gitMode": "100644",
+      "lines": 6,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__tests__/fixtures/notified.events.jsonl",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "48d8e4c4ee490113399fa46014cbb3c7ef7df68a41ddbb3ab9f23ecf0e111ebf",
+      "gitMode": "100644",
+      "lines": 39,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__tests__/fixtures/notified.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "fb6fabad422737ad2987b5fc0ad0165b014ac6957f22d6c7eb6f5d90c939366c",
+      "gitMode": "100644",
+      "lines": 3,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__tests__/fixtures/running.events.jsonl",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "1356e26d5a3a993410b49205b93002c40f12b4f6726a3606804cf175bd978f38",
+      "gitMode": "100644",
+      "lines": 10,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__tests__/fixtures/running.summary.json",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "109cb5d62bffa8dd33159c57ef3413ef4b92d5a84fbbcf19364c0486fe60993c",
+      "gitMode": "100644",
+      "lines": 3,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__tests__/fixtures/silent-recall.events.jsonl",
+      "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "test",
+      "contentSha256": "6f98bec43edb6aad068dc65501837ce302da0097fd7b544eee2c941e337ebcae",
+      "gitMode": "100644",
+      "lines": 27,
+      "owner": "packages/observability",
+      "path": "packages/observability/src/__tests__/fixtures/silent-recall.summary.json",
       "ruleId": "test-path-or-filename"
     },
     {
@@ -7342,6 +8279,42 @@
       "ruleId": "shipped-workspace-source"
     },
     {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/observability",
+      "path": "packages/observability/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "225981eeafafd467b56b2f0172463e4992b1b39bdc38fd82c35c676c1f8163ab",
+      "gitMode": "100644",
+      "lines": 10,
+      "owner": "packages/observability",
+      "path": "packages/observability/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "c0d29f6ec3db71d2b3f0e3545322b571c127af3f3fb52bd0c136d97f77a5709a",
+      "gitMode": "100644",
+      "lines": 277,
+      "owner": "packages/openai-api-adapter",
+      "path": "packages/openai-api-adapter/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "c4d6c74f23e1a4bd2a96d545461584296c894886f2cc8cd3a9806045904c7b27",
+      "gitMode": "100644",
+      "lines": 43,
+      "owner": "packages/openai-api-adapter",
+      "path": "packages/openai-api-adapter/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
       "classification": "test",
       "contentSha256": "b2ede66cef359b32f2ced12e020544ca16775dc2ca7487a9928c4bc6bae4945a",
       "gitMode": "100644",
@@ -7403,6 +8376,42 @@
       "owner": "packages/openai-api-adapter",
       "path": "packages/openai-api-adapter/src/server.ts",
       "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "86d8cfcc7269c08261b84c895b2b7c498aab745837b9e376da51edfd405c97b1",
+      "gitMode": "100644",
+      "lines": 7,
+      "owner": "packages/openai-api-adapter",
+      "path": "packages/openai-api-adapter/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/openai-api-adapter",
+      "path": "packages/openai-api-adapter/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "9fa45e00f9b865403fcc7cc06ac8dcce6926c09dea88aabaad1fedaa4fecb136",
+      "gitMode": "100644",
+      "lines": 181,
+      "owner": "packages/operator-adapter",
+      "path": "packages/operator-adapter/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "ff05c0cf8c67021f41060ee591a8183b3124a724deaa867cdd1c59715e85349b",
+      "gitMode": "100644",
+      "lines": 43,
+      "owner": "packages/operator-adapter",
+      "path": "packages/operator-adapter/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -7484,6 +8493,42 @@
       "owner": "packages/operator-adapter",
       "path": "packages/operator-adapter/src/tui/server.ts",
       "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "86d8cfcc7269c08261b84c895b2b7c498aab745837b9e376da51edfd405c97b1",
+      "gitMode": "100644",
+      "lines": 7,
+      "owner": "packages/operator-adapter",
+      "path": "packages/operator-adapter/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/operator-adapter",
+      "path": "packages/operator-adapter/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "cdb6c73703ddef5c8587044da353e410fc07efb7a030346ad0c303f10b7c6d80",
+      "gitMode": "100644",
+      "lines": 338,
+      "owner": "packages/runtime-adapter",
+      "path": "packages/runtime-adapter/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "8283be2aeb23e74a2b4c96400c0c950780360f2b848a3ba1b611a75b19b67d3e",
+      "gitMode": "100644",
+      "lines": 40,
+      "owner": "packages/runtime-adapter",
+      "path": "packages/runtime-adapter/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -7675,6 +8720,42 @@
       "ruleId": "shipped-workspace-source"
     },
     {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/runtime-adapter",
+      "path": "packages/runtime-adapter/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/runtime-adapter",
+      "path": "packages/runtime-adapter/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "ded86b562e7387b7af3445ce1a0c8dd0b429fe1794d11213dbb429cf54d2ee81",
+      "gitMode": "100644",
+      "lines": 434,
+      "owner": "packages/slack-adapter",
+      "path": "packages/slack-adapter/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "af650203d96106c010764892db5d54bedfbe0b5c6f8812819402c118f3eb98f7",
+      "gitMode": "100644",
+      "lines": 43,
+      "owner": "packages/slack-adapter",
+      "path": "packages/slack-adapter/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
       "classification": "test",
       "contentSha256": "002e68d9c97186f9b62e8a6ea0f052754a182952bd3895d6d93ae48e2312b4f9",
       "gitMode": "100644",
@@ -7844,6 +8925,42 @@
       "owner": "packages/slack-adapter",
       "path": "packages/slack-adapter/src/types.ts",
       "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/slack-adapter",
+      "path": "packages/slack-adapter/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/slack-adapter",
+      "path": "packages/slack-adapter/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "6ec184a328e0ef34427aa06620f112e99a1cefea8c66d3bcb128e2a3ebcfde8d",
+      "gitMode": "100644",
+      "lines": 386,
+      "owner": "packages/telegram-adapter",
+      "path": "packages/telegram-adapter/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "acdf5b2df8637220725ec75739a8e533b157e18ff1a92f2452c3fd7301d6618a",
+      "gitMode": "100644",
+      "lines": 42,
+      "owner": "packages/telegram-adapter",
+      "path": "packages/telegram-adapter/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -8060,6 +9177,42 @@
       "owner": "packages/telegram-adapter",
       "path": "packages/telegram-adapter/src/types.ts",
       "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/telegram-adapter",
+      "path": "packages/telegram-adapter/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/telegram-adapter",
+      "path": "packages/telegram-adapter/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "5abae6ed8c17a68f4b1241b980ab443303a1f816865d08737ad82e2585a81c02",
+      "gitMode": "100644",
+      "lines": 243,
+      "owner": "packages/tui",
+      "path": "packages/tui/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "f5289ab91a92b323fc47e0997fcc0831c8f965f2287e017bc242bb7d181a48a5",
+      "gitMode": "100644",
+      "lines": 48,
+      "owner": "packages/tui",
+      "path": "packages/tui/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -8476,6 +9629,24 @@
       "ruleId": "shipped-workspace-source"
     },
     {
+      "classification": "excluded",
+      "contentSha256": "0fafdc9942aff310ed1433c7cb46d16efe2ac81a7c2ef4c8b6521e61029b15d7",
+      "gitMode": "100644",
+      "lines": 8,
+      "owner": "packages/tui",
+      "path": "packages/tui/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "7407346587717c619e76c9b01de6808a2c17712335a5e6d6e02bbd202d6fddf1",
+      "gitMode": "100644",
+      "lines": 12,
+      "owner": "packages/tui",
+      "path": "packages/tui/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
       "classification": "test",
       "contentSha256": "86c3d97839ae7269f20dafb3f8408dae6732dac111bb2b8840ed72631be6eb76",
       "gitMode": "100644",
@@ -8483,6 +9654,24 @@
       "owner": "packages/tui",
       "path": "packages/tui/vitest.config.ts",
       "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "d34f091e59c5a523df4f2c05c16c4ebbe8b65c627ff055b20aba8209787df11b",
+      "gitMode": "100644",
+      "lines": 316,
+      "owner": "packages/web",
+      "path": "packages/web/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "71a9ff4a69f88a7bfec4a2f0e725de1ada136a54af0725086be4b98499db7c52",
+      "gitMode": "100644",
+      "lines": 48,
+      "owner": "packages/web",
+      "path": "packages/web/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -8653,6 +9842,123 @@
       "lines": 1825,
       "owner": "packages/web",
       "path": "packages/web/src/store.ts",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "86d8cfcc7269c08261b84c895b2b7c498aab745837b9e376da51edfd405c97b1",
+      "gitMode": "100644",
+      "lines": 7,
+      "owner": "packages/web",
+      "path": "packages/web/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/web",
+      "path": "packages/web/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "2231e931f757231e8d75367b081ec33716289f4875bac00657118ab20956d904",
+      "gitMode": "100644",
+      "lines": 3,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/.gitignore",
+      "ruleId": "package-metadata"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "f13cb06427555d3ee29c2c6e3f3fbac77c992c802a0a6192528c4054d2ec1514",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/.npmignore",
+      "ruleId": "package-metadata"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "20f665554530ed8e3c5282d1f11e71e7dd7f844a81f01042ee3fd90faf905f43",
+      "gitMode": "100644",
+      "lines": 17,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/index.html",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "ccf87719effe9114fe103c5674dbd9c27c2c04595f476082fb5d7fbe9bf84112",
+      "gitMode": "100644",
+      "lines": 37,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/package.json",
+      "ruleId": "package-metadata"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "51d4f21bbdfc1ce592354ed9086cded130c68cc18782bc1e71b23a4dd4ded2c5",
+      "gitMode": "100644",
+      "lines": 7555,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/pnpm-lock.yaml",
+      "ruleId": "package-metadata"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "8f65179b41d50d6a13892c5026113ce13809363b6758f4cbb11305e43051c958",
+      "gitMode": "100644",
+      "lines": 13,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/pnpm-workspace.yaml",
+      "ruleId": "package-metadata"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "7927209024e9b49e58cc74c6b9a5d177987b1c0ba35ddc3a340d33bf6c89e3ea",
+      "gitMode": "100644",
+      "lines": 0,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/public/apple-touch-icon.png",
+      "ruleId": "binary-runtime-asset"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "c26129c032f9415a4f1dd767241ca8a4607ca74b6f08c137fca5bfb366e28ece",
+      "gitMode": "100644",
+      "lines": 0,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/public/favicon.ico",
+      "ruleId": "binary-runtime-asset"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "e475b92b6327a67830bd24425ed41a5438778965af9092f7376746d7a8660c0e",
+      "gitMode": "100644",
+      "lines": 0,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/public/icon-192.png",
+      "ruleId": "binary-runtime-asset"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "44255eabefb705eb4e632a37ad6f28c4db713b3b22142925f2d57a6188feef1e",
+      "gitMode": "100644",
+      "lines": 0,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/public/icon-512.png",
+      "ruleId": "binary-runtime-asset"
+    },
+    {
+      "classification": "production",
+      "contentSha256": "3f90fc2df8b44f75ec36f9396cbc35d48a9b6e3cb5daf154aa7a18ea00b56033",
+      "gitMode": "100644",
+      "lines": 22,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/public/icon.svg",
       "ruleId": "shipped-workspace-source"
     },
     {
@@ -9025,6 +10331,15 @@
       "ruleId": "shipped-workspace-source"
     },
     {
+      "classification": "production",
+      "contentSha256": "a272e13ff80a54c40eccf84ec7097c624cc3fff904be85911e2b2400cb37ccf7",
+      "gitMode": "100644",
+      "lines": 720,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/src/styles.css",
+      "ruleId": "shipped-workspace-source"
+    },
+    {
       "classification": "test",
       "contentSha256": "2a7bf67841d8f835a011882e0b2365d6b292e9a9404a83890fd97541818da72b",
       "gitMode": "100644",
@@ -9079,6 +10394,33 @@
       "ruleId": "typescript-declaration-only"
     },
     {
+      "classification": "excluded",
+      "contentSha256": "f1bdf8a2869d8d6cbdf4576c4987b964be5d429210b1f7c31282926c4406d3b2",
+      "gitMode": "100644",
+      "lines": 24,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/tsconfig.app.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "770b4140bbb581e2dfd9ea9946ffc9c75a1d86ba7d2db5f77c83e37cbdf9d808",
+      "gitMode": "100644",
+      "lines": 7,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/tsconfig.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "1ec7d6be29c3d39226e9cb61aae2d42d79f0b836b91847b0cb34e3e12f6b0da9",
+      "gitMode": "100644",
+      "lines": 22,
+      "owner": "packages/web",
+      "path": "packages/web/webapp/tsconfig.node.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
       "classification": "production",
       "contentSha256": "e741ee6b4f452f3a4a4b65265aa8fd1d58c4b580c5927c6b82632312b729d027",
       "gitMode": "100644",
@@ -9086,6 +10428,24 @@
       "owner": "packages/web",
       "path": "packages/web/webapp/vite.config.ts",
       "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "ccfdecaddadf5343dcdb20bf71cfa001f7775539491ff8b3b745caee99f7902e",
+      "gitMode": "100644",
+      "lines": 265,
+      "owner": "packages/webhook-adapter",
+      "path": "packages/webhook-adapter/README.md",
+      "ruleId": "package-documentation"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "eaf839ff9eba7590b2aa1fb1ff294c3d332f215dacd4d1f4d987488647710aa6",
+      "gitMode": "100644",
+      "lines": 43,
+      "owner": "packages/webhook-adapter",
+      "path": "packages/webhook-adapter/package.json",
+      "ruleId": "package-metadata"
     },
     {
       "classification": "test",
@@ -9167,6 +10527,24 @@
       "owner": "packages/webhook-adapter",
       "path": "packages/webhook-adapter/src/server.ts",
       "ruleId": "shipped-workspace-source"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "25257d2dd7f34fc93e4d8d54ce27a3c927d810a89420dc762589284539b02c3b",
+      "gitMode": "100644",
+      "lines": 4,
+      "owner": "packages/webhook-adapter",
+      "path": "packages/webhook-adapter/tsconfig.build.json",
+      "ruleId": "package-build-configuration"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "b7c1ac2823f73803939d6f8333ed8181c6380c443ce4662a88515b8286d00480",
+      "gitMode": "100644",
+      "lines": 9,
+      "owner": "packages/webhook-adapter",
+      "path": "packages/webhook-adapter/tsconfig.json",
+      "ruleId": "package-build-configuration"
     },
     {
       "classification": "test",
@@ -9404,9 +10782,9 @@
     },
     {
       "classification": "test",
-      "contentSha256": "f7e69c918d0c03a347564a4b0552c40aaea69773fe6d9f34bb4b6ea5230296aa",
+      "contentSha256": "e330901cb90e9d14f80107f3367443a21cf65a87cf0a2719b8c73b3dc47c5314",
       "gitMode": "100644",
-      "lines": 841,
+      "lines": 1388,
       "owner": "repo:scripts",
       "path": "scripts/__tests__/v1-complexity-report.test.mjs",
       "ruleId": "test-path-or-filename"
@@ -9710,9 +11088,9 @@
     },
     {
       "classification": "excluded",
-      "contentSha256": "e2208ce05f665abbd9d59ffa57c0887ae1ddfcbaf9fd7ccbcee973d5fc41ffdd",
+      "contentSha256": "395dd6b5d4841cdc16e5ea16d309fcc5e3e02709956e72da64ecdf8ef52ccb22",
       "gitMode": "100644",
-      "lines": 1389,
+      "lines": 2508,
       "owner": "repo:scripts",
       "path": "scripts/lib/v1-complexity.mjs",
       "ruleId": "repository-tooling"
@@ -9881,9 +11259,9 @@
     },
     {
       "classification": "excluded",
-      "contentSha256": "cd35acdca5a8bf327fb27e2671fe588071e2fc6b5278be3e676ca35bec4b3ab9",
+      "contentSha256": "d52b9745a383f9e4b3a988f4e5757df476f592838c6e94a023e80fb01d802815",
       "gitMode": "100644",
-      "lines": 215,
+      "lines": 241,
       "owner": "repo:scripts",
       "path": "scripts/v1-complexity-report.mjs",
       "ruleId": "repository-tooling"
@@ -10034,7 +11412,7 @@
           "@mono-agent/webhook-adapter",
           "create-mono-agent"
         ],
-        "productionLines": 172019,
+        "productionLines": 176749,
         "roots": [
           "create-mono-agent"
         ]
@@ -10256,14 +11634,30 @@
     "implementationFamilies": [
       {
         "activeMembers": 2,
-        "enforceAt": "G8",
-        "id": "operator-wire-client",
-        "maxMembers": 1,
-        "members": [
+        "detection": {
+          "allContentMarkers": [
+            "/v1/turns",
+            "application/x-ndjson",
+            "fetchImpl"
+          ],
+          "pathPrefixes": [
+            "extras/",
+            "packages/"
+          ]
+        },
+        "discoveredMembers": [
           "packages/tui/src/remote/client.ts",
           "packages/web/src/operator-client.ts"
         ],
-        "missingMembers": []
+        "enforceAt": "G8",
+        "id": "operator-wire-client",
+        "maxMembers": 1,
+        "minMembers": 1,
+        "registeredMember": null,
+        "unknownMembers": [
+          "packages/tui/src/remote/client.ts",
+          "packages/web/src/operator-client.ts"
+        ]
       }
     ],
     "publicCodeExportSubpaths": {
@@ -10467,37 +11861,300 @@
       ],
       "total": 49
     },
+    "shippedReachability": {
+      "packedRuntimePaths": 116,
+      "packedRuntimePathsSha256": "7b1ca09f039ba5ac5cbe377ba6426e70d3b413d707bd40e77840b3c53a481ab6",
+      "productionPaths": 523,
+      "productionPathsSha256": "b60d0486b5d9946516f82158b3f87e62c5139951f8a258d05f6af8f5e12076fe"
+    },
     "workspacePackages": {
+      "entries": [
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "communication",
+          "name": "@mono-agent/a2a-adapter",
+          "path": "extras/a2a-adapter",
+          "publishable": true,
+          "responsibility": "Exposes agent responders over A2A and consumes remote A2A agents through direct discovery.",
+          "tier": "plugin"
+        },
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "execution",
+          "name": "@mono-agent/agent-orchestrator",
+          "path": "extras/agent-orchestrator",
+          "publishable": true,
+          "responsibility": "Exposes named collaborator responders to an orchestrator runtime through a bounded MCP tool.",
+          "tier": "plugin"
+        },
+        {
+          "allowedDependencyCategories": [],
+          "category": "context",
+          "name": "@mono-agent/docs-mcp",
+          "path": "extras/docs-mcp",
+          "publishable": true,
+          "responsibility": "Provides offline hybrid search and guided reading over version-matched mono-agent documentation through MCP.",
+          "tier": "plugin"
+        },
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "context",
+          "name": "@mono-agent/memory-supermemory",
+          "path": "extras/memory-supermemory",
+          "publishable": true,
+          "responsibility": "Provides a MemoryStore over an external Supermemory instance (local OSS binary or hosted cloud) via its REST API: server-side extraction, hybrid recall, awaited completed-turn admission, and legacy best-effort writes.",
+          "tier": "plugin"
+        },
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "communication",
+          "name": "@mono-agent/whatsapp-adapter",
+          "path": "extras/whatsapp-adapter",
+          "publishable": true,
+          "responsibility": "Adapts WhatsApp messages to structural agent requests and buffered final-only replies.",
+          "tier": "plugin"
+        },
+        {
+          "allowedDependencyCategories": [
+            "core",
+            "context",
+            "runtime",
+            "execution",
+            "observability",
+            "communication",
+            "operator-surface"
+          ],
+          "category": "app",
+          "name": "@mono-agent/agent-app",
+          "path": "packages/agent-app",
+          "publishable": true,
+          "responsibility": "Runs a config-first agent host: loads mono-agent.config.json, owns configured responder/harness/runtime/memory composition, and starts every configured channel and traceability.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "core",
+          "name": "@mono-agent/agent-contracts",
+          "path": "packages/agent-contracts",
+          "publishable": true,
+          "responsibility": "Defines shared structural request/response contracts plus adapter-neutral settings JSON, env, safe-bind, and bearer helpers.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core",
+            "context",
+            "runtime",
+            "observability"
+          ],
+          "category": "execution",
+          "name": "@mono-agent/agent-harness",
+          "path": "packages/agent-harness",
+          "publishable": true,
+          "responsibility": "Composes prompt context, selected skills, runtime, memory, history, tool policy, and observability for one request.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "runtime"
+          ],
+          "category": "runtime",
+          "name": "@mono-agent/agent-runtime",
+          "path": "packages/agent-runtime",
+          "publishable": true,
+          "responsibility": "Provides five runtime bridges (Claude SDK, Claude Code CLI, Codex app-server, OpenCode app-server, Pi SDK); direct OpenCode requires stable CLI >=1.15.0 on PATH.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core",
+            "runtime"
+          ],
+          "category": "core",
+          "name": "@mono-agent/config",
+          "path": "packages/config",
+          "publishable": true,
+          "responsibility": "Loads adapter-neutral runtime, context, memory, tool, and artifact settings.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "app"
+          ],
+          "category": "app",
+          "name": "create-mono-agent",
+          "path": "packages/create-mono-agent",
+          "publishable": true,
+          "responsibility": "Unscoped npm-init installer (`npm create mono-agent`) shipping `create-mono-agent` and `mono-agent` bins that forward every command to @mono-agent/agent-app's CLI.",
+          "tier": "alias"
+        },
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "communication",
+          "name": "@mono-agent/cron-adapter",
+          "path": "packages/cron-adapter",
+          "publishable": true,
+          "responsibility": "Invokes agent responders from cron schedules with configurable skip, queue, or replace overlap policies.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core",
+            "context"
+          ],
+          "category": "context",
+          "name": "@mono-agent/memory",
+          "path": "packages/memory",
+          "publishable": true,
+          "responsibility": "Provides local memory subpaths for the SQLite substrate, embedding search, and Bullet-Journal memory engine.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "observability",
+          "name": "@mono-agent/observability",
+          "path": "packages/observability",
+          "publishable": true,
+          "responsibility": "Records and reads local JSONL run artifacts, summaries, trace source manifests, and exposes the OTLP/Phoenix exporter through the ./otel subpath.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "communication",
+          "name": "@mono-agent/openai-api-adapter",
+          "path": "packages/openai-api-adapter",
+          "publishable": true,
+          "responsibility": "Exposes agent responders through OpenAI-compatible model discovery and Chat Completions endpoints.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "communication",
+          "name": "@mono-agent/operator-adapter",
+          "path": "packages/operator-adapter",
+          "publishable": true,
+          "responsibility": "Exposes the structured local TUI NDJSON endpoint used by the terminal and browser operator consoles.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core",
+            "runtime"
+          ],
+          "category": "runtime",
+          "name": "@mono-agent/runtime-adapter",
+          "path": "packages/runtime-adapter",
+          "publishable": true,
+          "responsibility": "Wraps @mono-agent/agent-runtime behind runtime contracts and owns sandbox policy/process wrapping.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "communication",
+          "name": "@mono-agent/slack-adapter",
+          "path": "packages/slack-adapter",
+          "publishable": true,
+          "responsibility": "Adapts Slack Socket Mode events to structural agent requests and streamed replies.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "communication",
+          "name": "@mono-agent/telegram-adapter",
+          "path": "packages/telegram-adapter",
+          "publishable": true,
+          "responsibility": "Adapts Telegram updates to structural agent requests and streamed replies.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core",
+            "observability"
+          ],
+          "category": "operator-surface",
+          "name": "@mono-agent/tui",
+          "path": "packages/tui",
+          "publishable": true,
+          "responsibility": "pi-tui operator console: live chat with structured stream-event insight, bounded recorded-run replay, and read-only config view for running agents.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core",
+            "observability"
+          ],
+          "category": "operator-surface",
+          "name": "@mono-agent/web",
+          "path": "packages/web",
+          "publishable": true,
+          "responsibility": "Serves the always-on browser operator console for persistent multi-agent conversations, streamed turns, and local-device attachments.",
+          "tier": null
+        },
+        {
+          "allowedDependencyCategories": [
+            "core"
+          ],
+          "category": "communication",
+          "name": "@mono-agent/webhook-adapter",
+          "path": "packages/webhook-adapter",
+          "publishable": true,
+          "responsibility": "Invokes agent responders from HTTP webhook requests with sync and async modes.",
+          "tier": null
+        }
+      ],
       "publishable": 22,
       "total": 22
     }
   },
+  "inventoryPolicySha256": "51dd60ebc86aafe25c0c03ee8071ad38f85045d22814dfd662d42c5fbef4d3cf",
   "issues": [],
-  "manifestSha256": "ad3c3255dbd404ea51a5f52814968d6a8499a1224b6f3db71eca6b793aa92b65",
-  "policySha256": "1cdd2f22f05a725f669c930366408b73db9a75ac873f1d4286017282a0bd7a93",
+  "manifestSha256": "7c29e9894e498248cd2bb7d75d4253fd7100319cc9a0e10144eb70c2c6b7343f",
+  "policySha256": "51dd60ebc86aafe25c0c03ee8071ad38f85045d22814dfd662d42c5fbef4d3cf",
   "schema": "mono-agent.v1-complexity-report.v1",
-  "snapshotSha256": "3e5ffd9a140519f490f391f5f3dc470269e68711ab72e6189a1089004e770054",
+  "snapshotSha256": "ff1cb5900de51f954d68133295f26af8bc7572a99dc5e883afc6c905c201c313",
   "totals": {
     "allExecutable": {
-      "files": 1024,
-      "lines": 379021
+      "files": 1177,
+      "lines": 403981
     },
     "byClassification": {
       "excluded": {
-        "files": 62,
-        "lines": 17659
+        "files": 169,
+        "lines": 36728
       },
       "generated": {
         "files": 0,
         "lines": 0
       },
       "production": {
-        "files": 523,
-        "lines": 182217
+        "files": 536,
+        "lines": 187005
       },
       "test": {
-        "files": 439,
-        "lines": 179145
+        "files": 472,
+        "lines": 180248
       },
       "unclassified": {
         "files": 0,
