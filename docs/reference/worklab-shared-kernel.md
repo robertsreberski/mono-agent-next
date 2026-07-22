@@ -1,15 +1,22 @@
 ---
 title: "Worklab shared kernel decision"
-description: "Record why mono-agent and Worklab share agent-runtime as a kernel while remaining separate products."
+description: "Record the superseded v0 Worklab runtime decision and its disposition under the mono-agent v1 architecture."
 sidebar:
   order: 60
 ---
 
-Mono-agent and Worklab should share one runtime kernel: `@mono-agent/agent-runtime`.
-Worklab should consume the published runtime package instead of carrying a
-vendored runtime fork.
+Status: Superseded for mono-agent v1 by the
+[v1 architecture decision](/reference/v1-architecture/).
 
-This is an ecosystem decision, not a repository merge. The intended shape is:
+This decision governed the v0 package shape: mono-agent and Worklab were to
+share `@mono-agent/agent-runtime` instead of carrying a vendored runtime fork.
+The v1 architecture retires that package and does not make Worklab part of the
+v1 migration. Worklab may remain pinned to the final v0 runtime until a
+separate, reviewed Worklab migration selects an appropriate v1 runtime or
+public contract. Nothing in the v1 refactor preserves `agent-runtime` solely
+for Worklab.
+
+The historical intended shape was:
 
 - **One shared kernel:** `@mono-agent/agent-runtime` owns provider execution,
   provider sessions, runtime events, Pi-native response generation, and the
@@ -19,13 +26,13 @@ This is an ecosystem decision, not a repository merge. The intended shape is:
   deployment. Worklab remains the orchestration workbench for tasks, goals, and
   teams.
 
-## Decision
+## Superseded decision
 
-Kill Worklab's runtime fork by moving provider execution onto
+The v0 decision was to kill Worklab's runtime fork by moving provider execution onto
 `@mono-agent/agent-runtime`. Keep the products separate above that shared
 kernel.
 
-Mono-agent can add narrow, additive exports to `@mono-agent/agent-runtime` when
+While Worklab remains on v0, mono-agent v0 can add narrow, additive exports to `@mono-agent/agent-runtime` when
 Worklab needs an existing runtime surface that is already part of the package.
 For Pi-native response generation, Worklab should use
 `generatePiNativeResponse` from `@mono-agent/agent-runtime/ai` rather than a
@@ -35,9 +42,11 @@ separate provider subpath or a `pi-sdk` compatibility export.
 
 A full mono-agent and Worklab merge is rejected for the current v1 path:
 
-- **License and distribution boundary:** mono-agent and all of its publishable
-  packages are `GPL-3.0-only`. Worklab remains a separately deployed product;
-  any distribution of the shared kernel must comply with those terms.
+- **License and distribution boundary:** the final-v0 mono-agent graph,
+  including `@mono-agent/agent-runtime`, is `GPL-3.0-only`. Worklab remains a
+  separately deployed product; any distribution of that v0 kernel must comply
+  with those terms. This historical constraint does not override the reviewed
+  per-package v1 split.
 - **Package-manager and release-model mismatch:** mono-agent publishes npm
   packages from a pnpm workspace; Worklab's workspace model and deployment needs
   are different.
@@ -61,13 +70,17 @@ contract item.
 That methodology should continue in mono-agent even though Worklab remains a
 separate product. The operating lesson transfers; the runtime fork does not.
 
-## Consequences
+## Current consequences
 
-- Worklab depends on `@mono-agent/agent-runtime` for provider execution.
-- The shared kernel remains `GPL-3.0-only`, matching the rest of mono-agent's
-  publishable package graph and the repository-level `LICENSE`.
-- Mono-agent keeps the runtime package as the ecosystem kernel and avoids
-  Worklab-specific product concepts in the core runtime.
-- Additive runtime exports are acceptable when they expose existing files and do
-  not create new compatibility shims.
+- Worklab's only authorized v0 fallback is the predecessor-published registry
+  artifact `@mono-agent/agent-runtime@0.16.0`; it must not resolve successor
+  source or packages. This pin is not a mono-agent v1 dependency or retention
+  requirement.
+- The final-v0 shared kernel remains `GPL-3.0-only`, matching the final-v0
+  publishable package graph and repository-level `LICENSE`; mono-agent v1's
+  separately reviewed extension seams follow the v1 licensing decision.
+- Mono-agent v1 does not carry Worklab-specific product concepts or a
+  compatibility shell for the retiring runtime package.
+- Any Worklab move to v1 requires its own consumer evidence, contract choice,
+  release plan, and rollback proof.
 - No repository merge is required to remove duplicated runtime ownership.
