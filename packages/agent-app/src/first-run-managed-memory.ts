@@ -1,5 +1,18 @@
+import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
-import { link, lstat, mkdir, mkdtemp, open, readdir, realpath, rmdir, unlink } from "node:fs/promises";
+import {
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  realpath,
+  rename,
+  rmdir,
+  type FileHandle,
+  unlink,
+} from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { probeMemoryEmbeddingSelection } from "./memory-embedding-service.js";
@@ -9,6 +22,7 @@ const DEFAULT_MANAGED_MEMORY_DIMENSION = 768;
 const FIRST_RUN_EMBEDDING_PROBE_TIMEOUT_MS = 5_000;
 const FIRST_RUN_OPENAI_PROBE_TEXT = "mono-agent managed-memory first-run embedding readiness probe";
 export const FIRST_RUN_MEMORY_INITIALIZING_MARKER = ".first-run-memory-initializing";
+export const FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX = `${FIRST_RUN_MEMORY_INITIALIZING_MARKER}.released-`;
 const FIRST_RUN_MANAGED_MEMORY_OVERRIDE_KEYS = [
   "MONO_AGENT_MEMORY_BACKEND",
   "MONO_AGENT_MEMORY_MODE",
@@ -29,6 +43,10 @@ export interface FirstRunManagedMemoryHooks {
   readonly beforePromotion?: (stagingRoot: string, finalRoot: string) => void | Promise<void>;
   /** Test seam after manifest authority exists but before source-link cleanup/directory fsync. */
   readonly afterManifestLinked?: (finalRoot: string) => void | Promise<void>;
+  /** Test seam immediately before the exact initialization marker release boundary. */
+  readonly beforeMarkerRelease?: (markerPath: string) => void | Promise<void>;
+  /** Test seam after the marker name is quarantined but before its identity is revalidated. */
+  readonly afterMarkerQuarantined?: (releasedPath: string, markerPath: string) => void | Promise<void>;
 }
 
 export interface InitializeFirstRunManagedMemoryOptions {
@@ -49,6 +67,11 @@ export interface InitializeFirstRunManagedMemoryResult {
 interface ClaimedDirectoryIdentity {
   readonly dev: number;
   readonly ino: number;
+}
+
+interface DurableMarker {
+  readonly handle: FileHandle;
+  readonly identity: ClaimedDirectoryIdentity;
 }
 
 interface PinnedDirectoryIdentity extends ClaimedDirectoryIdentity {
@@ -177,15 +200,16 @@ async function cleanupEmptyClaimedRoot(root: string, expected: ClaimedDirectoryI
   }
 }
 
-async function createDurableMarker(path: string): Promise<ClaimedDirectoryIdentity> {
+async function createDurableMarker(path: string): Promise<DurableMarker> {
   const handle = await open(path, "wx", 0o600);
   try {
     await handle.writeFile("initializing\n", "utf8");
     await handle.sync();
     const pathStat = await handle.stat();
-    return { dev: pathStat.dev, ino: pathStat.ino };
-  } finally {
-    await handle.close();
+    return { handle, identity: { dev: pathStat.dev, ino: pathStat.ino } };
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
   }
 }
 
@@ -202,18 +226,54 @@ async function removeOwnedMarker(
   root: string,
   rootIdentity: ClaimedDirectoryIdentity,
   markerPath: string,
-  markerIdentity: ClaimedDirectoryIdentity,
+  marker: DurableMarker,
+  beforeRelease?: (markerPath: string) => void | Promise<void>,
+  afterQuarantined?: (releasedPath: string, markerPath: string) => void | Promise<void>,
 ): Promise<boolean> {
+  const exactMarkerIsPublished = async (): Promise<boolean> => {
+    const rootStat = await optionalLstat(root);
+    const openedMarkerStat = await marker.handle.stat();
+    const markerStat = await optionalLstat(markerPath);
+    return rootStat !== undefined && !rootStat.isSymbolicLink() && rootStat.isDirectory()
+      && sameIdentity(rootStat, rootIdentity)
+      && openedMarkerStat.isFile() && openedMarkerStat.nlink === 1
+      && sameIdentity(openedMarkerStat, marker.identity)
+      && markerStat !== undefined && !markerStat.isSymbolicLink() && markerStat.isFile()
+      && sameIdentity(markerStat, marker.identity);
+  };
+  if (!await exactMarkerIsPublished()) return false;
+  await beforeRelease?.(markerPath);
+  if (!await exactMarkerIsPublished()) return false;
+
+  // Path unlink is intrinsically check-then-act. First atomically move the
+  // candidate to an unguessable private name, then delete only if the moved
+  // inode is still the marker pinned by our open handle. A racer is retained
+  // at the private name instead of being unlinked as collateral cleanup.
+  const releasedPath = join(root, `${FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX}${randomUUID()}`);
+  try {
+    await rename(markerPath, releasedPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  await afterQuarantined?.(releasedPath, markerPath);
   const rootStat = await optionalLstat(root);
-  const markerStat = await optionalLstat(markerPath);
+  const releasedStat = await optionalLstat(releasedPath);
+  const openedMarkerStat = await marker.handle.stat();
   if (
     rootStat === undefined || rootStat.isSymbolicLink() || !rootStat.isDirectory()
     || !sameIdentity(rootStat, rootIdentity)
-    || markerStat === undefined || markerStat.isSymbolicLink() || !markerStat.isFile()
-    || !sameIdentity(markerStat, markerIdentity)
+    || releasedStat === undefined || releasedStat.isSymbolicLink() || !releasedStat.isFile()
+    || !sameIdentity(releasedStat, marker.identity)
+    || !openedMarkerStat.isFile() || openedMarkerStat.nlink !== 1
+    || !sameIdentity(openedMarkerStat, marker.identity)
+    || await optionalLstat(markerPath) !== undefined
   ) return false;
-  await unlink(markerPath);
-  return await optionalLstat(markerPath) === undefined;
+  await unlink(releasedPath);
+  const unlinkedMarkerStat = await marker.handle.stat();
+  return unlinkedMarkerStat.nlink === 0
+    && await optionalLstat(markerPath) === undefined
+    && await optionalLstat(releasedPath) === undefined;
 }
 
 function treeIdentity(pathStat: Stats): TreeEntryIdentity {
@@ -598,7 +658,7 @@ export async function initializeFirstRunManagedMemory(
   let stagingRoot: string | undefined;
   let stagingIdentity: ClaimedDirectoryIdentity | undefined;
   let rootIdentity: ClaimedDirectoryIdentity | undefined;
-  let markerIdentity: ClaimedDirectoryIdentity | undefined;
+  let marker: DurableMarker | undefined;
   const markerPath = join(root, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
   let published = false;
   try {
@@ -621,7 +681,7 @@ export async function initializeFirstRunManagedMemory(
       await assertClaimedRoot(root, rootIdentity!);
     };
     await assertDestination();
-    markerIdentity = await createDurableMarker(markerPath);
+    marker = await createDurableMarker(markerPath);
     await assertDestination();
     await fsyncPath(root);
     await fsyncPath(dirname(root));
@@ -688,7 +748,14 @@ export async function initializeFirstRunManagedMemory(
         : { afterManifestLinked: options.hooks.afterManifestLinked }),
     });
     await assertDestination();
-    if (!await removeOwnedMarker(root, rootIdentity, markerPath, markerIdentity)) {
+    if (!await removeOwnedMarker(
+      root,
+      rootIdentity,
+      markerPath,
+      marker,
+      options.hooks?.beforeMarkerRelease,
+      options.hooks?.afterMarkerQuarantined,
+    )) {
       throw new Error("First-run managed memory could not remove its exact initialization marker.");
     }
     await assertDestination();
@@ -704,8 +771,8 @@ export async function initializeFirstRunManagedMemory(
       // Never follow a replaced parent for cleanup.
     }
     if (parentsStable) {
-      if (!published && rootIdentity !== undefined && markerIdentity !== undefined) {
-        await removeOwnedMarker(root, rootIdentity, markerPath, markerIdentity);
+      if (!published && rootIdentity !== undefined && marker !== undefined) {
+        await removeOwnedMarker(root, rootIdentity, markerPath, marker);
       }
       if (stagingRoot !== undefined && stagingIdentity !== undefined) {
         await cleanupEmptyClaimedRoot(stagingRoot, stagingIdentity);
@@ -715,5 +782,7 @@ export async function initializeFirstRunManagedMemory(
       }
     }
     throw error;
+  } finally {
+    await marker?.handle.close().catch(() => undefined);
   }
 }

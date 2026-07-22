@@ -82,7 +82,10 @@ import {
 } from "./continuation-store-types.js";
 import { CONTINUATION_STATES, continuationDigest, type ContinuationState } from "./continuations.js";
 import { formatInteractionBridgeUrl, loadInteractionSettings } from "./interaction-bridge.js";
-import { FIRST_RUN_MEMORY_INITIALIZING_MARKER } from "./first-run-managed-memory.js";
+import {
+  FIRST_RUN_MEMORY_INITIALIZING_MARKER,
+  FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX,
+} from "./first-run-managed-memory.js";
 import {
   DEFAULT_MEMORY_EMBEDDING_ENDPOINTS,
   probeMemoryEmbeddingSelection,
@@ -1637,7 +1640,7 @@ async function memorySection(
 async function managedMemoryIdentityStatus(
   memory: NonNullable<MonoAgentConfig["memory"]>,
 ): Promise<{ readonly status: "error"; readonly details: readonly string[] } | undefined> {
-  if (await pathExists(join(memory.path, FIRST_RUN_MEMORY_INITIALIZING_MARKER))) {
+  if (await firstRunMemoryInitializationIsIncomplete(memory.path)) {
     return {
       status: "error",
       details: [
@@ -1697,6 +1700,15 @@ async function managedMemoryIdentityStatus(
       "Stop the agent with `mono-agent stop`, run `mono-agent memory rebuild`, then re-run `mono-agent validate` before restarting.",
     ],
   };
+}
+
+async function firstRunMemoryInitializationIsIncomplete(root: string): Promise<boolean> {
+  if (await pathExists(join(root, FIRST_RUN_MEMORY_INITIALIZING_MARKER))) return true;
+  try {
+    return (await readdir(root)).some((name) => name.startsWith(FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX));
+  } catch {
+    return false;
+  }
 }
 
 async function builtInMemoryNativeStatus(

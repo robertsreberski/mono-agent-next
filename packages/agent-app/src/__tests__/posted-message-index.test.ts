@@ -551,7 +551,11 @@ describe("posted-message-index", () => {
     expect(compactedOriginalFingerprint).toMatchObject({
       dev: originalIndexFingerprint.dev,
       ino: originalIndexFingerprint.ino,
-      mode: originalIndexFingerprint.mode,
+      // Opening the index is also the owner-only hardening boundary. The
+      // permissive source mode must not survive compaction on POSIX hosts.
+      mode: process.platform === "win32"
+        ? originalIndexFingerprint.mode!
+        : (originalIndexFingerprint.mode! & ~0o777) | 0o600,
       nlink: originalIndexFingerprint.nlink,
     });
     expect(nonEmptyLineCount(await readFile(savedOriginal, "utf8"))).toBe(3);

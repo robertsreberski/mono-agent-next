@@ -200,24 +200,18 @@ describe("structured AskUser interaction bridge", () => {
   });
 
   it("expires pending interactions and returns partial answers to the waiting tool", async () => {
-    vi.useFakeTimers();
-    try {
-      const { handle, updated } = await createHarness(25);
-      const created = await createAsk(handle, { conversationId: "web:timeout", questions: questions() });
-      const interactionId = created.body.interactionId as string;
-      const snapshot = handle.getPendingAsk("web:timeout")!;
-      await handle.submitAskAnswers({
-        conversationId: "web:timeout",
-        interactionId,
-        answers: [{ questionId: snapshot.questions[0]!.id, selectedOptionIds: [snapshot.questions[0]!.options[0]!.id] }],
-      });
-      await vi.advanceTimersByTimeAsync(25);
-      const terminal = await pollAsk(handle, interactionId);
-      expect(terminal.status).toBe("expired");
-      expect(terminal.answers).toHaveLength(1);
-      expect(updated.at(-1)?.status).toBe("expired");
-    } finally {
-      vi.useRealTimers();
-    }
+    const { handle, updated } = await createHarness(1_000);
+    const created = await createAsk(handle, { conversationId: "web:timeout", questions: questions() });
+    const interactionId = created.body.interactionId as string;
+    const snapshot = handle.getPendingAsk("web:timeout")!;
+    await handle.submitAskAnswers({
+      conversationId: "web:timeout",
+      interactionId,
+      answers: [{ questionId: snapshot.questions[0]!.id, selectedOptionIds: [snapshot.questions[0]!.options[0]!.id] }],
+    });
+    await vi.waitFor(() => expect(updated.at(-1)?.status).toBe("expired"), { timeout: 3_000, interval: 10 });
+    const terminal = await pollAsk(handle, interactionId);
+    expect(terminal.status).toBe("expired");
+    expect(terminal.answers).toHaveLength(1);
   });
 });

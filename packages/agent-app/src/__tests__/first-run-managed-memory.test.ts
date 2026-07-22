@@ -1,4 +1,4 @@
-import { access, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { validateMonoAgentFolder } from "../doctor.js";
 import {
   FIRST_RUN_MEMORY_INITIALIZING_MARKER,
+  FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX,
   initializeFirstRunManagedMemory,
 } from "../first-run-managed-memory.js";
 import { composeWizardPlan } from "../wizard/answers.js";
@@ -337,6 +338,77 @@ describe("initializeFirstRunManagedMemory", () => {
 
     expect(await readFile(markerPath, "utf8")).toBe("external replacement\n");
     await access(join(finalRoot, ".index", "manifest.json"));
+  });
+
+  it("leaves a replacement untouched when the marker changes at its release boundary", async () => {
+    const finalRoot = join(await realpath(dir), ".mono-agent", "memory");
+    const markerPath = join(finalRoot, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
+    await expect(initializeFirstRunManagedMemory({
+      agentRoot: dir,
+      plan: localPrivatePlan(),
+      hooks: {
+        beforeMarkerRelease: async (candidate) => {
+          expect(candidate).toBe(markerPath);
+          await rm(candidate);
+          await writeFile(candidate, "release-boundary replacement\n");
+        },
+      },
+    })).rejects.toThrow(/exact initialization marker/u);
+
+    expect(await readFile(markerPath, "utf8")).toBe("release-boundary replacement\n");
+    await access(join(finalRoot, ".index", "manifest.json"));
+  });
+
+  it("retains a canonical replacement raced after marker quarantine", async () => {
+    const finalRoot = join(await realpath(dir), ".mono-agent", "memory");
+    const markerPath = join(finalRoot, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
+    await expect(initializeFirstRunManagedMemory({
+      agentRoot: dir,
+      plan: localPrivatePlan(),
+      hooks: {
+        afterMarkerQuarantined: async (releasedPath, candidate) => {
+          expect(candidate).toBe(markerPath);
+          await access(releasedPath);
+          await writeFile(candidate, "post-quarantine replacement\n");
+        },
+      },
+    })).rejects.toThrow(/exact initialization marker/u);
+
+    expect(await readFile(markerPath, "utf8")).toBe("post-quarantine replacement\n");
+    expect((await readdir(finalRoot)).some((name) => name.startsWith(FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX)))
+      .toBe(true);
+  });
+
+  it("reports a quarantined marker as incomplete when release fails after rename", async () => {
+    const finalRoot = join(await realpath(dir), ".mono-agent", "memory");
+    const plan = localPrivatePlan();
+    const configPath = join(dir, "mono-agent.config.json");
+    await writeFile(configPath, JSON.stringify(plan.configJson));
+    await writeFile(join(dir, "IDENTITY.md"), "# Identity\n");
+
+    await expect(initializeFirstRunManagedMemory({
+      agentRoot: dir,
+      plan,
+      hooks: {
+        afterMarkerQuarantined: async () => { throw new Error("injected post-quarantine failure"); },
+      },
+    })).rejects.toThrow("injected post-quarantine failure");
+
+    await expect(access(join(finalRoot, FIRST_RUN_MEMORY_INITIALIZING_MARKER)))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    expect((await readdir(finalRoot)).some((name) => name.startsWith(FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX)))
+      .toBe(true);
+    const report = await validateMonoAgentFolder({
+      cwd: dir,
+      configPath,
+      env: {},
+      allowFilesystemWrites: true,
+      liveness: false,
+    });
+    expect(report.sections.find((section) => section.id === "memory")).toMatchObject({
+      status: "error",
+      details: expect.arrayContaining([expect.stringMatching(/initialization is incomplete/u)]),
+    });
   });
 
   it("rejects a pinned parent replaced by a symlink before publication", async () => {

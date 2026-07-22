@@ -1,4 +1,4 @@
-import { link, lstat, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, symlink, writeFile, mkdir } from "node:fs/promises";
+import { chmod, link, lstat, mkdtemp, readFile, readdir, readlink, realpath, rename, rm, symlink, writeFile, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
@@ -185,6 +185,29 @@ describe("ensureManagedBackgroundRuntime", () => {
 
     expect(marker.installedAt).toBe("1970-01-01T00:00:10.000Z");
     expect(now).toBe(11_000);
+  });
+
+  it("keeps injected installer fixtures mode-faithful independently of the process umask", async () => {
+    const source = await fixturePackage();
+    const homeDir = await homeFixture();
+    await chmod(source.root, 0o750);
+    await chmod(join(source.root, "dist"), 0o751);
+    await chmod(source.cliPath, 0o750);
+    await chmod(join(source.root, "package.json"), 0o640);
+
+    const runtime = await ensureManagedBackgroundRuntime({
+      currentCliPath: source.cliPath,
+      nodePath: process.execPath,
+      homeDir,
+    }, fakeInstallerDeps(async (input) => {
+      await materializeInstalledPackage(input, await readFile(source.cliPath));
+    }));
+    const packageRoot = dirname(dirname(runtime.cliPath));
+
+    expect((await lstat(packageRoot)).mode & 0o777).toBe(0o750);
+    expect((await lstat(join(packageRoot, "dist"))).mode & 0o777).toBe(0o751);
+    expect((await lstat(runtime.cliPath)).mode & 0o777).toBe(0o750);
+    expect((await lstat(join(packageRoot, "package.json"))).mode & 0o777).toBe(0o640);
   });
 
   it("publishes a path-free launch proof that verifies the exact finalized closure", async () => {
@@ -1041,8 +1064,11 @@ describe("ensureManagedBackgroundRuntime", () => {
       },
     });
 
-    await expect(first).resolves.toMatchObject({ verificationMode: "installed" });
-    await expect(second).resolves.toMatchObject({ verificationMode: "fast-reuse" });
+    const outcomes = await Promise.allSettled([first, second]);
+    expect(outcomes).toEqual([
+      { status: "fulfilled", value: expect.objectContaining({ verificationMode: "installed" }) },
+      { status: "fulfilled", value: expect.objectContaining({ verificationMode: "fast-reuse" }) },
+    ]);
     expect(elapsed).toBeGreaterThanOrEqual(90_000);
     expect(secondInstalls).toBe(0);
   });
@@ -1128,12 +1154,19 @@ async function expectRepairFromStaleRuntimeLock(staleIncarnation: ProcessIncarna
 
 async function materializeInstalledPackage(input: ManagedRuntimeInstallInput, cli: Buffer): Promise<void> {
   const packageRoot = join(input.stagingDir, "node_modules", "@mono-agent", "agent-app");
+  const sourceDist = join(input.packageSource, "dist");
+  const sourceCli = join(sourceDist, "cli.js");
+  const sourcePackageJson = join(input.packageSource, "package.json");
   await mkdir(join(packageRoot, "dist"), { recursive: true });
+  await chmod(packageRoot, (await lstat(input.packageSource)).mode & 0o777);
+  await chmod(join(packageRoot, "dist"), (await lstat(sourceDist)).mode & 0o777);
   await writeFile(join(packageRoot, "dist", "cli.js"), cli);
+  await chmod(join(packageRoot, "dist", "cli.js"), (await lstat(sourceCli)).mode & 0o777);
   await writeFile(
     join(packageRoot, "package.json"),
-    await readFile(join(input.packageSource, "package.json")),
+    await readFile(sourcePackageJson),
   );
+  await chmod(join(packageRoot, "package.json"), (await lstat(sourcePackageJson)).mode & 0o777);
   await writeFile(join(input.stagingDir, "package-lock.json"), `${JSON.stringify({
     lockfileVersion: 3,
     packages: {

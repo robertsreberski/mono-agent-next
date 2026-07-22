@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseEnv } from "node:util";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { MONO_AGENT_CONFIG_SCHEMA_URL } from "../config-reference.js";
 import { initMonoAgentFolder, mergeSecretEnvFile } from "../init.js";
@@ -14,9 +14,20 @@ let dir: string;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "agent-app-init-"));
+  vi.stubGlobal("fetch", vi.fn(async (url: string | URL) => {
+    const value = String(url);
+    if (value.endsWith("/api/embed")) {
+      return new Response(JSON.stringify({ embeddings: [new Array<number>(768).fill(0.01)] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error(`Unexpected init embeddings request: ${value}`);
+  }));
 });
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await rm(dir, { recursive: true, force: true });
 });
 
