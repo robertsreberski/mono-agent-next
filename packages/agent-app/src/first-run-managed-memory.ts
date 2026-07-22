@@ -227,17 +227,22 @@ async function commitDurableMarker(marker: DurableMarker): Promise<void> {
   await marker.handle.sync();
 }
 
+async function readExactHandleBytes(handle: FileHandle, size: number): Promise<Buffer | undefined> {
+  const content = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < content.length) {
+    const { bytesRead } = await handle.read(content, offset, content.length - offset, offset);
+    if (bytesRead === 0) return undefined;
+    offset += bytesRead;
+  }
+  return content;
+}
+
 async function durableMarkerHasExactContent(marker: DurableMarker, state: "initializing" | "initialized"): Promise<boolean> {
   const expected = Buffer.from(`${state}:${marker.token}\n`, "utf8");
   if ((await marker.handle.stat()).size !== expected.length) return false;
-  const actual = Buffer.alloc(expected.length);
-  let offset = 0;
-  while (offset < actual.length) {
-    const { bytesRead } = await marker.handle.read(actual, offset, actual.length - offset, offset);
-    if (bytesRead === 0) return false;
-    offset += bytesRead;
-  }
-  return actual.equals(expected) && (await marker.handle.stat()).size === expected.length;
+  const actual = await readExactHandleBytes(marker.handle, expected.length);
+  return actual?.equals(expected) === true && (await marker.handle.stat()).size === expected.length;
 }
 
 async function fsyncPath(path: string): Promise<void> {
@@ -302,17 +307,6 @@ async function commitOwnedMarker(
 
 const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
 const INITIALIZED_MARKER_PATTERN = new RegExp(`^initialized:${UUID_SOURCE}\\n$`, "u");
-
-async function readExactHandleBytes(handle: FileHandle, size: number): Promise<Buffer | undefined> {
-  const content = Buffer.alloc(size);
-  let offset = 0;
-  while (offset < content.length) {
-    const { bytesRead } = await handle.read(content, offset, content.length - offset, offset);
-    if (bytesRead === 0) return undefined;
-    offset += bytesRead;
-  }
-  return content;
-}
 
 async function canonicalMarkerIsCommitted(
   root: string,
