@@ -1,0 +1,19 @@
+# Makes website/ a self-contained pnpm project (its own lockfile), independent of
+# the monorepo root workspace — so `pnpm install` here (and on Vercel, with Root
+# Directory = website) installs only the docs-site deps and never sweeps the
+# Astro build into the repo's `pnpm -r run build`/`test`.
+packages: []
+
+allowBuilds:
+  esbuild: true
+  sharp: true
+
+# Security floors for transitive Starlight/Astro dependencies.
+overrides:
+  js-yaml: 4.3.0
+  svgo: 4.0.2
+
+# Pre-approve native/postinstall build scripts so install is non-interactive.
+onlyBuiltDependencies:
+  - esbuild
+  - sharp

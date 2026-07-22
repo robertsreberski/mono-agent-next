@@ -1,0 +1,11 @@
+{
+  "runId": "run-usage-limit",
+  "conversationId": "fixture",
+  "status": "failed",
+  "failureKind": "usage_limit",
+  "startedAt": "2026-06-24T11:53:00.000Z",
+  "endedAt": "2026-06-24T11:53:01.000Z",
+  "durationMs": 1000,
+  "eventCount": 1,
+  "artifactPaths": []
+}

@@ -1,0 +1,65 @@
+{
+  "name": "@mono-agent/agent-app",
+  "version": "0.15.0",
+  "description": "Config-first mono-agent host: builds a responder and starts every configured communication channel and traceability from one mono-agent.config.json.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent.git",
+    "directory": "packages/agent-app"
+  },
+  "private": false,
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "mono-agent": "./dist/cli.js",
+    "mono-agent-memory-recall": "./dist/memory-recall-main.js"
+  },
+  "files": [
+    "dist",
+    "resources",
+    "schema",
+    "skills",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.7.0",
+    "@earendil-works/pi-ai": "0.80.6",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@mono-agent/agent-contracts": "workspace:0.15.0",
+    "@mono-agent/agent-harness": "workspace:0.15.0",
+    "@mono-agent/config": "workspace:0.15.0",
+    "@mono-agent/cron-adapter": "workspace:0.15.0",
+    "@mono-agent/operator-adapter": "workspace:0.15.0",
+    "@mono-agent/memory": "workspace:0.15.0",
+    "@mono-agent/observability": "workspace:0.15.0",
+    "@mono-agent/openai-api-adapter": "workspace:0.15.0",
+    "@mono-agent/runtime-adapter": "workspace:0.15.0",
+    "@mono-agent/slack-adapter": "workspace:0.15.0",
+    "@mono-agent/telegram-adapter": "workspace:0.15.0",
+    "@mono-agent/tui": "workspace:0.15.0",
+    "@mono-agent/web": "workspace:0.15.0",
+    "@mono-agent/webhook-adapter": "workspace:0.15.0",
+    "undici": "8.7.0",
+    "zod": "^4.4.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

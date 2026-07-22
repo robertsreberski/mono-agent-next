@@ -1,0 +1,27 @@
+title = "mono-agent gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "telegram-bot-token"
+description = "Telegram Bot API token"
+regex = '''(?:^|[^A-Za-z0-9_]|/(?:file/)?bot)([0-9]{6,10}:[A-Za-z0-9_-]{35})(?:$|[^A-Za-z0-9_-])'''
+secretGroup = 1
+tags = ["api", "telegram"]
+
+[[allowlists]]
+description = "Generated dependency lockfiles"
+paths = [
+  '''pnpm-lock\.yaml$''',
+]
+
+[[allowlists]]
+description = "Clearly fake secret placeholders used by docs and tests"
+regexTarget = "secret"
+regexes = [
+  '''(?i)^(?:dummy|fake|fixture|inline|json|resolved|redacted|secret|test|top)[-_]?(?:api[-_]?key|secret|token|value)?$''',
+  '''(?i)^sk-(?:env|json|secret|test)-secret$''',
+  '''(?i)^sm[-_]secret$''',
+  '''^SUPER_SECRET_PROMPT_PAYLOAD$''',
+]

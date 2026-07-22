@@ -1,0 +1,2476 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/robertsreberski/mono-agent/main/packages/agent-app/schema/mono-agent.config.schema.json",
+  "title": "mono-agent.config.json",
+  "type": "object",
+  "required": [
+    "runtime",
+    "context"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "Public display identity used for trace labels and default A2A metadata; never used in paths or service ids.",
+          "examples": [
+            "Research Partner"
+          ],
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "description": "Configures model for the runtime section.",
+          "examples": [
+            "codex:gpt-5.6-terra"
+          ],
+          "type": "string"
+        },
+        "fallbackModels": {
+          "description": "Legacy fallback list whose routes inherit runtime.effort. Prefer runtime.fallbacks for new configs.",
+          "examples": [
+            [
+              "pi:ollama:gemma4:31b"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "fallbacks": {
+          "description": "Canonical ordered fallback routes. Omitted per-route effort means that provider's default.",
+          "examples": [
+            [
+              {
+                "model": "codex:gpt-5.6-sol"
+              },
+              {
+                "model": "pi:openai-codex:gpt-5.6-terra",
+                "effort": "high"
+              }
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "model"
+            ],
+            "properties": {
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "effort": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "minimal",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max",
+                  "ultra"
+                ]
+              }
+            }
+          },
+          "default": []
+        },
+        "routeSafety": {
+          "description": "Uniform preserves one shared safety contract; per-route-native uses and reports each provider's explicit contract.",
+          "examples": [
+            "per-route-native"
+          ],
+          "type": "string",
+          "default": "uniform",
+          "enum": [
+            "uniform",
+            "per-route-native"
+          ]
+        },
+        "executionMode": {
+          "description": "Configures executionMode for the runtime section.",
+          "examples": [
+            "inferred"
+          ],
+          "type": "string",
+          "default": "inferred"
+        },
+        "effort": {
+          "description": "Route-specific effort. Reasoning-capable pi:* maps ultra to LOW; Pi without reasoning uses OFF. Direct codex:* forwards ultra unchanged. Mono-agent rejects ultra on its Claude SDK route because the pinned SDK public contract ends at max (the SDK JavaScript itself forwards the value). The Claude CLI route passes --effort ultra, but both tested Claude Code binaries (SDK-bundled 2.1.206 and local 2.1.210) warn that it is unknown, ignore it, and use default effort. Direct OpenCode rejects explicit effort. Ranking above max only prevents keyword downgrade.",
+          "examples": [
+            "medium"
+          ],
+          "type": "string",
+          "enum": [
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
+        },
+        "permissionMode": {
+          "description": "Configures permissionMode for the runtime section.",
+          "examples": [
+            "default"
+          ],
+          "type": "string"
+        },
+        "maxTurns": {
+          "description": "Configures maxTurns for the runtime section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        },
+        "compaction": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enables adaptive proactive compaction and one-shot reactive overflow recovery.",
+              "examples": [
+                true
+              ],
+              "type": "boolean",
+              "default": true
+            },
+            "triggerRatio": {
+              "description": "Fraction of the effective model context window used for the proactive trigger, additionally capped by adaptive safety headroom.",
+              "examples": [
+                0.7
+              ],
+              "type": "number",
+              "default": 0.7,
+              "minimum": 0.2,
+              "maximum": 0.95
+            },
+            "keepRecentTokens": {
+              "description": "Explicit recent-context retention override; omitted derives 10% of the effective context window, clamped to 4,000-20,000 tokens.",
+              "examples": [
+                12800
+              ],
+              "type": "integer",
+              "minimum": 4000,
+              "maximum": 200000
+            },
+            "summaryMaxTokens": {
+              "description": "Explicit combined summary-output budget override; omitted derives 4% of the effective context window, clamped to 2,000-12,000 tokens.",
+              "examples": [
+                5120
+              ],
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 64000
+            },
+            "minSavingsTokens": {
+              "description": "Minimum verified token reduction required for proactive compaction; omitted derives 10% of the effective window, clamped to 4,000-20,000. Reactive recovery accepts any positive reduction.",
+              "examples": [
+                12800
+              ],
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 500000
+            },
+            "fixedOverheadEnabled": {
+              "description": "Includes system instructions, tool schemas, and the current user turn in proactive request-size estimates.",
+              "examples": [
+                true
+              ],
+              "type": "boolean",
+              "default": true
+            },
+            "contextWindowOverride": {
+              "description": "Persistent correction for inaccurate provider context-window metadata; learned overflow ceilings may lower it process-locally.",
+              "examples": [
+                128000
+              ],
+              "type": "integer",
+              "minimum": 32000,
+              "maximum": 10000000
+            }
+          }
+        },
+        "workspace": {
+          "description": "Configures workspace for the runtime section.",
+          "examples": [
+            "."
+          ],
+          "type": "string",
+          "default": "."
+        },
+        "session": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "description": "Configures session.mode for the runtime section.",
+              "examples": [
+                "continuous"
+              ],
+              "type": "string",
+              "default": "continuous"
+            },
+            "idleTimeoutMs": {
+              "description": "Configures session.idleTimeoutMs for the runtime section.",
+              "examples": [
+                1800000
+              ],
+              "type": "integer",
+              "default": 1800000
+            },
+            "rollover": {
+              "description": "Configures session.rollover for the runtime section.",
+              "examples": [
+                "none"
+              ],
+              "type": "string",
+              "default": "none"
+            },
+            "rolloverTimezone": {
+              "description": "Configures session.rolloverTimezone for the runtime section.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "rolloverNotice": {
+              "description": "Configures session.rolloverNotice for the runtime section.",
+              "examples": [
+                true
+              ],
+              "type": "boolean",
+              "default": false
+            },
+            "isolateProactive": {
+              "description": "Configures session.isolateProactive for the runtime section.",
+              "examples": [
+                true
+              ],
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      },
+      "required": [
+        "model"
+      ]
+    },
+    "concurrency": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxConcurrentRuns": {
+          "description": "Configures maxConcurrentRuns for the concurrency section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        },
+        "maxPendingRuns": {
+          "description": "Configures maxPendingRuns for the concurrency section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "identityPath": {
+          "description": "Configures identityPath for the context section.",
+          "examples": [
+            "./IDENTITY.md"
+          ],
+          "type": "string"
+        },
+        "soulPath": {
+          "description": "Configures soulPath for the context section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "skillsRoot": {
+          "description": "Configures skillsRoot for the context section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "selectedSkills": {
+          "description": "Configures selectedSkills for the context section.",
+          "examples": [
+            [
+              "example"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "skillMaxBytes": {
+          "description": "Configures skillMaxBytes for the context section.",
+          "examples": [
+            48000
+          ],
+          "type": "integer",
+          "default": 48000
+        },
+        "skillDisclosure": {
+          "description": "Configures skillDisclosure for the context section.",
+          "examples": [
+            "full"
+          ],
+          "type": "string",
+          "default": "full"
+        }
+      },
+      "required": [
+        "identityPath"
+      ]
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {
+          "description": "Configures backend for the memory section.",
+          "examples": [
+            "bujo"
+          ],
+          "type": "string",
+          "default": "bujo",
+          "enum": [
+            "bujo",
+            "supermemory"
+          ]
+        },
+        "mode": {
+          "description": "Configures mode for the memory section.",
+          "examples": [
+            "journal"
+          ],
+          "type": "string",
+          "default": "lite",
+          "enum": [
+            "lite",
+            "journal",
+            "bujo"
+          ]
+        },
+        "path": {
+          "description": "Configures path for the memory section.",
+          "examples": [
+            "./.mono-agent/memory"
+          ],
+          "type": "string"
+        },
+        "maxBytes": {
+          "description": "Configures maxBytes for the memory section.",
+          "examples": [
+            64000
+          ],
+          "type": "integer",
+          "default": 64000
+        },
+        "writeMode": {
+          "description": "Configures writeMode for the memory section.",
+          "examples": [
+            "disabled"
+          ],
+          "type": "string",
+          "default": "disabled",
+          "enum": [
+            "disabled",
+            "append-host-summary",
+            "capture"
+          ]
+        },
+        "supermemory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "baseUrl": {
+              "description": "Configures supermemory.baseUrl for the memory section.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "apiKey": {
+              "description": "Secret value for memory.supermemory.apiKey; prefer the env override.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "apiKeyEnv": {
+              "description": "Secret value for memory.supermemory.apiKeyEnv; prefer the env override.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "container": {
+              "description": "Configures supermemory.container for the memory section.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "timeoutMs": {
+              "description": "Configures supermemory.timeoutMs for the memory section.",
+              "examples": [
+                10000
+              ],
+              "type": "integer",
+              "default": 10000
+            },
+            "exposeMcpServer": {
+              "description": "Configures supermemory.exposeMcpServer for the memory section.",
+              "examples": [
+                true
+              ],
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "embeddings": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "provider": {
+              "description": "Embedding service used by Journal/BuJo memory: ollama, lmstudio, or openai.",
+              "examples": [
+                "ollama"
+              ],
+              "type": "string",
+              "enum": [
+                "ollama",
+                "lmstudio",
+                "openai"
+              ]
+            },
+            "model": {
+              "description": "Configures embeddings.model for the memory section.",
+              "examples": [
+                "nomic-embed-text:v1.5"
+              ],
+              "type": "string"
+            },
+            "endpoint": {
+              "description": "Provider service root. LM Studio uses <root>/v1/embeddings and defaults to http://localhost:1234.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "apiKey": {
+              "description": "Secret value for memory.embeddings.apiKey; prefer the env override.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "apiKeyEnv": {
+              "description": "Environment-variable name containing an optional provider bearer token; an explicitly declared name must resolve before memory starts.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "dim": {
+              "description": "Configures embeddings.dim for the memory section.",
+              "examples": [
+                1
+              ],
+              "type": "integer"
+            },
+            "timeoutMs": {
+              "description": "Configures embeddings.timeoutMs for the memory section.",
+              "examples": [
+                10000
+              ],
+              "type": "integer",
+              "default": 10000
+            },
+            "circuitBreaker": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "failureThreshold": {
+                  "description": "Configures embeddings.circuitBreaker.failureThreshold for the memory section.",
+                  "examples": [
+                    3
+                  ],
+                  "type": "integer",
+                  "default": 3
+                },
+                "cooldownMs": {
+                  "description": "Configures embeddings.circuitBreaker.cooldownMs for the memory section.",
+                  "examples": [
+                    30000
+                  ],
+                  "type": "integer",
+                  "default": 30000
+                }
+              }
+            }
+          }
+        },
+        "llm": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "provider": {
+              "description": "Configures llm.provider for the memory section.",
+              "examples": [
+                "agent-host"
+              ],
+              "type": "string",
+              "enum": [
+                "ollama",
+                "agent-host"
+              ]
+            },
+            "model": {
+              "description": "Configures llm.model for the memory section.",
+              "examples": [
+                "pi:openai-codex:gpt-5.6-terra"
+              ],
+              "type": "string"
+            },
+            "executionMode": {
+              "description": "Configures llm.executionMode for the memory section.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "trace": {
+              "description": "Configures llm.trace for the memory section.",
+              "examples": [
+                true
+              ],
+              "type": "boolean",
+              "default": true
+            },
+            "timeoutMs": {
+              "description": "Configures llm.timeoutMs for the memory section.",
+              "examples": [
+                60000
+              ],
+              "type": "integer",
+              "default": 60000
+            },
+            "endpoint": {
+              "description": "Configures llm.endpoint for the memory section.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            }
+          }
+        },
+        "recallTool": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enables the memory capability.",
+              "examples": [
+                true
+              ],
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "consolidation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Enables the memory capability.",
+              "examples": [
+                true
+              ],
+              "type": "boolean",
+              "default": true
+            },
+            "cron": {
+              "description": "Configures consolidation.cron for the memory section.",
+              "examples": [
+                "0 */2 * * *"
+              ],
+              "type": "string",
+              "default": "0 */2 * * *"
+            }
+          }
+        },
+        "reflection": {
+          "type": "object",
+          "deprecated": true,
+          "additionalProperties": true,
+          "description": "Removed memory.reflection settings are tolerated only to emit a migration warning."
+        },
+        "migration": {
+          "type": "object",
+          "deprecated": true,
+          "additionalProperties": true,
+          "description": "Removed memory.migration settings are tolerated only to emit a migration warning."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "backend": {
+                "const": "bujo"
+              },
+              "mode": {
+                "const": "lite"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "embeddings": {}
+                  },
+                  "required": [
+                    "embeddings"
+                  ]
+                },
+                {
+                  "properties": {
+                    "llm": {}
+                  },
+                  "required": [
+                    "llm"
+                  ]
+                },
+                {
+                  "properties": {
+                    "consolidation": {}
+                  },
+                  "required": [
+                    "consolidation"
+                  ]
+                },
+                {
+                  "properties": {
+                    "writeMode": {
+                      "const": "capture"
+                    }
+                  },
+                  "required": [
+                    "writeMode"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "backend": {
+                "const": "bujo"
+              },
+              "mode": {
+                "const": "journal"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "embeddings"
+            ],
+            "properties": {
+              "embeddings": {
+                "type": "object",
+                "minProperties": 1
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "properties": {
+                    "llm": {}
+                  },
+                  "required": [
+                    "llm"
+                  ]
+                },
+                {
+                  "properties": {
+                    "consolidation": {}
+                  },
+                  "required": [
+                    "consolidation"
+                  ]
+                },
+                {
+                  "properties": {
+                    "writeMode": {
+                      "const": "capture"
+                    }
+                  },
+                  "required": [
+                    "writeMode"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "backend": {
+                "const": "bujo"
+              },
+              "mode": {
+                "const": "bujo"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "embeddings",
+              "llm"
+            ],
+            "properties": {
+              "embeddings": {
+                "type": "object",
+                "minProperties": 1
+              },
+              "llm": {
+                "type": "object",
+                "properties": {
+                  "model": {}
+                },
+                "required": [
+                  "model"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "backend": {
+                "const": "bujo"
+              },
+              "writeMode": {
+                "const": "capture"
+              }
+            },
+            "required": [
+              "writeMode"
+            ]
+          },
+          "then": {
+            "properties": {
+              "mode": {
+                "const": "bujo"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          }
+        }
+      ]
+    },
+    "tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allowedTools": {
+          "description": "Configures allowedTools for the tools section.",
+          "examples": [
+            [
+              "Read",
+              "Grep"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "*"
+          ]
+        },
+        "disallowedTools": {
+          "description": "Configures disallowedTools for the tools section.",
+          "examples": [
+            [
+              "Read",
+              "Grep"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "mcpConfigPath": {
+          "description": "Configures mcpConfigPath for the tools section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "mcpRequestContextServers": {
+          "description": "Configured stdio MCP server names that receive trusted per-request conversation, run, output-directory, and scoped progress context.",
+          "examples": [
+            [
+              "transcribe"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": [],
+          "uniqueItems": true
+        },
+        "continuationServers": {
+          "description": "Configures continuationServers for the tools section.",
+          "examples": [
+            [
+              "example"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mcpCallTimeoutMs": {
+          "description": "Configures mcpCallTimeoutMs for the tools section.",
+          "examples": [
+            120000
+          ],
+          "type": "integer",
+          "default": 120000
+        },
+        "mcpCallMaxTotalTimeoutMs": {
+          "description": "Configures mcpCallMaxTotalTimeoutMs for the tools section.",
+          "examples": [
+            2700000
+          ],
+          "type": "integer",
+          "default": 2700000
+        }
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "description": "Configures mode for the sandbox section.",
+          "examples": [
+            "native"
+          ],
+          "type": "string",
+          "enum": [
+            "native",
+            "off"
+          ]
+        },
+        "network": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "description": "Configures network.mode for the sandbox section.",
+              "examples": [
+                "none"
+              ],
+              "type": "string",
+              "default": "none",
+              "enum": [
+                "none",
+                "localhost",
+                "allowlist"
+              ]
+            },
+            "allowlist": {
+              "description": "Configures network.allowlist for the sandbox section.",
+              "examples": [
+                [
+                  "example"
+                ]
+              ],
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "readableRoots": {
+          "description": "Configures readableRoots for the sandbox section.",
+          "examples": [
+            [
+              "example"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "writableRoots": {
+          "description": "Configures writableRoots for the sandbox section.",
+          "examples": [
+            [
+              "example"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "denyWrite": {
+          "description": "Configures denyWrite for the sandbox section.",
+          "examples": [
+            [
+              "example"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "fallback": {
+          "description": "Configures fallback for the sandbox section.",
+          "examples": [
+            "fail-closed"
+          ],
+          "type": "string",
+          "default": "fail-closed",
+          "enum": [
+            "fail-closed",
+            "unsafe-host-process"
+          ]
+        },
+        "unsafeAllowHostProcess": {
+          "description": "Configures unsafeAllowHostProcess for the sandbox section.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dir": {
+          "description": "Configures dir for the artifacts section.",
+          "examples": [
+            ".mono-agent/artifacts"
+          ],
+          "type": "string",
+          "default": ".mono-agent/artifacts"
+        },
+        "retention": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxAgeDays": {
+              "description": "Configures retention.maxAgeDays for the artifacts section.",
+              "examples": [
+                365
+              ],
+              "type": "integer",
+              "default": 365
+            },
+            "maxCount": {
+              "description": "Configures retention.maxCount for the artifacts section.",
+              "examples": [
+                50000
+              ],
+              "type": "integer",
+              "default": 50000
+            },
+            "dryRun": {
+              "description": "Configures retention.dryRun for the artifacts section.",
+              "examples": [
+                true
+              ],
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
+        "memoryRetention": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxAgeDays": {
+              "description": "Configures memoryRetention.maxAgeDays for the artifacts section.",
+              "examples": [
+                7
+              ],
+              "type": "integer",
+              "default": 7
+            },
+            "maxCount": {
+              "description": "Configures memoryRetention.maxCount for the artifacts section.",
+              "examples": [
+                5000
+              ],
+              "type": "integer",
+              "default": 5000
+            },
+            "dryRun": {
+              "description": "Configures memoryRetention.dryRun for the artifacts section.",
+              "examples": [
+                true
+              ],
+              "type": "boolean",
+              "default": false
+            }
+          }
+        }
+      }
+    },
+    "traceability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "registryDir": {
+          "description": "Configures registryDir for the traceability section.",
+          "examples": [
+            ".mono-agent/trace-sources"
+          ],
+          "type": "string",
+          "default": ".mono-agent/trace-sources"
+        },
+        "sourceId": {
+          "description": "Configures sourceId for the traceability section.",
+          "examples": [
+            "my-agent"
+          ],
+          "type": "string"
+        },
+        "sourceLabel": {
+          "description": "Configures sourceLabel for the traceability section.",
+          "examples": [
+            "My Agent"
+          ],
+          "type": "string"
+        },
+        "heartbeatMs": {
+          "description": "Configures heartbeatMs for the traceability section.",
+          "examples": [
+            10000
+          ],
+          "type": "integer",
+          "default": 10000
+        },
+        "staleAfterMs": {
+          "description": "Configures staleAfterMs for the traceability section.",
+          "examples": [
+            30000
+          ],
+          "type": "integer",
+          "default": 30000
+        },
+        "globalDiscovery": {
+          "description": "Configures globalDiscovery for the traceability section.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "exporters": {
+          "type": "array",
+          "maxItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "phoenix"
+              },
+              "endpoint": {
+                "type": "string"
+              },
+              "headers": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "includeSensitiveData": {
+                "type": "boolean"
+              },
+              "contentPatternRedaction": {
+                "type": "boolean"
+              },
+              "timeoutMs": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 60000
+              },
+              "projectName": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "piAuthPath": {
+          "description": "Configures piAuthPath for the providers section.",
+          "examples": [
+            "~/.pi/agent/auth.json"
+          ],
+          "type": "string"
+        },
+        "piNative": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "transport": {
+              "description": "Preferred Pi provider transport: auto, sse, websocket, or websocket-cached. Providers without multiple transports ignore it.",
+              "examples": [
+                "sse"
+              ],
+              "type": "string",
+              "default": "auto",
+              "enum": [
+                "auto",
+                "sse",
+                "websocket",
+                "websocket-cached"
+              ]
+            },
+            "piMaxRetries": {
+              "description": "Configures piNative.piMaxRetries for the providers section.",
+              "examples": [
+                2
+              ],
+              "type": "integer",
+              "default": 2
+            },
+            "maxRetryDelayMs": {
+              "description": "Configures piNative.maxRetryDelayMs for the providers section.",
+              "examples": [
+                60000
+              ],
+              "type": "integer",
+              "default": 60000
+            },
+            "piSessionsRoot": {
+              "description": "Configures piNative.piSessionsRoot for the providers section.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            }
+          }
+        },
+        "local": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "type": {
+                "enum": [
+                  "ollama",
+                  "lmstudio",
+                  "openai_compat"
+                ]
+              },
+              "baseUrl": {
+                "type": "string"
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "trustPublicUrl": {
+                "type": "boolean"
+              },
+              "apiKey": {
+                "type": "string"
+              },
+              "apiKeyEnv": {
+                "type": "string"
+              },
+              "models": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "name"
+                  ],
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "alias": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "displayName": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "capabilities": {
+                      "type": "object",
+                      "additionalProperties": true
+                    },
+                    "pricing": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "interaction": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bridge": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "host": {
+              "description": "Bind host for the app-owned AskUser/tool-progress bridge. Defaults to loopback; keep it local because non-loopback values are not rejected.",
+              "examples": [
+                "127.0.0.1"
+              ],
+              "type": "string",
+              "default": "127.0.0.1"
+            },
+            "port": {
+              "description": "Bridge port. 0 chooses an ephemeral port.",
+              "examples": [
+                0
+              ],
+              "type": "integer",
+              "default": 0
+            }
+          }
+        },
+        "askUser": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "timeoutMs": {
+              "description": "Maximum wait for one AskUser interaction (one to five questions).",
+              "examples": [
+                600000
+              ],
+              "type": "integer",
+              "default": 600000
+            }
+          }
+        },
+        "progress": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "description": "Whether tool progress posts are relayed to channel status messages.",
+              "examples": [
+                true
+              ],
+              "type": "boolean",
+              "default": true
+            }
+          }
+        }
+      }
+    },
+    "continuations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the durable continuation service when continuation functionality is configured."
+        },
+        "host": {
+          "type": "string",
+          "enum": [
+            "127.0.0.1",
+            "::1",
+            "localhost"
+          ],
+          "default": "127.0.0.1",
+          "description": "Loopback-only continuation service host."
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "default": 4319,
+          "description": "Fixed continuation service port; 0 is intentionally invalid."
+        },
+        "stateDir": {
+          "type": "string",
+          "minLength": 1,
+          "default": ".mono-agent/continuations",
+          "description": "Owner-only durable continuation state directory."
+        },
+        "namedRoutes": {
+          "type": "object",
+          "default": {},
+          "propertyNames": {
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "additionalProperties": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "mode",
+                  "conversationId"
+                ],
+                "properties": {
+                  "mode": {
+                    "const": "notify_if_actionable"
+                  },
+                  "conversationId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "mode",
+                  "conversationId"
+                ],
+                "properties": {
+                  "mode": {
+                    "const": "capture"
+                  },
+                  "conversationId": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "mode"
+                ],
+                "properties": {
+                  "mode": {
+                    "const": "silent"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "detachedServices": {
+          "type": "array",
+          "default": [],
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "tokenEnv"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "tokenEnv": {
+                "type": "string",
+                "pattern": "^[A-Z_][A-Z0-9_]*$"
+              }
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "properties": {
+            "maxActiveRecords": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "default": 10000
+            },
+            "maxActivePerOrigin": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "default": 500
+            },
+            "maxConcurrent": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 256,
+              "default": 16
+            },
+            "synthesisTimeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400000,
+              "default": 600000
+            },
+            "deliveryTimeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 86400000,
+              "default": 120000
+            },
+            "operatorPageSize": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "default": 100
+            }
+          }
+        },
+        "retention": {
+          "type": "object",
+          "additionalProperties": false,
+          "default": {},
+          "properties": {
+            "terminalMaxRecords": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "default": 50000
+            },
+            "terminalMaxAgeMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "default": 31536000000
+            },
+            "capturedTextMaxRecords": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "default": 1000
+            },
+            "capturedTextMaxAgeMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991,
+              "default": 2592000000
+            }
+          }
+        }
+      }
+    },
+    "channels": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "plugins": {
+          "type": "array",
+          "description": "External channel plugins loaded by package name.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "package"
+            ],
+            "properties": {
+              "package": {
+                "type": "string",
+                "description": "Package name exporting createChannelDriver(options)."
+              },
+              "id": {
+                "type": "string",
+                "description": "Optional channel id override."
+              },
+              "label": {
+                "type": "string",
+                "description": "Optional operator-facing label."
+              },
+              "config": {
+                "type": "object",
+                "description": "Plugin-owned config payload.",
+                "additionalProperties": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "cron": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "jobs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "expression",
+              "prompt"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "expression": {
+                "type": "string",
+                "minLength": 1
+              },
+              "timezone": {
+                "type": "string",
+                "minLength": 1
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "conversationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "maxRunMs": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "notify": {
+                "type": "boolean"
+              },
+              "notifyConversationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "notifyFailureCooldownHours": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "effort": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "enabled": {
+          "description": "Enables the cron capability.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": false
+        },
+        "dir": {
+          "description": "Configures dir for the cron section.",
+          "examples": [
+            "cron"
+          ],
+          "type": "string",
+          "default": "cron"
+        },
+        "expression": {
+          "description": "Configures expression for the cron section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "timezone": {
+          "description": "Configures timezone for the cron section.",
+          "examples": [
+            "UTC"
+          ],
+          "type": "string",
+          "default": "UTC"
+        },
+        "prompt": {
+          "description": "Configures prompt for the cron section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "conversationId": {
+          "description": "Configures conversationId for the cron section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "notify": {
+          "description": "Configures notify for the cron section.",
+          "examples": [
+            "false"
+          ],
+          "type": "boolean",
+          "default": false
+        },
+        "notifyConversationId": {
+          "description": "Configures notifyConversationId for the cron section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "notifyFailureCooldownHours": {
+          "description": "Configures notifyFailureCooldownHours for the cron section.",
+          "examples": [
+            6
+          ],
+          "type": "integer",
+          "default": 6
+        },
+        "model": {
+          "description": "Configures model for the cron section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "effort": {
+          "description": "Configures effort for the cron section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        }
+      }
+    },
+    "webhook": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "endpoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "mode": {
+                "enum": [
+                  "sync",
+                  "async"
+                ]
+              },
+              "enabled": {
+                "type": "boolean"
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "notify": {
+                "type": "boolean"
+              },
+              "notifyConversationId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1
+              },
+              "effort": {
+                "type": "string",
+                "minLength": 1
+              },
+              "maxRunMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 86400000
+              }
+            }
+          }
+        },
+        "enabled": {
+          "description": "Enables the webhook capability.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": false
+        },
+        "dir": {
+          "description": "Configures dir for the webhook section.",
+          "examples": [
+            "webhook"
+          ],
+          "type": "string",
+          "default": "webhook"
+        },
+        "host": {
+          "description": "Configures host for the webhook section.",
+          "examples": [
+            "127.0.0.1"
+          ],
+          "type": "string",
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "description": "Configures port for the webhook section.",
+          "examples": [
+            0
+          ],
+          "type": "integer",
+          "default": 0
+        },
+        "path": {
+          "description": "Configures path for the webhook section.",
+          "examples": [
+            "/webhook/invoke"
+          ],
+          "type": "string",
+          "default": "/webhook/invoke"
+        },
+        "prompt": {
+          "description": "Configures prompt for the webhook section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "notify": {
+          "description": "Configures notify for the webhook section.",
+          "examples": [
+            "example"
+          ],
+          "type": "boolean"
+        },
+        "notifyConversationId": {
+          "description": "Configures notifyConversationId for the webhook section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "model": {
+          "description": "Configures model for the webhook section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "effort": {
+          "description": "Configures effort for the webhook section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "allowNonLoopback": {
+          "description": "Configures allowNonLoopback for the webhook section.",
+          "examples": [
+            true
+          ],
+          "type": "boolean"
+        },
+        "apiKey": {
+          "description": "Secret value for webhook.apiKey; prefer the env override.",
+          "examples": [
+            "set-via-MONO_AGENT_WEBHOOK_API_KEY"
+          ],
+          "type": "string"
+        },
+        "defaultMode": {
+          "description": "Configures defaultMode for the webhook section.",
+          "examples": [
+            "sync"
+          ],
+          "type": "string",
+          "default": "sync"
+        },
+        "retentionMs": {
+          "description": "Configures retentionMs for the webhook section.",
+          "examples": [
+            300000
+          ],
+          "type": "integer",
+          "default": 300000
+        },
+        "maxStoredRequests": {
+          "description": "Configures maxStoredRequests for the webhook section.",
+          "examples": [
+            "100"
+          ],
+          "type": "integer",
+          "default": 100
+        },
+        "maxRunMs": {
+          "description": "Configures maxRunMs for the webhook section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        }
+      }
+    },
+    "slack": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "shortcuts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "callbackId",
+              "prompt"
+            ],
+            "properties": {
+              "callbackId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              },
+              "channelId": {
+                "type": "string",
+                "minLength": 1
+              },
+              "ackText": {
+                "type": "string",
+                "minLength": 1
+              },
+              "threadReply": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "homeTab": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "headerText": {
+              "type": "string",
+              "minLength": 1
+            },
+            "buttons": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "actionId",
+                  "label",
+                  "prompt"
+                ],
+                "properties": {
+                  "actionId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "label": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "channelId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "ackText": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "threadReply": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "enabled": {
+          "description": "Enables the slack capability.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": false
+        },
+        "botToken": {
+          "description": "Secret value for slack.botToken; prefer the env override.",
+          "examples": [
+            "env:MONO_AGENT_SLACK_BOT_TOKEN"
+          ],
+          "type": "string"
+        },
+        "appToken": {
+          "description": "Secret value for slack.appToken; prefer the env override.",
+          "examples": [
+            "env:MONO_AGENT_SLACK_APP_TOKEN"
+          ],
+          "type": "string"
+        },
+        "allowedChannelIds": {
+          "description": "Configures allowedChannelIds for the slack section.",
+          "examples": [
+            [
+              "example"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowAllChannels": {
+          "description": "Configures allowAllChannels for the slack section.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": false
+        },
+        "botUserIds": {
+          "description": "Configures botUserIds for the slack section.",
+          "examples": [
+            [
+              "example"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mentionTextAliases": {
+          "description": "Configures mentionTextAliases for the slack section.",
+          "examples": [
+            [
+              "example"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stripMentionText": {
+          "description": "When unset, defaults to `true` when `botUserIds` or `mentionTextAliases` is non-empty; otherwise `false`.",
+          "examples": [
+            false
+          ],
+          "type": "boolean"
+        },
+        "heartbeatIntervalMs": {
+          "description": "Configures heartbeatIntervalMs for the slack section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        },
+        "heartbeatTimeoutMs": {
+          "description": "Configures heartbeatTimeoutMs for the slack section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        },
+        "reconnectInitialBackoffMs": {
+          "description": "Configures reconnectInitialBackoffMs for the slack section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        },
+        "reconnectMaxBackoffMs": {
+          "description": "Configures reconnectMaxBackoffMs for the slack section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        },
+        "reconnectStabilityMs": {
+          "description": "Configures reconnectStabilityMs for the slack section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        },
+        "reconnectStartupGraceMs": {
+          "description": "Configures reconnectStartupGraceMs for the slack section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        },
+        "drainDeadlineMs": {
+          "description": "Configures drainDeadlineMs for the slack section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        }
+      }
+    },
+    "telegram": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "command",
+              "description"
+            ],
+            "properties": {
+              "command": {
+                "type": "string",
+                "pattern": "^[a-z0-9_]{1,32}$"
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "prompt": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "reactions": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "working": {
+                  "type": "boolean"
+                },
+                "done": {
+                  "type": "boolean"
+                },
+                "error": {
+                  "type": "boolean"
+                }
+              }
+            }
+          ]
+        },
+        "quietHours": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "start",
+            "end",
+            "timezone"
+          ],
+          "properties": {
+            "start": {
+              "type": "string",
+              "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
+            },
+            "end": {
+              "type": "string",
+              "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$"
+            },
+            "timezone": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "sendTools": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "scope": {
+              "description": "Bind Telegram send tools to the chat that produced the current run.",
+              "examples": [
+                "producing-conversation"
+              ],
+              "type": "string",
+              "enum": [
+                "producing-conversation"
+              ]
+            },
+            "pathScope": {
+              "description": "Confine Telegram path uploads to the current run output directory.",
+              "examples": [
+                "run-output"
+              ],
+              "type": "string",
+              "enum": [
+                "run-output"
+              ]
+            }
+          }
+        },
+        "enabled": {
+          "description": "Enables the telegram capability.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": false
+        },
+        "botToken": {
+          "description": "Secret value for telegram.botToken; prefer the env override.",
+          "examples": [
+            "env:MONO_AGENT_TELEGRAM_BOT_TOKEN"
+          ],
+          "type": "string"
+        },
+        "allowedChatIds": {
+          "description": "Configures allowedChatIds for the telegram section.",
+          "examples": [
+            [
+              "example"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "allowAllChats": {
+          "description": "Configures allowAllChats for the telegram section.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": false
+        },
+        "transport": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ipFamily": {
+              "description": "Configures transport.ipFamily for the telegram section.",
+              "examples": [
+                "example"
+              ],
+              "type": "integer"
+            }
+          }
+        },
+        "pollWatchdogMs": {
+          "description": "Configures pollWatchdogMs for the telegram section.",
+          "examples": [
+            1
+          ],
+          "type": "integer"
+        },
+        "apiRoot": {
+          "description": "Configures apiRoot for the telegram section.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        },
+        "attachments": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxBytes": {
+              "description": "Configures attachments.maxBytes for the telegram section.",
+              "examples": [
+                1
+              ],
+              "type": "integer"
+            },
+            "downloadTimeoutMs": {
+              "description": "Configures attachments.downloadTimeoutMs for the telegram section.",
+              "examples": [
+                1
+              ],
+              "type": "integer"
+            },
+            "maxUploadBytes": {
+              "description": "Configures attachments.maxUploadBytes for the telegram section.",
+              "examples": [
+                1
+              ],
+              "type": "integer"
+            }
+          }
+        },
+        "transcription": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "endpoint": {
+              "description": "Configures transcription.endpoint for the telegram section.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "model": {
+              "description": "Configures transcription.model for the telegram section.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "language": {
+              "description": "Configures transcription.language for the telegram section.",
+              "examples": [
+                "example"
+              ],
+              "type": "string"
+            },
+            "timeoutMs": {
+              "description": "Configures transcription.timeoutMs for the telegram section.",
+              "examples": [
+                1
+              ],
+              "type": "integer"
+            }
+          }
+        }
+      }
+    },
+    "openaiApi": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Enables the openaiApi capability.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": false
+        },
+        "host": {
+          "description": "Configures host for the openaiApi section.",
+          "examples": [
+            "127.0.0.1"
+          ],
+          "type": "string",
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "description": "Configures port for the openaiApi section.",
+          "examples": [
+            0
+          ],
+          "type": "integer",
+          "default": 0
+        },
+        "basePath": {
+          "description": "Configures basePath for the openaiApi section.",
+          "examples": [
+            "/v1"
+          ],
+          "type": "string",
+          "default": "/v1"
+        },
+        "allowNonLoopback": {
+          "description": "Configures allowNonLoopback for the openaiApi section.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": false
+        },
+        "apiKey": {
+          "description": "Secret value for openaiApi.apiKey; prefer the env override.",
+          "examples": [
+            "env:MONO_AGENT_OPENAI_API_KEY"
+          ],
+          "type": "string"
+        },
+        "modelId": {
+          "description": "Configures modelId for the openaiApi section.",
+          "examples": [
+            "agent"
+          ],
+          "type": "string",
+          "default": "agent"
+        }
+      }
+    },
+    "tui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "description": "Enables the tui capability.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": true
+        },
+        "host": {
+          "description": "Configures host for the tui section.",
+          "examples": [
+            "127.0.0.1"
+          ],
+          "type": "string",
+          "default": "127.0.0.1"
+        },
+        "port": {
+          "description": "Configures port for the tui section.",
+          "examples": [
+            0
+          ],
+          "type": "integer",
+          "default": 0
+        },
+        "basePath": {
+          "description": "Configures basePath for the tui section.",
+          "examples": [
+            "/gui"
+          ],
+          "type": "string",
+          "default": "/gui"
+        },
+        "allowNonLoopback": {
+          "description": "Configures allowNonLoopback for the tui section.",
+          "examples": [
+            true
+          ],
+          "type": "boolean",
+          "default": false
+        },
+        "apiKey": {
+          "description": "Secret value for tui.apiKey; prefer the env override.",
+          "examples": [
+            "example"
+          ],
+          "type": "string"
+        }
+      }
+    }
+  }
+}

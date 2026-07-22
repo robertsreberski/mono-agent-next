@@ -1,0 +1,34 @@
+.mono-agent/
+.mono-agent-build.json
+.mono-agent-build.json.tmp-*
+.mono-agent-build.lock
+node_modules/
+dist/
+coverage/
+.workflow/
+.ultrawork/
+.env*
+!.env.example
+.DS_Store
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+mono-agent.config.json
+# These two source-only, secret-free consumer contract fixtures are deliberate.
+!packages/agent-app/src/__tests__/fixtures/consumers/local-agent-alpha/mono-agent.config.json
+!packages/agent-app/src/__tests__/fixtures/consumers/local-agent-beta/mono-agent.config.json
+packages/*/dist/
+packages/*/types/
+demos/*/dist/
+# memory-bujo SQLite index — disposable, rebuildable from canonical markdown (spec §6.1)
+memory.db
+*.db-wal
+*.db-shm
+
+# Superpowers working docs (specs/plans) — local-only, not tracked in git
+docs/superpowers/
+
+# Local-only agent notes + git hooks (never commit; keep personal identity/policy off the public repo)
+AGENTS.local.md
+.claude/settings.local.json
+.githooks/

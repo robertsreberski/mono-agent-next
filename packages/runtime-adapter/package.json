@@ -1,0 +1,40 @@
+{
+  "name": "@mono-agent/runtime-adapter",
+  "version": "0.15.0",
+  "description": "Typed runtime facade over @mono-agent/agent-runtime.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent.git",
+    "directory": "packages/runtime-adapter"
+  },
+  "private": false,
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && node -e \"require('node:fs').copyFileSync('src/srt-embed-runner.mjs','dist/srt-embed-runner.mjs')\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mono-agent/agent-contracts": "workspace:0.15.0",
+    "@mono-agent/agent-runtime": "workspace:0.15.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

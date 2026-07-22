@@ -1,0 +1,320 @@
+#!/usr/bin/env node
+import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
+import { join, relative } from "node:path";
+
+import {
+  PACKAGE_CATEGORIES,
+  SHIPPED_CHANNEL_IDS,
+  packageByName,
+  packageCatalog,
+  packageRelativePath,
+} from "./package-catalog.mjs";
+import { findAdapterNeutralityErrors } from "./lib/adapter-neutrality.mjs";
+import { findPackagePublicApiDocErrors } from "./lib/public-api-docs.mjs";
+import {
+  findPackageDocGenerationErrors,
+  findPackageReadmeStructureErrors,
+  REQUIRED_PACKAGE_README_SECTIONS,
+} from "./lib/package-docs.mjs";
+import { findPackageVerificationErrors } from "./lib/package-verification.mjs";
+
+const root = process.cwd();
+const packageScope = "@mono-agent/";
+const requiredReadmeSections = REQUIRED_PACKAGE_README_SECTIONS.map((section) => `## ${section}`);
+
+const errors = [];
+const catalogByName = packageByName();
+const catalogPaths = new Set(packageCatalog.map((entry) => packageRelativePath(entry)));
+const packagePaths = workspacePackagePaths()
+  .sort();
+
+for (const packagePath of packagePaths) {
+  if (!catalogPaths.has(packagePath)) {
+    errors.push(`${packagePath} is missing from scripts/package-catalog.mjs.`);
+  }
+}
+
+const channelOwnerById = new Map();
+for (const catalogEntry of packageCatalog) {
+  const packagePath = packageRelativePath(catalogEntry);
+  if (!PACKAGE_CATEGORIES.includes(catalogEntry.category)) {
+    errors.push(`${packagePath} has unknown category ${catalogEntry.category}.`);
+  }
+  for (const allowed of catalogEntry.allowedDependencyCategories) {
+    if (!PACKAGE_CATEGORIES.includes(allowed)) {
+      errors.push(`${packagePath} allows unknown dependency category ${allowed}.`);
+    }
+  }
+  if (catalogEntry.category === "communication" && !Array.isArray(catalogEntry.channelIds)) {
+    errors.push(`${packagePath} must declare channelIds in scripts/package-catalog.mjs.`);
+    continue;
+  }
+  if (catalogEntry.category !== "communication" && catalogEntry.channelIds !== undefined) {
+    errors.push(`${packagePath} declares channelIds but is not a communication package.`);
+    continue;
+  }
+  if (!Array.isArray(catalogEntry.channelIds)) {
+    continue;
+  }
+  if (catalogEntry.channelIds.length === 0) {
+    errors.push(`${packagePath} must declare at least one shipped channel id.`);
+  }
+  for (const channelId of catalogEntry.channelIds) {
+    if (typeof channelId !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(channelId)) {
+      errors.push(`${packagePath} has invalid shipped channel id ${JSON.stringify(channelId)}.`);
+      continue;
+    }
+    const existingOwner = channelOwnerById.get(channelId);
+    if (existingOwner !== undefined) {
+      errors.push(`${packagePath} duplicates shipped channel id ${channelId} from ${existingOwner}.`);
+      continue;
+    }
+    channelOwnerById.set(channelId, packagePath);
+  }
+}
+
+for (const catalogEntry of packageCatalog) {
+  const packagePath = packageRelativePath(catalogEntry);
+  const dir = join(root, packagePath);
+  const packageJsonPath = join(dir, "package.json");
+  const readmePath = join(dir, "README.md");
+  if (!existsSync(packageJsonPath)) {
+    errors.push(`Missing package.json for ${packagePath}.`);
+    continue;
+  }
+  if (!existsSync(readmePath)) {
+    errors.push(`Missing README.md for ${packagePath}.`);
+  } else {
+    const readme = readFileSync(readmePath, "utf8");
+    for (const section of requiredReadmeSections) {
+      if (!readme.includes(section)) {
+        errors.push(`${packagePath}/README.md missing section ${section}.`);
+      }
+    }
+    if (!readme.includes(`Category: \`${catalogEntry.category}\``)) {
+      errors.push(`${packagePath}/README.md missing catalog category line: Category: \`${catalogEntry.category}\`.`);
+    }
+  }
+
+  const manifest = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+  if (catalogEntry.publishable === true) {
+    errors.push(...findPackageVerificationErrors({ manifest, packagePath }));
+  }
+  const packageName = manifest.name;
+  if (packageName !== catalogEntry.name) {
+    errors.push(`${packagePath}/package.json has unexpected name ${packageName}.`);
+  }
+  // The `alias` tier is intentionally unscoped (the bare `mono-agent` npm name);
+  // every other package must use the @mono-agent/ scope.
+  if (catalogEntry.tier !== "alias" && !packageName.startsWith(packageScope)) {
+    errors.push(`${packagePath}/package.json name must use the ${packageScope} scope.`);
+  }
+  const deps = {
+    ...manifest.dependencies,
+    ...manifest.optionalDependencies,
+    ...manifest.peerDependencies,
+  };
+  const depNames = Object.keys(deps);
+  for (const depName of depNames) {
+    if (!depName.startsWith(packageScope)) {
+      continue;
+    }
+    const depEntry = catalogByName.get(depName);
+    if (depEntry === undefined) {
+      if (String(deps[depName]).startsWith("workspace:")) {
+        errors.push(`${packagePath} depends on uncatalogued workspace package ${depName}.`);
+      }
+      continue;
+    }
+    if (!catalogEntry.allowedDependencyCategories.includes(depEntry.category)) {
+      errors.push(
+        `${packagePath} (${catalogEntry.category}) may not depend on ${depName} (${depEntry.category}).`,
+      );
+    }
+    if (depEntry.category === "communication" && catalogEntry.category !== "app") {
+      errors.push(`${packagePath} may not depend on communication adapter ${depName}; compose adapters only in app hosts/demos.`);
+    }
+  }
+}
+
+const oldReferences = [
+  `@mono-agent/${"config"}-${"ui"}`,
+  `@mono-agent/${"telegram"}-${"bridge"}`,
+  `@mono-agent/${"whatsapp"}-${"bridge"}`,
+];
+for (const file of ["package.json", "README.md", "pnpm-lock.yaml"]) {
+  const text = readFileSync(join(root, file), "utf8");
+  for (const oldReference of oldReferences) {
+    if (text.includes(oldReference)) {
+      errors.push(`${file} still references ${oldReference}.`);
+    }
+  }
+}
+
+const staleReferences = [
+  `@mono-agent/${"comm"}/`,
+  `${packageScope}${"context"}`,
+  `${packageScope}${"skills"}`,
+  `${packageScope}${"sandbox"}`,
+  `${packageScope}${"tool"}-${"policy"}`,
+  `${packageScope}${"agent"}-${"host"}`,
+  `${packageScope}${"tui"}-${"adapter"}`,
+  `${packageScope}${"live"}-${"adapter"}`,
+  `packages/${"context"}`,
+  `packages/${"skills"}`,
+  `packages/${"sandbox"}`,
+  `packages/${"tool"}-${"policy"}`,
+  `packages/${"agent"}-${"host"}`,
+  `packages/${"tui"}-${"adapter"}`,
+  `packages/${"live"}-${"adapter"}`,
+  `${"config"}-${"ui"}`,
+  `${"telegram"}-${"bridge"}`,
+  `${"whatsapp"}-${"bridge"}`,
+];
+for (const staleReference of staleReferences) {
+  for (const file of walkTextFiles(root)) {
+    const text = readFileSync(file, "utf8");
+    if (text.includes(staleReference)) {
+      errors.push(`${relative(root, file)} still references ${staleReference}.`);
+    }
+  }
+}
+
+const controllerOperationModules = [
+  "app-controller-channels.ts",
+  "app-controller-continuation.ts",
+  "app-controller-lifecycle.ts",
+  "app-controller-maintenance.ts",
+  "app-controller-memory-health.ts",
+  "app-controller-memory.ts",
+  "app-controller-responder.ts",
+  "app-controller-traceability.ts",
+];
+for (const file of controllerOperationModules) {
+  const relativePath = join("packages", "agent-app", "src", file);
+  const text = readFileSync(join(root, relativePath), "utf8");
+  if (/from\s+["']\.\/app-controller\.js["']/u.test(text)) {
+    errors.push(`${relativePath} must depend on a narrow controller port, not MonoAgentAppController.`);
+  }
+}
+
+const extractedResponsibilityDeclarations = [
+  {
+    file: join("packages", "agent-app", "src", "web-command.ts"),
+    declaration: "function rolloverManagedWebLogs",
+    owner: "managed-web-logs.ts",
+  },
+  {
+    file: join("packages", "agent-app", "src", "background.ts"),
+    declaration: "function maintainLaunchdLogsOperation",
+    owner: "background-log-maintenance.ts",
+  },
+  {
+    file: join("packages", "agent-app", "src", "doctor.ts"),
+    declaration: "function probeExporterEndpoint",
+    owner: "doctor-observability.ts",
+  },
+  {
+    file: join("packages", "slack-adapter", "src", "adapter.ts"),
+    declaration: "function buildSlackRuntimeControlCatalog",
+    owner: "runtime-controls.ts",
+  },
+  {
+    file: join("packages", "memory", "src", "bujo", "rebuild.ts"),
+    declaration: "function acquireSqliteWriterFences",
+    owner: "rebuild-sqlite-safety.ts",
+  },
+];
+for (const rule of extractedResponsibilityDeclarations) {
+  const text = readFileSync(join(root, rule.file), "utf8");
+  if (text.includes(rule.declaration)) {
+    errors.push(`${rule.file} must keep ${rule.declaration} in ${rule.owner}.`);
+  }
+}
+
+errors.push(...findAdapterNeutralityErrors({ root, channelIds: SHIPPED_CHANNEL_IDS }));
+errors.push(...findPackagePublicApiDocErrors({ root, catalog: packageCatalog }));
+errors.push(...findPackageDocGenerationErrors({ root, catalog: packageCatalog }));
+errors.push(...findPackageReadmeStructureErrors({ root, catalog: packageCatalog }));
+
+if (errors.length > 0) {
+  console.error("Package architecture check failed:");
+  for (const error of errors) {
+    console.error(`- ${error}`);
+  }
+  process.exit(1);
+}
+
+console.log(`Package architecture check passed for ${packageCatalog.length} workspace packages.`);
+
+function workspacePackagePaths() {
+  const workspaceRoots = ["packages", "extras"];
+  const paths = [];
+  for (const workspaceRoot of workspaceRoots) {
+    const workspaceRootPath = join(root, workspaceRoot);
+    if (!existsSync(workspaceRootPath)) {
+      continue;
+    }
+    for (const entry of readdirSync(workspaceRootPath, { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      const packagePath = `${workspaceRoot}/${entry.name}`;
+      if (isPackageDirectory(join(root, packagePath)) || catalogPaths.has(packagePath)) {
+        paths.push(packagePath);
+      }
+    }
+  }
+  return paths;
+}
+
+function walkTextFiles(dir) {
+  const ignoredDirs = new Set([
+    ".claude",
+    ".codex",
+    ".git",
+    ".mono-agent",
+    ".omx",
+    ".superpowers",
+    ".ultrawork",
+    ".workflow",
+    ".worklab-tmp",
+    ".worktrees",
+    "node_modules",
+    "dist",
+  ]);
+  const files = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (ignoredDirs.has(entry.name)) {
+      continue;
+    }
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...walkTextFiles(path));
+      continue;
+    }
+    if (!entry.isFile()) {
+      continue;
+    }
+    if (!isTextFile(path)) {
+      continue;
+    }
+    files.push(path);
+  }
+  return files;
+}
+
+function isTextFile(path) {
+  if (statSync(path).size > 1_000_000) {
+    return false;
+  }
+  return /\.(?:cjs|css|html|js|json|md|mjs|ts|tsx|yaml|yml)$/u.test(path);
+}
+
+function isPackageDirectory(dir) {
+  if (existsSync(join(dir, "package.json"))) {
+    return true;
+  }
+  const ignoredPackageArtifacts = new Set(["dist", "node_modules"]);
+  return readdirSync(dir).some((entry) => !ignoredPackageArtifacts.has(entry));
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Verify Green"
+  short_description: "Choose a risk-based verification lane"
+  default_prompt: "Use $verify-green to select and run the smallest verification lane that proves this mono-agent change."

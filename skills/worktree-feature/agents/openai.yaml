@@ -1,0 +1,4 @@
+interface:
+  display_name: "Worktree Feature"
+  short_description: "Use diff-aware isolated feature work"
+  default_prompt: "Use $worktree-feature to prepare only the build scope this mono-agent diff needs, then ship and clean up its PR safely."

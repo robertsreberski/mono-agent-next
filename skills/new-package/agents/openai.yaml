@@ -1,0 +1,4 @@
+interface:
+  display_name: "New Package"
+  short_description: "Add architecture-compliant packages"
+  default_prompt: "Use $new-package to add a new @mono-agent package that passes architecture checks."

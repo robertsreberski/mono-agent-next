@@ -1,0 +1,154 @@
+{
+  "$schema": "https://raw.githubusercontent.com/robertsreberski/mono-agent-next/main/packages/agent-app/schema/mono-agent.config.schema.json",
+  "runtime": {
+    "model": "pi:openai-codex:gpt-5.5",
+    "fallbackModels": [
+      "pi:opencode-go:kimi-k2.6"
+    ],
+    "maxTurns": 0,
+    "executionMode": "sdk",
+    "effort": "high",
+    "permissionMode": "bypassPermissions",
+    "workspace": ".",
+    "session": {
+      "mode": "continuous",
+      "idleTimeoutMs": 1800000,
+      "rollover": "daily",
+      "rolloverTimezone": "Europe/Rome",
+      "isolateProactive": true
+    }
+  },
+  "providers": {
+    "piAuthPath": "./pi-auth/auth.json",
+    "piNative": {
+      "piSessionsRoot": "./.mono-agent/sessions",
+      "maxRetryDelayMs": 30000
+    }
+  },
+  "context": {
+    "identityPath": "./IDENTITY.md",
+    "skillsRoot": "./skills",
+    "selectedSkills": [],
+    "skillMaxBytes": 96000,
+    "skillDisclosure": "index"
+  },
+  "memory": {
+    "mode": "bujo",
+    "path": "./.mono-agent/memory",
+    "writeMode": "capture",
+    "maxBytes": 96000,
+    "embeddings": {
+      "provider": "ollama",
+      "model": "nomic-embed-text:v1.5",
+      "endpoint": "http://localhost:11434"
+    },
+    "llm": {
+      "provider": "agent-host",
+      "model": "pi:opencode-go:kimi-k2.6",
+      "executionMode": "sdk",
+      "timeoutMs": 360000
+    },
+    "recallTool": {
+      "enabled": true
+    }
+  },
+  "tools": {
+    "allowedTools": [
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "Bash",
+      "WebFetch",
+      "WebSearch",
+      "TelegramSendMessage"
+    ],
+    "disallowedTools": [],
+    "mcpConfigPath": "./mcp.json"
+  },
+  "sandbox": {
+    "mode": "native",
+    "network": {
+      "mode": "localhost",
+      "allowlist": []
+    },
+    "readableRoots": [
+      ".",
+      "./fixture-home/.config/todoist-cli",
+      "./fixture-home/.config/gws-personal",
+      "./fixture-home/.config/gws-secondary",
+      "./fixture-home/.config/gws-work",
+      "./fixture-home/.wacli",
+      "./fixture-home/.config/work-cli",
+      "./fixture-home/ExampleCorp_Repositories/work-cli",
+      "./fixture-home/.claude"
+    ],
+    "writableRoots": [
+      ".",
+      "./fixture-home/.config/todoist-cli",
+      "./fixture-home/.config/gws-personal",
+      "./fixture-home/.config/gws-secondary",
+      "./fixture-home/.config/gws-work",
+      "./fixture-home/.wacli",
+      "./fixture-home/.config/work-cli",
+      "./fixture-home/.claude"
+    ],
+    "denyWrite": [
+      ".env",
+      ".env.*",
+      ".git/config",
+      ".git/hooks/**"
+    ],
+    "fallback": "unsafe-host-process",
+    "unsafeAllowHostProcess": true
+  },
+  "artifacts": {
+    "dir": "./.mono-agent/artifacts"
+  },
+  "traceability": {
+    "registryDir": "./.mono-agent/trace-sources",
+    "sourceId": "local-agent-alpha",
+    "sourceLabel": "Local Agent Alpha",
+    "heartbeatMs": 10000,
+    "staleAfterMs": 30000
+  },
+  "observability": {
+    "exporters": [
+      {
+        "type": "phoenix",
+        "endpoint": "http://127.0.0.1:6006/v1/traces",
+        "projectName": "local-agent-alpha",
+        "includeSensitiveData": false
+      }
+    ]
+  },
+  "webhook": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 0,
+    "path": "/webhook/invoke",
+    "allowNonLoopback": false,
+    "defaultMode": "sync",
+    "retentionMs": 300000,
+    "maxStoredRequests": 100
+  },
+  "openaiApi": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 4312,
+    "basePath": "/v1",
+    "allowNonLoopback": false,
+    "modelId": "local-agent-alpha"
+  },
+  "telegram": {
+    "enabled": true,
+    "allowedChatIds": [
+      "100100100"
+    ],
+    "allowAllChats": false
+  },
+  "cron": {
+    "dir": "cron"
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Dead Code Audit"
+  short_description: "Prove-or-remove dead code across the monorepo"
+  default_prompt: "Use $dead-code-audit to prove-or-remove dead exports, orphaned wiring, and deprecated surfaces across the monorepo."
