@@ -31,11 +31,27 @@ import {
   runWorkspaceBuild,
   stagingDistTagForRelease,
 } from "../publish-release.mjs";
+import { assertPublishingAllowed } from "../check-publish-guard.mjs";
 import { SUPPORTED_NODE_ENGINE } from "../../node-version.mjs";
 
 const expectedPublishablePackages = packageCatalog.filter((entry) => entry.publishable === true);
 const expectedPublishablePackageCount = expectedPublishablePackages.length;
 const expectedPublishablePackageNames = expectedPublishablePackages.map((entry) => entry.name).sort();
+
+describe("successor publish guard", () => {
+  test("blocks publication until the bootstrap safety section is removed", () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-release-guard-"));
+    try {
+      fs.writeFileSync(path.join(repo, "AGENTS.md"), "# AGENTS.md\n\n## Successor bootstrap safety\n\nDo not publish.\n");
+      expect(() => assertPublishingAllowed({ repo })).toThrow(/successor bootstrap safety guard/u);
+
+      fs.writeFileSync(path.join(repo, "AGENTS.md"), "# AGENTS.md\n\n## Project\n");
+      expect(() => assertPublishingAllowed({ repo })).not.toThrow();
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
 
 function packageRecord({
   name,
@@ -544,6 +560,7 @@ describe("current launch manifest", () => {
     );
 
     expect(workflow).toContain("id-token: write");
+    expect(workflow).toContain("node scripts/release/check-publish-guard.mjs");
     expect(workflow).toContain("npm install --global npm@11.12.1");
     expect(workflow).toContain("NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}");
     expect(workflow).toContain("pnpm run release:publish -- --tag \"$GITHUB_REF_NAME\"");

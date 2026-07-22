@@ -41,6 +41,9 @@ jobs:
           node-version: "22.19.0"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Enforce successor bootstrap safety
+        run: node scripts/release/check-publish-guard.mjs
+
       - name: Enable Corepack
         run: corepack enable
 

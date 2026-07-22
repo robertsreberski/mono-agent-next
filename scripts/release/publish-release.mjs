@@ -11,6 +11,7 @@ import {
   computeRuntimeDependencyDigest,
   readBuildMarker,
 } from "../lib/build-provenance.mjs";
+import { assertPublishingAllowed } from "./check-publish-guard.mjs";
 import { packReleasePackage } from "./pack-release.mjs";
 import { REPO_ROOT } from "./package-graph.mjs";
 import { validateRelease } from "./validate-release.mjs";
@@ -420,6 +421,7 @@ export async function executeFrozenPublish({
 async function main() {
   const argv = process.argv.slice(2);
   const dryRun = hasArg("--dry-run", argv);
+  if (!dryRun) assertPublishingAllowed();
   const explicitTag = argValue("--tag", argv);
   if (!dryRun && explicitTag === null) {
     throw new Error("--tag is required for a real publish");

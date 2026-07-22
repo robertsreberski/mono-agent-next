@@ -39,6 +39,7 @@
     "test:demo": "vitest run demos/final-agent/src/__tests__/final-demo.test.ts demos/final-agent/src/__tests__/cli-args.test.ts demos/final-agent/src/__tests__/deploy-cli.test.ts demos/final-agent/src/__tests__/deployment.test.ts",
     "demo:final": "node demos/final-agent/dist/cli.js",
     "deploy:final": "pnpm run build && node demos/final-agent/dist/deploy-cli.js",
+    "release:guard": "node scripts/release/check-publish-guard.mjs",
     "release:validate": "node scripts/release/validate-release.mjs",
     "release:pack": "node scripts/release/pack-release.mjs",
     "release:consumer": "node scripts/release/verify-packed-consumer.mjs",

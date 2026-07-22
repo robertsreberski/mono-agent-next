@@ -9,6 +9,10 @@ non-negotiables below are your contract.
 
 ## Non-negotiables
 
+- **Successor guard first.** Run `pnpm run release:guard` before changing a
+  version or creating a tag. If it fails, stop: this checkout cannot publish,
+  deploy, restart, or repoint consumers until the reviewed canonical cutover
+  removes the guard from `AGENTS.md`.
 - **Lockstep**: every `packages/*/package.json` version equals the tag version;
   every internal dep (including root devDependencies and demo/consumer manifests)
   is `workspace:<version>`. `pnpm install` after bumping to refresh the lockfile.
@@ -19,13 +23,15 @@ pnpm run release:test
 pnpm run release:validate -- --tag vX.Y.Z
 pnpm run check:architecture && pnpm run build && pnpm run typecheck && pnpm test
 pnpm run release:pack -- --tag vX.Y.Z
+pnpm run release:consumer -- --tag vX.Y.Z --require-minimum
 git diff --check
 ```
 
 - **CI publishes, not you.** `git tag vX.Y.Z && git push origin vX.Y.Z` triggers
   `.github/workflows/npm-release.yml`. Watch it: `gh run list --limit 5`,
   `gh run watch <id>`, `gh run view <id> --json status,conclusion`.
-  Local `npm publish` only as an explicit, user-approved fallback.
+  A local fallback must still pass `pnpm run release:guard` and use
+  `pnpm run release:publish -- --tag vX.Y.Z`; never call raw `npm publish`.
 
 ## Registry gotcha (always)
 
@@ -51,6 +57,8 @@ before declaring failure (CI's own smoke retries ~150s).
 
 ## Aftercare
 
+- While the successor guard remains, do not deploy, restart, or repoint any
+  consumer from this checkout.
 - The live fleet runs this repo's dist, not npm — ask whether to redeploy
   (`fleet-deploy` skill) so agents match the release.
 - Deprecations of retired packages go through the npm web UI (CLI is blocked by

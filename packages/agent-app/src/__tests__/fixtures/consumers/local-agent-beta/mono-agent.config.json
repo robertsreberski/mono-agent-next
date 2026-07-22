@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/robertsreberski/mono-agent/main/packages/agent-app/schema/mono-agent.config.schema.json",
+  "$schema": "https://raw.githubusercontent.com/robertsreberski/mono-agent-next/main/packages/agent-app/schema/mono-agent.config.schema.json",
   "runtime": {
     "model": "pi:openai-codex:gpt-5.5",
     "fallbackModels": [
@@ -122,7 +122,7 @@
         "type": "phoenix",
         "endpoint": "http://127.0.0.1:6006/v1/traces",
         "projectName": "local-agent-beta",
-        "includeSensitiveData": true
+        "includeSensitiveData": false
       }
     ]
   }
