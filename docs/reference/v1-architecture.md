@@ -294,8 +294,9 @@ retired package or deletion target.
 
 ## Licensing decision and authority
 
-The intended per-package license split is conditional on V1-010's provenance
-and authority gate:
+Until V1-010 passes, the repository and every first-party package manifest
+remain GPL-3.0-only. The intended post-gate package split is conditional on
+V1-010's provenance and authority proof:
 
 - `module-sdk` and `operator` may be marked Apache-2.0 extension seams only after
   V1-010 proves and commits the required authority.

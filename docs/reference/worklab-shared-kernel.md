@@ -72,10 +72,10 @@ separate product. The operating lesson transfers; the runtime fork does not.
 
 ## Current consequences
 
-- Worklab may remain pinned to the predecessor-published registry artifact
-  `@mono-agent/agent-runtime@0.16.0`; successor source or packages are not an
-  authorized v0 fallback, and this is not a mono-agent v1 dependency or
-  retention requirement.
+- Worklab's only authorized v0 fallback is the predecessor-published registry
+  artifact `@mono-agent/agent-runtime@0.16.0`; it must not resolve successor
+  source or packages. This pin is not a mono-agent v1 dependency or retention
+  requirement.
 - The final-v0 shared kernel remains `GPL-3.0-only`, matching the final-v0
   publishable package graph and repository-level `LICENSE`; mono-agent v1's
   separately reviewed extension seams follow the v1 licensing decision.
