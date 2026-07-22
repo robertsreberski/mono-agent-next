@@ -26,6 +26,7 @@
     "check:doc-snippets": "node scripts/check-doc-snippets.mjs",
     "check:architecture": "node scripts/check-package-architecture.mjs",
     "check:deep-imports": "node scripts/verify-deep-imports.mjs",
+    "report:v1-complexity": "node scripts/v1-complexity-report.mjs --baseline refactor/baselines/v1-complexity-baseline.json",
     "verify:consumers": "node scripts/verify-consumers.mjs",
     "verify:all": "node scripts/verify-all.mjs",
     "generate:public-api-docs": "node scripts/generate-public-api-docs.mjs",
