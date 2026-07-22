@@ -1,0 +1,129 @@
+{
+  "$schema": "https://raw.githubusercontent.com/robertsreberski/mono-agent/main/packages/agent-app/schema/mono-agent.config.schema.json",
+  "runtime": {
+    "model": "pi:openai-codex:gpt-5.5",
+    "fallbackModels": [
+      "pi:opencode-go:glm-5.2"
+    ],
+    "executionMode": "sdk",
+    "effort": "xhigh",
+    "workspace": ".",
+    "permissionMode": "bypassPermissions",
+    "session": {
+      "mode": "continuous",
+      "idleTimeoutMs": 1800000,
+      "rollover": "daily",
+      "rolloverTimezone": "Europe/Rome"
+    }
+  },
+  "context": {
+    "identityPath": "./IDENTITY.md",
+    "skillsRoot": "./skills",
+    "selectedSkills": []
+  },
+  "providers": {
+    "piAuthPath": "./pi-auth/auth.json",
+    "piNative": {
+      "piSessionsRoot": "./.local-agent-beta/sessions"
+    }
+  },
+  "memory": {
+    "mode": "journal",
+    "path": "./.local-agent-beta/memory",
+    "maxBytes": 64000,
+    "writeMode": "append-host-summary",
+    "embeddings": {
+      "provider": "ollama",
+      "model": "nomic-embed-text:v1.5",
+      "endpoint": "http://localhost:11434",
+      "dim": 768
+    },
+    "recallTool": {
+      "enabled": true
+    }
+  },
+  "tools": {
+    "allowedTools": [
+      "Read",
+      "Write",
+      "Edit",
+      "Glob",
+      "Grep",
+      "Bash",
+      "WebFetch",
+      "WebSearch",
+      "SlackSendMessage",
+      "MemoryRecall"
+    ],
+    "disallowedTools": [],
+    "mcpConfigPath": "./mcp.json"
+  },
+  "sandbox": {
+    "mode": "native",
+    "network": {
+      "mode": "localhost",
+      "allowlist": []
+    },
+    "readableRoots": [
+      ".",
+      "./fixture-home/.config/todoist-cli",
+      "./fixture-home/.config/gws-work",
+      "./fixture-home/.config/work-cli",
+      "./fixture-home/ExampleCorp_Repositories/work-cli",
+      "./fixture-home/.config/gh",
+      "./fixture-home/.claude"
+    ],
+    "writableRoots": [
+      ".",
+      "./fixture-home/.config/todoist-cli",
+      "./fixture-home/.config/gws-work",
+      "./fixture-home/.config/work-cli",
+      "./fixture-home/.config/gh",
+      "./fixture-home/.claude"
+    ],
+    "denyWrite": [
+      ".env",
+      ".env.*",
+      ".git/config",
+      ".git/hooks/**"
+    ],
+    "fallback": "unsafe-host-process",
+    "unsafeAllowHostProcess": true
+  },
+  "slack": {
+    "enabled": true,
+    "allowedChannelIds": [
+      "CLOCALBETA"
+    ],
+    "allowAllChannels": false
+  },
+  "cron": {
+    "dir": "cron"
+  },
+  "openaiApi": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 4311,
+    "basePath": "/v1",
+    "allowNonLoopback": false,
+    "modelId": "local-agent-beta"
+  },
+  "artifacts": {
+    "dir": "./.local-agent-beta/artifacts"
+  },
+  "traceability": {
+    "registryDir": "./.local-agent-beta/trace",
+    "sourceId": "local-agent-beta",
+    "sourceLabel": "Local Agent Beta"
+  },
+  "observability": {
+    "exporters": [
+      {
+        "type": "phoenix",
+        "endpoint": "http://127.0.0.1:6006/v1/traces",
+        "projectName": "local-agent-beta",
+        "includeSensitiveData": true
+      }
+    ]
+  }
+}

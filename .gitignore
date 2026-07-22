@@ -15,6 +15,9 @@ npm-debug.log*
 pnpm-debug.log*
 yarn-error.log*
 mono-agent.config.json
+# These two source-only, secret-free consumer contract fixtures are deliberate.
+!packages/agent-app/src/__tests__/fixtures/consumers/local-agent-alpha/mono-agent.config.json
+!packages/agent-app/src/__tests__/fixtures/consumers/local-agent-beta/mono-agent.config.json
 packages/*/dist/
 packages/*/types/
 demos/*/dist/
