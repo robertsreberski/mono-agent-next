@@ -6,8 +6,8 @@ description: Cut and registry-verify a lockstep npm release of all @mono-agent p
 # Lockstep npm release
 
 This workflow ends when the tag is published and the public registry is
-verified. Restarting Personal Agent, other mono-agent instances, A8C agents, or
-the web console is separate work and happens only when explicitly requested.
+verified. Restarting Personal Agent, other mono-agent instances, or the web
+console is separate work and happens only when explicitly requested.
 
 All catalog-publishable packages release in lockstep.
 `scripts/release/validate-release.mjs` requires every publishable package
@@ -20,6 +20,19 @@ a `tier`), 1 `tier: "alias"` package (`create-mono-agent` under `packages/*`), a
 5 `tier: "plugin"` extras under `extras/*` (a2a-adapter, agent-orchestrator,
 docs-mcp, memory-supermemory, and whatsapp-adapter). Plugin extras are version-bumped and
 published alongside core.
+
+## 0. Enforce repository release authority
+
+Before changing versions or creating a tag, run:
+
+```bash
+pnpm run release:guard
+```
+
+If the successor bootstrap safety guard is present, this command fails. Stop:
+do not bump, tag, publish, deploy, restart, or repoint a consumer from this
+checkout. The guard is removed only by the reviewed canonical-repository
+cutover. Never bypass it with raw `npm publish` or a local token.
 
 ## 1. Bump in a worktree
 
@@ -81,7 +94,8 @@ condition, inspect it once, stop polling, and report the external failure.
 
 The supported publisher is the tag workflow. A local fallback is allowed only
 when the user supplied or explicitly authorized `NPM_DEV_TOKEN`, the tag points
-at the clean current `main` commit, and the release build marker is valid:
+at the clean current `main` commit, the release build marker is valid, and
+`pnpm run release:guard` passes:
 
 ```bash
 test -n "${NPM_DEV_TOKEN:-}"
@@ -114,7 +128,7 @@ poll loops.
 Report the release commit, tag, publish path (CI or authorized local fallback),
 and registry verification. Then stop. If consumer adoption was also requested,
 start a separate exact-target workflow with `fleet-deploy` or that consumer's
-own runbook.
+own runbook, and only after `pnpm run release:guard` passes.
 
 Package deprecations must retain an explicit removal version/date or permanent
 retention decision in `docs/reference/deprecations.md`; remove due code, tests,
