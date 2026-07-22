@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -190,7 +190,7 @@ describe("A2A durable dispatch lifecycle", () => {
     expect(restartedCalls).toBe(0);
   });
 
-  it("fails closed on an in-doubt active admission after restart", async () => {
+  it("fails closed on an in-doubt crash-remnant admission after restart", async () => {
     const stateDir = await temporaryStateDir();
     const gate = deferred<void>();
     const original = await startProvider({
@@ -207,7 +207,16 @@ describe("A2A durable dispatch lifecycle", () => {
       idempotencyKey: "dispatch-restart-active-1",
     } as const;
     await dispatchA2AMessage({ ...input, agentUrl: original.agentCardUrl });
+    const recordPath = await onlyRecordPath(stateDir);
+    const crashRemnant = await readFile(recordPath);
+    expect(JSON.parse(crashRemnant.toString("utf8"))).toMatchObject({ status: "active" });
     await original.stop();
+    await expect.poll(async () =>
+      (JSON.parse(await readFile(recordPath, "utf8")) as { status?: unknown }).status,
+    ).toBe("completed");
+    // A graceful stop records a terminal cancellation. Restore the last
+    // pre-shutdown durable receipt to model a process crash after admission.
+    await writeFile(recordPath, crashRemnant);
 
     let restartedCalls = 0;
     const restarted = await startProvider({
@@ -382,6 +391,12 @@ async function temporaryStateDir(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "mono-a2a-dispatch-"));
   cleanups.push(() => rm(root, { recursive: true, force: true }));
   return join(root, "state");
+}
+
+async function onlyRecordPath(stateDir: string): Promise<string> {
+  const records = (await readdir(stateDir)).filter((name) => /^[a-f0-9]{64}\.json$/u.test(name));
+  expect(records).toHaveLength(1);
+  return join(stateDir, records[0] as string);
 }
 
 function idempotentAgentCard(): AgentCard {

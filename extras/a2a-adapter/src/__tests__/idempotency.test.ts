@@ -702,7 +702,7 @@ describe("durable A2A logical dispatch idempotency", () => {
     expect(secondCalls).toBe(0);
   });
 
-  it("fails closed with idempotency_in_doubt for an active admission after restart", async () => {
+  it("fails closed with idempotency_in_doubt for a crash-remnant active admission after restart", async () => {
     const stateDir = await temporaryStateDir();
     const gate = deferred<void>();
     const firstProvider = await startProvider({
@@ -720,7 +720,16 @@ describe("durable A2A logical dispatch idempotency", () => {
       returnImmediately: true,
     } as const;
     await sendA2AMessage({ ...input, agentUrl: firstProvider.agentCardUrl });
+    const recordPath = await onlyRecordPath(stateDir);
+    const crashRemnant = await readFile(recordPath);
+    expect(JSON.parse(crashRemnant.toString("utf8"))).toMatchObject({ status: "active" });
     await firstProvider.stop();
+    await expect.poll(async () =>
+      (JSON.parse(await readFile(recordPath, "utf8")) as { status?: unknown }).status,
+    ).toBe("completed");
+    // A graceful stop records a terminal cancellation. Restore the last
+    // pre-shutdown durable receipt to model a process crash after admission.
+    await writeFile(recordPath, crashRemnant);
 
     let restartedCalls = 0;
     const restarted = await startProvider({
