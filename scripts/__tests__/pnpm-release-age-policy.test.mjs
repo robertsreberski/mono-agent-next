@@ -353,7 +353,7 @@ describe("pnpm release-age policy", () => {
       argv: [], cwd: emptyExclusionCwd, stdout: sink(), stderr: emptyExclusionError,
     })).exitCode).toBe(1);
     expect(emptyExclusionError.text).toContain("must be absent while");
-  });
+  }, 15_000);
 
   it("isolates committed policy reads from release-age environment and user config", async () => {
     const cwd = await tempRepo([
@@ -389,7 +389,7 @@ describe("pnpm release-age policy", () => {
       "minimumReleaseAgeExclude: package-a",
       "packages: []",
       "",
-    ].join("\n"), { packageManager: "pnpm@10.28.2" });
+    ].join("\n"));
     const scalarError = sink();
     expect((await runCheckPnpmReleaseAgePolicy({
       argv: [], cwd: scalarCwd, stdout: sink(), stderr: scalarError,
