@@ -16,7 +16,7 @@ export const PACKAGE_CATEGORIES = [
 //     as request-scoped runtime extensions, or through an explicitly selected
 //     plugin backend or companion MCP pairing, living under `extras/`);
 //   - `tier: "alias"` — the unscoped `create-mono-agent` npm-init installer whose
-//     `create-mono-agent`/`mono-agent` bins delegate to `@mono-agent/agent-app`;
+//     `create-mono-agent`/`mono-agent` bins scaffold v1 or delegate to `@mono-agent/cli`;
 //     carries no responsibility of its own and is exempt from the `@mono-agent/`
 //     scope rule in the arch and release checks (the bare `mono-agent` npm name is
 //     unavailable — npm blocks it as too similar to an unrelated `monoagent`);
@@ -85,6 +85,31 @@ export const packageCatalog = [
     publishable: true,
   },
   {
+    dir: "channel-webhook",
+    name: "@mono-agent/channel-webhook",
+    category: "communication",
+    channelIds: ["webhook"],
+    responsibility: "Serves authenticated HTTP ingress as an explicitly selected typed channel module.",
+    allowedDependencyCategories: ["core"],
+    publishable: true,
+  },
+  {
+    dir: "cli",
+    name: "@mono-agent/cli",
+    category: "app",
+    responsibility: "Provides thin validation, inspection, authoring, and foreground-run frontends over the core public API.",
+    allowedDependencyCategories: ["core"],
+    publishable: true,
+  },
+  {
+    dir: "core",
+    name: "@mono-agent/core",
+    category: "core",
+    responsibility: "Loads strict agent configuration and runs selected typed modules without importing concrete implementations.",
+    allowedDependencyCategories: ["core"],
+    publishable: true,
+  },
+  {
     dir: "config",
     name: "@mono-agent/config",
     category: "core",
@@ -130,10 +155,19 @@ export const packageCatalog = [
     tier: "plugin",
   },
   {
+    dir: "module-sdk",
+    name: "@mono-agent/module-sdk",
+    category: "core",
+    responsibility: "Defines the Apache-licensed typed module contracts, schemas, compliance helpers, and bounded host primitives.",
+    allowedDependencyCategories: [],
+    publishable: true,
+    license: "Apache-2.0",
+  },
+  {
     dir: "create-mono-agent",
     name: "create-mono-agent",
     category: "app",
-    responsibility: "Unscoped npm-init installer (`npm create mono-agent`) shipping `create-mono-agent` and `mono-agent` bins that forward every command to @mono-agent/agent-app's CLI.",
+    responsibility: "Transactionally scaffolds the exact minimal v1 dependency closure and delegates non-init commands to @mono-agent/cli.",
     allowedDependencyCategories: ["app"],
     publishable: true,
     tier: "alias",
@@ -170,6 +204,14 @@ export const packageCatalog = [
     category: "runtime",
     responsibility: "Wraps @mono-agent/agent-runtime behind runtime contracts and owns sandbox policy/process wrapping.",
     allowedDependencyCategories: ["core", "runtime"],
+    publishable: true,
+  },
+  {
+    dir: "runtime-pi",
+    name: "@mono-agent/runtime-pi",
+    category: "runtime",
+    responsibility: "Runs Pi-native provider turns as isolated native attempts behind the typed runtime contract.",
+    allowedDependencyCategories: ["core"],
     publishable: true,
   },
   {
@@ -226,6 +268,7 @@ export const packageCatalog = [
     responsibility: "Invokes agent responders from HTTP webhook requests with sync and async modes.",
     allowedDependencyCategories: ["core"],
     publishable: true,
+    supersededBy: "@mono-agent/channel-webhook",
   },
 ];
 

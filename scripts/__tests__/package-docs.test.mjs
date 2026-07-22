@@ -100,10 +100,10 @@ describe("package documentation generation", () => {
     expect(graph).toContain("| `@mono-agent/example` | None |");
     const directory = renderPackageDirectory(model, { website: true });
     expect(directory).toContain(
-      "https://github.com/robertsreberski/mono-agent/blob/main/packages/example/README.md",
+      "https://github.com/robertsreberski/mono-agent-next/blob/main/packages/example/README.md",
     );
     expect(directory).toContain(
-      "[README for @mono-agent/example](https://github.com/robertsreberski/mono-agent/blob/main/packages/example/README.md)",
+      "[README for @mono-agent/example](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/example/README.md)",
     );
     expect(directory).toContain(
       "[npm for @mono-agent/example](https://www.npmjs.com/package/@mono-agent/example)",

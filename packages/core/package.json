@@ -1,0 +1,46 @@
+{
+  "name": "@mono-agent/core",
+  "version": "0.15.0",
+  "description": "Strict config loader and lifecycle kernel for mono-agent v1.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
+    "directory": "packages/core"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "mono-agent"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@mono-agent/module-sdk": "workspace:0.15.0",
+    "yaml": "^2.9.0"
+  }
+}

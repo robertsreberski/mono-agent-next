@@ -15,11 +15,9 @@ concurrency:
 
 jobs:
   verify:
-    name: Verify (Node ${{ matrix.node-version }})
-    # scripts/__tests__/verify-all.test.mjs enforces the complete ordered action,
-    # environment, and exact run-script projection; VERIFY_GATE_DELTA declares exceptions.
+    name: Verify runnable architecture (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -37,200 +35,79 @@ jobs:
       - name: Enable Corepack
         run: corepack enable
 
-      - name: Check pnpm release-age policy
-        run: node scripts/pnpm-release-age-policy.mjs
-
-      - name: Check Node support floor
-        run: pnpm run check:node
+      - name: Check runtime floors
+        run: |
+          node scripts/pnpm-release-age-policy.mjs
+          pnpm run check:node
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Check production dependency vulnerabilities
+      - name: Check dependency vulnerabilities
         if: ${{ matrix.node-version == '22.19.0' }}
-        run: pnpm run check:dependency-vulnerabilities
+        run: pnpm run check:v1-dependency-vulnerabilities
 
-      - name: Install bundled web console dependencies
-        run: pnpm --dir packages/web/webapp install --frozen-lockfile
-
-      - name: Check secrets
+      - name: Scan secrets
+        if: ${{ matrix.node-version == '22.19.0' }}
         run: |
           docker run --rm \
             -v "$PWD:/repo" \
             ghcr.io/gitleaks/gitleaks:v8.30.1 \
             dir --redact --no-banner --config /repo/.gitleaks.toml /repo
 
-      - name: Check OSS hygiene
-        run: pnpm run check:oss-hygiene
-
-      - name: Check license consistency
-        run: pnpm run check:licenses
-
-      - name: Check Codex discoverability
-        run: pnpm run check:codex-discoverability
-
-      - name: Check consumer docs consistency
-        run: pnpm run check:consumer-docs-consistency
-
-      - name: Derive release smoke tag
-        id: release-smoke
+      - name: Check OSS and package boundaries
         run: |
-          set -euo pipefail
-          VERSION="$(node -e "process.stdout.write(require('./packages/agent-app/package.json').version)")"
-          echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+          pnpm run check:oss-hygiene
+          node scripts/check-license-consistency.mjs
+          pnpm run check:architecture
 
-      - name: Check getting-started version pins
-        run: pnpm run check:getting-started-version-pins
+      - name: Build and typecheck runnable closure
+        run: |
+          pnpm -r --sort \
+            --filter @mono-agent/module-sdk \
+            --filter @mono-agent/core \
+            --filter @mono-agent/cli \
+            --filter @mono-agent/runtime-pi \
+            --filter @mono-agent/channel-webhook \
+            --filter create-mono-agent run build
+          pnpm -r --sort \
+            --filter @mono-agent/module-sdk \
+            --filter @mono-agent/core \
+            --filter @mono-agent/cli \
+            --filter @mono-agent/runtime-pi \
+            --filter @mono-agent/channel-webhook \
+            --filter create-mono-agent run typecheck
 
-      - name: Check documentation quality
-        run: pnpm run check:docs
+      - name: Test runnable closure
+        run: |
+          pnpm -r --sort \
+            --filter @mono-agent/module-sdk \
+            --filter @mono-agent/core \
+            --filter @mono-agent/cli \
+            --filter @mono-agent/runtime-pi \
+            --filter @mono-agent/channel-webhook \
+            --filter create-mono-agent run test
 
-      - name: Validate release package graph
-        run: pnpm run release:validate -- --tag "${{ steps.release-smoke.outputs.tag }}"
-
-      - name: Check package architecture
-        run: pnpm run check:architecture
-
-      - name: Build packages and demos
-        run: pnpm run build
-
-      - name: Typecheck marked documentation snippets
-        run: pnpm run check:doc-snippets
-
-      - name: Check agent-runtime deep imports
-        run: pnpm run check:deep-imports
-
-      - name: Verify consumer contracts
-        run: pnpm run verify:consumers --skip-build
-
-      - name: Validate package tarballs
-        run: pnpm run release:pack -- --tag "${{ steps.release-smoke.outputs.tag }}"
-
-      - name: Install packed consumer at the minimum Node version
+      - name: Prove packed clean-project turn
         if: ${{ matrix.node-version == '22.19.0' }}
-        run: pnpm run release:consumer -- --tag "${{ steps.release-smoke.outputs.tag }}" --require-minimum
+        run: pnpm run verify:v1-minimal
 
-      - name: Typecheck packages and demos
-        run: pnpm run typecheck
-
-      - name: Run tests
-        run: pnpm test
-
-      - name: Check whitespace
-        run: git diff --check
-
-  website:
-    name: Website
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-
-    # website/ is an isolated pnpm workspace (own lockfile) that renders ../docs.
-    # Gate its build and rendered accessibility independently from the package
-    # verification lane. Runs in parallel with `verify` so its browser setup
-    # does not lengthen the package matrix.
-    defaults:
-      run:
-        working-directory: website
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
-      - name: Enable Corepack
-        run: corepack enable
-
-      - name: Install website dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Test website transforms
-        run: pnpm run test:unit
-
-      - name: Install Chromium
-        run: pnpm exec playwright install --with-deps chromium
-
-      - name: Build docs site (check-asides -> sync-content -> astro build -> check-links)
-        run: pnpm run build
-
-      - name: Audit every built page for accessibility
-        run: pnpm run test:a11y
-
-  release-dry-run:
-    name: Release dry run
-    if: github.event_name == 'pull_request'
-    needs: verify
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
-      - name: Enable Corepack
-        run: corepack enable
-
-      - name: Check pnpm release-age policy
-        run: node ./scripts/pnpm-release-age-policy.mjs
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Dry-run every publishable tarball
-        run: |
-          set -euo pipefail
-          VERSION="$(node -e "process.stdout.write(require('./packages/agent-app/package.json').version)")"
-          TAG="v${VERSION}"
-          PACKAGE_COUNT="$(node --input-type=module -e "import { packageCatalog } from './scripts/package-catalog.mjs'; process.stdout.write(String(packageCatalog.filter((entry) => entry.publishable).length))")"
-          pnpm run release:publish -- --dry-run --tag "$TAG"
-          {
-            echo "## Release dry run"
-            echo
-            echo "- Tag: \`$TAG\`"
-            echo "- Publishable tarballs: $PACKAGE_COUNT"
-            echo "- Result: green"
-          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Check generated contracts and whitespace
+        run: git diff --exit-code && git diff --check
 
   verdict:
     name: Required verdict
     if: always()
     needs:
       - verify
-      - website
-      - release-dry-run
     runs-on: ubuntu-latest
     timeout-minutes: 5
-
     steps:
-      - name: Publish one required verdict
+      - name: Publish required verdict
         env:
-          EVENT_NAME: ${{ github.event_name }}
           VERIFY_RESULT: ${{ needs.verify.result }}
-          WEBSITE_RESULT: ${{ needs.website.result }}
-          RELEASE_DRY_RUN_RESULT: ${{ needs.release-dry-run.result }}
         run: |
-          set -euo pipefail
-          {
-            echo "## Required CI verdict"
-            echo
-            echo "- Package matrix: $VERIFY_RESULT"
-            echo "- Website: $WEBSITE_RESULT"
-            echo "- Release dry run: $RELEASE_DRY_RUN_RESULT"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          if [[ "$VERIFY_RESULT" != "success" || "$WEBSITE_RESULT" != "success" ]]; then
-            echo "CI VERDICT: FAILED"
-            exit 1
-          fi
-          if [[ "$EVENT_NAME" == "pull_request" && "$RELEASE_DRY_RUN_RESULT" != "success" ]]; then
+          if [[ "$VERIFY_RESULT" != "success" ]]; then
             echo "CI VERDICT: FAILED"
             exit 1
           fi

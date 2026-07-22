@@ -158,7 +158,7 @@ export function renderPackageDirectory(model, { website = false } = {}) {
   ];
   for (const entry of [...model].sort(compareCatalogPosition)) {
     const readmeUrl = website
-      ? `https://github.com/robertsreberski/mono-agent/blob/main/${entry.packagePath}/README.md`
+      ? `https://github.com/robertsreberski/mono-agent-next/blob/main/${entry.packagePath}/README.md`
       : `./${entry.packagePath}/README.md`;
     const npmUrl = `https://www.npmjs.com/package/${entry.name}`;
     lines.push(

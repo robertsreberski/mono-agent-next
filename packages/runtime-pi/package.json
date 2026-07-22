@@ -1,0 +1,55 @@
+{
+  "name": "@mono-agent/runtime-pi",
+  "version": "0.15.0",
+  "description": "Pi-native runtime module for mono-agent v1.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
+    "directory": "packages/runtime-pi"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "mono-agent",
+    "runtime",
+    "pi"
+  ],
+  "mono-agent": {
+    "packageName": "@mono-agent/runtime-pi",
+    "apiVersion": 1,
+    "kind": "runtime",
+    "responsibility": "Runs turns through Pi-native providers as isolated native attempts."
+  },
+  "private": false,
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.81.1",
+    "@earendil-works/pi-ai": "0.81.1",
+    "@mono-agent/module-sdk": "workspace:0.15.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

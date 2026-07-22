@@ -21,6 +21,18 @@ import { findPackageVerificationErrors } from "./lib/package-verification.mjs";
 const root = process.cwd();
 const packageScope = "@mono-agent/";
 const requiredReadmeSections = REQUIRED_PACKAGE_README_SECTIONS.map((section) => `## ${section}`);
+const v1ModuleKinds = new Map([
+  ["@mono-agent/runtime-pi", "runtime"],
+  ["@mono-agent/channel-webhook", "channel"],
+]);
+const v1InternalDependencyClosure = new Map([
+  ["@mono-agent/module-sdk", []],
+  ["@mono-agent/core", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/cli", ["@mono-agent/core"]],
+  ["@mono-agent/runtime-pi", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/channel-webhook", ["@mono-agent/module-sdk"]],
+  ["create-mono-agent", ["@mono-agent/cli"]],
+]);
 
 const errors = [];
 const catalogByName = packageByName();
@@ -62,6 +74,15 @@ for (const catalogEntry of packageCatalog) {
   for (const channelId of catalogEntry.channelIds) {
     if (typeof channelId !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(channelId)) {
       errors.push(`${packagePath} has invalid shipped channel id ${JSON.stringify(channelId)}.`);
+      continue;
+    }
+    if (catalogEntry.supersededBy !== undefined) {
+      const replacement = catalogByName.get(catalogEntry.supersededBy);
+      if (replacement === undefined || replacement.category !== "communication") {
+        errors.push(`${packagePath} has invalid communication replacement ${catalogEntry.supersededBy}.`);
+      } else if (!replacement.channelIds?.includes(channelId)) {
+        errors.push(`${packagePath} replacement ${catalogEntry.supersededBy} does not own channel id ${channelId}.`);
+      }
       continue;
     }
     const existingOwner = channelOwnerById.get(channelId);
@@ -115,15 +136,36 @@ for (const catalogEntry of packageCatalog) {
     ...manifest.peerDependencies,
   };
   const depNames = Object.keys(deps);
+  const expectedV1Dependencies = v1InternalDependencyClosure.get(packageName);
+  if (expectedV1Dependencies !== undefined) {
+    const actualV1Dependencies = depNames
+      .filter((name) => name.startsWith(packageScope) || name === "create-mono-agent")
+      .sort();
+    const expected = [...expectedV1Dependencies].sort();
+    if (JSON.stringify(actualV1Dependencies) !== JSON.stringify(expected)) {
+      errors.push(
+        `${packagePath} must have exact v1 workspace closure ${expected.join(", ") || "none"}; found ${actualV1Dependencies.join(", ") || "none"}.`,
+      );
+    }
+  }
+  const expectedModuleKind = v1ModuleKinds.get(packageName);
+  if (expectedModuleKind !== undefined) {
+    const moduleMetadata = manifest["mono-agent"];
+    if (moduleMetadata?.packageName !== packageName
+      || moduleMetadata?.apiVersion !== 1
+      || moduleMetadata?.kind !== expectedModuleKind
+      || typeof moduleMetadata?.responsibility !== "string"
+      || moduleMetadata.responsibility.trim().length === 0) {
+      errors.push(`${packagePath}/package.json must declare matching mono-agent ${expectedModuleKind} metadata at API version 1.`);
+    }
+  }
   for (const depName of depNames) {
     if (!depName.startsWith(packageScope)) {
       continue;
     }
     const depEntry = catalogByName.get(depName);
     if (depEntry === undefined) {
-      if (String(deps[depName]).startsWith("workspace:")) {
-        errors.push(`${packagePath} depends on uncatalogued workspace package ${depName}.`);
-      }
+      errors.push(`${packagePath} depends on uncatalogued scoped package ${depName}.`);
       continue;
     }
     if (!catalogEntry.allowedDependencyCategories.includes(depEntry.category)) {

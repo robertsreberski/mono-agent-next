@@ -44,6 +44,16 @@ describe("package architecture adapter-neutrality guard", () => {
     expect(TEST_CHANNEL_IDS).toEqual([...SHIPPED_CHANNEL_IDS, SYNTHETIC_CHANNEL_ID]);
   });
 
+  it("keeps the legacy webhook package explicitly superseded during the vertical migration", () => {
+    expect(packageCatalog.find((entry) => entry.name === "@mono-agent/webhook-adapter")).toMatchObject({
+      supersededBy: "@mono-agent/channel-webhook",
+    });
+    expect(packageCatalog.find((entry) => entry.name === "@mono-agent/channel-webhook")).toMatchObject({
+      category: "communication",
+      channelIds: ["webhook"],
+    });
+  });
+
   it.each(TEST_CHANNEL_IDS)("detects %s prefix literals and patterns but not the bare id", (channelId) => {
     const escapedForRegex = channelId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
     const coupledSources = [
