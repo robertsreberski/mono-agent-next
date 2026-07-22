@@ -36,11 +36,18 @@ configuration as production:
 - `packages/tui/vitest.config.ts`: 9 lines
 
 Classifying the test-only files correctly produces 182,026 production lines in
-the original tree (`182,118 - 92`). The successor bootstrap also removed one
-meaningless terminal blank line from
-`packages/agent-app/src/package-version.ts`, so the exact normalized successor
-baseline is 182,025 production lines. The G8 budget of 130,000 lines therefore
-requires a 28.58% reduction from this checked-in baseline.
+the original tree (`182,118 - 92`). The successor bootstrap removed one
+meaningless terminal blank line from `packages/agent-app/src/package-version.ts`,
+then added 192 production lines in reviewed seed security fixes: 30 in the
+SQLite creation boundary, 160 in the permanent descriptor-bound first-run
+marker and its post-read doctor snapshot revalidation, and 2 in doctor
+integration. The exact normalized successor baseline is therefore 182,217
+production lines. The final reviewed seed replaced one fixed-delay SSE test
+assertion with a bounded capacity-release probe, adding nine test lines and no
+production code. It therefore records 179,145 test lines and 17,659
+excluded-with-reason lines, for 379,021 executable lines. The G8 budget of
+130,000 lines requires a rounded 28.66% reduction from this checked-in baseline
+(71.34% retained).
 
 `packages/web/webapp/vite.config.ts` remains production. Although Vite consumes
 the file as build configuration, it owns shipped PWA metadata, service-worker

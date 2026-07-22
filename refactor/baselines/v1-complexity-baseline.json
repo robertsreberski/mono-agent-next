@@ -2,7 +2,7 @@
   "algorithmVersion": 1,
   "budgets": [
     {
-      "actualLines": 182025,
+      "actualLines": 182217,
       "classification": "production",
       "enforceAt": "G8",
       "id": "repository-production",
@@ -49,7 +49,7 @@
         },
         "test": {
           "files": 3,
-          "lines": 3134
+          "lines": 3158
         },
         "unclassified": {
           "files": 0,
@@ -190,11 +190,11 @@
         },
         "production": {
           "files": 143,
-          "lines": 66377
+          "lines": 66539
         },
         "test": {
           "files": 110,
-          "lines": 58723
+          "lines": 58968
         },
         "unclassified": {
           "files": 0,
@@ -393,11 +393,11 @@
         },
         "production": {
           "files": 57,
-          "lines": 22719
+          "lines": 22749
         },
         "test": {
           "files": 53,
-          "lines": 20961
+          "lines": 20999
         },
         "unclassified": {
           "files": 0,
@@ -629,7 +629,7 @@
         },
         "test": {
           "files": 30,
-          "lines": 5976
+          "lines": 5985
         },
         "unclassified": {
           "files": 0,
@@ -732,8 +732,8 @@
     {
       "byClassification": {
         "excluded": {
-          "files": 46,
-          "lines": 15996
+          "files": 47,
+          "lines": 16226
         },
         "generated": {
           "files": 0,
@@ -745,7 +745,7 @@
         },
         "test": {
           "files": 36,
-          "lines": 14639
+          "lines": 14857
         },
         "unclassified": {
           "files": 0,
@@ -890,18 +890,18 @@
     },
     {
       "classification": "test",
-      "contentSha256": "f026bd533dda66eab987195a4365d63dbc7c46ff861d65910c2cbacbe3afb84e",
+      "contentSha256": "db069ac89c6990dfb2cc30b7951ff1f01bdee0ecc0704a5b69ae0a42cf0871f1",
       "gitMode": "100644",
-      "lines": 467,
+      "lines": 482,
       "owner": "extras/a2a-adapter",
       "path": "extras/a2a-adapter/src/__tests__/dispatch.test.ts",
       "ruleId": "test-path-or-filename"
     },
     {
       "classification": "test",
-      "contentSha256": "d3f80d0de0862e8477fa0ae899241f607cd2d577a651b7c27aa1bf13f5712a71",
+      "contentSha256": "be92bb482c00181fcdc4e0404a5e04831827dad9e3cdf0052cdde5db3294fefe",
       "gitMode": "100644",
-      "lines": 1305,
+      "lines": 1314,
       "owner": "extras/a2a-adapter",
       "path": "extras/a2a-adapter/src/__tests__/idempotency.test.ts",
       "ruleId": "test-path-or-filename"
@@ -1448,9 +1448,9 @@
     },
     {
       "classification": "test",
-      "contentSha256": "2247f119cd22e84c12b4aa88fff5f9924820a7f317332a773815dd4c68091475",
+      "contentSha256": "52b98254a3a266af255f3112d80d8bcd3519e9bb55dc58747a30119b4a3c9347",
       "gitMode": "100644",
-      "lines": 1159,
+      "lines": 1192,
       "owner": "packages/agent-app",
       "path": "packages/agent-app/src/__tests__/background-runtime.test.ts",
       "ruleId": "test-path-or-filename"
@@ -1817,9 +1817,9 @@
     },
     {
       "classification": "test",
-      "contentSha256": "2e52bfd2dc667ce8b960005c31d0f8f72e7939a70bc9d89e1064a5f21f438365",
+      "contentSha256": "42894f1f9ed4f6ee76e8637f138f5223f8a2d73d415990da1b8404803fce0711",
       "gitMode": "100644",
-      "lines": 391,
+      "lines": 594,
       "owner": "packages/agent-app",
       "path": "packages/agent-app/src/__tests__/first-run-managed-memory.test.ts",
       "ruleId": "test-path-or-filename"
@@ -1853,9 +1853,9 @@
     },
     {
       "classification": "test",
-      "contentSha256": "62ec92913b558b0af5b17fde1799e8d1198e15e79aab7165f107df2a04348c12",
+      "contentSha256": "a73c26fd98f1a8001a5f04cb09bbebcd1c5be72a1ac5f2f9f8ca50f9117d1948",
       "gitMode": "100644",
-      "lines": 354,
+      "lines": 365,
       "owner": "packages/agent-app",
       "path": "packages/agent-app/src/__tests__/init.test.ts",
       "ruleId": "test-path-or-filename"
@@ -1871,9 +1871,9 @@
     },
     {
       "classification": "test",
-      "contentSha256": "d49e9f780319d31b7bcc015af7d7c86ce0ed735f36b42a90dc93a71dffcf81c2",
+      "contentSha256": "5a95973259d512bcbc5c530d34976b0225a4c227cb2cd3b9cb9733ebc468d9a3",
       "gitMode": "100644",
-      "lines": 223,
+      "lines": 217,
       "owner": "packages/agent-app",
       "path": "packages/agent-app/src/__tests__/interaction-bridge.test.ts",
       "ruleId": "test-path-or-filename"
@@ -2051,9 +2051,9 @@
     },
     {
       "classification": "test",
-      "contentSha256": "6f757d2b5aa4171af8b88f0c22560f5e8b7394ef5d8b4345f067cbbf3d5ad230",
+      "contentSha256": "178f2fb5917097cb92db806fa7c5c2f07c95bc10902db31ee58ede85cfd4b304",
       "gitMode": "100644",
-      "lines": 936,
+      "lines": 940,
       "owner": "packages/agent-app",
       "path": "packages/agent-app/src/__tests__/posted-message-index.test.ts",
       "ruleId": "test-path-or-filename"
@@ -3050,18 +3050,18 @@
     },
     {
       "classification": "production",
-      "contentSha256": "266a829239a1ee686ef1ebb0ddfe1fef2078b8cdbf841a6115367b79654bcc91",
+      "contentSha256": "d9ed1dcf7e21dd542af4bf2584276ff3a9ffce5ce2246dd77e710cf8e71b74d5",
       "gitMode": "100644",
-      "lines": 3517,
+      "lines": 3519,
       "owner": "packages/agent-app",
       "path": "packages/agent-app/src/doctor.ts",
       "ruleId": "shipped-workspace-source"
     },
     {
       "classification": "production",
-      "contentSha256": "d21b8110d52a7a1ce8bdbfaba4c3ca9f7c9bc9a22241969eb4d3616ae6dc8597",
+      "contentSha256": "08ab1a7d461b8f286816e1072be1f4443d95f4b5a6318545adf5966518ad991f",
       "gitMode": "100644",
-      "lines": 719,
+      "lines": 879,
       "owner": "packages/agent-app",
       "path": "packages/agent-app/src/first-run-managed-memory.ts",
       "ruleId": "shipped-workspace-source"
@@ -6119,9 +6119,9 @@
     },
     {
       "classification": "test",
-      "contentSha256": "66be633bd59c6499d02f5076dbb646bb7bdb0e0ad6c6fc47b4f1e0ec3036a9b7",
+      "contentSha256": "ef264bdbb7f877c428add802515f01f46f15de9faf54bdc0c25b21bae45ca3b5",
       "gitMode": "100644",
-      "lines": 1001,
+      "lines": 1005,
       "owner": "packages/memory",
       "path": "packages/memory/src/bujo/__tests__/replay-adoption.test.ts",
       "ruleId": "test-path-or-filename"
@@ -6650,9 +6650,9 @@
     },
     {
       "classification": "test",
-      "contentSha256": "aeb34ba0df6c680f44a57603ab5f1a08f8283d1f3134ae892996ed7e60b9fa46",
+      "contentSha256": "14a865c5fc5ffd4c24490522c8d7d31bfc1e34daee2777840805bb7a285cf465",
       "gitMode": "100644",
-      "lines": 99,
+      "lines": 133,
       "owner": "packages/memory",
       "path": "packages/memory/src/store/__tests__/open.test.ts",
       "ruleId": "test-path-or-filename"
@@ -6758,9 +6758,9 @@
     },
     {
       "classification": "production",
-      "contentSha256": "521e2f7929d5058db4c5e9ffafec0f329450c4db750c8bf2a1fae6848ee29aca",
+      "contentSha256": "4c7b838d8b998c75775346f9c305e33f2bb652d2574693ad53ec441b089ad1aa",
       "gitMode": "100644",
-      "lines": 744,
+      "lines": 774,
       "owner": "packages/memory",
       "path": "packages/memory/src/store/db-core.ts",
       "ruleId": "shipped-workspace-source"
@@ -8522,9 +8522,9 @@
     },
     {
       "classification": "test",
-      "contentSha256": "c0a63f61b0b01275fd50a9f22409ca8bf0e57f53d9be9fbcf2700bbb1448d417",
+      "contentSha256": "919bfedfe52197406dedc0b253e7745074a999c6936a842257e0eeb566d74340",
       "gitMode": "100644",
-      "lines": 492,
+      "lines": 501,
       "owner": "packages/web",
       "path": "packages/web/src/__tests__/server.test.ts",
       "ruleId": "test-path-or-filename"
@@ -9368,7 +9368,7 @@
     },
     {
       "classification": "test",
-      "contentSha256": "2640b518ec4348ae16b3e1363c29a374ec05025ec743764d2a798bbf7a739a83",
+      "contentSha256": "82b53f4576ee76912e6e28b308151bfe754a954481ca131e69b918265d8802be",
       "gitMode": "100644",
       "lines": 509,
       "owner": "repo:scripts",
@@ -9404,9 +9404,9 @@
     },
     {
       "classification": "test",
-      "contentSha256": "b4863d5567a413ec5555dcb3f5a8e5837efbe6110b1cba323c627c486c272f02",
+      "contentSha256": "f7e69c918d0c03a347564a4b0552c40aaea69773fe6d9f34bb4b6ea5230296aa",
       "gitMode": "100644",
-      "lines": 755,
+      "lines": 841,
       "owner": "repo:scripts",
       "path": "scripts/__tests__/v1-complexity-report.test.mjs",
       "ruleId": "test-path-or-filename"
@@ -9710,9 +9710,9 @@
     },
     {
       "classification": "excluded",
-      "contentSha256": "eb65c36c7929822dcdd2126b9d5d2ef8a6e585fc7519e98e70f4d7f0552bce32",
+      "contentSha256": "e2208ce05f665abbd9d59ffa57c0887ae1ddfcbaf9fd7ccbcee973d5fc41ffdd",
       "gitMode": "100644",
-      "lines": 1280,
+      "lines": 1389,
       "owner": "repo:scripts",
       "path": "scripts/lib/v1-complexity.mjs",
       "ruleId": "repository-tooling"
@@ -9782,12 +9782,21 @@
     },
     {
       "classification": "test",
-      "contentSha256": "f9b042558ee769523a6bd7bb292aba83c4ef32b67b13cc60c0d6454a1214c655",
+      "contentSha256": "77151b6c10dad517cd067f484825aa8f492a8f84e5ef27df2432f01f8999b32e",
       "gitMode": "100644",
-      "lines": 833,
+      "lines": 965,
       "owner": "repo:scripts",
       "path": "scripts/release/__tests__/release.test.mjs",
       "ruleId": "test-path-or-filename"
+    },
+    {
+      "classification": "excluded",
+      "contentSha256": "fb2e22931e35a82639f11bdfe71dfd07f5eaef0bcc01b4051d43afe71844225f",
+      "gitMode": "100644",
+      "lines": 34,
+      "owner": "repo:scripts",
+      "path": "scripts/release/check-publish-guard.mjs",
+      "ruleId": "repository-tooling"
     },
     {
       "classification": "excluded",
@@ -9836,9 +9845,9 @@
     },
     {
       "classification": "excluded",
-      "contentSha256": "bb6d1b6dbfaf279206d106f82b293eb5bfef7cbff10a1b7d7958d3420b4b254a",
+      "contentSha256": "1aa308f0bfa93ecd4780cb580c46c8c629713a757dcbf6069723baa0d2b65dfe",
       "gitMode": "100644",
-      "lines": 481,
+      "lines": 534,
       "owner": "repo:scripts",
       "path": "scripts/release/publish-release.mjs",
       "ruleId": "repository-tooling"
@@ -9872,9 +9881,9 @@
     },
     {
       "classification": "excluded",
-      "contentSha256": "9c8ef1c8526ffad430f9082b6053bdeabb95b35b4691bf69a96a2104ef64558c",
+      "contentSha256": "cd35acdca5a8bf327fb27e2671fe588071e2fc6b5278be3e676ca35bec4b3ab9",
       "gitMode": "100644",
-      "lines": 181,
+      "lines": 215,
       "owner": "repo:scripts",
       "path": "scripts/v1-complexity-report.mjs",
       "ruleId": "repository-tooling"
@@ -10025,7 +10034,7 @@
           "@mono-agent/webhook-adapter",
           "create-mono-agent"
         ],
-        "productionLines": 171827,
+        "productionLines": 172019,
         "roots": [
           "create-mono-agent"
         ]
@@ -10464,19 +10473,19 @@
     }
   },
   "issues": [],
-  "manifestSha256": "41be70ede2a00d0329c922bfeaff7a81669c958777e86d3be1aacc20fa126801",
+  "manifestSha256": "ad3c3255dbd404ea51a5f52814968d6a8499a1224b6f3db71eca6b793aa92b65",
   "policySha256": "1cdd2f22f05a725f669c930366408b73db9a75ac873f1d4286017282a0bd7a93",
   "schema": "mono-agent.v1-complexity-report.v1",
-  "snapshotSha256": "15f44627caa95ec849cd1df34b45d01dce4dbafbae18d70f0712b532128deea3",
+  "snapshotSha256": "3e5ffd9a140519f490f391f5f3dc470269e68711ab72e6189a1089004e770054",
   "totals": {
     "allExecutable": {
-      "files": 1023,
-      "lines": 378065
+      "files": 1024,
+      "lines": 379021
     },
     "byClassification": {
       "excluded": {
-        "files": 61,
-        "lines": 17429
+        "files": 62,
+        "lines": 17659
       },
       "generated": {
         "files": 0,
@@ -10484,11 +10493,11 @@
       },
       "production": {
         "files": 523,
-        "lines": 182025
+        "lines": 182217
       },
       "test": {
         "files": 439,
-        "lines": 178611
+        "lines": 179145
       },
       "unclassified": {
         "files": 0,
