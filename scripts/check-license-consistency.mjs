@@ -10,8 +10,6 @@ export const REQUIRED_LICENSE = "GPL-3.0-only";
 export const DEFAULT_PACKAGE_LICENSE = REQUIRED_LICENSE;
 export const CANONICAL_GPL3_SHA256 = "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986";
 export const CANONICAL_APACHE2_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4";
-const APACHE_PACKAGE = "@mono-agent/module-sdk";
-
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const canonicalLicensePaths = ["LICENSE", "packages/agent-runtime/LICENSE"];
 
@@ -34,10 +32,10 @@ export async function checkLicenseConsistency(options = {}) {
 
   for (const entry of publishable) {
     const relativePath = `${packageRelativePath(entry)}/package.json`;
-    const expectedLicense = entry.name === APACHE_PACKAGE ? "Apache-2.0" : DEFAULT_PACKAGE_LICENSE;
-    if (entry.name === APACHE_PACKAGE && entry.license !== "Apache-2.0") {
-      issues.push(`${APACHE_PACKAGE} must be the sole Apache-2.0 catalog override`);
-    } else if (entry.name !== APACHE_PACKAGE && entry.license !== undefined) {
+    const expectedLicense = entry.license === "Apache-2.0"
+      ? "Apache-2.0"
+      : DEFAULT_PACKAGE_LICENSE;
+    if (entry.license !== undefined && entry.license !== "Apache-2.0") {
       issues.push(`${entry.name} may not override the default ${DEFAULT_PACKAGE_LICENSE} package license`);
     }
     await checkManifestLicense({
@@ -46,7 +44,7 @@ export async function checkLicenseConsistency(options = {}) {
       expectedLicense,
       issues,
     });
-    if (entry.name === APACHE_PACKAGE) {
+    if (expectedLicense === "Apache-2.0") {
       const licensePath = `${packageRelativePath(entry)}/LICENSE`;
       await checkCanonicalLicense(
         join(repoRoot, licensePath),

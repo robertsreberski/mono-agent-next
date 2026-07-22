@@ -1,686 +1,417 @@
-import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
-import { chmod, open, rename, unlink } from "node:fs/promises";
-import { createServer } from "node:http";
-import { isIP } from "node:net";
+import { createHash, timingSafeEqual } from "node:crypto";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { isIP, type AddressInfo, type Socket } from "node:net";
 import { hostname as systemHostname } from "node:os";
-import { dirname, resolve } from "node:path";
-import { pipeline } from "node:stream/promises";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
 
-import {
-  AGENT_LIVE_INPUT_MAX_CHARACTERS,
-  closeServerBounded,
-  hostForUrl,
-  listen,
-  normalizeHostForBind,
-  type ChannelAskAnswer,
-} from "@mono-agent/agent-contracts";
-import express, { type NextFunction, type Request, type Response } from "express";
+import type { WebConfig } from "./config.js";
+import { loadWebConfig } from "./config.js";
+import type { CreateWebThreadInput, StartWebTurnInput } from "./contracts.js";
+import { WebProductError } from "./errors.js";
+import { createOperatorGateway } from "./operator-gateway.js";
+import { WebService, type WebOperatorGateway } from "./service.js";
+import { DurableWebStore } from "./store.js";
+import { WEB_APP_JS, WEB_INDEX_HTML, WEB_STYLES } from "./ui.js";
 
-import {
-  WEB_API_VERSION,
-  WEB_MAX_TURN_TEXT_CHARACTERS,
-  type CreateWebThreadInput,
-  type CreateWebUploadInput,
-  type PatchWebAgentInput,
-  type PatchWebThreadInput,
-  type StartWebLiveInputInput,
-  type StartWebTurnInput,
-  type WebEvent,
-} from "./contracts.js";
-import { errorMessage, WebConsoleError } from "./errors.js";
-import {
-  startWebNotificationIngress,
-  type WebNotificationIngressHandle,
-} from "./notification-ingress.js";
-import { WebService, type CreateWebServiceOptions } from "./service.js";
+const MAX_BODY_BYTES = 256 * 1024;
 
-export const DEFAULT_WEB_HOST = "0.0.0.0";
-export const DEFAULT_WEB_PORT = 5050;
-const HEARTBEAT_INTERVAL_MS = 15_000;
-const MAX_SSE_CLIENTS = 64;
-
-export interface StartWebServerOptions extends CreateWebServiceOptions {
-  readonly host?: string;
-  readonly port?: number;
-  readonly staticDir?: string;
-  /** Exact additional DNS hostnames accepted at the browser boundary (for example this node's Tailscale DNSName). */
-  readonly allowedHosts?: readonly string[];
+export interface StartWebServerOptions {
+  readonly config?: WebConfig;
+  readonly configPath?: string;
+  readonly environment?: Readonly<Record<string, string | undefined>>;
+  readonly fetch?: typeof globalThis.fetch;
+  readonly shutdownTimeoutMs?: number;
+  /** Deterministic embedding/test seam; normal products use the shared operator directory. */
+  readonly operatorGateway?: WebOperatorGateway;
 }
 
 export interface WebServerHandle {
   readonly url: string;
-  readonly host: string;
+  readonly address: string;
   readonly port: number;
-  readonly boundAddress: string;
-  readonly stateDir: string;
+  readonly dataDirectory: string;
   stop(): Promise<void>;
   close(): Promise<void>;
 }
 
 export async function startWebServer(options: StartWebServerOptions = {}): Promise<WebServerHandle> {
-  const host = normalizeHostForBind(options.host ?? DEFAULT_WEB_HOST);
-  const port = normalizePort(options.port ?? DEFAULT_WEB_PORT);
-  const staticDir = options.staticDir ?? defaultStaticDir();
-  const logger = options.logger;
-  // Validate all synchronous startup inputs before acquiring the persistent
-  // service lease so an embedding typo cannot strand SQLite ownership.
-  const allowedHosts = resolveAllowedHosts(options.allowedHosts, options.env ?? process.env);
-  const service = await WebService.create(options);
-  const app = express();
-  const server = createServer(app);
-  server.headersTimeout = 15_000;
-  server.requestTimeout = 5 * 60_000;
-  server.keepAliveTimeout = 5_000;
-  const activeStreams = new Set<() => void>();
-  const activeOperations = new Set<Promise<unknown>>();
-  let notificationIngress: WebNotificationIngressHandle | undefined;
+  if (options.config !== undefined && options.configPath !== undefined) {
+    throw new WebProductError("invalid_start_options", "Provide config or configPath, not both.");
+  }
+  const config = options.config ?? await loadWebConfig(resolve(options.configPath ?? "web.config.json"), {
+    ...(options.environment === undefined ? {} : { environment: options.environment }),
+  });
+  validateRuntimeConfig(config);
+  const store = await DurableWebStore.open(config.dataDirectory);
+  const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 1_000;
+  let service: WebService;
+  try {
+    const gateway = options.operatorGateway ?? createOperatorGateway({
+      registryDirectories: config.agentRegistries,
+      environment: options.environment ?? process.env,
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+    });
+    service = new WebService(store, gateway, { shutdownTimeoutMs });
+  } catch (error) {
+    await store.close();
+    throw error;
+  }
+  const sockets = new Set<Socket>();
+  let stopping = false;
   let stopPromise: Promise<void> | undefined;
-
-  app.disable("x-powered-by");
-  app.use(securityHeaders);
-  app.use(validateLocalRequest(host, allowedHosts));
-  app.use("/api", (_req, res, next) => {
-    res.setHeader("Cache-Control", "no-store");
-    res.setHeader("Pragma", "no-cache");
-    next();
-  });
-  app.use("/api/v1", express.json({ limit: "256kb", strict: true }));
-
-  app.get("/healthz", (_req, res) => {
-    res.status(200).json({ status: "ok", version: WEB_API_VERSION });
-  });
-
-  app.get("/api/v1/bootstrap", (_req, res, next) => {
-    void service.bootstrap().then((bootstrap) => res.status(200).json(bootstrap)).catch(next);
-  });
-
-  app.patch("/api/v1/agents/:id", (req, res, next) => {
-    try {
-      const input = parsePatchAgent(req.body);
-      res.status(200).json({ agent: service.patchAgent(pathParam(req.params.id), input) });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.post("/api/v1/threads", (req, res, next) => {
-    try {
-      const input = parseCreateThread(req.body);
-      res.status(201).json({ thread: service.createThread(input.sourceId) });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.get("/api/v1/threads/:id", (req, res, next) => {
-    try {
-      res.status(200).json(service.thread(pathParam(req.params.id)));
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.patch("/api/v1/threads/:id", (req, res, next) => {
-    try {
-      const input = parsePatchThread(req.body);
-      res.status(200).json({ thread: service.patchThread(pathParam(req.params.id), input) });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.delete("/api/v1/threads/:id", (req, res, next) => {
-    void trackOperation(service.deleteThread(pathParam(req.params.id)), activeOperations)
-      .then(() => res.status(204).end())
-      .catch(next);
-  });
-
-  app.post("/api/v1/threads/:id/turns", (req, res, next) => {
-    let input: StartWebTurnInput;
-    let threadId: string;
-    try {
-      input = parseTurn(req.body);
-      threadId = pathParam(req.params.id);
-    } catch (error) {
-      next(error);
-      return;
-    }
-    void trackOperation(service.startTurn(threadId, input), activeOperations)
-      .then((started) => res.status(202).json(started))
-      .catch(next);
-  });
-
-  app.post("/api/v1/threads/:id/live-input", (req, res, next) => {
-    try {
-      const input = parseLiveInput(req.body);
-      res.status(202).json(service.submitLiveInput(pathParam(req.params.id), input.text));
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.post("/api/v1/threads/:id/cancel", (req, res, next) => {
-    const threadId = pathParam(req.params.id);
-    void trackOperation(service.cancelTurn(threadId), activeOperations)
-      .then((thread) => res.status(202).json({ cancelled: true, thread }))
-      .catch(next);
-  });
-
-  app.get("/api/v1/threads/:id/ask", (req, res, next) => {
-    void trackOperation(service.pendingAsk(pathParam(req.params.id)), activeOperations)
-      .then((ask) => res.status(200).json({ ask: ask ?? null }))
-      .catch(next);
-  });
-
-  app.post("/api/v1/threads/:id/ask", (req, res, next) => {
-    const body = typeof req.body === "object" && req.body !== null ? req.body as Record<string, unknown> : {};
-    if (typeof body.interactionId !== "string" || !Array.isArray(body.answers)) {
-      next(new WebConsoleError("invalid_ask_answer", "interactionId and answers are required.", 400));
-      return;
-    }
-    void trackOperation(
-      service.submitAsk(
-        pathParam(req.params.id),
-        body.interactionId,
-        body.answers as readonly ChannelAskAnswer[],
-      ),
-      activeOperations,
-    ).then((result) => res.status(200).json(result)).catch(next);
-  });
-
-  app.post("/api/v1/uploads", (req, res, next) => {
-    try {
-      const input = parseCreateUpload(req.body);
-      res.status(201).json({ attachment: service.createUpload(input) });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  app.put("/api/v1/uploads/:id/content", (req, res, next) => {
-    void trackOperation(handleUploadContent(req, res, service), activeOperations).catch(next);
-  });
-
-  app.delete("/api/v1/uploads/:id", (req, res, next) => {
-    void trackOperation(service.removeUpload(pathParam(req.params.id)), activeOperations)
-      .then(() => res.status(204).end())
-      .catch(next);
-  });
-
-  app.get("/api/v1/uploads/:id/content", (req, res, next) => {
-    void trackOperation(handleDownloadContent(pathParam(req.params.id), res, service), activeOperations).catch(next);
-  });
-
-  app.get("/api/v1/events", (_req, res) => {
-    if (activeStreams.size >= MAX_SSE_CLIENTS) {
-      res.status(503).json({ error: { code: "sse_capacity", message: "Too many event streams are connected." } });
-      return;
-    }
-    let closed = false;
-    res.status(200);
-    res.setHeader("Content-Type", "text/event-stream");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    res.setHeader("X-Accel-Buffering", "no");
-    res.flushHeaders();
-
-    const closeStream = (): void => {
-      if (closed) return;
-      closed = true;
-      clearInterval(heartbeat);
-      unsubscribe();
-      activeStreams.delete(closeStream);
-      res.end();
-    };
-    const send = (event: WebEvent): boolean => {
-      if (closed || res.writableEnded) return false;
-      const writable = res.write(formatSse(event));
-      if (!writable) {
-        // Events are state-invalidation hints, not an unbounded replay log. A
-        // client that cannot drain one frame must reconnect and bootstrap.
-        closeStream();
-        return false;
-      }
-      return true;
-    };
-    const unsubscribe = service.subscribe(send);
-    const heartbeat = setInterval(() => {
-      if (!res.write(`: heartbeat ${Date.now()}\n\n`)) closeStream();
-    }, HEARTBEAT_INTERVAL_MS);
-    heartbeat.unref();
-    activeStreams.add(closeStream);
-    res.once("close", closeStream);
-    send(service.readyEvent());
-  });
-
-  app.use("/api", (_req, res) => {
-    res.status(404).json({ error: { code: "not_found", message: "Not found." } });
-  });
-
-  app.use(express.static(staticDir, { fallthrough: true, index: false, redirect: false }));
-  app.get("/{*splat}", (_req, res, next) => {
-    // Keep the managed runtime's hidden ~/.mono-agent parent out of the
-    // request-relative path. Express otherwise applies its dotfile policy to
-    // the absolute path and rejects an existing index.html as Not Found.
-    res.sendFile("index.html", { root: staticDir }, (error) => {
-      if (error !== undefined && error !== null) next(error);
+  const server = createServer((request, response) => {
+    setSecurityHeaders(response);
+    void handleRequest(request, response, config.auth.token, service).catch((error) => {
+      sendError(response, error);
     });
   });
-
-  app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
-    if (res.headersSent) {
-      next(error);
-      return;
-    }
-    const known = error instanceof WebConsoleError;
-    const syntax = error instanceof SyntaxError && (error as { status?: unknown }).status === 400;
-    const tooLarge = typeof error === "object" && error !== null
-      && ((error as { status?: unknown }).status === 413 || (error as { type?: unknown }).type === "entity.too.large");
-    const status = known ? error.status : tooLarge ? 413 : syntax ? 400 : 500;
-    const code = known ? error.code : tooLarge ? "request_too_large" : syntax ? "invalid_json" : "internal_error";
-    if (status >= 500) logger?.error?.("Web console request failed.", { error: errorMessage(error) });
-    res.status(status).json({
-      error: {
-        code,
-        message: known || syntax ? errorMessage(error) : "Internal server error.",
-        ...(known && error.details !== undefined ? { details: error.details } : {}),
-      },
-    });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
   });
 
-  const stop = (): Promise<void> => {
-    stopPromise ??= (async () => {
-      let ingressFailure: unknown;
+  try {
+    await listen(server, config.listen.port, config.listen.host);
+  } catch (error) {
+    await service.stop();
+    throw new WebProductError("listen_failed", `Web product failed to listen: ${error instanceof Error ? error.message : String(error)}`, 500);
+  }
+  const address = server.address();
+  if (address === null || typeof address === "string") {
+    await service.stop();
+    throw new WebProductError("listen_failed", "Web product did not receive a TCP address.", 500);
+  }
+  const advertisedHost = wildcard(config.listen.host) ? "127.0.0.1" : bracket(config.listen.host);
+  const url = `http://${advertisedHost}:${address.port}/`;
+
+  const stop = async (): Promise<void> => {
+    if (stopPromise !== undefined) return stopPromise;
+    stopping = true;
+    stopPromise = (async () => {
+      const closing = closeServer(server);
+      server.closeIdleConnections?.();
+      const timer = setTimeout(() => {
+        for (const socket of sockets) socket.destroy();
+      }, shutdownTimeoutMs);
+      timer.unref();
       try {
-        await notificationIngress?.stop();
-      } catch (error) {
-        ingressFailure = error;
-      }
-      for (const closeStream of [...activeStreams]) closeStream();
-      try {
-        await closeServerBounded(server, 500);
-        await Promise.allSettled([...activeOperations]);
+        const [serviceResult, closeResult] = await Promise.allSettled([
+          service.stop(),
+          closing,
+        ]);
+        if (serviceResult.status === "rejected") throw serviceResult.reason;
+        if (closeResult.status === "rejected") throw closeResult.reason;
       } finally {
-        await service.stop();
+        clearTimeout(timer);
+        for (const socket of sockets) socket.destroy();
       }
-      if (ingressFailure !== undefined) throw ingressFailure;
     })();
     return stopPromise;
   };
 
-  try {
-    const address = await listen(server, port, host, {
-      listenFailed: (reason) => new WebConsoleError("listen_failed", `Web console failed to listen: ${reason}`, 500),
-      noAddress: () => new WebConsoleError("listen_failed", "Web console did not receive a TCP address.", 500),
-    });
-    notificationIngress = await startWebNotificationIngress(service, logger);
-    const url = `http://${hostForUrl(host)}:${address.port}/`;
-    return {
-      url,
-      host,
-      port: address.port,
-      boundAddress: address.address,
-      stateDir: service.store.paths.root,
-      stop,
-      close: stop,
-    };
-  } catch (error) {
-    await notificationIngress?.stop().catch(() => undefined);
-    if (server.listening) await closeServerBounded(server, 500).catch(() => undefined);
-    await service.stop();
-    throw error;
-  }
-}
-
-function trackOperation<T>(operation: Promise<T>, active: Set<Promise<unknown>>): Promise<T> {
-  active.add(operation);
-  void operation.finally(() => active.delete(operation)).catch(() => undefined);
-  return operation;
-}
-
-async function handleUploadContent(req: Request, res: Response, service: WebService): Promise<void> {
-  const contentEncoding = req.headers["content-encoding"]?.trim().toLowerCase();
-  if (contentEncoding !== undefined && contentEncoding !== "identity") {
-    throw new WebConsoleError("unsupported_content_encoding", "Compressed upload bodies are not accepted.", 415);
-  }
-  if (req.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/octet-stream") {
-    throw new WebConsoleError("invalid_upload_content_type", "Upload bytes with Content-Type: application/octet-stream.", 415);
-  }
-  const declaredLength = parseContentLength(req.headers["content-length"]);
-  const reservation = service.reserveUpload(pathParam(req.params.id));
-  if (declaredLength !== undefined && declaredLength > reservation.maxBytes) {
-    reservation.release();
-    throw new WebConsoleError("attachment_too_large", "Attachment exceeds the 20 MiB file limit.", 413);
-  }
-  if (declaredLength !== undefined && reservation.attachment.sizeBytes > 0 && declaredLength !== reservation.attachment.sizeBytes) {
-    reservation.release();
-    throw new WebConsoleError("attachment_size_mismatch", "Upload size does not match the declared file size.", 400);
-  }
-  const destination = service.store.attachmentPath(reservation.attachment);
-  const temporary = `${destination}.partial-${randomUUID()}`;
-  let moved = false;
-  try {
-    const sizeBytes = await writeBoundedRequest(req, temporary, reservation.maxBytes);
-    if (reservation.attachment.sizeBytes > 0 && sizeBytes !== reservation.attachment.sizeBytes) {
-      throw new WebConsoleError("attachment_size_mismatch", "Upload size does not match the declared file size.", 400);
-    }
-    await rename(temporary, destination);
-    moved = true;
-    await chmod(destination, 0o600);
-    const attachment = service.completeUpload(reservation.attachment.id, sizeBytes);
-    res.status(200).json({ attachment });
-  } catch (error) {
-    await unlink(temporary).catch(() => undefined);
-    if (moved) await unlink(destination).catch(() => undefined);
-    throw error;
-  } finally {
-    reservation.release();
-  }
-}
-
-async function writeBoundedRequest(req: Request, path: string, maxBytes: number): Promise<number> {
-  const handle = await open(path, "wx", 0o600);
-  let total = 0;
-  try {
-    for await (const raw of req) {
-      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw as Uint8Array);
-      total += chunk.byteLength;
-      if (total > maxBytes) {
-        throw new WebConsoleError("attachment_too_large", "Attachment exceeds the 20 MiB file limit.", 413);
-      }
-      let offset = 0;
-      while (offset < chunk.byteLength) {
-        const { bytesWritten } = await handle.write(chunk, offset, chunk.byteLength - offset);
-        if (bytesWritten <= 0) throw new WebConsoleError("upload_write_failed", "Upload storage made no write progress.", 500);
-        offset += bytesWritten;
-      }
-    }
-    await handle.sync();
-    const info = await handle.stat();
-    if (!info.isFile() || info.size !== total) {
-      throw new WebConsoleError("upload_write_failed", "Stored upload size did not match the received bytes.", 500);
-    }
-    return total;
-  } finally {
-    await handle.close();
-  }
-}
-
-async function handleDownloadContent(id: string, res: Response, service: WebService): Promise<void> {
-  const attachment = service.storedAttachment(id);
-  if (!attachment.uploaded) throw new WebConsoleError("attachment_not_ready", "Attachment upload is incomplete.", 409);
-  const path = service.store.attachmentPath(attachment);
-  let handle;
-  try {
-    handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
-  } catch (error) {
-    throw new WebConsoleError("attachment_integrity", `Attachment content is unavailable (${errorMessage(error)}).`, 409);
-  }
-  const info = await handle.stat();
-  if (!info.isFile() || info.size !== attachment.sizeBytes) {
-    await handle.close();
-    throw new WebConsoleError("attachment_integrity", "Attachment content is unavailable.", 409);
-  }
-  const image = attachment.kind === "image";
-  res.status(200);
-  res.setHeader("Content-Type", image ? attachment.contentType : "application/octet-stream");
-  res.setHeader("Content-Length", String(info.size));
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
-  res.setHeader("Content-Disposition", contentDisposition(attachment.name, image ? "inline" : "attachment"));
-  const stream = handle.createReadStream({ autoClose: false });
-  await pipeline(stream, res).finally(async () => handle.close());
-}
-
-function validateLocalRequest(
-  configuredHost: string,
-  additionalHosts: readonly string[],
-): (req: Request, res: Response, next: NextFunction) => void {
-  return (req, _res, next): void => {
-    try {
-      const host = normalizedAuthority(req.headers.host);
-      if (!isAllowedWebHostname(host.hostname, configuredHost, systemHostname(), additionalHosts)) {
-        throw new WebConsoleError("untrusted_host", "This Host is not allowed for the local web console.", 421);
-      }
-      if (isMutation(req.method)) {
-        if (req.headers["sec-fetch-site"] === "cross-site") {
-          throw new WebConsoleError("cross_site_request", "Cross-site mutations are not allowed.", 403);
-        }
-        const rawOrigin = req.headers.origin;
-        if (rawOrigin !== undefined) {
-          let origin: URL;
-          try {
-            origin = new URL(rawOrigin);
-          } catch {
-            throw new WebConsoleError("invalid_origin", "Request Origin is invalid.", 403);
-          }
-          if ((origin.protocol !== "http:" && origin.protocol !== "https:") || origin.host.toLowerCase() !== host.authority) {
-            throw new WebConsoleError("origin_mismatch", "Cross-origin mutations are not allowed.", 403);
-          }
-        }
-      }
-      next();
-    } catch (error) {
-      next(error);
-    }
+  return {
+    url,
+    address: (address as AddressInfo).address,
+    port: address.port,
+    dataDirectory: config.dataDirectory,
+    stop,
+    close: stop,
   };
+
+  async function handleRequest(
+    request: IncomingMessage,
+    response: ServerResponse,
+    token: string,
+    web: WebService,
+  ): Promise<void> {
+    if (stopping) throw new WebProductError("web_stopping", "Web product is stopping.", 503);
+    const url = new URL(request.url ?? "/", "http://web.invalid");
+    validateRequestAuthority(request, config.listen.host, listeningPort(server));
+    if (request.method === "GET" && url.pathname === "/") return sendText(response, 200, "text/html; charset=utf-8", WEB_INDEX_HTML);
+    if (request.method === "GET" && url.pathname === "/app.js") return sendText(response, 200, "text/javascript; charset=utf-8", WEB_APP_JS);
+    if (request.method === "GET" && url.pathname === "/styles.css") return sendText(response, 200, "text/css; charset=utf-8", WEB_STYLES);
+    if (request.method === "GET" && url.pathname === "/healthz") return sendJson(response, 200, { status: "healthy" });
+    if (!url.pathname.startsWith("/api/v1/")) throw new WebProductError("not_found", "Not found.", 404);
+
+    authenticate(request, token);
+    response.setHeader("cache-control", "no-store");
+    if (request.method === "GET" && url.pathname === "/api/v1/bootstrap") {
+      return sendJson(response, 200, await web.bootstrap());
+    }
+    if (request.method === "POST" && url.pathname === "/api/v1/threads") {
+      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      const input = parseCreateThread(await readJsonBody(request));
+      return sendJson(response, 201, await web.createThread(input.agentId, input.title));
+    }
+    const detailMatch = /^\/api\/v1\/threads\/([^/]+)$/u.exec(url.pathname);
+    if (request.method === "GET" && detailMatch !== null) {
+      return sendJson(response, 200, web.thread(decodePath(detailMatch[1]!)));
+    }
+    const turnMatch = /^\/api\/v1\/threads\/([^/]+)\/turns$/u.exec(url.pathname);
+    if (request.method === "POST" && turnMatch !== null) {
+      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      const input = parseStartTurn(await readJsonBody(request));
+      const threadId = decodePath(turnMatch[1]!);
+      response.writeHead(200, {
+        "content-type": "application/x-ndjson; charset=utf-8",
+        "cache-control": "no-store",
+        connection: "keep-alive",
+      });
+      let disconnected = false;
+      response.once("close", () => {
+        if (!response.writableEnded) disconnected = true;
+      });
+      try {
+        const detail = await web.runTurn(threadId, input, async (next) => {
+          if (disconnected || response.destroyed) return;
+          await writeLine(response, { type: "state", detail: next });
+        });
+        if (!response.destroyed) await writeLine(response, { type: "done", detail });
+      } catch (error) {
+        if (!response.destroyed) await writeLine(response, {
+          type: "error",
+          error: { code: errorCode(error), message: error instanceof Error ? error.message : String(error) },
+          detail: web.thread(threadId),
+        });
+      }
+      if (!response.destroyed) response.end();
+      return;
+    }
+    const cancelMatch = /^\/api\/v1\/threads\/([^/]+)\/cancel$/u.exec(url.pathname);
+    if (request.method === "POST" && cancelMatch !== null) {
+      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      await readJsonBody(request);
+      return sendJson(response, 200, await web.cancel(decodePath(cancelMatch[1]!)));
+    }
+    throw new WebProductError("not_found", "Not found.", 404);
+  }
 }
 
-export function isAllowedWebHostname(
-  hostname: string,
-  configuredHost: string,
-  machineHostname = systemHostname(),
-  additionalHosts: readonly string[] = [],
-): boolean {
-  const normalizedMachine = normalizeAllowedHostname(machineHostname);
-  const allowedConfiguredNames = new Set<string>([
-    normalizedMachine,
-    `${normalizedMachine}.local`,
-    ...additionalHosts.map(normalizeAllowedHostname),
-  ]);
-  const normalizedConfigured = configuredHost.toLowerCase().replace(/^\[|\]$/gu, "");
-  if (isIP(normalizedConfigured) === 0 && /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/iu.test(normalizedConfigured)) {
-    allowedConfiguredNames.add(normalizedConfigured);
+function validateRuntimeConfig(config: WebConfig): void {
+  if (typeof config.auth?.token !== "string" || config.auth.token.length < 16) {
+    throw new WebProductError("missing_auth_token", "Web browser authentication requires a token of at least 16 characters.");
   }
-  return isAllowedLocalHostname(hostname, allowedConfiguredNames);
+  const nonLoopback = !isLoopback(normalizeHostname(config.listen.host));
+  if (nonLoopback && config.auth.token.length < 24) {
+    throw new WebProductError("unsafe_non_loopback_bind", "A non-loopback listener requires an authentication token of at least 24 characters.");
+  }
+  if (nonLoopback && config.allowInsecureHttp !== true) {
+    throw new WebProductError(
+      "insecure_http_opt_in_required",
+      "A non-loopback plaintext HTTP listener requires explicit allowInsecureHttp: true.",
+    );
+  }
 }
 
-function normalizedAuthority(value: string | undefined): { readonly authority: string; readonly hostname: string } {
-  if (value === undefined || value.trim().length === 0 || /[\s/@\\]/u.test(value)) {
-    throw new WebConsoleError("invalid_host", "Request Host is invalid.", 400);
+function authenticate(request: IncomingMessage, token: string): void {
+  const header = request.headers.authorization;
+  if (typeof header !== "string" || !header.startsWith("Bearer ") || !secretEqual(header.slice(7), token)) {
+    throw new WebProductError("unauthorized", "Unauthorized.", 401);
   }
+}
+
+function requireMutationSafety(request: IncomingMessage, configuredHost: string, port: number): void {
+  if (request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
+    throw new WebProductError("unsupported_media_type", "Mutations require Content-Type: application/json.", 415);
+  }
+  const origin = request.headers.origin;
+  if (origin === undefined) {
+    const fetchSite = request.headers["sec-fetch-site"];
+    if (fetchSite !== undefined && fetchSite !== "same-origin" && fetchSite !== "none") rejectOrigin();
+    return;
+  }
+  const host = request.headers.host;
+  if (host === undefined) rejectOrigin();
   let parsed: URL;
+  let requestAuthority: URL;
   try {
-    parsed = new URL(`http://${value}`);
+    parsed = new URL(origin);
+    requestAuthority = new URL(`http://${host}`);
+  } catch { return rejectOrigin(); }
+  if (parsed.protocol !== "http:" || parsed.username !== "" || parsed.password !== "" || parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") rejectOrigin();
+  if (requestAuthority.username !== "" || requestAuthority.password !== "" || requestAuthority.pathname !== "/" || requestAuthority.search !== "" || requestAuthority.hash !== "") rejectOrigin();
+  if (effectivePort(parsed) !== port || effectivePort(requestAuthority) !== port) rejectOrigin();
+  const originHost = normalizeHostname(parsed.hostname);
+  if (normalizeHostname(requestAuthority.hostname) !== originHost) rejectOrigin();
+  if (!isAllowedProductHost(originHost, configuredHost)) rejectOrigin();
+}
+
+function validateRequestAuthority(request: IncomingMessage, configuredHost: string, port: number): void {
+  const host = request.headers.host;
+  if (host === undefined) rejectAuthority();
+  let authority: URL;
+  try { authority = new URL(`http://${host}`); } catch { return rejectAuthority(); }
+  if (authority.username !== "" || authority.password !== "" || authority.pathname !== "/" || authority.search !== "" || authority.hash !== "") rejectAuthority();
+  if (effectivePort(authority) !== port) rejectAuthority();
+  if (!isAllowedProductHost(normalizeHostname(authority.hostname), configuredHost)) rejectAuthority();
+}
+
+function isAllowedProductHost(originHost: string, configuredHost: string): boolean {
+  const configured = normalizeHostname(configuredHost);
+  if (wildcard(configured)) return isValidatedLocalHost(originHost);
+  if (isLoopback(configured)) return isLoopback(originHost);
+  return originHost === configured;
+}
+
+function isValidatedLocalHost(host: string): boolean {
+  if (isLoopback(host)) return true;
+  const machine = systemHostname().toLowerCase();
+  if (host === machine || host === `${machine}.local`) return true;
+  if (isIP(host) === 4) {
+    const parts = host.split(".").map(Number);
+    const [a = -1, b = -1] = parts;
+    return a === 10
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168)
+      || (a === 169 && b === 254)
+      || (a === 100 && b >= 64 && b <= 127);
+  }
+  if (isIP(host) === 6) {
+    return /^(?:fc|fd)/u.test(host) || /^fe[89ab]/u.test(host);
+  }
+  return false;
+}
+
+function effectivePort(url: URL): number {
+  return url.port === "" ? 80 : Number(url.port);
+}
+
+function normalizeHostname(host: string): string {
+  return host.toLowerCase().replace(/^\[|\]$/gu, "");
+}
+
+function rejectOrigin(): never {
+  throw new WebProductError("cross_origin", "Cross-origin mutation rejected.", 403);
+}
+
+function rejectAuthority(): never {
+  throw new WebProductError("invalid_authority", "Request authority is not accepted by this web listener.", 421);
+}
+
+async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  const declared = request.headers["content-length"];
+  if (typeof declared === "string" && /^\d+$/u.test(declared) && Number(declared) > MAX_BODY_BYTES) {
+    throw new WebProductError("body_too_large", "Request body exceeds 256 KiB.", 413);
+  }
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of request) {
+    const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+    total += bytes.length;
+    if (total > MAX_BODY_BYTES) throw new WebProductError("body_too_large", "Request body exceeds 256 KiB.", 413);
+    chunks.push(bytes);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as unknown;
   } catch {
-    throw new WebConsoleError("invalid_host", "Request Host is invalid.", 400);
+    throw new WebProductError("invalid_json", "Request body is not valid JSON.");
   }
+}
+
+function parseCreateThread(raw: unknown): CreateWebThreadInput {
+  const value = strictObject(raw, ["agentId", "title"]);
+  if (typeof value.agentId !== "string" || value.agentId.length === 0 || value.agentId.length > 256) throw new WebProductError("invalid_request", "agentId is required.");
+  if (value.title !== undefined && (typeof value.title !== "string" || value.title.length > 120)) throw new WebProductError("invalid_request", "title is invalid.");
+  return { agentId: value.agentId, ...(value.title === undefined ? {} : { title: value.title as string }) };
+}
+
+function parseStartTurn(raw: unknown): StartWebTurnInput {
+  const value = strictObject(raw, ["text", "model", "effort"]);
   return {
-    authority: parsed.host.toLowerCase(),
-    hostname: parsed.hostname.toLowerCase().replace(/\.$/u, ""),
+    text: typeof value.text === "string" ? value.text : "",
+    ...(value.model === undefined ? {} : { model: value.model as string }),
+    ...(value.effort === undefined ? {} : { effort: value.effort as string }),
   };
 }
 
-function isAllowedLocalHostname(hostname: string, allowedConfiguredNames: ReadonlySet<string>): boolean {
-  const unwrapped = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
-  const ipKind = isIP(unwrapped);
-  if (ipKind === 4) return isPrivateIpv4(unwrapped);
-  if (ipKind === 6) {
-    const normalized = unwrapped.toLowerCase();
-    return normalized === "::1" || normalized.startsWith("fe80:") || normalized.startsWith("fc") || normalized.startsWith("fd");
-  }
-  return unwrapped === "localhost"
-    || unwrapped.endsWith(".localhost")
-    || allowedConfiguredNames.has(unwrapped);
-}
-
-function resolveAllowedHosts(
-  configured: readonly string[] | undefined,
-  env: Readonly<Record<string, string | undefined>>,
-): string[] {
-  const fromEnv = env?.MONO_AGENT_WEB_ALLOWED_HOSTS?.split(",") ?? [];
-  return [...new Set([...(configured ?? []), ...fromEnv]
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0)
-    .map(normalizeAllowedHostname))];
-}
-
-function normalizeAllowedHostname(value: string): string {
-  const normalized = value.trim().toLowerCase().replace(/\.$/u, "");
-  if (normalized.length === 0
-    || normalized.includes(":")
-    || !/^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/u.test(normalized)) {
-    throw new WebConsoleError("invalid_allowed_host", `Invalid allowed web hostname: ${value}`, 400);
-  }
-  return normalized;
-}
-
-function isPrivateIpv4(value: string): boolean {
-  const [first = -1, second = -1] = value.split(".").map(Number);
-  return first === 0
-    || first === 10
-    || first === 127
-    || (first === 169 && second === 254)
-    || (first === 172 && second >= 16 && second <= 31)
-    || (first === 192 && second === 168)
-    || (first === 100 && second >= 64 && second <= 127);
-}
-
-function securityHeaders(_req: Request, res: Response, next: NextFunction): void {
-  res.setHeader("X-Content-Type-Options", "nosniff");
-  res.setHeader("Referrer-Policy", "no-referrer");
-  res.setHeader("X-Frame-Options", "DENY");
-  res.setHeader("Cross-Origin-Resource-Policy", "same-origin");
-  res.setHeader("Content-Security-Policy", "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'");
-  next();
-}
-
-function parseCreateThread(value: unknown): CreateWebThreadInput {
-  const body = requireRecord(value);
-  return { sourceId: requireString(body.sourceId, "sourceId", 256) };
-}
-
-function parsePatchAgent(value: unknown): PatchWebAgentInput {
-  const body = requireRecord(value);
-  if (typeof body.pinned !== "boolean") throw invalidBody("pinned must be boolean.");
-  return { pinned: body.pinned };
-}
-
-function parsePatchThread(value: unknown): PatchWebThreadInput {
-  const body = requireRecord(value);
-  const title = optionalString(body.title, "title", 120);
-  const archived = body.archived;
-  if (archived !== undefined && typeof archived !== "boolean") throw invalidBody("archived must be boolean.");
-  if (title === undefined && archived === undefined) throw invalidBody("Provide title or archived.");
-  return { ...(title === undefined ? {} : { title }), ...(archived === undefined ? {} : { archived }) };
-}
-
-function parseTurn(value: unknown): StartWebTurnInput {
-  const body = requireRecord(value);
-  const text = body.text === undefined
-    ? undefined
-    : requireString(body.text, "text", WEB_MAX_TURN_TEXT_CHARACTERS, true);
-  const quoteBody = body.quote === undefined ? undefined : requireRecord(body.quote);
-  const quote = quoteBody === undefined
-    ? undefined
-    : {
-        text: requireString(
-          quoteBody.text,
-          "quote.text",
-          WEB_MAX_TURN_TEXT_CHARACTERS,
-        ),
-        messageId: requireString(quoteBody.messageId, "quote.messageId", 256),
-      };
-  const attachmentIds = body.attachmentIds;
-  if (attachmentIds !== undefined && (!Array.isArray(attachmentIds) || !attachmentIds.every((id) => typeof id === "string" && id.length > 0))) {
-    throw invalidBody("attachmentIds must be an array of ids.");
-  }
-  const model = optionalString(body.model, "model", 512);
-  const effort = optionalString(body.effort, "effort", 128);
-  return {
-    ...(text === undefined ? {} : { text }),
-    ...(quote === undefined ? {} : { quote }),
-    ...(attachmentIds === undefined ? {} : { attachmentIds }),
-    ...(model === undefined ? {} : { model }),
-    ...(effort === undefined ? {} : { effort }),
-  };
-}
-
-function parseLiveInput(value: unknown): StartWebLiveInputInput {
-  const body = requireRecord(value);
-  return {
-    text: requireString(body.text, "text", AGENT_LIVE_INPUT_MAX_CHARACTERS),
-  };
-}
-
-function parseCreateUpload(value: unknown): CreateWebUploadInput {
-  const body = requireRecord(value);
-  const sizeBytes = body.sizeBytes;
-  if (sizeBytes !== undefined && (!Number.isSafeInteger(sizeBytes) || (sizeBytes as number) < 0)) {
-    throw invalidBody("sizeBytes must be a non-negative integer.");
-  }
-  return {
-    name: requireString(body.name, "name", 1_024),
-    contentType: requireString(body.contentType, "contentType", 256),
-    ...(sizeBytes === undefined ? {} : { sizeBytes: sizeBytes as number }),
-  };
-}
-
-function requireRecord(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw invalidBody("JSON body must be an object.");
-  return value as Record<string, unknown>;
-}
-
-function requireString(value: unknown, field: string, max: number, allowEmpty = false): string {
-  if (typeof value !== "string" || value.length > max || (!allowEmpty && value.trim().length === 0)) {
-    throw invalidBody(`${field} must be a${allowEmpty ? "" : " non-empty"} string of at most ${max} characters.`);
-  }
+function strictObject(raw: unknown, fields: readonly string[]): Record<string, unknown> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new WebProductError("invalid_request", "Request body must be an object.");
+  const value = raw as Record<string, unknown>;
+  for (const field of Object.keys(value)) if (!fields.includes(field)) throw new WebProductError("invalid_request", `Unknown request field ${field}.`);
   return value;
 }
 
-function optionalString(value: unknown, field: string, max: number): string | undefined {
-  return value === undefined ? undefined : requireString(value, field, max);
+function sendError(response: ServerResponse, error: unknown): void {
+  const status = error instanceof WebProductError ? error.status : 500;
+  const code = errorCode(error);
+  const message = status >= 500 ? "Internal server error." : error instanceof Error ? error.message : String(error);
+  if (response.headersSent) {
+    if (!response.destroyed) response.end(`${JSON.stringify({ type: "error", error: { code, message } })}\n`);
+    return;
+  }
+  if (status === 401) response.setHeader("www-authenticate", 'Bearer realm="mono-agent-web"');
+  sendJson(response, status, { error: { code, message } });
 }
 
-function invalidBody(message: string): WebConsoleError {
-  return new WebConsoleError("invalid_request", message, 400);
+function sendJson(response: ServerResponse, status: number, value: unknown): void {
+  sendText(response, status, "application/json; charset=utf-8", `${JSON.stringify(value)}\n`);
 }
 
-function pathParam(value: string | readonly string[] | undefined): string {
-  const id = Array.isArray(value) ? value[0] : value;
-  if (typeof id !== "string" || id.length === 0 || id.length > 512) throw invalidBody("Path id is invalid.");
-  return id;
+function sendText(response: ServerResponse, status: number, contentType: string, body: string): void {
+  response.writeHead(status, { "content-type": contentType, "content-length": Buffer.byteLength(body) });
+  response.end(body);
 }
 
-function parseContentLength(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  if (!/^\d+$/u.test(value)) throw invalidBody("Content-Length is invalid.");
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed)) throw invalidBody("Content-Length is invalid.");
-  return parsed;
+async function writeLine(response: ServerResponse, value: unknown): Promise<void> {
+  if (response.write(`${JSON.stringify(value)}\n`)) return;
+  if (response.destroyed) return;
+  await new Promise<void>((resolveWrite) => {
+    const settle = (): void => {
+      response.off("drain", settle);
+      response.off("close", settle);
+      resolveWrite();
+    };
+    response.once("drain", settle);
+    response.once("close", settle);
+  });
 }
 
-function contentDisposition(name: string, disposition: "inline" | "attachment"): string {
-  const ascii = name.replace(/[^\x20-\x7e]/gu, "_").replace(/["\\]/gu, "_").slice(0, 150) || "attachment";
-  const encoded = encodeURIComponent(name).replace(/[!'()*]/gu, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
-  return `${disposition}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+function setSecurityHeaders(response: ServerResponse): void {
+  response.setHeader("x-content-type-options", "nosniff");
+  response.setHeader("referrer-policy", "no-referrer");
+  response.setHeader("x-frame-options", "DENY");
+  response.setHeader("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  response.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=()");
 }
 
-function formatSse(event: WebEvent): string {
-  return `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+function secretEqual(left: string, right: string): boolean {
+  const a = createHash("sha256").update(left).digest();
+  const b = createHash("sha256").update(right).digest();
+  return timingSafeEqual(a, b);
 }
 
-function isMutation(method: string): boolean {
-  return method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+function decodePath(value: string): string {
+  try { return decodeURIComponent(value); } catch { throw new WebProductError("invalid_path", "Invalid URL path."); }
 }
 
-function normalizePort(value: number): number {
-  if (!Number.isInteger(value) || value < 0 || value > 65_535) throw new WebConsoleError("invalid_port", "Web port must be an integer from 0 to 65535.", 400);
-  return value;
+function errorCode(error: unknown): string {
+  return typeof error === "object" && error !== null && typeof (error as { code?: unknown }).code === "string"
+    ? (error as { code: string }).code
+    : "internal_error";
 }
 
-function defaultStaticDir(): string {
-  return resolve(dirname(fileURLToPath(import.meta.url)), "../webapp/dist");
+function isLoopback(host: string): boolean { return host === "localhost" || host === "::1" || /^127(?:\.|$)/u.test(host); }
+function wildcard(host: string): boolean { return host === "0.0.0.0" || host === "::"; }
+function bracket(host: string): string { return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host; }
+
+function listeningPort(server: Server): number {
+  const address = server.address();
+  if (address === null || typeof address === "string") throw new WebProductError("web_not_listening", "Web product is not listening.", 503);
+  return address.port;
+}
+
+function listen(server: Server, port: number, host: string): Promise<void> {
+  return new Promise((resolveListen, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once("error", onError);
+    server.listen(port, host, () => {
+      server.off("error", onError);
+      resolveListen();
+    });
+  });
+}
+
+function closeServer(server: Server): Promise<void> {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolveClose, reject) => server.close((error) => error === undefined ? resolveClose() : reject(error)));
 }

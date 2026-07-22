@@ -10,7 +10,7 @@ terminal and browser consoles.
 
 Category: `communication`
 Tier: `core`
-Catalog responsibility: Exposes the structured local TUI NDJSON endpoint used by the terminal and browser operator consoles.
+Catalog responsibility: Retains the v0 TUI endpoint only until the legacy agent-app plane is removed in the next rebuild vertical.
 
 <!-- package-metadata:end -->
 

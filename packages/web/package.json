@@ -1,12 +1,12 @@
 {
   "name": "@mono-agent/web",
   "version": "0.15.0",
-  "description": "Always-on assistant-ui web console for discovering and chatting with local mono-agent instances.",
+  "description": "Standalone authenticated browser operator for mono-agent instances.",
   "type": "module",
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/robertsreberski/mono-agent.git",
+    "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
     "directory": "packages/web"
   },
   "private": false,
@@ -15,6 +15,9 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "mono-agent-web": "./dist/bin.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -23,24 +26,16 @@
   },
   "files": [
     "dist",
-    "webapp/dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
-    "build": "pnpm run build:webapp && pnpm run build:server",
-    "build:server": "tsc -p tsconfig.build.json",
-    "build:webapp": "pnpm --dir webapp install --frozen-lockfile && pnpm --dir webapp run build",
+    "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run src/__tests__ && pnpm --dir webapp run test"
+    "test": "vitest run"
   },
   "dependencies": {
-    "@mono-agent/agent-contracts": "workspace:0.15.0",
-    "@mono-agent/config": "workspace:0.15.0",
-    "@mono-agent/observability": "workspace:0.15.0",
-    "express": "^5.1.0"
-  },
-  "devDependencies": {
-    "@types/express": "^5.0.2"
+    "@mono-agent/operator": "workspace:0.15.0"
   },
   "publishConfig": {
     "access": "public"

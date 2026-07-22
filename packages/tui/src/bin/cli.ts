@@ -1,140 +1,89 @@
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
-
-import type { AgentResponderLike } from "../agent/responder.js";
+import { sanitizeTerminalText } from "../ui/terminal-text.js";
 
 export interface ParsedArgs {
-  readonly responder?: string;
-  readonly config?: string;
-  readonly title?: string;
+  readonly endpoint?: string;
+  readonly tokenEnvironment?: string;
+  readonly registryDirectories: readonly string[];
+  readonly operatorId?: string;
   readonly conversationId?: string;
-  readonly url?: string;
-  readonly apiKey?: string;
-  readonly registryDir?: string;
+  readonly title?: string;
+  readonly model?: string;
+  readonly effort?: string;
   readonly help: boolean;
 }
 
 export type ParseArgsResult = ParsedArgs | { readonly error: string };
 
-const VALUE_FLAGS: Record<string, keyof Omit<ParsedArgs, "help">> = {
-  "--responder": "responder",
-  "--config": "config",
-  "--title": "title",
-  "--conversation": "conversationId",
-  "--url": "url",
-  "--api-key": "apiKey",
-  "--registry-dir": "registryDir",
-};
+const VALUE_FLAGS = new Map<string, Exclude<keyof ParsedArgs, "help" | "registryDirectories">>([
+  ["--endpoint", "endpoint"],
+  ["--token-env", "tokenEnvironment"],
+  ["--agent", "operatorId"],
+  ["--conversation", "conversationId"],
+  ["--title", "title"],
+  ["--model", "model"],
+  ["--effort", "effort"],
+]);
 
-/**
- * Parse the `mono-agent-tui` argv (already stripped of `node` + script path).
- * Pure and side-effect free so it can be unit-tested without booting the CLI.
- */
+/** Parse `mono-agent-tui` arguments without accessing the process or filesystem. */
 export function parseArgs(argv: readonly string[]): ParseArgsResult {
+  const values: {
+    -readonly [Key in Exclude<keyof ParsedArgs, "help" | "registryDirectories">]?: string;
+  } = {};
+  const registryDirectories: string[] = [];
   let help = false;
-  const values: Partial<Record<keyof Omit<ParsedArgs, "help">, string>> = {};
 
-  for (let i = 0; i < argv.length; i++) {
-    const flag = argv[i];
+  for (let index = 0; index < argv.length; index += 1) {
+    const flag = argv[index];
     if (flag === "-h" || flag === "--help") {
       help = true;
       continue;
     }
-    const key = flag === undefined ? undefined : VALUE_FLAGS[flag];
-    if (key !== undefined) {
-      const value = argv[i + 1];
-      if (value === undefined) {
-        return { error: `${flag} requires a value` };
+    const key = flag === undefined ? undefined : VALUE_FLAGS.get(flag);
+    if (key !== undefined || flag === "--registry") {
+      const value = argv[index + 1]?.trim();
+      if (value === undefined || value.length === 0) {
+        return { error: `${String(flag)} requires a value` };
       }
-      values[key] = value;
-      i++;
+      if (flag === "--registry") registryDirectories.push(value);
+      else if (key !== undefined) values[key] = value;
+      index += 1;
       continue;
     }
     return { error: `unknown argument: ${String(flag)}` };
   }
 
-  if (values.responder !== undefined && values.url !== undefined) {
-    return { error: "--responder and --url are mutually exclusive" };
+  if (values.endpoint !== undefined && registryDirectories.length > 0) {
+    return { error: "--endpoint and --registry are mutually exclusive" };
   }
-
-  return { help, ...values };
+  if (values.tokenEnvironment !== undefined && values.endpoint === undefined) {
+    return { error: "--token-env requires --endpoint" };
+  }
+  return { ...values, registryDirectories, help };
 }
 
 export const HELP_TEXT = `Usage: mono-agent-tui [options]
 
-Connection (exactly one):
-  --responder <file>      Path to an ESM module that default-exports an
-                          AgentResponderLike, or exports
-                          createResponder(env, cwd, configJson). In-process mode.
-  --url <baseUrl>         Connect to a running agent's tui endpoint
-                          (e.g. http://127.0.0.1:52341/gui).
-  (neither)               Discover running agents from the trace-source
-                          registry and open on the picker.
+Connection:
+  --endpoint <url>       Connect directly to a loopback operator endpoint.
+  --token-env <name>     Read the bearer token from this environment variable.
+                         Defaults to required MONO_AGENT_OPERATOR_TOKEN.
+  --registry <dir>       Discover running agents in a registry (repeatable).
+  --agent <id>           Select one discovered agent by id.
+  (neither)              Discover through the operator library's default registry.
 
-Options:
-  --api-key <key>         Bearer key for --url when the agent sets tui.apiKey.
-  --registry-dir <dir>    Trace-source registry directory (default:
-                          ~/.mono-agent/trace-sources).
-  --config <path>         Path to mono-agent.config.json. Enables the Config
-                          view and is forwarded to createResponder().
-  --conversation <id>     Conversation id (default: tui-local).
-  --title <text>          Header title (default: "mono-agent").
-  -h, --help              Show this help and exit.
+Session:
+  --conversation <id>    Conversation id (default: tui-<random uuid>).
+  --model <ref>          Initial per-turn model override, when eligible.
+  --effort <level>       Initial per-turn effort override, when eligible.
+  --title <text>         Header title (default: mono-agent).
+  -h, --help             Show this help and exit.
 
-Prefer \`mono-agent tui\` (from @mono-agent/agent-app): it resolves running
-agents, endpoints, and keys automatically. This bin is the low-level surface
-for custom hosts.
+Inside the console, /model and /effort change eligible overrides, /cancel or
+Escape cancels an active turn, and /exit or /quit closes only this renderer.
 `;
 
 export function exitWithError(message: string): never {
-  process.stderr.write(`mono-agent-tui: ${message}\n`);
+  process.stderr.write(`mono-agent-tui: ${sanitizeTerminalText(message)}\n`);
   process.stderr.write(HELP_TEXT);
   process.exit(2);
-}
-
-function isAgentResponderLike(value: unknown): value is AgentResponderLike {
-  return typeof (value as { readonly respond?: unknown } | null | undefined)?.respond === "function";
-}
-
-/**
- * Resolve and import an `AgentResponderLike` from a host-supplied module.
- * Accepts either a `createResponder(env, cwd, configPath)` factory export or
- * a default-exported responder. Exits the process with a 2 on user error.
- */
-export async function loadResponder(
-  responderPath: string,
-  configPath: string | undefined,
-): Promise<AgentResponderLike> {
-  const absolute = resolve(process.cwd(), responderPath);
-  if (!existsSync(absolute)) {
-    exitWithError(`responder file not found: ${absolute}`);
-  }
-  const moduleUrl = pathToFileURL(absolute).href;
-  const moduleExports = (await import(moduleUrl)) as {
-    default?: unknown;
-    createResponder?: (
-      env: Record<string, string | undefined>,
-      cwd: string,
-      configPath: string | undefined,
-    ) => Promise<unknown> | unknown;
-  };
-
-  if (typeof moduleExports.createResponder === "function") {
-    const result = await moduleExports.createResponder(
-      { ...process.env },
-      process.cwd(),
-      configPath,
-    );
-    if (!isAgentResponderLike(result)) {
-      exitWithError(`createResponder() from module ${absolute} did not return an AgentResponderLike.`);
-    }
-    return result;
-  }
-  if (isAgentResponderLike(moduleExports.default)) {
-    return moduleExports.default;
-  }
-  exitWithError(
-    `module ${absolute} did not export a default AgentResponderLike or createResponder().`,
-  );
 }

@@ -2,55 +2,44 @@
 import { resolve } from "node:path";
 
 import { startMonoAgentTui } from "../runtime/start.js";
-import type { StartMonoAgentTuiOptions } from "../runtime/start.js";
-import { exitWithError, HELP_TEXT, loadResponder, parseArgs } from "./cli.js";
+import { sanitizeTerminalText } from "../ui/terminal-text.js";
+import { exitWithError, HELP_TEXT, parseArgs } from "./cli.js";
 
 async function main(): Promise<void> {
   const parsed = parseArgs(process.argv.slice(2));
-  if ("error" in parsed) {
-    exitWithError(parsed.error);
-  }
+  if ("error" in parsed) exitWithError(parsed.error);
   if (parsed.help) {
     process.stdout.write(HELP_TEXT);
-    process.exit(0);
+    return;
   }
   if (process.stdin.isTTY !== true) {
-    exitWithError("stdin is not a TTY; mono-agent-tui needs an interactive terminal");
+    exitWithError("stdin is not a TTY; inject a Terminal through the programmatic API for tests");
+  }
+  const tokenEnvironment = parsed.endpoint === undefined
+    ? undefined
+    : parsed.tokenEnvironment ?? "MONO_AGENT_OPERATOR_TOKEN";
+  const token = tokenEnvironment === undefined ? undefined : process.env[tokenEnvironment];
+  if (tokenEnvironment !== undefined && (token === undefined || token.length === 0)) {
+    exitWithError(`environment variable ${tokenEnvironment} is empty or missing`);
   }
 
-  const config =
-    parsed.config !== undefined
-      ? { path: resolve(process.cwd(), parsed.config), cwd: process.cwd(), env: { ...process.env } }
-      : undefined;
-
-  let mode: Pick<StartMonoAgentTuiOptions, "responder" | "connection" | "discovery">;
-  if (parsed.responder !== undefined) {
-    mode = { responder: await loadResponder(parsed.responder, parsed.config) };
-  } else if (parsed.url !== undefined) {
-    mode = {
-      connection: {
-        baseUrl: parsed.url,
-        ...(parsed.apiKey === undefined ? {} : { apiKey: parsed.apiKey }),
-      },
-    };
-  } else {
-    mode = {
-      discovery: parsed.registryDir === undefined ? {} : { registryDir: resolve(parsed.registryDir) },
-    };
-  }
-
-  const handle = startMonoAgentTui({
-    ...mode,
-    ...(config === undefined ? {} : { config }),
-    ...(parsed.title === undefined ? {} : { title: parsed.title }),
+  const handle = await startMonoAgentTui({
+    ...(parsed.endpoint === undefined ? {} : { endpoint: parsed.endpoint }),
+    ...(token === undefined || token.length === 0 ? {} : { token }),
+    ...(parsed.registryDirectories.length === 0
+      ? {}
+      : { registryDirectories: parsed.registryDirectories.map((directory) => resolve(directory)) }),
+    ...(parsed.operatorId === undefined ? {} : { operatorId: parsed.operatorId }),
     ...(parsed.conversationId === undefined ? {} : { conversationId: parsed.conversationId }),
+    ...(parsed.title === undefined ? {} : { title: parsed.title }),
+    ...(parsed.model === undefined ? {} : { model: parsed.model }),
+    ...(parsed.effort === undefined ? {} : { effort: parsed.effort }),
   });
-
   await handle.waitUntilExit();
 }
 
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`mono-agent-tui: ${message}\n`);
-  process.exit(1);
+  process.stderr.write(`mono-agent-tui: ${sanitizeTerminalText(message)}\n`);
+  process.exitCode = 1;
 });

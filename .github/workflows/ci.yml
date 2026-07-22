@@ -69,6 +69,10 @@ jobs:
             --filter @mono-agent/cli \
             --filter @mono-agent/runtime-pi \
             --filter @mono-agent/channel-webhook \
+            --filter @mono-agent/operator \
+            --filter @mono-agent/channel-operator \
+            --filter @mono-agent/tui \
+            --filter @mono-agent/web \
             --filter create-mono-agent run build
           pnpm -r --sort \
             --filter @mono-agent/module-sdk \
@@ -76,6 +80,10 @@ jobs:
             --filter @mono-agent/cli \
             --filter @mono-agent/runtime-pi \
             --filter @mono-agent/channel-webhook \
+            --filter @mono-agent/operator \
+            --filter @mono-agent/channel-operator \
+            --filter @mono-agent/tui \
+            --filter @mono-agent/web \
             --filter create-mono-agent run typecheck
 
       - name: Test runnable closure
@@ -86,11 +94,19 @@ jobs:
             --filter @mono-agent/cli \
             --filter @mono-agent/runtime-pi \
             --filter @mono-agent/channel-webhook \
+            --filter @mono-agent/operator \
+            --filter @mono-agent/channel-operator \
+            --filter @mono-agent/tui \
+            --filter @mono-agent/web \
             --filter create-mono-agent run test
 
       - name: Prove packed clean-project turn
         if: ${{ matrix.node-version == '22.19.0' }}
         run: pnpm run verify:v1-minimal
+
+      - name: Prove standalone operator products
+        if: ${{ matrix.node-version == '22.19.0' }}
+        run: pnpm run verify:v1-operator-products
 
       - name: Check generated contracts and whitespace
         run: git diff --exit-code && git diff --check

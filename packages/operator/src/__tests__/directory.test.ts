@@ -1,0 +1,143 @@
+import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import {
+  OPERATOR_PROTOCOL,
+  OPERATOR_REGISTRY_SCHEMA,
+  OperatorDirectory,
+  OperatorDirectoryError,
+  createOperatorClientForEntry,
+  discoverOperators,
+  getDefaultOperatorRegistryDirectory,
+  type OperatorRegistryDescriptor,
+} from "../index.js";
+import { FIXTURE_CAPABILITIES } from "../testing.js";
+
+const roots: string[] = [];
+
+async function temporaryRegistry(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), "mono-agent-operator-"));
+  roots.push(root);
+  const registry = join(root, "registry");
+  await mkdir(registry, { mode: 0o700 });
+  await chmod(registry, 0o700);
+  return registry;
+}
+
+function descriptor(overrides: Partial<OperatorRegistryDescriptor> = {}): OperatorRegistryDescriptor {
+  return {
+    schema: OPERATOR_REGISTRY_SCHEMA,
+    agent: { id: "fixture-agent", label: "Fixture Agent" },
+    operator: { endpoint: "http://127.0.0.1:4321/operator", tokenEnvironment: "FIXTURE_OPERATOR_TOKEN" },
+    pid: 42,
+    startedAt: "2026-01-02T03:04:05.000Z",
+    heartbeatAt: "2026-01-02T03:04:10.000Z",
+    capabilities: FIXTURE_CAPABILITIES,
+    ...overrides,
+  };
+}
+
+async function writeDescriptor(registry: string, name: string, value: unknown, mode = 0o600): Promise<string> {
+  const path = join(registry, name);
+  await writeFile(path, JSON.stringify(value), { mode });
+  await chmod(path, mode);
+  return path;
+}
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("operator directory", () => {
+  it("discovers, normalizes, deduplicates, and selects owner-private entries deterministically", async () => {
+    const older = await temporaryRegistry();
+    const newer = await temporaryRegistry();
+    await writeDescriptor(older, "agent.json", descriptor());
+    await writeDescriptor(newer, "agent.json", descriptor({ heartbeatAt: "2026-01-02T03:04:20.000Z" }));
+    const entries = await discoverOperators({
+      registryDirectories: [newer, older],
+      now: new Date("2026-01-02T03:04:30.000Z"),
+      staleAfterMs: 15_000,
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ id: "fixture-agent", endpoint: "http://127.0.0.1:4321/operator", stale: false });
+    expect(entries[0]!.heartbeatAt).toBe("2026-01-02T03:04:20.000Z");
+
+    const directory = new OperatorDirectory(entries);
+    expect(directory.select()).toEqual(entries[0]);
+    directory.pin("fixture-agent");
+    expect(directory.pinnedId).toBe("fixture-agent");
+  });
+
+  it("marks stale entries without making wall-clock decisions inside the domain state", async () => {
+    const registry = await temporaryRegistry();
+    await writeDescriptor(registry, "agent.json", descriptor());
+    const [entry] = await discoverOperators({ registryDirectories: [registry], now: Date.parse("2026-01-02T03:05:00.000Z"), staleAfterMs: 10_000 });
+    expect(entry?.stale).toBe(true);
+    expect(() => new OperatorDirectory([entry!]).select()).toThrow("no live operator");
+  });
+
+  it("rejects permissive files and symlink entries without repairing them", async () => {
+    const registry = await temporaryRegistry();
+    const permissive = await writeDescriptor(registry, "permissive.json", descriptor(), 0o644);
+    await expect(discoverOperators({ registryDirectories: [registry] })).rejects.toMatchObject({ code: "UNSAFE_REGISTRY" });
+    await chmod(permissive, 0o600);
+
+    const target = await writeDescriptor(registry, "target.txt", descriptor());
+    await symlink(target, join(registry, "linked.json"));
+    await expect(discoverOperators({ registryDirectories: [registry] })).rejects.toMatchObject({ code: "UNSAFE_REGISTRY" });
+  });
+
+  it("rejects malformed descriptors and non-loopback endpoints", async () => {
+    const malformedRegistry = await temporaryRegistry();
+    await writeDescriptor(malformedRegistry, "bad.json", { schema: OPERATOR_REGISTRY_SCHEMA });
+    await expect(discoverOperators({ registryDirectories: [malformedRegistry] })).rejects.toMatchObject({ code: "INVALID_REGISTRY" });
+
+    const remoteRegistry = await temporaryRegistry();
+    await writeDescriptor(remoteRegistry, "remote.json", descriptor({ operator: { endpoint: "http://example.com/operator" } }));
+    await expect(discoverOperators({ registryDirectories: [remoteRegistry] })).rejects.toThrow("literal 127/8 or ::1");
+
+    const secretRegistry = await temporaryRegistry();
+    await writeDescriptor(secretRegistry, "secret.json", descriptor({
+      operator: { endpoint: "http://127.0.0.1:4321/operator", tokenEnvironment: "NOT-A-VALID-ENV-NAME" },
+    }));
+    await expect(discoverOperators({ registryDirectories: [secretRegistry] })).rejects.toMatchObject({
+      code: "INVALID_REGISTRY",
+      cause: { message: expect.stringContaining("valid environment variable name") },
+    });
+  });
+
+  it("resolves a named token only when constructing a client", async () => {
+    const entry = {
+      id: "fixture-agent",
+      label: "Fixture Agent",
+      endpoint: "http://127.0.0.1:4321/operator",
+      tokenEnvironment: "FIXTURE_OPERATOR_TOKEN",
+      pid: 42,
+      startedAt: "2026-01-02T03:04:05.000Z",
+      heartbeatAt: "2026-01-02T03:04:10.000Z",
+      stale: false,
+      sourcePath: "/owner-private/fixture.json",
+    } as const;
+    expect(() => createOperatorClientForEntry(entry, { env: {} })).toThrow(OperatorDirectoryError);
+
+    const fetch = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer secret-value");
+      return new Response(JSON.stringify({
+        protocol: OPERATOR_PROTOCOL,
+        agent: { id: "fixture-agent", label: "Fixture Agent" },
+        process: { pid: 42, startedAt: "2026-01-02T03:04:05.000Z" },
+        capabilities: FIXTURE_CAPABILITIES,
+      }), { headers: { "content-type": "application/json" } });
+    });
+    const client = createOperatorClientForEntry(entry, { env: { FIXTURE_OPERATOR_TOKEN: "secret-value" }, fetch });
+    await expect(client.getInfo()).resolves.toMatchObject({ agent: { id: "fixture-agent" } });
+  });
+
+  it("exposes one canonical default registry location", () => {
+    expect(getDefaultOperatorRegistryDirectory()).toMatch(/[\\/]\.mono-agent[\\/]trace-sources$/);
+  });
+});

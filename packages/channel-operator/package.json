@@ -1,0 +1,48 @@
+{
+  "name": "@mono-agent/channel-operator",
+  "version": "0.15.0",
+  "description": "Authenticated loopback operator protocol channel for mono-agent.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
+    "directory": "packages/channel-operator"
+  },
+  "private": false,
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "mono-agent": {
+    "packageName": "@mono-agent/channel-operator",
+    "apiVersion": 1,
+    "kind": "channel",
+    "responsibility": "Serves one agent over the authenticated shared operator protocol."
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mono-agent/module-sdk": "workspace:0.15.0",
+    "@mono-agent/operator": "workspace:0.15.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

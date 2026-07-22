@@ -910,7 +910,7 @@ The machine-wide web product likewise owns its listener, browser authentication,
   "$schema": "./.mono-agent/web.config.schema.json",
   "configVersion": 1,
   "listen": {
-    "host": "0.0.0.0",
+    "host": "127.0.0.1",
     "port": 5050
   },
   "auth": {
@@ -918,12 +918,20 @@ The machine-wide web product likewise owns its listener, browser authentication,
       "$env": "MONO_AGENT_WEB_AUTH_TOKEN"
     }
   },
+  "allowInsecureHttp": false,
   "dataDirectory": "./.mono-agent/web",
   "agentRegistries": [
     "/Users/example/personal-agent/.mono-agent/trace-sources"
   ]
 }
 ```
+
+Loopback is the safe default. Direct plaintext LAN or Tailscale-IP binding
+requires a token of at least 24 characters and explicit
+`"allowInsecureHttp": true`; that flag acknowledges unencrypted transport and
+does not provide TLS. Prefer loopback behind an HTTPS reverse proxy or
+Tailscale Serve. Host/Origin checks remain request-integrity defenses, not a
+replacement for bearer authentication or encryption.
 
 TUI needs no persistent product config for the common case; it discovers an agent through the same owner-private registry or accepts an explicit operator endpoint. docs-mcp is placed in the coding client's `mcpServers` map. No central products registry is introduced.
 
@@ -945,7 +953,24 @@ The wire remains HTTP routes plus NDJSON turn streaming with disconnect-aborts-t
 
 Given the same fixture stream and capabilities, TUI and web produce equivalent conversation/turn state, AskUser state, and available actions. Renderers retain layout, navigation, widgets, terminal/browser integration, and platform persistence.
 
-The shared contract covers discovery/selection/pinning, conversations, turns, live input, cancellation, AskUser, model/effort overrides, attachments, quoting, config/replay/health views, per-turn context-window usage with compaction and provider-session eviction telemetry, proactive delivery into new operator conversations, and renderer exit without stopping the agent. Web keeps its durable SQLite store, uploads, active-turn survival, and notifications. TUI keeps pi-tui rendering and terminal UX.
+The shared schema covers discovery/selection/pinning, conversations, turns,
+live input, cancellation, AskUser, model/effort overrides, attachments,
+quoting, config/replay/health views, per-turn context-window usage with
+compaction and provider-session eviction telemetry, and proactive delivery into
+new operator conversations. Capability flags, not type presence, determine
+what an endpoint and product may expose.
+
+The first runnable G2 slice deliberately implements a narrower executable
+path: owner-private discovery reading, strict text-turn streaming,
+cancellation, runtime overrides, health, pi-tui rendering, authenticated web
+text conversations, atomic owner-private JSON state, and web-service turn
+survival across browser response disconnect/reload. The paired channel reports
+attachments, quotes, live input, AskUser, proactive delivery, config view, and
+replay as unsupported. Web uploads, notifications, structured AskUser UI,
+multi-user accounts, PWA/TLS/service management, and remote reset are not in
+this slice. A renderer exit never stops the agent; web product shutdown may
+cancel its owned active turns. Later verticals must enable additional
+capabilities explicitly rather than relying on the shared schema alone.
 
 Products are installed and launched independently. service-macos may start agent and web as separately declared services, but it never infers web from agent config.
 

@@ -1,11 +1,11 @@
 ---
-title: "Observability & CLI"
-description: "Map mono-agent's local run artifacts, trace-source registry, Phoenix export, lifecycle CLI, terminal console, and always-on web console."
+title: "Observability & operator products"
+description: "Map mono-agent's local observability surfaces and the standalone terminal and web operators."
 sidebar:
   order: 0
 ---
 
-Every mono-agent run gets local JSONL artifacts and can optionally be exported to [Phoenix](/observability/phoenix-and-backfill/) for a semantic trace timeline. The artifacts are the on-disk record after successful recorder boundaries, not a crash-safe in-flight journal. A trace-source registry lets dashboards discover running agents, the `mono-agent` CLI operates the whole lifecycle, and the TUI and always-on web console provide complementary operator views. This page maps those surfaces and links the detail pages.
+Every mono-agent run gets local JSONL artifacts and can optionally be exported to [Phoenix](/observability/phoenix-and-backfill/) for a semantic trace timeline. The artifacts are the on-disk record after successful recorder boundaries, not a crash-safe in-flight journal. The v1 terminal and web operators are separate products over one shared authenticated operator protocol; neither is a view embedded in the lifecycle CLI. This page maps those surfaces and links the detail pages.
 
 ## The surfaces
 
@@ -14,9 +14,9 @@ Every mono-agent run gets local JSONL artifacts and can optionally be exported t
 | JSONL run artifacts | Per-run `run-*.events.jsonl` + `run-*.summary.json`; non-numeric values under sensitive-looking object keys are redacted; numeric values under matched keys are retained; retained free text is scanned for a closed set of high-confidence credential shapes | config / auto | [Run artifacts & traces](/observability/artifacts-and-traces/) |
 | Trace-source registry | Heartbeat manifest so dashboards discover live agents | config | [Run artifacts & traces](/observability/artifacts-and-traces/) |
 | Phoenix exporter + backfill | Best-effort OTLP/HTTP export of run lifecycles; retroactive backfill | config / cli | [Phoenix export & backfill](/observability/phoenix-and-backfill/) |
-| `mono-agent` CLI | init / validate / start / stop / logs / restart / tui / web / backfill / runs / install-skill | cli | [CLI reference](/observability/cli-reference/) |
-| TUI | Operator console: live chat with thinking/tool/telemetry insight, run replay, config view | cli | [TUI](/observability/tui/) |
-| Web console | Always-on persistent multi-agent conversations, streamed turns, and local-device attachments | cli | [Web console](/observability/web-console/) |
+| `mono-agent` CLI | Agent lifecycle and diagnostics on the transitional host plane | cli | [CLI reference](/observability/cli-reference/) |
+| Terminal operator | Standalone pi-tui text chat over the shared strict operator client | cli / code | [Terminal operator](/observability/tui/) |
+| Web operator | Standalone authenticated service with durable source-bound text conversations | config / cli / code | [Web operator](/observability/web-console/) |
 
 ## JSONL run artifacts (always on)
 
@@ -80,27 +80,27 @@ See [Phoenix export & backfill](/observability/phoenix-and-backfill/) for the fu
 
 The full command and flag matrix is in the [CLI reference](/observability/cli-reference/).
 
-## The TUI
+## The terminal operator
 
-`mono-agent tui` opens the operator console from any directory and connects to any running agent on the machine: live chat with structured thinking/tool/telemetry insight, a bounded recorded-run replay browser (all channel types), and a source-annotated config view.
-
-```bash
-mono-agent tui                        # discover running agents and connect
-mono-agent tui --agent personal-agent # pick one directly
-```
-
-See the [TUI page](/observability/tui/) for details, including the embedded `--responder` mode for custom hosts.
-
-## The always-on web console
-
-`mono-agent web start` installs the persistent browser conversation console on macOS; `mono-agent web run` is the foreground cross-platform path. It auto-discovers running agents and keeps threads and in-flight work in an owner-private service store, so a browser refresh does not cancel a turn.
+`mono-agent-tui` connects directly to an authenticated loopback endpoint or discovers one through owner-private registry descriptors. Direct mode reads the bearer from `MONO_AGENT_OPERATOR_TOKEN` unless `--token-env` selects another environment variable.
 
 ```bash
-mono-agent web start
-mono-agent web               # read-only status + exact URLs
+mono-agent-tui --endpoint http://127.0.0.1:52341
+mono-agent-tui --agent personal-agent
 ```
 
-The default bind is `0.0.0.0:5050`, making LAN and tailnet access the normal path; `--loopback` narrows it to this computer. There is no application login, so network reachability is authority to operate the agents. Keep the service on a trusted LAN/tailnet and do not expose it publicly. See the [web console guide](/observability/web-console/) for lifecycle, Tailscale HTTPS, security, conversations, archive/reset behavior, and attachments.
+It has no embedded/local responder, replay/config pane, or self-configuration path. See the [terminal operator page](/observability/tui/) for its exact flags and current capability-gated controls.
+
+## The web operator
+
+`mono-agent-web` runs the independently configured authenticated browser product. It discovers registered agents and keeps text conversations and in-flight work in an owner-private service store, so a browser response disconnect or reload does not cancel a turn.
+
+```bash
+MONO_AGENT_WEB_AUTH_TOKEN="replace-with-a-long-random-token" \
+  mono-agent-web ./web.config.json
+```
+
+The default bind is `127.0.0.1:5050` and every browser API request requires bearer auth. Non-loopback plaintext additionally requires a stronger token and explicit `allowInsecureHttp: true`; prefer loopback behind HTTPS. See the [web operator guide](/observability/web-console/) for product config, Host/origin defenses, durable state, and the deliberately limited first-slice feature set.
 
 ## Related
 

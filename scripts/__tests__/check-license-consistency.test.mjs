@@ -45,7 +45,7 @@ describe("check-license-consistency", () => {
 
     const result = await checkLicenseConsistency({
       repoRoot,
-      catalog: [{ ...catalog[0], name: "@mono-agent/module-sdk", license: "Apache-2.0" }],
+      catalog: [{ ...catalog[0], name: "@mono-agent/operator", license: "Apache-2.0" }],
     });
 
     expect(result).toEqual({ exitCode: 0, issues: [], packageCount: 1 });
@@ -57,7 +57,7 @@ describe("check-license-consistency", () => {
 
     const result = await checkLicenseConsistency({
       repoRoot,
-      catalog: [{ ...catalog[0], name: "@mono-agent/module-sdk", license: "Apache-2.0" }],
+      catalog: [{ ...catalog[0], name: "@mono-agent/operator", license: "Apache-2.0" }],
     });
 
     expect(result.exitCode).toBe(1);
@@ -66,7 +66,7 @@ describe("check-license-consistency", () => {
     ]);
   });
 
-  it("rejects license overrides outside module-sdk", async () => {
+  it("rejects license overrides other than the catalogued Apache split", async () => {
     const repoRoot = await fixtureRepo({ packageLicense: "MIT" });
 
     const result = await checkLicenseConsistency({

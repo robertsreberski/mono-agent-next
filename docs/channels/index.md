@@ -5,7 +5,7 @@ sidebar:
   order: 0
 ---
 
-Channels are how a mono-agent receives input and delivers replies. Core channels use independent JSON sections in `mono-agent.config.json`; external channel packages are declared under `channels.plugins[]` and return the same `ChannelDriver` shape. Most channels opt in through their own `enabled` flag; the loopback `tui` operator surface defaults on and can be disabled explicitly. `@mono-agent/agent-app` composes the resolved drivers into the running host. This page explains the shared lifecycle, how to pick a channel, and links to every per-channel guide. Coverage: **config** unless a feature is noted otherwise.
+Channels are how a mono-agent receives input and delivers replies. Legacy channels on the transitional app plane retain their existing config sections. The v1 operator endpoint is an explicitly selected typed module under `channels.operator`; it is not a default-on `tui` section and it does not start either operator product. This page links the channel guides and records that migration boundary. Coverage: **config** unless a feature is noted otherwise.
 
 ## Core channels
 
@@ -16,7 +16,7 @@ Channels are how a mono-agent receives input and delivers replies. Core channels
 | Webhook | HTTP POST, sync or async | `webhook` | [Webhook](/channels/webhook/) |
 | OpenAI-compatible API | `/v1/chat/completions` (SSE) | `openaiApi` | [OpenAI-compatible API](/channels/openai-api/) |
 | Cron | Scheduled prompts | `cron` | [Cron](/channels/cron/) |
-| Operator stream endpoint | Loopback NDJSON turns for `mono-agent tui` and `mono-agent web` | `tui` | [Operator stream endpoint](/channels/tui/) |
+| Operator channel | Authenticated loopback HTTP/NDJSON turns for standalone products | `channels.operator` (`@mono-agent/channel-operator`) | [Operator channel](/channels/tui/) |
 
 ## External channel packages
 
@@ -29,11 +29,11 @@ Channels are fully independent: enabling one neither requires nor affects anothe
 
 ## Opt-in and the status lifecycle
 
-Most channels default to **off**. The deliberate exception is the [`tui` operator stream endpoint](/channels/tui/), which defaults to **on** (loopback-only, ephemeral port, so the TUI/web console can chat without a config edit). Set `"tui": {"enabled": false}` to opt out. You turn other channels on with `enabled: true` and supply their required settings; external channels also need a `channels.plugins[]` entry naming the package. Human status output groups communication channels separately from the operator transport, labels the stable `tui` id as `gui` (`TUI + Web`), and folds disabled ids into one compact line. JSON retains stable ids and full reasons. Active entries reflect one of five states:
+Most legacy channels default to **off** and use their existing `enabled` field. The v1 [`operator` channel](/channels/tui/) is also absent until selected, but selection uses `$use: "@mono-agent/channel-operator"` plus mandatory environment-referenced bearer auth rather than an `enabled` toggle. It always binds loopback; there is no non-loopback override. Legacy status values below continue to describe the transitional host plane, while typed-module health is owned by Core and the selected module:
 
 | State | Meaning |
 | --- | --- |
-| `disabled` | The resolved `enabled` value is false. Omission resolves false for most channels, but `tui` defaults true and requires an explicit false to reach this state. |
+| `disabled` | The resolved legacy `enabled` value is false. An unselected v1 typed module is absent rather than represented by a default-on compatibility channel. |
 | `waiting_for_config` | `enabled: true` but a required setting is missing — the line names the exact missing field. |
 | `running` | Ready and listening; the line includes endpoint facts (host/port/path, or the bot it connected as). |
 | `degraded` | Was running but the live transport connection dropped on a transient failure (e.g. a Telegram poll crash on a network switch, or a Slack Socket Mode disconnect); the responder/harness is kept alive and the adapter is reconnecting, so the channel keeps serving. Rendered `degraded: <reason>` with a warning badge. Non-fatal and self-recovering — it returns to `running` automatically once the transport stays up, unlike `failed`. |
@@ -72,7 +72,7 @@ Pick by who or what is on the other end:
 | A human chatting interactively | [Telegram](/channels/telegram/), [Slack](/channels/slack/), or [WhatsApp](/channels/whatsapp/) | Conversational adapters with allowlists, working indicators, and final-answer delivery; WhatsApp is loaded as an external plugin |
 | Programmatic / pipeline invocation | [Webhook](/channels/webhook/) or [A2A](/channels/a2a/) | Webhook for plain HTTP POST (sync or async polling); A2A for agent-to-agent calls with Agent Card discovery and is loaded as an external plugin |
 | A chat UI (e.g. Open WebUI) | [OpenAI-compatible API](/channels/openai-api/) | Exposes `/v1/models` + `/v1/chat/completions` with token-by-token SSE streaming |
-| A first-party operator console | [Terminal console](/observability/tui/) or [web console](/observability/web-console/) | Connects through the loopback operator endpoint while keeping transport details out of user-facing chat |
+| A first-party operator product | [Terminal operator](/observability/tui/) or [web operator](/observability/web-console/) | Connects through the explicitly selected authenticated loopback operator channel |
 | Scheduled / unattended runs | [Cron](/channels/cron/) | Timezone-aware five-field jobs that invoke the responder on a schedule |
 
 You can enable any combination — for example Telegram for your own use plus a webhook for automation and cron for a daily digest.

@@ -507,6 +507,8 @@ describe("current launch manifest", () => {
     expect(publishableNames).not.toContain(`@mono-agent/${"sandbox"}`);
     expect(publishableNames).not.toContain(`@mono-agent/${"tui"}-${"adapter"}`);
     expect(publishableNames).not.toContain(`@mono-agent/${"live"}-${"adapter"}`);
+    expect(publishableNames).toContain("@mono-agent/operator");
+    expect(publishableNames).toContain("@mono-agent/channel-operator");
     expect(publishableNames).toContain("@mono-agent/operator-adapter");
     expect(publishableNames).toContain("@mono-agent/agent-runtime");
     expect(publishableNames).toContain("@mono-agent/runtime-adapter");
