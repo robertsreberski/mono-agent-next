@@ -1,0 +1,405 @@
+import { readFile } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
+
+import { AgentConfigError, type AgentConfigIssue, errorMessage } from "./errors.js";
+import { loadSelectedModules } from "./module-loader.js";
+import type {
+  AgentConfig,
+  AgentLoadOptions,
+  AgentValidationResult,
+  LoadedAgentConfig,
+  LoadedAgentModule,
+  ModuleKind,
+  ResolvedAgentPaths,
+  SelectedModuleConfig,
+} from "./types.js";
+
+const TOP_LEVEL_KEYS = new Set([
+  "$schema",
+  "configVersion",
+  "agent",
+  "runtimes",
+  "routing",
+  "session",
+  "context",
+  "channels",
+  "memory",
+  "state",
+  "triggers",
+  "observability",
+  "policy",
+]);
+
+const environments = new WeakMap<LoadedAgentConfig, Readonly<Record<string, string | undefined>>>();
+
+export async function loadAgentConfig(
+  configPath: string,
+  options: AgentLoadOptions = {},
+): Promise<LoadedAgentConfig> {
+  const absoluteConfigPath = resolve(configPath);
+  const configDirectory = dirname(absoluteConfigPath);
+  const projectRoot = resolve(options.projectRoot ?? configDirectory);
+  let source: string;
+  try {
+    source = await readFile(absoluteConfigPath, "utf8");
+  } catch (error) {
+    throw new AgentConfigError(`Could not read agent config ${absoluteConfigPath}`, [
+      { path: "$", message: errorMessage(error), code: "config_read" },
+    ]);
+  }
+
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(source) as unknown;
+  } catch (error) {
+    throw new AgentConfigError(`Agent config is not strict JSON: ${absoluteConfigPath}`, [
+      { path: "$", message: errorMessage(error), code: "invalid_json" },
+    ]);
+  }
+
+  const issues = validateAgentEnvelope(candidate);
+  if (issues.length > 0) {
+    throw new AgentConfigError(`Agent config is invalid: ${absoluteConfigPath}`, issues);
+  }
+  const raw = candidate as AgentConfig;
+  const selections = collectModuleSelections(raw);
+  const environment = options.environment ?? process.env;
+  let modules: readonly LoadedAgentModule[];
+  try {
+    modules = await loadSelectedModules({ projectRoot, selections, environment });
+  } catch (error) {
+    if (error instanceof AgentConfigError) throw error;
+    throw new AgentConfigError(`Selected module validation failed: ${absoluteConfigPath}`, [
+      { path: "$", message: errorMessage(error), code: "module_load" },
+    ]);
+  }
+
+  const paths = resolveAgentPaths(raw, configDirectory);
+  const loaded: LoadedAgentConfig = deepFreeze({
+    configPath: absoluteConfigPath,
+    configDirectory,
+    projectRoot,
+    raw,
+    paths,
+    modules,
+  });
+  environments.set(loaded, environment);
+  return loaded;
+}
+
+export async function validateAgentConfig(
+  configPath: string,
+  options: AgentLoadOptions = {},
+): Promise<AgentValidationResult> {
+  try {
+    return { ok: true, issues: [], loaded: await loadAgentConfig(configPath, options) };
+  } catch (error) {
+    if (error instanceof AgentConfigError) return { ok: false, issues: error.issues };
+    return {
+      ok: false,
+      issues: [{ path: "$", message: errorMessage(error), code: "unexpected" }],
+    };
+  }
+}
+
+export function environmentFor(config: LoadedAgentConfig): Readonly<Record<string, string | undefined>> {
+  return environments.get(config) ?? process.env;
+}
+
+export function isLoadedAgentConfig(value: unknown): value is LoadedAgentConfig {
+  if (!isRecord(value)) return false;
+  return typeof value.configPath === "string" && isRecord(value.raw) && Array.isArray(value.modules);
+}
+
+export async function ensureLoadedAgentConfig(
+  value: string | LoadedAgentConfig,
+  options: AgentLoadOptions = {},
+): Promise<LoadedAgentConfig> {
+  return typeof value === "string" ? loadAgentConfig(value, options) : value;
+}
+
+export interface ModuleSelection {
+  readonly slot: ModuleKind;
+  readonly instanceId: string;
+  readonly configPath: string;
+  readonly selected: SelectedModuleConfig;
+}
+
+export function collectModuleSelections(config: AgentConfig): readonly ModuleSelection[] {
+  const selections: ModuleSelection[] = [];
+  addMapSelections(selections, "runtime", "runtimes", config.runtimes);
+  addMapSelections(selections, "channel", "channels", config.channels ?? {});
+  if (config.memory !== undefined) addSingletonSelection(selections, "memory", "memory", config.memory);
+  if (config.state !== undefined) addSingletonSelection(selections, "state", "state", config.state);
+  addMapSelections(selections, "trigger", "triggers", config.triggers ?? {});
+  addMapSelections(selections, "exporter", "observability.exporters", config.observability?.exporters ?? {});
+  if (!("mode" in config.policy.sandbox && config.policy.sandbox.mode === "off")) {
+    addSingletonSelection(selections, "sandbox", "policy.sandbox", config.policy.sandbox as SelectedModuleConfig);
+  }
+  return selections;
+}
+
+function addMapSelections(
+  output: ModuleSelection[],
+  slot: ModuleKind,
+  prefix: string,
+  values: Readonly<Record<string, SelectedModuleConfig>>,
+): void {
+  for (const instanceId of Object.keys(values).sort()) {
+    const selected = values[instanceId];
+    if (selected !== undefined) output.push({ slot, instanceId, configPath: `${prefix}.${instanceId}`, selected });
+  }
+}
+
+function addSingletonSelection(
+  output: ModuleSelection[],
+  slot: ModuleKind,
+  configPath: string,
+  selected: SelectedModuleConfig,
+): void {
+  output.push({ slot, instanceId: slot, configPath, selected });
+}
+
+export function validateAgentEnvelope(input: unknown): readonly AgentConfigIssue[] {
+  const issues: AgentConfigIssue[] = [];
+  if (!isRecord(input)) return [{ path: "$", message: "must be a JSON object", code: "type" }];
+  rejectUnknown(input, TOP_LEVEL_KEYS, "$", issues);
+  if (input.configVersion !== 1) issue(issues, "configVersion", "must be exactly 1", "version");
+  if (input.$schema !== undefined) expectString(input.$schema, "$schema", issues);
+
+  validateAgent(input.agent, issues);
+  validateModuleMap(input.runtimes, "runtimes", issues, true);
+  validateRouting(input.routing, input.runtimes, issues);
+  validateSession(input.session, issues);
+  validateContext(input.context, issues);
+  validateModuleMap(input.channels, "channels", issues, false);
+  validateSelectedModule(input.memory, "memory", issues, false);
+  validateSelectedModule(input.state, "state", issues, false);
+  validateModuleMap(input.triggers, "triggers", issues, false);
+  validateObservability(input.observability, issues);
+  validatePolicy(input.policy, issues);
+  return issues;
+}
+
+function validateAgent(value: unknown, issues: AgentConfigIssue[]): void {
+  if (!expectRecord(value, "agent", issues)) return;
+  rejectUnknown(value, new Set(["id", "name", "instructions", "workspace"]), "agent", issues);
+  expectNonEmptyString(value.id, "agent.id", issues);
+  expectNonEmptyString(value.name, "agent.name", issues);
+  expectNonEmptyString(value.instructions, "agent.instructions", issues);
+  expectNonEmptyString(value.workspace, "agent.workspace", issues);
+  if (typeof value.id === "string" && !/^[a-z0-9][a-z0-9._-]*$/u.test(value.id)) {
+    issue(issues, "agent.id", "must use lowercase letters, digits, dot, underscore, or hyphen", "format");
+  }
+}
+
+function validateRouting(value: unknown, runtimes: unknown, issues: AgentConfigIssue[]): void {
+  if (!expectRecord(value, "routing", issues)) return;
+  rejectUnknown(value, new Set(["primary", "fallbacks", "effort"]), "routing", issues);
+  validateRoute(value.primary, "routing.primary", runtimes, issues);
+  if (!Array.isArray(value.fallbacks)) {
+    issue(issues, "routing.fallbacks", "must be an array", "type");
+  } else {
+    value.fallbacks.forEach((route, index) => validateRoute(route, `routing.fallbacks.${index}`, runtimes, issues));
+  }
+  if (value.effort !== undefined) expectNonEmptyString(value.effort, "routing.effort", issues);
+}
+
+function validateRoute(value: unknown, path: string, runtimes: unknown, issues: AgentConfigIssue[]): void {
+  if (!expectRecord(value, path, issues)) return;
+  rejectUnknown(value, new Set(["runtime", "model"]), path, issues);
+  expectNonEmptyString(value.runtime, `${path}.runtime`, issues);
+  expectNonEmptyString(value.model, `${path}.model`, issues);
+  if (typeof value.runtime === "string" && isRecord(runtimes) && !(value.runtime in runtimes)) {
+    issue(issues, `${path}.runtime`, `references unconfigured runtime ${JSON.stringify(value.runtime)}`, "reference");
+  }
+}
+
+function validateSession(value: unknown, issues: AgentConfigIssue[]): void {
+  if (value === undefined) return;
+  if (!expectRecord(value, "session", issues)) return;
+  rejectUnknown(
+    value,
+    new Set(["mode", "idleTimeoutMs", "rollover", "timezone", "isolateProactiveRuns"]),
+    "session",
+    issues,
+  );
+  expectEnum(value.mode, ["continuous", "per-message"], "session.mode", issues);
+  if (value.idleTimeoutMs !== undefined) expectPositiveInteger(value.idleTimeoutMs, "session.idleTimeoutMs", issues);
+  if (value.rollover !== undefined) expectEnum(value.rollover, ["none", "daily"], "session.rollover", issues);
+  if (value.timezone !== undefined) expectNonEmptyString(value.timezone, "session.timezone", issues);
+  if (value.isolateProactiveRuns !== undefined) expectBoolean(value.isolateProactiveRuns, "session.isolateProactiveRuns", issues);
+}
+
+function validateContext(value: unknown, issues: AgentConfigIssue[]): void {
+  if (value === undefined) return;
+  if (!expectRecord(value, "context", issues)) return;
+  rejectUnknown(value, new Set(["skills", "mcp"]), "context", issues);
+  if (value.skills !== undefined) {
+    if (expectRecord(value.skills, "context.skills", issues)) {
+      rejectUnknown(value.skills, new Set(["roots", "load", "disclosure", "maxBytes"]), "context.skills", issues);
+      expectStringArray(value.skills.roots, "context.skills.roots", issues);
+      if (value.skills.load !== undefined) expectEnum(value.skills.load, ["all", "selected"], "context.skills.load", issues);
+      if (value.skills.disclosure !== undefined) {
+        expectEnum(value.skills.disclosure, ["full", "index"], "context.skills.disclosure", issues);
+      }
+      if (value.skills.maxBytes !== undefined) expectPositiveInteger(value.skills.maxBytes, "context.skills.maxBytes", issues);
+    }
+  }
+  if (value.mcp !== undefined && expectRecord(value.mcp, "context.mcp", issues)) {
+    rejectUnknown(value.mcp, new Set(["configPath"]), "context.mcp", issues);
+    expectNonEmptyString(value.mcp.configPath, "context.mcp.configPath", issues);
+  }
+}
+
+function validateObservability(value: unknown, issues: AgentConfigIssue[]): void {
+  if (value === undefined) return;
+  if (!expectRecord(value, "observability", issues)) return;
+  rejectUnknown(value, new Set(["exporters"]), "observability", issues);
+  validateModuleMap(value.exporters, "observability.exporters", issues, false);
+}
+
+function validatePolicy(value: unknown, issues: AgentConfigIssue[]): void {
+  if (!expectRecord(value, "policy", issues)) return;
+  rejectUnknown(value, new Set(["tools", "approvals", "sandbox"]), "policy", issues);
+  if (expectRecord(value.tools, "policy.tools", issues)) {
+    rejectUnknown(value.tools, new Set(["default", "allow", "deny"]), "policy.tools", issues);
+    expectEnum(value.tools.default, ["allow", "deny"], "policy.tools.default", issues);
+    if (value.tools.allow !== undefined) expectStringArray(value.tools.allow, "policy.tools.allow", issues);
+    if (value.tools.deny !== undefined) expectStringArray(value.tools.deny, "policy.tools.deny", issues);
+    if (value.tools.default === "deny" && value.tools.deny !== undefined) {
+      issue(issues, "policy.tools.deny", "is not valid when default is deny; use allow", "policy");
+    }
+    if (value.tools.default === "allow" && value.tools.allow !== undefined) {
+      issue(issues, "policy.tools.allow", "is not valid when default is allow; use deny", "policy");
+    }
+  }
+  if (expectRecord(value.approvals, "policy.approvals", issues)) {
+    rejectUnknown(value.approvals, new Set(["default"]), "policy.approvals", issues);
+    expectEnum(value.approvals.default, ["allow", "ask", "deny"], "policy.approvals.default", issues);
+  }
+  if (!expectRecord(value.sandbox, "policy.sandbox", issues)) return;
+  if (value.sandbox.mode === "off") {
+    rejectUnknown(value.sandbox, new Set(["mode"]), "policy.sandbox", issues);
+  } else {
+    validateSelectedModule(value.sandbox, "policy.sandbox", issues, true);
+  }
+}
+
+function validateModuleMap(value: unknown, path: string, issues: AgentConfigIssue[], required: boolean): void {
+  if (value === undefined) {
+    if (required) issue(issues, path, "is required", "required");
+    return;
+  }
+  if (!expectRecord(value, path, issues)) return;
+  for (const [instanceId, selected] of Object.entries(value)) {
+    if (!/^[a-z0-9][a-z0-9._-]*$/u.test(instanceId)) {
+      issue(issues, `${path}.${instanceId}`, "instance id must be lowercase and path-safe", "format");
+    }
+    validateSelectedModule(selected, `${path}.${instanceId}`, issues, true);
+  }
+}
+
+function validateSelectedModule(value: unknown, path: string, issues: AgentConfigIssue[], required: boolean): void {
+  if (value === undefined) {
+    if (required) issue(issues, path, "is required", "required");
+    return;
+  }
+  if (!expectRecord(value, path, issues)) return;
+  expectNonEmptyString(value.$use, `${path}.$use`, issues);
+  if (typeof value.$use === "string" && !isBarePackageName(value.$use)) {
+    issue(issues, `${path}.$use`, "must be a literal bare npm package name (no path, URL, subpath, or alias)", "package_name");
+  }
+  for (const key of Object.keys(value)) {
+    if (key.startsWith("$") && key !== "$use") {
+      issue(issues, `${path}.${key}`, "is not a recognized core module directive", "unknown_directive");
+    }
+  }
+}
+
+export function isBarePackageName(value: string): boolean {
+  if (value.length === 0 || value.length > 214 || value.includes("\\") || value.includes(":")) return false;
+  if (value.startsWith(".") || value.startsWith("/") || value.includes("//")) return false;
+  return /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/u.test(value);
+}
+
+function resolveAgentPaths(config: AgentConfig, configDirectory: string): ResolvedAgentPaths {
+  const fromConfig = (value: string): string => (isAbsolute(value) ? value : resolve(configDirectory, value));
+  return {
+    ...(config.$schema === undefined ? {} : { schema: fromConfig(config.$schema) }),
+    instructions: fromConfig(config.agent.instructions),
+    workspace: fromConfig(config.agent.workspace),
+    skillRoots: (config.context?.skills?.roots ?? []).map(fromConfig),
+    ...(config.context?.mcp?.configPath === undefined
+      ? {}
+      : { mcpConfig: fromConfig(config.context.mcp.configPath) }),
+  };
+}
+
+function rejectUnknown(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+  path: string,
+  issues: AgentConfigIssue[],
+): void {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) issue(issues, path === "$" ? key : `${path}.${key}`, "is not allowed", "unknown");
+  }
+}
+
+function expectRecord(value: unknown, path: string, issues: AgentConfigIssue[]): value is Record<string, unknown> {
+  if (isRecord(value)) return true;
+  issue(issues, path, "must be an object", "type");
+  return false;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function expectString(value: unknown, path: string, issues: AgentConfigIssue[]): value is string {
+  if (typeof value === "string") return true;
+  issue(issues, path, "must be a string", "type");
+  return false;
+}
+
+function expectNonEmptyString(value: unknown, path: string, issues: AgentConfigIssue[]): value is string {
+  if (expectString(value, path, issues) && value.trim().length > 0) return true;
+  if (typeof value === "string") issue(issues, path, "must not be empty", "format");
+  return false;
+}
+
+function expectStringArray(value: unknown, path: string, issues: AgentConfigIssue[]): value is string[] {
+  if (!Array.isArray(value)) {
+    issue(issues, path, "must be an array", "type");
+    return false;
+  }
+  value.forEach((entry, index) => expectNonEmptyString(entry, `${path}.${index}`, issues));
+  return true;
+}
+
+function expectEnum(value: unknown, values: readonly string[], path: string, issues: AgentConfigIssue[]): void {
+  if (typeof value !== "string" || !values.includes(value)) {
+    issue(issues, path, `must be one of ${values.map((entry) => JSON.stringify(entry)).join(", ")}`, "enum");
+  }
+}
+
+function expectPositiveInteger(value: unknown, path: string, issues: AgentConfigIssue[]): void {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    issue(issues, path, "must be a positive safe integer", "range");
+  }
+}
+
+function expectBoolean(value: unknown, path: string, issues: AgentConfigIssue[]): void {
+  if (typeof value !== "boolean") issue(issues, path, "must be a boolean", "type");
+}
+
+function issue(issues: AgentConfigIssue[], path: string, message: string, code: string): void {
+  issues.push({ path, message, code });
+}
+
+function deepFreeze<T>(value: T): T {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
+}

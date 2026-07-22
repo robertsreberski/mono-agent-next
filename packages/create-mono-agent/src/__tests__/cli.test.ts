@@ -1,0 +1,72 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { runCreateMonoAgentCli } from "../cli.js";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+});
+
+describe("runCreateMonoAgentCli", () => {
+  it("ships distinct create and mono-agent bins so invocation intent survives npm shims", async () => {
+    const manifest = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8"));
+    expect(manifest.bin).toEqual({
+      "create-mono-agent": "./dist/bin/create-mono-agent.js",
+      "mono-agent": "./dist/bin/mono-agent.js",
+    });
+  });
+
+  it("uses create-mono-agent as a no-wizard scaffolder", async () => {
+    const root = await makeTemporaryDirectory();
+    const stdout: string[] = [];
+
+    await expect(runCreateMonoAgentCli(["my-agent"], {
+      cwd: root,
+      stdout: (text) => stdout.push(text),
+      stderr: () => undefined,
+    }, { invocationName: "create-mono-agent" })).resolves.toBe(0);
+
+    expect(JSON.parse(stdout.join(""))).toMatchObject({ event: "scaffolded", installed: false });
+    expect(JSON.parse(await readFile(join(root, "my-agent", "package.json"), "utf8")).name).toBe("my-agent");
+  });
+
+  it("preserves mono-agent init/setup and delegates every other command to @mono-agent/cli", async () => {
+    const root = await makeTemporaryDirectory();
+    const delegate = vi.fn(async () => 17);
+
+    await expect(runCreateMonoAgentCli(["init", "initialized"], {
+      cwd: root,
+      stdout: () => undefined,
+      stderr: () => undefined,
+    }, { invocationName: "mono-agent", delegate })).resolves.toBe(0);
+    expect(delegate).not.toHaveBeenCalled();
+
+    await expect(runCreateMonoAgentCli(["validate", "--config", "config.json"], {}, {
+      invocationName: "mono-agent",
+      delegate,
+    })).resolves.toBe(17);
+    expect(delegate).toHaveBeenCalledWith(["validate", "--config", "config.json"], {});
+  });
+
+  it("returns usage exit 2 for unsupported package managers, including Yarn", async () => {
+    for (const packageManager of ["bun", "yarn"]) {
+      const stderr: string[] = [];
+      await expect(runCreateMonoAgentCli(["setup", "--package-manager", packageManager], {
+        stdout: () => undefined,
+        stderr: (text) => stderr.push(text),
+      }, { invocationName: "mono-agent" })).resolves.toBe(2);
+      expect(stderr.join("")).toContain(`Unsupported package manager: ${packageManager}`);
+      expect(stderr.join("")).toContain("--package-manager <pnpm|npm>");
+    }
+  });
+});
+
+async function makeTemporaryDirectory(): Promise<string> {
+  const path = await mkdtemp(join(tmpdir(), "create-mono-agent-cli-test-"));
+  temporaryDirectories.push(path);
+  return path;
+}

@@ -7,7 +7,10 @@ import { fileURLToPath } from "node:url";
 import { packageCatalog, packageRelativePath } from "./package-catalog.mjs";
 
 export const REQUIRED_LICENSE = "GPL-3.0-only";
+export const DEFAULT_PACKAGE_LICENSE = REQUIRED_LICENSE;
 export const CANONICAL_GPL3_SHA256 = "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986";
+export const CANONICAL_APACHE2_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4";
+const APACHE_PACKAGE = "@mono-agent/module-sdk";
 
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const canonicalLicensePaths = ["LICENSE", "packages/agent-runtime/LICENSE"];
@@ -25,20 +28,44 @@ export async function checkLicenseConsistency(options = {}) {
   await checkManifestLicense({
     path: join(repoRoot, "package.json"),
     label: "root package.json",
+    expectedLicense: REQUIRED_LICENSE,
     issues,
   });
 
   for (const entry of publishable) {
     const relativePath = `${packageRelativePath(entry)}/package.json`;
+    const expectedLicense = entry.name === APACHE_PACKAGE ? "Apache-2.0" : DEFAULT_PACKAGE_LICENSE;
+    if (entry.name === APACHE_PACKAGE && entry.license !== "Apache-2.0") {
+      issues.push(`${APACHE_PACKAGE} must be the sole Apache-2.0 catalog override`);
+    } else if (entry.name !== APACHE_PACKAGE && entry.license !== undefined) {
+      issues.push(`${entry.name} may not override the default ${DEFAULT_PACKAGE_LICENSE} package license`);
+    }
     await checkManifestLicense({
       path: join(repoRoot, relativePath),
       label: `${entry.name} (${relativePath})`,
+      expectedLicense,
       issues,
     });
+    if (entry.name === APACHE_PACKAGE) {
+      const licensePath = `${packageRelativePath(entry)}/LICENSE`;
+      await checkCanonicalLicense(
+        join(repoRoot, licensePath),
+        licensePath,
+        "Apache-2.0",
+        CANONICAL_APACHE2_SHA256,
+        issues,
+      );
+    }
   }
 
   for (const relativePath of canonicalLicensePaths) {
-    await checkCanonicalLicense(join(repoRoot, relativePath), relativePath, issues);
+    await checkCanonicalLicense(
+      join(repoRoot, relativePath),
+      relativePath,
+      "GPL-3.0",
+      CANONICAL_GPL3_SHA256,
+      issues,
+    );
   }
 
   return {
@@ -50,7 +77,7 @@ export async function checkLicenseConsistency(options = {}) {
 
 export function renderLicenseConsistencyReport(result) {
   if (result.issues.length === 0) {
-    return `License consistency check passed: root + ${result.packageCount} publishable packages use ${REQUIRED_LICENSE}.\n`;
+    return `License consistency check passed: root + ${result.packageCount} publishable packages match the declared GPL/Apache split.\n`;
   }
 
   return [
@@ -60,7 +87,7 @@ export function renderLicenseConsistencyReport(result) {
   ].join("\n");
 }
 
-async function checkManifestLicense({ path, label, issues }) {
+async function checkManifestLicense({ path, label, expectedLicense, issues }) {
   let manifest;
   try {
     manifest = JSON.parse(await readFile(path, "utf8"));
@@ -69,12 +96,12 @@ async function checkManifestLicense({ path, label, issues }) {
     return;
   }
 
-  if (manifest.license !== REQUIRED_LICENSE) {
-    issues.push(`${label} license must be ${REQUIRED_LICENSE}; found ${JSON.stringify(manifest.license)}`);
+  if (manifest.license !== expectedLicense) {
+    issues.push(`${label} license must be ${expectedLicense}; found ${JSON.stringify(manifest.license)}`);
   }
 }
 
-async function checkCanonicalLicense(path, label, issues) {
+async function checkCanonicalLicense(path, label, licenseName, expectedDigest, issues) {
   let contents;
   try {
     contents = await readFile(path);
@@ -84,8 +111,8 @@ async function checkCanonicalLicense(path, label, issues) {
   }
 
   const digest = createHash("sha256").update(contents).digest("hex");
-  if (digest !== CANONICAL_GPL3_SHA256) {
-    issues.push(`${label} must be the canonical GPL-3.0 text (sha256 ${CANONICAL_GPL3_SHA256}); found ${digest}`);
+  if (digest !== expectedDigest) {
+    issues.push(`${label} must be the canonical ${licenseName} text (sha256 ${expectedDigest}); found ${digest}`);
   }
 }
 
