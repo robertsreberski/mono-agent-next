@@ -1,0 +1,138 @@
+{
+  "detected": [
+    {
+      "name": "six-digit identifier with every URL-safe tail class",
+      "id": "123456",
+      "tail": {
+        "character": "x",
+        "count": 30,
+        "suffix": "Aa0_-"
+      }
+    },
+    {
+      "name": "ten-digit identifier upper bound",
+      "id": "1234567890",
+      "tail": {
+        "character": "B",
+        "count": 33,
+        "suffix": "-_"
+      }
+    },
+    {
+      "name": "canonical Bot API URL",
+      "candidatePrefix": "https://api.telegram.org/bot",
+      "candidateSuffix": "/getMe",
+      "id": "234567",
+      "tail": {
+        "character": "C",
+        "count": 33,
+        "suffix": "-_"
+      }
+    },
+    {
+      "name": "canonical Bot API file URL",
+      "candidatePrefix": "https://api.telegram.org/file/bot",
+      "candidateSuffix": "/documents/report.txt",
+      "id": "345678",
+      "tail": {
+        "character": "D",
+        "count": 33,
+        "suffix": "-_"
+      }
+    }
+  ],
+  "ignored": [
+    {
+      "name": "five-digit identifier",
+      "id": "12345",
+      "tail": {
+        "character": "C",
+        "count": 33,
+        "suffix": "-_"
+      }
+    },
+    {
+      "name": "eleven-digit identifier",
+      "id": "12345678901",
+      "tail": {
+        "character": "D",
+        "count": 33,
+        "suffix": "-_"
+      }
+    },
+    {
+      "name": "non-numeric identifier",
+      "id": "A23456",
+      "tail": {
+        "character": "G",
+        "count": 33,
+        "suffix": "-_"
+      }
+    },
+    {
+      "name": "35-character credential tail containing plus",
+      "id": "1234567",
+      "tail": {
+        "character": "g",
+        "count": 34,
+        "suffix": "+"
+      }
+    },
+    {
+      "name": "35-character credential tail containing slash",
+      "id": "12345678",
+      "tail": {
+        "character": "h",
+        "count": 34,
+        "suffix": "/"
+      }
+    },
+    {
+      "name": "35-character credential tail containing equals",
+      "id": "123456789",
+      "tail": {
+        "character": "i",
+        "count": 34,
+        "suffix": "="
+      }
+    },
+    {
+      "name": "34-character credential tail",
+      "id": "123456",
+      "tail": {
+        "character": "E",
+        "count": 32,
+        "suffix": "-_"
+      }
+    },
+    {
+      "name": "36-character credential tail",
+      "id": "123456",
+      "tail": {
+        "character": "F",
+        "count": 34,
+        "suffix": "-_"
+      }
+    },
+    {
+      "name": "robot prefix is not a Bot API path",
+      "candidatePrefix": "robot",
+      "id": "456789",
+      "tail": {
+        "character": "H",
+        "count": 33,
+        "suffix": "-_"
+      }
+    },
+    {
+      "name": "underscore bot prefix is not a Bot API path",
+      "candidatePrefix": "_bot",
+      "id": "567890",
+      "tail": {
+        "character": "I",
+        "count": 33,
+        "suffix": "-_"
+      }
+    }
+  ]
+}

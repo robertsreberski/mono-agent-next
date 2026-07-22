@@ -1,0 +1,9 @@
+{
+  "runId": "run-running-live",
+  "conversationId": "fixture",
+  "status": "running",
+  "startedAt": "2026-06-24T11:59:45.000Z",
+  "durationMs": 0,
+  "eventCount": 0,
+  "artifactPaths": []
+}

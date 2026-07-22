@@ -1,0 +1,39 @@
+{
+  "runId": "run-public-fixture-001",
+  "conversationId": "00000000-0000-4000-8000-000000000001",
+  "status": "succeeded",
+  "startedAt": "2026-01-01T00:00:00.000Z",
+  "endedAt": "2026-01-01T00:00:01.000Z",
+  "updatedAt": "2026-01-01T00:00:01.000Z",
+  "durationMs": 1000,
+  "usage": {
+    "input_tokens": "[redacted]",
+    "output_tokens": "[redacted]",
+    "cache_read_tokens": "[redacted]",
+    "cache_creation_tokens": "[redacted]",
+    "cost_usd": 0.01
+  },
+  "providerSessionId": "00000000-0000-7000-8000-000000000002",
+  "eventCount": 6,
+  "artifactPaths": [
+    "/Users/example/project/.mono-agent/example-agent/artifacts/run-public-fixture-001.events.jsonl",
+    "/Users/example/project/.mono-agent/example-agent/artifacts/run-public-fixture-001.summary.json"
+  ],
+  "diagnostics": {
+    "codex_thread_start_attempts": 1,
+    "codex_thread_start_timeout_ms": 60000,
+    "codex_thread_start_duration_ms": 660
+  },
+  "capabilitiesUsed": {
+    "prompt_cache_active": true,
+    "thinking_enabled": null,
+    "structured_output_enforced": false,
+    "subagent_invoked": null,
+    "mcp_servers_used": [
+      "example_tools"
+    ],
+    "native_subagents_used": [],
+    "tool_compaction_applied": false,
+    "context_compaction_applied": null
+  }
+}

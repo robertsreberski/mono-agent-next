@@ -1,0 +1,35 @@
+{
+  "name": "create-mono-agent",
+  "version": "0.15.0",
+  "description": "npm-init style installer for the mono-agent CLI: `npm create mono-agent`. Ships both a `create-mono-agent` and a `mono-agent` bin, each delegating to the @mono-agent/agent-app CLI.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent.git",
+    "directory": "packages/create-mono-agent"
+  },
+  "private": false,
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "bin": {
+    "create-mono-agent": "./dist/bin/mono-agent.js",
+    "mono-agent": "./dist/bin/mono-agent.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mono-agent/agent-app": "workspace:0.15.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

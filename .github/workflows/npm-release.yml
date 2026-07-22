@@ -1,0 +1,119 @@
+name: npm release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  # Static OIDC readiness. The current staged all-package promotion still uses
+  # NPM_TOKEN for `npm dist-tag add`, which npm trusted publishing does not
+  # support; release docs keep the tokenless/public-provenance item blocked.
+  id-token: write
+
+concurrency:
+  group: npm-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish npm packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag points at current main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
+          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "$(git rev-parse HEAD)"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Check pnpm release-age policy
+        run: node scripts/pnpm-release-age-policy.mjs
+
+      - name: Install npm with trusted-publishing support
+        # Trusted publishing requires npm >=11.5.1. Keep the release runner on
+        # the exact minimum Node while pinning a qualifying npm CLI explicitly.
+        run: npm install --global npm@11.12.1
+
+      - name: Check Node support floor
+        run: pnpm run check:node
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate release tag and package graph
+        run: pnpm run release:validate -- --tag "$GITHUB_REF_NAME"
+
+      - name: Check package architecture
+        run: pnpm run check:architecture
+
+      - name: Build packages and demos
+        run: pnpm run build
+
+      - name: Typecheck packages and demos
+        run: pnpm run typecheck
+
+      - name: Run tests
+        run: pnpm test
+
+      - name: Validate package contents
+        run: pnpm run release:pack -- --tag "$GITHUB_REF_NAME"
+
+      - name: Install packed consumer at the minimum Node version
+        run: pnpm run release:consumer -- --tag "$GITHUB_REF_NAME" --require-minimum
+
+      - name: Check whitespace
+        run: git diff --check
+
+      - name: Publish packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm run release:publish -- --tag "$GITHUB_REF_NAME"
+
+      - name: Verify public npm metadata
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: pnpm run release:verify -- --tag "$GITHUB_REF_NAME"
+
+      - name: Smoke test published CLIs
+        env:
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: |
+          set -euo pipefail
+          retry() {
+            for _ in $(seq 1 30); do
+              "$@" && return 0
+              sleep 5
+            done
+            "$@"
+          }
+          VERSION="${GITHUB_REF_NAME#v}"
+          TMP_ROOT="$(mktemp -d)"
+          trap 'rm -rf -- "$TMP_ROOT"' EXIT
+
+          retry npm install -g --prefix "$TMP_ROOT/tui" --prefer-online "@mono-agent/tui@${VERSION}"
+          "$TMP_ROOT/tui/bin/mono-agent-tui" --help
+
+          retry npm install -g --prefix "$TMP_ROOT/app" --prefer-online "@mono-agent/agent-app@${VERSION}"
+          "$TMP_ROOT/app/bin/mono-agent" --help
+
+          retry npm install -g --prefix "$TMP_ROOT/create" --prefer-online "create-mono-agent@${VERSION}"
+          "$TMP_ROOT/create/bin/create-mono-agent" --help
+          "$TMP_ROOT/create/bin/mono-agent" --help

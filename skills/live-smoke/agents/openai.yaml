@@ -1,0 +1,4 @@
+interface:
+  display_name: "Live Smoke"
+  short_description: "Smoke-test one matching live surface"
+  default_prompt: "Use $live-smoke to run the one real mono-agent smoke scenario that matches the changed surface."

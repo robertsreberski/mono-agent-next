@@ -1,0 +1,27 @@
+{
+  "runId": "run-silent-recall",
+  "conversationId": "cron:nightly-report",
+  "status": "succeeded",
+  "startedAt": "2026-05-20T03:00:00.000Z",
+  "endedAt": "2026-05-20T03:00:04.200Z",
+  "updatedAt": "2026-05-20T03:00:04.200Z",
+  "durationMs": 4200,
+  "usage": {
+    "input_tokens": 1200,
+    "output_tokens": 300,
+    "cache_read_tokens": 100,
+    "cache_creation_tokens": 50,
+    "cost_usd": 0.01
+  },
+  "cost": {
+    "cumulativeUsd": 0.02
+  },
+  "providerSessionId": "sess-silent-recall",
+  "eventCount": 3,
+  "artifactPaths": [],
+  "model": "pi:ollama:gemma4:31b",
+  "effort": "high",
+  "source": "cron",
+  "sourceDetail": "nightly-report",
+  "userInput": "Summarize overnight logs.\n\n[Recalled long-term memory (2 entries)]\n- user prefers terse reports\n- last run flagged disk usage"
+}

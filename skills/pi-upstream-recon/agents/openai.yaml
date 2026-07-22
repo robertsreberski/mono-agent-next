@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pi Upstream Recon"
+  short_description: "Inspect vendored pi APIs safely"
+  default_prompt: "Use $pi-upstream-recon to inspect pi APIs before changing runtime-shaped code."

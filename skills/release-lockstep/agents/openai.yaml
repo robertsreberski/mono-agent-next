@@ -1,0 +1,4 @@
+interface:
+  display_name: "Release Lockstep"
+  short_description: "Publish a registry-scoped lockstep release"
+  default_prompt: "Use $release-lockstep to publish and registry-verify a lockstep @mono-agent release without implicitly deploying consumers."

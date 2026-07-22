@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mono Agent Composer"
+  short_description: "Compose config-first mono-agents"
+  default_prompt: "Use $mono-agent-composer and its semantic documentation companion to build and validate a config-first mono-agent folder."

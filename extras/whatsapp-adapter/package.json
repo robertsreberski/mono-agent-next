@@ -1,0 +1,40 @@
+{
+  "name": "@mono-agent/whatsapp-adapter",
+  "version": "0.15.0",
+  "description": "WhatsApp communication adapter for host-compatible runtimes using Baileys.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent.git",
+    "directory": "extras/whatsapp-adapter"
+  },
+  "private": false,
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mono-agent/agent-contracts": "workspace:0.15.0",
+    "@whiskeysockets/baileys": "^7.0.0-rc13"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

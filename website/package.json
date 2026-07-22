@@ -1,0 +1,29 @@
+{
+  "name": "mono-agent-docs",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "mono-agent documentation site (Astro Starlight). Renders the markdown under ../docs.",
+  "scripts": {
+    "dev": "node scripts/sync-content.mjs && astro dev",
+    "start": "node scripts/sync-content.mjs && astro dev",
+    "build": "pnpm run check:asides && node scripts/sync-content.mjs && astro build && node scripts/check-links.mjs",
+    "preview": "astro preview",
+    "sync": "node scripts/sync-content.mjs",
+    "check:asides": "node scripts/check-starlight-asides.mjs",
+    "check:links": "node scripts/check-links.mjs",
+    "test:unit": "node --test scripts/__tests__/*.test.mjs",
+    "test:a11y": "playwright test",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/markdown-remark": "^7.2.1",
+    "@astrojs/starlight": "^0.41.3",
+    "astro": "~7.0.9",
+    "sharp": "^0.35.0"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1"
+  }
+}

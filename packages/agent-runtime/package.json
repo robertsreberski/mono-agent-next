@@ -1,0 +1,150 @@
+{
+  "name": "@mono-agent/agent-runtime",
+  "version": "0.15.0",
+  "description": "Agent runtime supporting Claude SDK/CLI, Codex, OpenCode, and Pi SDK bridges out of the box",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent.git",
+    "directory": "packages/agent-runtime"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "runtime",
+    "mono-agent"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./ai": {
+      "types": "./types/ai/index.d.ts",
+      "default": "./src/ai/index.js"
+    },
+    "./agent": {
+      "types": "./types/agent/index.d.ts",
+      "default": "./src/agent/index.js"
+    },
+    "./ai/failure.js": {
+      "types": "./types/ai/failure.d.ts",
+      "default": "./src/ai/failure.js"
+    },
+    "./ai/cost.js": {
+      "types": "./types/ai/cost.d.ts",
+      "default": "./src/ai/cost.js"
+    },
+    "./ai/runtime/model-refs.js": {
+      "types": "./types/ai/runtime/model-refs.d.ts",
+      "default": "./src/ai/runtime/model-refs.js"
+    },
+    "./ai/runtime/registry.js": {
+      "types": "./types/ai/runtime/registry.d.ts",
+      "default": "./src/ai/runtime/registry.js"
+    },
+    "./ai/runtime/context-windows.js": {
+      "types": "./types/ai/runtime/context-windows.d.ts",
+      "default": "./src/ai/runtime/context-windows.js"
+    },
+    "./ai/runtime/fast-mode.js": {
+      "types": "./types/ai/runtime/fast-mode.d.ts",
+      "default": "./src/ai/runtime/fast-mode.js"
+    },
+    "./ai/streaming/codex-events.js": {
+      "types": "./types/ai/streaming/codex-events.d.ts",
+      "default": "./src/ai/streaming/codex-events.js"
+    },
+    "./ai/live-input-prompt.js": {
+      "types": "./types/ai/live-input-prompt.d.ts",
+      "default": "./src/ai/live-input-prompt.js"
+    },
+    "./ai/file-change-stats.js": {
+      "types": "./types/ai/file-change-stats.d.ts",
+      "default": "./src/ai/file-change-stats.js"
+    },
+    "./ai/providers/claude-sdk.js": {
+      "types": "./types/ai/providers/claude-sdk.d.ts",
+      "default": "./src/ai/providers/claude-sdk.js"
+    },
+    "./ai/providers/claude-sdk-discovery.js": {
+      "types": "./types/ai/providers/claude-sdk-discovery.d.ts",
+      "default": "./src/ai/providers/claude-sdk-discovery.js"
+    },
+    "./ai/providers/claude-cli.js": {
+      "types": "./types/ai/providers/claude-cli.d.ts",
+      "default": "./src/ai/providers/claude-cli.js"
+    },
+    "./ai/providers/codex-app.js": {
+      "types": "./types/ai/providers/codex-app.d.ts",
+      "default": "./src/ai/providers/codex-app.js"
+    },
+    "./ai/providers/opencode-discovery.js": {
+      "types": "./types/ai/providers/opencode-discovery.d.ts",
+      "default": "./src/ai/providers/opencode-discovery.js"
+    },
+    "./agent/tools/index.js": {
+      "types": "./types/agent/tools/index.d.ts",
+      "default": "./src/agent/tools/index.js"
+    },
+    "./agent/tools/shared/runtime-context.js": {
+      "types": "./types/agent/tools/shared/runtime-context.d.ts",
+      "default": "./src/agent/tools/shared/runtime-context.js"
+    },
+    "./agent/tools/shared/ripgrep.js": {
+      "types": "./types/agent/tools/shared/ripgrep.d.ts",
+      "default": "./src/agent/tools/shared/ripgrep.js"
+    },
+    "./agent/prompt/skill-index.js": {
+      "types": "./types/agent/prompt/skill-index.d.ts",
+      "default": "./src/agent/prompt/skill-index.js"
+    },
+    "./agent/allowlists.js": {
+      "types": "./types/agent/allowlists.d.ts",
+      "default": "./src/agent/allowlists.js"
+    },
+    "./agent/transcript.js": {
+      "types": "./types/agent/transcript.d.ts",
+      "default": "./src/agent/transcript.js"
+    },
+    "./agent/compaction.js": {
+      "types": "./types/agent/compaction.d.ts",
+      "default": "./src/agent/compaction.js"
+    }
+  },
+  "main": "./src/index.js",
+  "types": "./types/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.types.json",
+    "typecheck": "tsc -p tsconfig.types.json --noEmit",
+    "prepack": "pnpm run build",
+    "test": "vitest run"
+  },
+  "files": [
+    "src/**/*.js",
+    "!src/__tests__/**",
+    "types/**/*.d.ts",
+    "ARCHITECTURE.md",
+    "MIGRATION.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.206",
+    "@anthropic-ai/sdk": "^0.110.0",
+    "@earendil-works/pi-agent-core": "0.80.6",
+    "@earendil-works/pi-ai": "0.80.6",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opencode-ai/sdk": "^1.15.13",
+    "@vscode/ripgrep": "1.18.0",
+    "cross-spawn": "^7.0.6",
+    "zod": "^4.3.6"
+  }
+}

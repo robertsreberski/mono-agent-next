@@ -1,0 +1,4 @@
+interface:
+  display_name: "Docs Sync"
+  short_description: "Verify only affected documentation surfaces"
+  default_prompt: "Use $docs-sync to update and verify only the mono-agent documentation surfaces affected by this change."

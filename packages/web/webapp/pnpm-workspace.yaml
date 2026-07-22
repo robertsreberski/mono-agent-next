@@ -1,0 +1,13 @@
+# Keep the console frontend isolated from the monorepo package graph. The
+# publishable @mono-agent/web package builds this app explicitly.
+packages: []
+
+# Package release-age cooldown is explicitly disabled across supported pnpm versions.
+# Keep minimumReleaseAgeExclude absent while minimumReleaseAge remains 0.
+minimumReleaseAge: 0
+
+allowBuilds:
+  esbuild: true
+
+onlyBuiltDependencies:
+  - esbuild

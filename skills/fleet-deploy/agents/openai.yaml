@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fleet Deploy"
+  short_description: "Deploy only requested live consumers"
+  default_prompt: "Use $fleet-deploy to deploy or restart only the explicitly requested mono-agent consumers and prove their bounded health."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo Hygiene GC"
+  short_description: "Run explicit bulk repository cleanup"
+  default_prompt: "Use $repo-hygiene-gc only for an explicit bulk sweep of API-confirmed merged branches and clean worktrees."
