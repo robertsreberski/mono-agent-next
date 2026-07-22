@@ -1,6 +1,7 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo, Socket } from "node:net";
+import { isIP, type AddressInfo, type Socket } from "node:net";
+import { hostname as systemHostname } from "node:os";
 
 import {
   isLoopbackHost,
@@ -190,14 +191,21 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
 
     startPromise = new Promise<WebhookChannelStartInfo>((resolve, reject) => {
       const nextServer = createServer((request, response) => {
-        void handleRequest(request, response).catch(() => {
+        void handleRequest(request, response).catch((error: unknown) => {
           if (!response.headersSent && !response.destroyed) {
-            sendJson(response, 500, safeErrorBody("request_failed", "The request failed."));
+            const failure = error instanceof HttpError
+              ? error
+              : new HttpError(500, "request_failed", "The request failed.");
+            sendJson(response, failure.statusCode, safeErrorBody(failure.code, failure.statusCode >= 500 ? "The request failed." : failure.message));
           } else if (!response.writableEnded) {
             response.destroy();
           }
         });
       });
+      nextServer.requestTimeout = 30_000;
+      nextServer.headersTimeout = 10_000;
+      nextServer.keepAliveTimeout = 5_000;
+      nextServer.maxHeadersCount = 100;
       server = nextServer;
       nextServer.on("connection", (socket) => {
         sockets.add(socket);
@@ -257,9 +265,18 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
     request: IncomingMessage,
     response: ServerResponse,
   ): Promise<void> => {
+    if (startInfo === undefined) {
+      sendJson(response, 503, safeErrorBody("not_started", "The webhook channel is not started."));
+      return;
+    }
+    validateAuthority(request, options.config.listen.host, startInfo.port);
     const requestUrl = parseRequestUrl(request.url);
     const invokePath = options.config.path;
     const requestStatusBasePath = statusBasePath(invokePath);
+    if (requestUrl.search.length > 0) {
+      sendJson(response, 404, safeErrorBody("not_found", "Route not found."));
+      return;
+    }
 
     if (requestUrl.pathname === invokePath) {
       if (request.method !== "POST") {
@@ -325,7 +342,10 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
     let invocation: ParsedInvocation;
     try {
       const body = await readBoundedJsonBody(request, options.config.maxBodyBytes);
-      invocation = parseInvocation(body);
+      if (options.config.signatureSecret !== undefined && !verifySignature(request.headers["x-mono-agent-signature"], body.raw, options.config.signatureSecret)) {
+        throw new HttpError(401, "invalid_signature", "Unauthorized.");
+      }
+      invocation = parseInvocation(body.value);
     } catch (error) {
       const failure = error instanceof HttpError
         ? error
@@ -546,6 +566,9 @@ async function executeSubmission(
     if (typeof result !== "object" || result === null || typeof result.text !== "string") {
       throw new ExecutionError("request_failed");
     }
+    if (result.text.length > MAX_TEXT_LENGTH || Buffer.byteLength(result.text, "utf8") > MAX_TEXT_LENGTH * 4) {
+      throw new ExecutionError("request_failed");
+    }
     return result;
   } catch (error) {
     if (error instanceof ExecutionError) {
@@ -621,10 +644,29 @@ function parseMetadata(value: unknown): WebhookJsonObject | undefined {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new HttpError(400, "invalid_request", "metadata must be a JSON object.");
   }
+  assertJsonValue(value, "metadata", 0);
   return structuredClone(value) as WebhookJsonObject;
 }
 
-function readBoundedJsonBody(request: IncomingMessage, maxBytes: number): Promise<unknown> {
+function assertJsonValue(value: unknown, path: string, depth: number): void {
+  if (depth > 20) throw new HttpError(400, "invalid_request", `${path} exceeds the maximum nesting depth.`);
+  if (value === null || typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) return;
+  if (Array.isArray(value)) {
+    if (value.length > 10_000) throw new HttpError(400, "invalid_request", `${path} is too large.`);
+    value.forEach((entry, index) => assertJsonValue(entry, `${path}[${String(index)}]`, depth + 1));
+    return;
+  }
+  if (typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === "__proto__" || key === "constructor" || key === "prototype") throw new HttpError(400, "invalid_request", `${path} contains an unsafe key.`);
+      assertJsonValue(entry, `${path}.${key}`, depth + 1);
+    }
+    return;
+  }
+  throw new HttpError(400, "invalid_request", `${path} must contain only JSON values.`);
+}
+
+function readBoundedJsonBody(request: IncomingMessage, maxBytes: number): Promise<{ readonly raw: Buffer; readonly value: unknown }> {
   const contentLength = request.headers["content-length"];
   if (contentLength !== undefined) {
     const declaredBytes = Number(contentLength);
@@ -672,7 +714,8 @@ function readBoundedJsonBody(request: IncomingMessage, maxBytes: number): Promis
         return;
       }
       try {
-        resolve(JSON.parse(Buffer.concat(chunks, totalBytes).toString("utf8")) as unknown);
+        const raw = Buffer.concat(chunks, totalBytes);
+        resolve({ raw, value: JSON.parse(raw.toString("utf8")) as unknown });
       } catch {
         reject(new HttpError(400, "invalid_json", "Request body must be valid JSON."));
       }
@@ -719,6 +762,15 @@ function constantTimeTokenEqual(candidate: string, expected: string): boolean {
   const candidateHash = createHash("sha256").update(candidate, "utf8").digest();
   const expectedHash = createHash("sha256").update(expected, "utf8").digest();
   return timingSafeEqual(candidateHash, expectedHash);
+}
+
+function verifySignature(value: string | string[] | undefined, body: Buffer, secret: string): boolean {
+  if (typeof value !== "string") return false;
+  const match = /^sha256=([0-9a-f]{64})$/iu.exec(value);
+  if (match === null) return false;
+  const actual = Buffer.from(match[1]!, "hex");
+  const expected = createHmac("sha256", secret).update(body).digest();
+  return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
 function safeExecutionError(
@@ -827,8 +879,8 @@ function reserveStatusCapacity(
 }
 
 function assertStartSafety(config: WebhookConfig): void {
-  if (!isLoopbackHost(config.listen.host)) {
-    throw new Error("The HTTP-only webhook channel may bind only to loopback.");
+  if (!isLoopbackHost(config.listen.host) && config.allowNonLoopback !== true) {
+    throw new Error("The HTTP webhook channel may bind outside loopback only with explicit allowNonLoopback.");
   }
   if (
     typeof config.apiKey !== "string" ||
@@ -838,6 +890,44 @@ function assertStartSafety(config: WebhookConfig): void {
   ) {
     throw new Error("Webhook API key is required and must be a non-empty bearer token.");
   }
+  if (
+    !isLoopbackHost(config.listen.host)
+    && (
+      config.apiKey.length < 32
+      || typeof config.signatureSecret !== "string"
+      || config.signatureSecret.length < 32
+      || config.signatureSecret.length > 4_096
+      || /\s/u.test(config.signatureSecret)
+    )
+  ) {
+    throw new Error("A non-loopback webhook listener requires bearer and signature secrets of at least 32 characters.");
+  }
+}
+
+function validateAuthority(request: IncomingMessage, configuredHost: string, port: number): void {
+  const host = request.headers.host;
+  if (host === undefined) throw new HttpError(421, "invalid_authority", "Request authority is not accepted.");
+  let authority: URL;
+  try { authority = new URL(`http://${host}`); } catch { throw new HttpError(421, "invalid_authority", "Request authority is not accepted."); }
+  if (authority.username !== "" || authority.password !== "" || authority.pathname !== "/" || authority.search !== "" || authority.hash !== "" || Number(authority.port || "80") !== port) {
+    throw new HttpError(421, "invalid_authority", "Request authority is not accepted.");
+  }
+  const candidate = authority.hostname.toLowerCase().replace(/^\[|\]$/gu, "");
+  const configured = configuredHost.toLowerCase().replace(/^\[|\]$/gu, "");
+  const wildcard = configured === "0.0.0.0" || configured === "::";
+  const allowed = wildcard ? isLocalNetworkHost(candidate) : isLoopbackHost(configured) ? isLoopbackHost(candidate) : candidate === configured;
+  if (!allowed) throw new HttpError(421, "invalid_authority", "Request authority is not accepted.");
+}
+
+function isLocalNetworkHost(host: string): boolean {
+  if (isLoopbackHost(host)) return true;
+  const machine = systemHostname().toLowerCase();
+  if (host === machine || host === `${machine}.local`) return true;
+  if (isIP(host) === 4) {
+    const [a = -1, b = -1] = host.split(".").map(Number);
+    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
+  }
+  return isIP(host) === 6 && (/^(?:fc|fd)/u.test(host) || /^fe[89ab]/u.test(host));
 }
 
 function hostForUrl(host: string): string {

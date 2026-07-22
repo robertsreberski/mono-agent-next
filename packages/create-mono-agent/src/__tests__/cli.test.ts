@@ -18,6 +18,9 @@ describe("runCreateMonoAgentCli", () => {
       "create-mono-agent": "./dist/bin/create-mono-agent.js",
       "mono-agent": "./dist/bin/mono-agent.js",
     });
+    expect(manifest.license).toBe("GPL-3.0-only");
+    expect(await readFile(new URL("../../LICENSE", import.meta.url), "utf8"))
+      .toContain("GNU GENERAL PUBLIC LICENSE");
   });
 
   it("uses create-mono-agent as a no-wizard scaffolder", async () => {
@@ -30,8 +33,38 @@ describe("runCreateMonoAgentCli", () => {
       stderr: () => undefined,
     }, { invocationName: "create-mono-agent" })).resolves.toBe(0);
 
-    expect(JSON.parse(stdout.join(""))).toMatchObject({ event: "scaffolded", installed: false });
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      event: "scaffolded",
+      template: "minimal",
+      installed: false,
+    });
     expect(JSON.parse(await readFile(join(root, "my-agent", "package.json"), "utf8")).name).toBe("my-agent");
+  });
+
+  it("selects personal and multi-runtime templates explicitly", async () => {
+    const root = await makeTemporaryDirectory();
+    for (const template of ["personal", "multi-runtime"] as const) {
+      const stdout: string[] = [];
+      await expect(runCreateMonoAgentCli([
+        `${template}-agent`,
+        "--template",
+        template,
+      ], {
+        cwd: root,
+        stdout: (text) => stdout.push(text),
+        stderr: () => undefined,
+      }, { invocationName: "create-mono-agent" })).resolves.toBe(0);
+      expect(JSON.parse(stdout.join(""))).toMatchObject({ template });
+    }
+
+    const personal = JSON.parse(
+      await readFile(join(root, "personal-agent", "mono-agent.config.json"), "utf8"),
+    );
+    expect(personal.memory.$use).toBe("@mono-agent/memory-local");
+    const multi = JSON.parse(
+      await readFile(join(root, "multi-runtime-agent", "mono-agent.config.json"), "utf8"),
+    );
+    expect(multi.runtimes["claude-sdk"].$use).toBe("@mono-agent/runtime-claude");
   });
 
   it("preserves mono-agent init/setup and delegates every other command to @mono-agent/cli", async () => {
@@ -61,6 +94,21 @@ describe("runCreateMonoAgentCli", () => {
       }, { invocationName: "mono-agent" })).resolves.toBe(2);
       expect(stderr.join("")).toContain(`Unsupported package manager: ${packageManager}`);
       expect(stderr.join("")).toContain("--package-manager <pnpm|npm>");
+    }
+  });
+
+  it("returns usage exit 2 for unknown or repeated templates", async () => {
+    for (const argv of [
+      ["setup", "--template", "maximal"],
+      ["setup", "--template", "minimal", "--template", "personal"],
+    ]) {
+      const stderr: string[] = [];
+      await expect(runCreateMonoAgentCli(argv, {
+        stdout: () => undefined,
+        stderr: (text) => stderr.push(text),
+      }, { invocationName: "mono-agent" })).resolves.toBe(2);
+      expect(stderr.join("")).toContain("template");
+      expect(stderr.join("")).toContain("minimal|personal|multi-runtime");
     }
   });
 });

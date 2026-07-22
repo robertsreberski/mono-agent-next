@@ -1,15 +1,14 @@
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 
 import type {
   Credential,
   CredentialInfo,
   CredentialStore,
 } from "@earendil-works/pi-ai";
-
-const DELETED = Symbol("deleted");
 
 export function resolveRuntimePiPath(path: string, cwd: string): string {
   if (path === "~") return homedir();
@@ -39,9 +38,11 @@ function credentialAt(value: unknown, providerId: string): Credential {
     return structuredClone(record) as unknown as Credential;
   }
   if (record.type === "oauth") {
-    throw new Error(
-      `Pi OAuth credential for provider ${JSON.stringify(providerId)} requires atomic writable persistence and is not supported yet`,
-    );
+    if (typeof record.access !== "string" || typeof record.refresh !== "string"
+      || !Number.isFinite(record.expires) || Number(record.expires) < 0) {
+      throw new Error(`Pi auth store has an invalid OAuth credential for provider ${JSON.stringify(providerId)}`);
+    }
+    return structuredClone(record) as unknown as Credential;
   }
   throw new Error(`Pi auth store has an unsupported credential type for provider ${JSON.stringify(providerId)}`);
 }
@@ -99,69 +100,105 @@ async function readSecureAuthFile(path: string): Promise<Map<string, Credential>
   }
 }
 
-/**
- * Reads an owner-private Pi auth file but never mutates it. OAuth credentials
- * are rejected until refresh-token rotation can be committed atomically.
- */
-export class ReadOnlyPiCredentialStore implements CredentialStore {
+async function withFileLock<T>(path: string, task: () => Promise<T>): Promise<T> {
+  const lockPath = `${path}.lock`;
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  let handle;
+  try {
+    handle = await open(lockPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollow, 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new Error("Pi auth store is locked by another process");
+    }
+    throw new Error("Unable to lock Pi auth store", { cause: error });
+  }
+  try {
+    await handle.writeFile(`${process.pid}\n`, "utf8");
+    await handle.sync();
+    return await task();
+  } finally {
+    await handle.close();
+    await unlink(lockPath).catch(() => undefined);
+  }
+}
+
+async function writeSecureAuthFile(path: string, credentials: ReadonlyMap<string, Credential>): Promise<void> {
+  const directory = dirname(path);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const temporary = resolve(directory, `.${randomUUID()}.auth.tmp`);
+  const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  const handle = await open(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollow, 0o600);
+  try {
+    const serialized = Object.fromEntries([...credentials.entries()].sort(([left], [right]) => left.localeCompare(right)));
+    await handle.writeFile(`${JSON.stringify(serialized, null, 2)}\n`, "utf8");
+    await handle.sync();
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    await unlink(temporary).catch(() => undefined);
+    throw error;
+  }
+  await handle.close();
+  try {
+    await rename(temporary, path);
+    await chmod(path, 0o600);
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined);
+    throw new Error("Unable to atomically persist Pi auth store", { cause: error });
+  }
+}
+
+/** Owner-private Pi credential storage with atomic OAuth refresh rotation. */
+export class PiCredentialStore implements CredentialStore {
   readonly #path: string;
-  readonly #overlays = new Map<string, Credential | typeof DELETED>();
-  readonly #chains = new Map<string, Promise<void>>();
-  #snapshot: Promise<Map<string, Credential>> | undefined;
+  #chain = Promise.resolve();
 
   constructor(path: string) {
     this.#path = path;
   }
 
-  #load(): Promise<Map<string, Credential>> {
-    this.#snapshot ??= readSecureAuthFile(this.#path);
-    return this.#snapshot;
-  }
-
   async read(providerId: string): Promise<Credential | undefined> {
-    const overlay = this.#overlays.get(providerId);
-    if (overlay === DELETED) return undefined;
-    if (overlay !== undefined) return cloneCredential(overlay);
-    return cloneCredential((await this.#load()).get(providerId));
+    await this.#chain;
+    return cloneCredential((await readSecureAuthFile(this.#path)).get(providerId));
   }
 
   async list(): Promise<readonly CredentialInfo[]> {
-    const ids = new Set((await this.#load()).keys());
-    for (const [providerId, credential] of this.#overlays) {
-      if (credential === DELETED) ids.delete(providerId);
-      else ids.add(providerId);
-    }
-    const result: CredentialInfo[] = [];
-    for (const providerId of [...ids].sort()) {
-      const credential = await this.read(providerId);
-      if (credential !== undefined) result.push({ providerId, type: credential.type });
-    }
-    return result;
+    await this.#chain;
+    const snapshot = await readSecureAuthFile(this.#path);
+    return [...snapshot.entries()].sort(([left], [right]) => left.localeCompare(right))
+      .map(([providerId, credential]) => ({ providerId, type: credential.type }));
   }
 
   async modify(
     providerId: string,
     fn: (current: Credential | undefined) => Promise<Credential | undefined>,
   ): Promise<Credential | undefined> {
-    const previous = this.#chains.get(providerId) ?? Promise.resolve();
     let result: Credential | undefined;
-    const current = previous.catch(() => undefined).then(async () => {
-      const before = await this.read(providerId);
-      const next = await fn(cloneCredential(before));
-      if (next !== undefined) this.#overlays.set(providerId, cloneCredential(next) as Credential);
-      result = next === undefined ? before : next;
+    const current = this.#chain.catch(() => undefined).then(async () => {
+      result = await withFileLock(this.#path, async () => {
+        const snapshot = await readSecureAuthFile(this.#path);
+        const before = cloneCredential(snapshot.get(providerId));
+        const next = await fn(before);
+        if (next === undefined) return before;
+        snapshot.set(providerId, cloneCredential(next) as Credential);
+        await writeSecureAuthFile(this.#path, snapshot);
+        return next;
+      });
     });
-    this.#chains.set(providerId, current.then(() => undefined, () => undefined));
+    this.#chain = current.then(() => undefined, () => undefined);
     await current;
     return cloneCredential(result);
   }
 
   async delete(providerId: string): Promise<void> {
-    const previous = this.#chains.get(providerId) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(() => {
-      this.#overlays.set(providerId, DELETED);
+    const current = this.#chain.catch(() => undefined).then(async () => {
+      await withFileLock(this.#path, async () => {
+        const snapshot = await readSecureAuthFile(this.#path);
+        if (!snapshot.delete(providerId)) return;
+        await writeSecureAuthFile(this.#path, snapshot);
+      });
     });
-    this.#chains.set(providerId, current);
+    this.#chain = current.then(() => undefined, () => undefined);
     await current;
   }
 
@@ -180,6 +217,9 @@ export class ReadOnlyPiCredentialStore implements CredentialStore {
     return [...values];
   }
 }
+
+/** @deprecated Use PiCredentialStore. Retained as an internal source alias. */
+export const ReadOnlyPiCredentialStore = PiCredentialStore;
 
 export function redactRuntimePiText(value: unknown, secrets: readonly string[]): string {
   let text = value instanceof Error ? value.message : String(value);

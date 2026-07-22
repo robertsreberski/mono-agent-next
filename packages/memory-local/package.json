@@ -1,0 +1,54 @@
+{
+  "name": "@mono-agent/memory-local",
+  "version": "0.15.0",
+  "description": "Owner-private SQLite memory module for mono-agent v1.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
+    "directory": "packages/memory-local"
+  },
+  "keywords": [
+    "ai",
+    "agents",
+    "mono-agent",
+    "memory",
+    "sqlite"
+  ],
+  "mono-agent": {
+    "packageName": "@mono-agent/memory-local",
+    "apiVersion": 1,
+    "kind": "memory",
+    "responsibility": "Provides owner-private SQLite memory recall, capture, forgetting, and permanent first-run identity."
+  },
+  "private": false,
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mono-agent/module-sdk": "workspace:0.15.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

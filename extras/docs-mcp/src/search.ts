@@ -15,7 +15,6 @@ const MAX_LIMIT = 8;
 const RRF_K = 60;
 const SEMANTIC_WEIGHT = 0.65;
 const LEXICAL_WEIGHT = 0.35;
-const COMPOSER_AUTHORITY_MULTIPLIER = 1.05;
 
 interface LexicalDocument {
   readonly termFrequency: ReadonlyMap<string, number>;
@@ -60,8 +59,8 @@ export class MonoAgentDocsSearchIndex {
       throw new Error(`Documentation search limit must be an integer between 1 and ${MAX_LIMIT}.`);
     }
     const scope = input.scope ?? "all";
-    if (scope !== "all" && scope !== "composer" && scope !== "docs") {
-      throw new Error("Documentation search scope must be all, composer, or docs.");
+    if (scope !== "all" && scope !== "docs") {
+      throw new Error("Documentation search scope must be all or docs.");
     }
 
     const [queryEmbedding] = await embed(query);
@@ -92,11 +91,9 @@ export class MonoAgentDocsSearchIndex {
     const fused = candidateIndexes.map((index) => {
       const semanticRank = semanticRanks.get(index)!;
       const lexicalRank = lexicalRanks.get(index)!;
-      const chunk = this.#corpus.chunks[index]!;
-      const authority = chunk.source === "composer" ? COMPOSER_AUTHORITY_MULTIPLIER : 1;
       return {
         index,
-        score: authority * (
+        score: (
           (SEMANTIC_WEIGHT / (RRF_K + semanticRank))
           + (LEXICAL_WEIGHT / (RRF_K + lexicalRank))
         ),

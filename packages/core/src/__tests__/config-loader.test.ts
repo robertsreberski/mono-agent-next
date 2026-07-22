@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { access, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -76,6 +77,50 @@ describe("strict config and module loading", () => {
     ]));
   });
 
+  it("validates session timezones as IANA identifiers during config loading", async () => {
+    const project = await fixture({ kind: "runtime", controller: runtimeController(async () => ({})) });
+    const runtime = project.modules[0]!.name;
+    for (const timezone of ["UTC", "Europe/Amsterdam"]) {
+      await project.writeConfig(minimalConfig(runtime, {
+        session: { mode: "continuous", rollover: "daily", timezone },
+      }));
+      await expect(loadAgentConfig(project.configPath)).resolves.toMatchObject({
+        raw: { session: { timezone } },
+      });
+    }
+
+    for (const timezone of ["Mars/Olympus_Mons", "+01:00"]) {
+      await project.writeConfig(minimalConfig(runtime, {
+        session: { mode: "continuous", rollover: "daily", timezone },
+      }));
+      const result = await validateAgentConfig(project.configPath);
+      expect(result).toMatchObject({
+        ok: false,
+        issues: [expect.objectContaining({
+          path: "session.timezone",
+          message: "must be a valid IANA time zone",
+          code: "timezone",
+        })],
+      });
+    }
+  });
+
+  it("rejects the unsupported skill selection mode instead of silently loading every skill", async () => {
+    const project = await fixture({ kind: "runtime", controller: runtimeController(async () => ({})) });
+    const runtime = project.modules[0]!.name;
+    await project.writeConfig(minimalConfig(runtime, {
+      context: { skills: { roots: ["./skills"], load: "selected", disclosure: "index" } },
+    }));
+
+    await expect(validateAgentConfig(project.configPath)).resolves.toMatchObject({
+      ok: false,
+      issues: [expect.objectContaining({
+        path: "context.skills.load",
+        message: "must be one of \"all\"",
+      })],
+    });
+  });
+
   it("loads an external open-slot module without any first-party catalog entry", async () => {
     let parsed = false;
     const project = await fixture({
@@ -101,6 +146,79 @@ describe("strict config and module loading", () => {
     const loaded = await loadAgentConfig(project.configPath);
     expect(parsed).toBe(true);
     expect(loaded.modules[0]?.packageName).toBe(runtime);
+  });
+
+  it("validates annotated cross-slot instance and capability references after loading all modules", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtimeName = `@fixture/runtime-${suffix}`;
+    const channelName = `@fixture/channel-${suffix}`;
+    const project = await createFixtureProject([
+      {
+        name: runtimeName,
+        kind: "runtime",
+        capabilities: ["runtime.fixture-target"],
+        controller: { create: () => ({}) },
+      },
+      {
+        name: channelName,
+        kind: "channel",
+        schema: {
+          type: "object",
+          properties: {
+            runtime: {
+              type: "string",
+              "x-mono-agent-slot-reference": { slot: "runtime", capability: "runtime.fixture-target" },
+            },
+          },
+          required: ["runtime"],
+          additionalProperties: false,
+        },
+        controller: { create: () => ({}) },
+      },
+    ]);
+    projects.push(project);
+    const config = minimalConfig(runtimeName, {
+      channels: { gateway: { $use: channelName, runtime: "main" } },
+    });
+    await project.writeConfig(config);
+    await expect(loadAgentConfig(project.configPath)).resolves.toMatchObject({ modules: expect.any(Array) });
+
+    (config.channels!.gateway as unknown as { runtime: string }).runtime = "missing";
+    await project.writeConfig(config);
+    const missing = await validateAgentConfig(project.configPath);
+    expect(missing.issues).toContainEqual(expect.objectContaining({
+      path: "channels.gateway.runtime",
+      code: "module_reference",
+    }));
+
+    const noCapability = await createFixtureProject([
+      { name: `${runtimeName}-plain`, kind: "runtime", controller: { create: () => ({}) } },
+      {
+        name: `${channelName}-capability`,
+        kind: "channel",
+        schema: {
+          type: "object",
+          properties: {
+            runtime: {
+              type: "string",
+              "x-mono-agent-slot-reference": { slot: "runtime", capability: "runtime.fixture-target" },
+            },
+          },
+          required: ["runtime"],
+          additionalProperties: false,
+        },
+        controller: { create: () => ({}) },
+      },
+    ]);
+    projects.push(noCapability);
+    await noCapability.writeConfig(minimalConfig(`${runtimeName}-plain`, {
+      channels: { gateway: { $use: `${channelName}-capability`, runtime: "main" } },
+    }));
+    const unsupported = await validateAgentConfig(noCapability.configPath);
+    expect(unsupported.issues).toContainEqual(expect.objectContaining({
+      path: "channels.gateway.runtime",
+      code: "module_capability",
+    }));
   });
 
   it("resolves only marked env leaves before module parse and never surfaces the value", async () => {
@@ -194,6 +312,62 @@ describe("strict config and module loading", () => {
     expect(result.issues[0]?.message).toContain("[REDACTED]");
   });
 
+  it("resolves and materializes env-backed secret values in schema maps", async () => {
+    const seen: unknown[] = [];
+    const project = await fixture({
+      kind: "runtime",
+      schema: {
+        type: "object",
+        properties: {
+          headers: {
+            type: "object",
+            additionalProperties: {
+              type: "string",
+              "x-mono-agent-env-eligible": true,
+              "x-mono-agent-secret": true,
+            },
+          },
+        },
+        additionalProperties: false,
+      },
+      controller: {
+        parse(input) {
+          seen.push(input);
+          return input;
+        },
+        create: () => ({}),
+      },
+    });
+    const runtime = project.modules[0]!.name;
+    const config = minimalConfig(runtime);
+    setMainRuntime(config, {
+      $use: runtime,
+      headers: { authorization: { $env: "OTLP_AUTHORIZATION" } },
+    });
+    await project.writeConfig(config);
+
+    const loaded = await loadAgentConfig(project.configPath, {
+      environment: { OTLP_AUTHORIZATION: "Bearer fixture-token" },
+    });
+    expect(seen).toEqual([{ headers: { authorization: "Bearer fixture-token" } }]);
+
+    const schema = await composeAgentConfigSchema(loaded);
+    const headerValue = nested(schema, [
+      "properties",
+      "runtimes",
+      "properties",
+      "main",
+      "properties",
+      "headers",
+      "additionalProperties",
+    ]);
+    expect(headerValue).toMatchObject({
+      type: "object",
+      required: ["$env"],
+      additionalProperties: false,
+    });
+  });
+
   it("rejects inline secrets, missing env names, and env directives on unmarked leaves", async () => {
     const project = await fixture({
       kind: "runtime",
@@ -226,6 +400,228 @@ describe("strict config and module loading", () => {
     await project.writeConfig(unmarked);
     const unmarkedResult = await validateAgentConfig(project.configPath, { environment: { LABEL: "value" } });
     expect(unmarkedResult.issues[0]?.code).toBe("env_not_eligible");
+  });
+
+  it("selects discriminated schema branches before resolving or publishing env directives", async () => {
+    const tokenSchema = {
+      type: "string",
+      "x-mono-agent-env-eligible": true,
+      "x-mono-agent-secret": true,
+    };
+    const project = await fixture({
+      kind: "runtime",
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          auth: {
+            oneOf: [
+              {
+                type: "object",
+                additionalProperties: false,
+                required: ["method", "token"],
+                properties: { method: { const: "oauth" }, token: tokenSchema },
+              },
+              {
+                type: "object",
+                additionalProperties: false,
+                required: ["method", "token"],
+                properties: { method: { const: "literal-label" }, token: { type: "string" } },
+              },
+            ],
+          },
+        },
+      },
+      controller: { create: () => ({}) },
+    });
+    const runtime = project.modules[0]!.name;
+    const valid = minimalConfig(runtime);
+    setMainRuntime(valid, {
+      $use: runtime,
+      auth: { method: "oauth", token: { $env: "OAUTH_TOKEN" } },
+    });
+    await project.writeConfig(valid);
+    const loaded = await loadAgentConfig(project.configPath, { environment: { OAUTH_TOKEN: "secret" } });
+    const schema = await composeAgentConfigSchema(loaded);
+    const authBranches = nested(schema, [
+      "properties", "runtimes", "properties", "main", "properties", "auth", "oneOf",
+    ]);
+    expect(Array.isArray(authBranches) ? nested(authBranches[0], ["properties", "token"]) : undefined)
+      .toMatchObject({ type: "object", required: ["$env"], additionalProperties: false });
+
+    const wrongBranch = minimalConfig(runtime);
+    setMainRuntime(wrongBranch, {
+      $use: runtime,
+      auth: { method: "literal-label", token: { $env: "OAUTH_TOKEN" } },
+    });
+    await project.writeConfig(wrongBranch);
+    expect((await validateAgentConfig(project.configPath, { environment: { OAUTH_TOKEN: "secret" } })).issues[0]?.code)
+      .toBe("env_not_eligible");
+
+    const inline = minimalConfig(runtime);
+    setMainRuntime(inline, { $use: runtime, auth: { method: "oauth", token: "do-not-publish" } });
+    await project.writeConfig(inline);
+    expect((await validateAgentConfig(project.configPath)).issues[0]?.code).toBe("inline_secret");
+  });
+
+  it("matches primitive oneOf and anyOf branches before applying env and secret annotations", async () => {
+    const protectedString = {
+      type: "string",
+      "x-mono-agent-env-eligible": true,
+      "x-mono-agent-secret": true,
+    };
+    const protectedNumber = {
+      type: "number",
+      "x-mono-agent-env-eligible": true,
+      "x-mono-agent-secret": true,
+    };
+    const seen: unknown[] = [];
+    const project = await fixture({
+      kind: "runtime",
+      schema: {
+        type: "object",
+        properties: {
+          token: { oneOf: [{ type: "number" }, protectedString] },
+          label: { anyOf: [{ type: "string" }, protectedNumber] },
+        },
+        required: ["token", "label"],
+        additionalProperties: false,
+      },
+      controller: {
+        parse(input) {
+          seen.push(input);
+          return input;
+        },
+        create: () => ({}),
+      },
+    });
+    const runtime = project.modules[0]!.name;
+    const valid = minimalConfig(runtime);
+    setMainRuntime(valid, {
+      $use: runtime,
+      token: { $env: "TOKEN" },
+      label: "public-label",
+    });
+    await project.writeConfig(valid);
+    await loadAgentConfig(project.configPath, { environment: { TOKEN: "resolved-token" } });
+    expect(seen).toEqual([{ token: "resolved-token", label: "public-label" }]);
+
+    const inline = minimalConfig(runtime);
+    setMainRuntime(inline, { $use: runtime, token: "inline-token", label: "public-label" });
+    await project.writeConfig(inline);
+    expect((await validateAgentConfig(project.configPath)).issues[0]?.code).toBe("inline_secret");
+
+    const wrongAnyOfBranch = minimalConfig(runtime);
+    setMainRuntime(wrongAnyOfBranch, {
+      $use: runtime,
+      token: { $env: "TOKEN" },
+      label: { $env: "LABEL" },
+    });
+    await project.writeConfig(wrongAnyOfBranch);
+    const result = await validateAgentConfig(project.configPath, {
+      environment: { TOKEN: "resolved-token", LABEL: "public-label" },
+    });
+    expect(result.issues[0]?.code).toBe("env_not_eligible");
+  });
+
+  it("composes strict root oneOf and allOf schemas with a required module selector", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const variantName = `@fixture/runtime-variant-${suffix}`;
+    const layeredName = `@fixture/runtime-layered-${suffix}`;
+    const project = await createFixtureProject([
+      {
+        name: variantName,
+        kind: "runtime",
+        schema: {
+          type: "object",
+          oneOf: [
+            {
+              type: "object",
+              properties: { mode: { const: "remote" }, endpoint: { type: "string" } },
+              required: ["mode", "endpoint"],
+              additionalProperties: false,
+            },
+            {
+              type: "object",
+              properties: { mode: { const: "local" } },
+              required: ["mode"],
+              additionalProperties: false,
+            },
+          ],
+          additionalProperties: false,
+        },
+        controller: { create: () => ({}) },
+      },
+      {
+        name: layeredName,
+        kind: "runtime",
+        schema: {
+          type: "object",
+          allOf: [
+            {
+              type: "object",
+              properties: { endpoint: { type: "string" } },
+              required: ["endpoint"],
+              additionalProperties: false,
+            },
+            {
+              type: "object",
+              properties: { timeoutMs: { type: "integer" } },
+              required: ["timeoutMs"],
+              additionalProperties: false,
+            },
+          ],
+          additionalProperties: false,
+        },
+        controller: { create: () => ({}) },
+      },
+    ]);
+    projects.push(project);
+    const config = minimalConfig(variantName);
+    setMainRuntime(config, { $use: variantName, mode: "local" });
+    (config.runtimes as Record<string, unknown>).layered = {
+      $use: layeredName,
+      endpoint: "https://example.test",
+      timeoutMs: 1_000,
+    };
+    await project.writeConfig(config);
+
+    const schema = await composeAgentConfigSchema(await loadAgentConfig(project.configPath));
+    const variant = nested(schema, ["properties", "runtimes", "properties", "main"]);
+    expect(variant).toMatchObject({
+      type: "object",
+      properties: { $use: { const: variantName } },
+      required: expect.arrayContaining(["$use"]),
+      unevaluatedProperties: false,
+    });
+    expect(isRecord(variant) && Object.hasOwn(variant, "additionalProperties")).toBe(false);
+    const variants = isRecord(variant) && Array.isArray(variant.oneOf) ? variant.oneOf : [];
+    expect(variants).toHaveLength(2);
+    for (const branch of variants) {
+      expect(branch).toMatchObject({
+        properties: { $use: { const: variantName } },
+        required: expect.arrayContaining(["$use"]),
+        additionalProperties: false,
+      });
+    }
+
+    const layered = nested(schema, ["properties", "runtimes", "properties", "layered"]);
+    expect(layered).toMatchObject({
+      type: "object",
+      properties: { $use: { const: layeredName } },
+      required: expect.arrayContaining(["$use"]),
+      unevaluatedProperties: false,
+    });
+    expect(isRecord(layered) && Object.hasOwn(layered, "additionalProperties")).toBe(false);
+    const layers = isRecord(layered) && Array.isArray(layered.allOf) ? layered.allOf : [];
+    expect(layers).toHaveLength(2);
+    for (const branch of layers) {
+      expect(branch).toMatchObject({
+        properties: { $use: { const: layeredName } },
+        required: expect.arrayContaining(["$use"]),
+      });
+      expect(isRecord(branch) && Object.hasOwn(branch, "additionalProperties")).toBe(false);
+    }
   });
 });
 
@@ -297,6 +693,33 @@ describe("dependency and package preflight", () => {
     await replacePackageEntryWithSymlink(escaped, escapedName, "export const monoAgentModule = {};\n");
     await escaped.writeConfig(minimalConfig(escapedName));
     await expectConfigIssue(loadAgentConfig(escaped.configPath), /escapes its installed package root/u);
+  });
+
+  it("rejects non-compliant module definitions and schema annotations after import", async () => {
+    const duplicateCapability = await fixture({
+      kind: "runtime",
+      capabilities: ["runtime.fixture", "runtime.fixture"],
+      controller: { create: () => ({}) },
+    });
+    await duplicateCapability.writeConfig(minimalConfig(duplicateCapability.modules[0]!.name));
+    await expectConfigIssue(loadAgentConfig(duplicateCapability.configPath), /capabilities contains duplicate/u);
+
+    const invalidAnnotation = await fixture({
+      kind: "runtime",
+      schema: {
+        type: "object",
+        properties: {
+          target: {
+            type: "string",
+            "x-mono-agent-slot-reference": { slot: "unknown" },
+          },
+        },
+        additionalProperties: false,
+      },
+      controller: { create: () => ({}) },
+    });
+    await invalidAnnotation.writeConfig(minimalConfig(invalidAnnotation.modules[0]!.name));
+    await expectConfigIssue(loadAgentConfig(invalidAnnotation.configPath), /invalid cross-slot reference annotation/u);
   });
 });
 

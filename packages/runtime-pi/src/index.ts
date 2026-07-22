@@ -20,7 +20,7 @@ export const monoAgentModule = defineRuntimeModule({
     packageVersion: "0.15.0",
     apiVersion: 1,
     kind: "runtime",
-    responsibility: "Runs turns through Pi-native providers as isolated native attempts.",
+    responsibility: "Runs Pi-native turns with atomic session forks and live steering.",
     capabilities: [],
   },
   schema: {

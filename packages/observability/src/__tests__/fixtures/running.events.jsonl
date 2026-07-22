@@ -1,3 +1,0 @@
-{"type":"assistant","message":{"content":[{"type":"thinking","text":"Look"}]}}
-{"type":"assistant","message":{"content":[{"type":"thinking","text":"ing at the logs"}]}}
-{"type":"assistant","message":{"content":[{"type":"tool_use","id":"r1","name":"search","input":{"query":"disk usage"}}]}}

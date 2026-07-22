@@ -11,7 +11,7 @@ state, and action eligibility to `@mono-agent/operator`.
 
 Category: `operator-surface`
 Tier: `core`
-Catalog responsibility: Runs the standalone pi-tui renderer over the shared operator client, directory, state, and action contracts.
+Catalog responsibility: Runs the standalone pi-tui renderer over the shared operator client and domain contracts.
 
 <!-- package-metadata:end -->
 

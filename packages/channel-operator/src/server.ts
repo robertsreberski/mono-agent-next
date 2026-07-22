@@ -3,29 +3,44 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo, Socket } from "node:net";
 
 import type {
+  AskUserRequest,
   ChannelAttachment,
+  ChannelHost,
   ChannelInboundRequest,
   ChannelReplyEvent,
   ChannelReplySink,
   ChannelTurnResult,
   JsonObject,
+  JsonValue,
+  RuntimeUsage,
+  TurnMessage,
 } from "@mono-agent/module-sdk";
 import {
   OPERATOR_LIMITS,
   OPERATOR_PROTOCOL,
   OPERATOR_ROUTES,
   parseCancelRequest,
+  parseAskAnswerRequest,
+  parseLiveInputRequest,
   parseOperatorHealth,
   parseOperatorInfo,
   parseTurnRequest,
   serializeOperatorFrame,
   type OperatorCancelResponse,
+  type OperatorAskSnapshot,
+  type OperatorAskAnswerResponse,
   type OperatorCapabilities,
   type OperatorCompletedFrame,
   type OperatorErrorFrame,
   type OperatorFrame,
   type OperatorHealth,
   type OperatorInfo,
+  type OperatorConversationList,
+  type OperatorReplayResponse,
+  type OperatorConfigView,
+  type OperatorLiveInputResponse,
+  type OperatorMessage,
+  type OperatorUsage,
   type OperatorTurnRequest,
 } from "@mono-agent/operator";
 
@@ -38,6 +53,8 @@ import {
 const SHUTDOWN_BOUND_MS = 1_000;
 const TERMINAL_FRAME_RESERVE_BYTES = 1_024;
 const CANCELLATION_MESSAGE = "The operator turn was cancelled.";
+const MAX_PENDING_ASKS = 1_000;
+const CORE_REPLAY_PAGE_LIMIT = 10_000;
 
 export interface OperatorChannelStartInfo {
   readonly host: string;
@@ -47,6 +64,7 @@ export interface OperatorChannelStartInfo {
   readonly infoUrl: string;
   readonly turnsUrl: string;
   readonly healthUrl: string;
+  readonly startedAt: string;
   readonly authRequired: true;
   readonly protocol: typeof OPERATOR_PROTOCOL;
 }
@@ -70,10 +88,28 @@ export type OperatorDispatch = (
   reply: ChannelReplySink,
 ) => Promise<ChannelTurnResult>;
 
+export interface OperatorIdentityGrant {
+  readonly agent: { readonly id: string; readonly label: string };
+  readonly process: { readonly pid: number };
+  readonly defaults: { readonly runtime: string; readonly model: string; readonly effort?: string };
+  readonly configPath: string;
+  readonly projectRoot: string;
+}
+
 export interface CreateOperatorChannelOptions {
   readonly config: OperatorChannelConfig;
-  readonly instanceId: string;
+  readonly identity: OperatorIdentityGrant;
   readonly dispatch: OperatorDispatch;
+  readonly host?: Pick<ChannelHost,
+    | "cancel"
+    | "offerLiveInput"
+    | "answerAsk"
+    | "listConversations"
+    | "readReplay"
+    | "readConfig"
+    | "readHealth"
+    | "openConversation"
+  >;
 }
 
 interface ActiveTurn {
@@ -102,11 +138,9 @@ class StreamClosedError extends Error {
 
 export function createOperatorChannel(options: CreateOperatorChannelOptions): OperatorChannel {
   const config = parseOperatorChannelConfig(options.config);
+  const identity = validateIdentityGrant(options.identity);
   if (typeof options.dispatch !== "function") {
     throw new TypeError("createOperatorChannel requires a dispatch function.");
-  }
-  if (options.instanceId.length === 0 || options.instanceId !== options.instanceId.trim()) {
-    throw new TypeError("createOperatorChannel requires a non-empty instanceId.");
   }
 
   let server: Server | undefined;
@@ -118,6 +152,17 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
   let serverStartedAt: string | undefined;
   const sockets = new Set<Socket>();
   const activeByConversation = new Map<string, Set<ActiveTurn>>();
+  const pendingAsks = new Map<string, AskUserRequest>();
+
+  const rememberAsk = (conversationId: string, ask: AskUserRequest): void => {
+    pendingAsks.delete(conversationId);
+    pendingAsks.set(conversationId, ask);
+    while (pendingAsks.size > MAX_PENDING_ASKS) {
+      const oldest = pendingAsks.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      pendingAsks.delete(oldest);
+    }
+  };
 
   const start = async (): Promise<OperatorChannelStartInfo> => {
     if (startPromise !== undefined) return startPromise;
@@ -179,6 +224,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
           infoUrl: `${baseUrl}${OPERATOR_ROUTES.info}`,
           turnsUrl: `${baseUrl}${OPERATOR_ROUTES.turns}`,
           healthUrl: `${baseUrl}${OPERATOR_ROUTES.health}`,
+          startedAt: serverStartedAt,
           authRequired: true,
           protocol: OPERATOR_PROTOCOL,
         });
@@ -209,12 +255,22 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
 
     if (requestUrl.pathname === OPERATOR_ROUTES.info) {
       if (!requireMethod(request, response, "GET")) return;
-      sendJson(response, 200, operatorInfo(options.instanceId, config, startedAt));
+      sendJson(response, 200, operatorInfo(identity, startedAt, options.host));
       return;
     }
     if (requestUrl.pathname === OPERATOR_ROUTES.health) {
       if (!requireMethod(request, response, "GET")) return;
-      sendJson(response, 200, operatorHealth(degradedMessage));
+      sendJson(response, 200, await operatorHealth(degradedMessage, options.host?.readHealth));
+      return;
+    }
+    if (requestUrl.pathname === OPERATOR_ROUTES.config) {
+      if (!requireMethod(request, response, "GET")) return;
+      await handleConfig(response);
+      return;
+    }
+    if (requestUrl.pathname === OPERATOR_ROUTES.conversations) {
+      if (!requireMethod(request, response, "GET")) return;
+      await handleConversations(response);
       return;
     }
     if (requestUrl.pathname === OPERATOR_ROUTES.turns) {
@@ -232,19 +288,46 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
       return;
     }
 
+    const liveInputConversation = matchConversationMutation(requestUrl.pathname, "live-input");
+    if (liveInputConversation !== undefined) {
+      if (!requireMethod(request, response, "POST")) return;
+      if (!requireJsonContentType(request, response)) return;
+      await handleLiveInput(request, response, liveInputConversation);
+      return;
+    }
+
+    const askConversation = matchConversationMutation(requestUrl.pathname, "ask");
+    if (askConversation !== undefined) {
+      if (request.method === "GET") {
+        const snapshot: OperatorAskSnapshot = { ask: pendingAsks.get(askConversation) ?? null };
+        sendJson(response, 200, snapshot);
+        return;
+      }
+      if (!requireMethod(request, response, "POST")) return;
+      if (!requireJsonContentType(request, response)) return;
+      await handleAskAnswer(request, response, askConversation);
+      return;
+    }
+
+    const replayConversation = matchConversationMutation(requestUrl.pathname, "replay");
+    if (replayConversation !== undefined) {
+      if (!requireMethod(request, response, "GET")) return;
+      await handleReplay(response, replayConversation);
+      return;
+    }
+
     sendJson(response, 404, errorBody("not_found", "Operator route not found."));
   };
 
   const handleTurn = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     let turnRequest: OperatorTurnRequest;
+    let attachments: readonly ChannelAttachment[];
     try {
       turnRequest = parseTurnRequest(await readBoundedJsonBody(request, OPERATOR_LIMITS.requestBytes));
-      if ((turnRequest.input.attachments?.length ?? 0) > 0) {
-        throw new HttpError(422, "unsupported_capability", "This operator endpoint does not accept attachments.");
-      }
       if (turnRequest.input.quote !== undefined) {
         throw new HttpError(422, "unsupported_capability", "This operator endpoint does not accept quotes.");
       }
+      attachments = (turnRequest.input.attachments ?? []).map(toChannelAttachment);
     } catch (error) {
       const failure = error instanceof HttpError
         ? error
@@ -291,6 +374,13 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
           case "attachment":
             unsupportedAttachment = true;
             break;
+          case "ask-user":
+            rememberAsk(turnRequest.conversationId, event.ask);
+            await writer.write({ type: "ask_user", turnId, ask: event.ask });
+            break;
+          case "usage":
+            await writer.write({ type: "usage", turnId, usage: operatorUsage(event.usage) });
+            break;
         }
       },
     };
@@ -303,7 +393,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
         startedAt,
       });
       const result = await options.dispatch(
-        toInboundRequest(options.instanceId, turnId, startedAt, turnRequest, active.controller.signal),
+        toInboundRequest(identity, turnId, startedAt, turnRequest, attachments, active.controller.signal),
         reply,
       );
       if (active.controller.signal.aborted || result.status === "cancelled") {
@@ -344,6 +434,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
       response.off("close", abortForDisconnect);
       request.off("aborted", abortForDisconnect);
       removeActiveTurn(activeByConversation, active);
+      if (active.controller.signal.aborted) pendingAsks.delete(turnRequest.conversationId);
       if (!response.destroyed && !response.writableEnded) response.end();
     }
   };
@@ -353,8 +444,9 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
     response: ServerResponse,
     conversationId: string,
   ): Promise<void> => {
+    let cancelRequest;
     try {
-      parseCancelRequest(await readBoundedJsonBody(request, OPERATOR_LIMITS.requestBytes));
+      cancelRequest = parseCancelRequest(await readBoundedJsonBody(request, OPERATOR_LIMITS.requestBytes));
     } catch (error) {
       const failure = error instanceof HttpError
         ? error
@@ -363,16 +455,108 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
       return;
     }
     const turns = activeByConversation.get(conversationId);
-    if (turns === undefined || turns.size === 0) {
+    const hostResult = options.host?.cancel === undefined
+      ? undefined
+      : await options.host.cancel({ conversationId, ...(cancelRequest.reason === undefined ? {} : { reason: cancelRequest.reason }), signal: new AbortController().signal });
+    if ((turns === undefined || turns.size === 0) && hostResult?.status !== "accepted") {
       const idle: OperatorCancelResponse = { status: "idle" };
       sendJson(response, 200, idle);
       return;
     }
-    for (const turn of turns) {
+    for (const turn of turns ?? []) {
       turn.controller.abort(new Error("Operator cancellation requested."));
     }
     const accepted: OperatorCancelResponse = { status: "accepted" };
     sendJson(response, 202, accepted);
+  };
+
+  const handleLiveInput = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+    conversationId: string,
+  ): Promise<void> => {
+    let input;
+    try { input = parseLiveInputRequest(await readBoundedJsonBody(request, OPERATOR_LIMITS.requestBytes)); }
+    catch (error) { closeAfterOversize(request, response, error instanceof HttpError ? error : new HttpError(400, "invalid_request", "The live input request is invalid.")); return; }
+    if (options.host?.offerLiveInput === undefined) {
+      const unavailable: OperatorLiveInputResponse = { status: "unavailable" };
+      sendJson(response, 501, unavailable);
+      return;
+    }
+    const result = await options.host.offerLiveInput({ conversationId, ...input, signal: new AbortController().signal });
+    const mapped: OperatorLiveInputResponse = { status: result.status };
+    sendJson(response, result.status === "unavailable" ? 409 : 200, mapped);
+  };
+
+  const handleAskAnswer = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+    conversationId: string,
+  ): Promise<void> => {
+    let input;
+    try { input = parseAskAnswerRequest(await readBoundedJsonBody(request, OPERATOR_LIMITS.requestBytes)); }
+    catch (error) { closeAfterOversize(request, response, error instanceof HttpError ? error : new HttpError(400, "invalid_request", "The AskUser answer is invalid.")); return; }
+    const pending = pendingAsks.get(conversationId);
+    if (pending === undefined || pending.interactionId !== input.interactionId || options.host?.answerAsk === undefined) {
+      const mismatch: OperatorAskAnswerResponse = { status: "mismatch" };
+      sendJson(response, 409, mismatch);
+      return;
+    }
+    const result = await options.host.answerAsk(conversationId, { interactionId: input.interactionId, answers: input.answers, answeredAt: new Date().toISOString() }, new AbortController().signal);
+    const mapped: OperatorAskAnswerResponse = { status: result.status === "unsupported" ? "mismatch" : result.status };
+    if (mapped.status === "accepted" || mapped.status === "expired") pendingAsks.delete(conversationId);
+    sendJson(response, mapped.status === "accepted" ? 200 : 409, mapped);
+  };
+
+  const handleConversations = async (response: ServerResponse): Promise<void> => {
+    if (options.host?.listConversations === undefined) {
+      sendJson(response, 501, errorBody("unsupported", "Conversation listing is unsupported."));
+      return;
+    }
+    const result = await options.host.listConversations({ limit: 10_000, signal: new AbortController().signal });
+    const body: OperatorConversationList = {
+      conversations: result.conversations.map((conversation) => {
+        const activeTurnId = [...(activeByConversation.get(conversation.conversationId) ?? [])][0]?.turnId;
+        return {
+          id: conversation.conversationId,
+          ...(conversation.title === undefined ? {} : { title: conversation.title }),
+          updatedAt: conversation.updatedAt,
+          ...(activeTurnId === undefined ? {} : { activeTurnId }),
+        };
+      }),
+    };
+    sendJson(response, 200, body);
+  };
+
+  const handleReplay = async (response: ServerResponse, conversationId: string): Promise<void> => {
+    if (options.host?.readReplay === undefined) {
+      sendJson(response, 501, errorBody("unsupported", "Conversation replay is unsupported."));
+      return;
+    }
+    const result = await options.host.readReplay({ conversationId, limit: CORE_REPLAY_PAGE_LIMIT, signal: new AbortController().signal });
+    const activeTurnId = [...(activeByConversation.get(conversationId) ?? [])][0]?.turnId;
+    const body: OperatorReplayResponse = {
+      conversationId,
+      messages: result.entries.map((entry) => toOperatorMessage(entry.message, entry.createdAt)),
+      ...(activeTurnId === undefined ? {} : { activeTurnId }),
+    };
+    sendJson(response, 200, body);
+  };
+
+  const handleConfig = async (response: ServerResponse): Promise<void> => {
+    if (options.host?.readConfig === undefined) {
+      sendJson(response, 501, errorBody("unsupported", "Config view is unsupported."));
+      return;
+    }
+    const value = await options.host.readConfig(new AbortController().signal);
+    const generatedAt = new Date().toISOString();
+    const body: OperatorConfigView = {
+      revision: createHash("sha256").update(JSON.stringify(value)).digest("hex"),
+      generatedAt,
+      value: asConfigObject(value),
+      redacted: true,
+    };
+    sendJson(response, 200, body);
   };
 
   const health = (): OperatorChannelHealth => Object.freeze({
@@ -409,6 +593,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
         }
       }
       sockets.clear();
+      pendingAsks.clear();
       currentStartInfo = undefined;
       serverStartedAt = undefined;
     })();
@@ -429,65 +614,78 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
 }
 
 function operatorInfo(
-  instanceId: string,
-  config: OperatorChannelConfig,
+  identity: OperatorIdentityGrant,
   startedAt: string,
+  host: CreateOperatorChannelOptions["host"],
 ): OperatorInfo {
   return parseOperatorInfo({
     protocol: OPERATOR_PROTOCOL,
     agent: {
-      id: instanceId,
-      label: config.label ?? instanceId,
+      id: identity.agent.id,
+      label: identity.agent.label,
     },
     process: {
-      pid: process.pid,
+      pid: identity.process.pid,
       startedAt,
     },
-    capabilities: operatorCapabilities(),
+    capabilities: operatorCapabilities(host),
+    defaults: identity.defaults,
   });
 }
 
-function operatorHealth(degradedMessage: string | undefined): OperatorHealth {
-  const status = degradedMessage === undefined ? "healthy" : "degraded";
+async function operatorHealth(
+  degradedMessage: string | undefined,
+  readHealth: NonNullable<CreateOperatorChannelOptions["host"]>["readHealth"],
+): Promise<OperatorHealth> {
+  let hostHealth;
+  try { hostHealth = await readHealth?.(new AbortController().signal); }
+  catch { hostHealth = { status: "unhealthy" as const, summary: "Core health read failed." }; }
+  const status = degradedMessage !== undefined || hostHealth?.status === "degraded" || hostHealth?.status === "unknown"
+    ? "degraded"
+    : hostHealth?.status === "unhealthy"
+      ? "unhealthy"
+      : "healthy";
+  const channelStatus = degradedMessage === undefined ? "healthy" : "degraded";
   return parseOperatorHealth({
     status,
     checkedAt: new Date().toISOString(),
     details: [{
       id: "channel-operator",
-      status,
+      status: channelStatus,
       ...(degradedMessage === undefined ? {} : { message: degradedMessage }),
-    }],
+    }, ...(hostHealth === undefined ? [] : [{ id: "core", status: hostHealth.status === "unknown" ? "degraded" : hostHealth.status, ...(hostHealth.summary === undefined ? {} : { message: hostHealth.summary }) }])],
   });
 }
 
-function operatorCapabilities(): OperatorCapabilities {
+function operatorCapabilities(host: CreateOperatorChannelOptions["host"]): OperatorCapabilities {
   return Object.freeze({
-    attachments: false,
-    liveInput: false,
-    askUser: false,
+    attachments: true,
+    liveInput: host?.offerLiveInput !== undefined,
+    askUser: host?.answerAsk !== undefined,
     cancellation: true,
     quotes: false,
     runtimeOverrides: true,
-    proactive: false,
-    configView: false,
-    replay: false,
+    proactive: host?.openConversation !== undefined,
+    configView: host?.readConfig !== undefined,
+    replay: host?.readReplay !== undefined,
     health: true,
   });
 }
 
 function toInboundRequest(
-  instanceId: string,
+  identity: OperatorIdentityGrant,
   turnId: string,
   receivedAt: string,
   request: OperatorTurnRequest,
+  attachments: readonly ChannelAttachment[],
   signal: AbortSignal,
 ): ChannelInboundRequest {
   return {
     requestId: turnId,
     conversationId: request.conversationId,
-    sender: { id: "operator", displayName: instanceId },
+    sender: { id: "operator", displayName: identity.agent.label },
     text: request.input.text ?? "",
-    attachments: [] satisfies readonly ChannelAttachment[],
+    attachments,
     receivedAt,
     ...(request.runtime === undefined ? {} : { runtime: request.runtime }),
     ...(request.model === undefined ? {} : { model: request.model }),
@@ -495,6 +693,70 @@ function toInboundRequest(
     signal,
     ...(request.metadata === undefined ? {} : { metadata: request.metadata as JsonObject }),
   };
+}
+
+function validateIdentityGrant(value: OperatorIdentityGrant): OperatorIdentityGrant {
+  if (
+    typeof value !== "object" || value === null
+    || !validGrantText(value.agent?.id, 256)
+    || !validGrantText(value.agent.label, 1_024)
+    || !Number.isSafeInteger(value.process?.pid) || value.process.pid <= 0
+    || !validGrantText(value.defaults?.runtime, 256)
+    || !validGrantText(value.defaults.model, 256)
+    || (value.defaults.effort !== undefined && !validGrantText(value.defaults.effort, 256))
+    || !validGrantText(value.configPath, 4_096)
+    || !validGrantText(value.projectRoot, 4_096)
+  ) throw new TypeError("createOperatorChannel requires a valid operator.identity.v1 host grant.");
+  return value;
+}
+
+function validGrantText(value: unknown, maximum: number): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= maximum
+    && value === value.trim()
+    && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function toChannelAttachment(attachment: NonNullable<OperatorTurnRequest["input"]["attachments"]>[number]): ChannelAttachment {
+  if (attachment.url === undefined || !attachment.url.startsWith("data:")) throw new HttpError(422, "unsupported_attachment", "Operator attachments must use bounded inline data URLs.");
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/u.exec(attachment.url);
+  if (match === null) throw new HttpError(422, "unsupported_attachment", "Operator attachment data URL is invalid.");
+  const data = Buffer.from(match[2]!, "base64");
+  if (match[1] !== attachment.mediaType) throw new HttpError(422, "invalid_attachment", "Operator attachment media type does not match its data URL.");
+  if (data.byteLength > OPERATOR_LIMITS.requestBytes) throw new HttpError(413, "attachment_too_large", "Operator attachment exceeds the request byte bound.");
+  return { id: attachment.id, kind: match[1]!.startsWith("image/") ? "image" : match[1]!.startsWith("audio/") ? "audio" : "file", name: attachment.name, mediaType: attachment.mediaType, sizeBytes: data.byteLength, data: new Uint8Array(data) };
+}
+
+function toOperatorMessage(message: TurnMessage, createdAt: string): OperatorMessage {
+  const text = message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+  const attachments = message.content.flatMap((part) => part.type === "attachment"
+    ? [{ id: part.attachment.id, name: part.attachment.name, mediaType: part.attachment.mediaType, sizeBytes: part.attachment.sizeBytes }]
+    : []);
+  return {
+    ...(message.id === undefined ? {} : { id: message.id }),
+    role: message.role === "assistant" ? "assistant" : "user",
+    text,
+    ...(attachments.length === 0 ? {} : { attachments }),
+    createdAt: message.createdAt ?? createdAt,
+  };
+}
+
+function operatorUsage(usage: RuntimeUsage): OperatorUsage {
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    ...(usage.contextWindow === undefined ? {} : { contextWindow: usage.contextWindow }),
+    ...(usage.contextUsed === undefined ? {} : { contextUsed: usage.contextUsed }),
+    compacted: usage.compaction?.compacted ?? false,
+    sessionEvicted: usage.sessionEvicted ?? false,
+  };
+}
+
+function asConfigObject(value: JsonValue): Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Readonly<Record<string, unknown>>
+    : { value };
 }
 
 function errorFrame(
@@ -688,7 +950,7 @@ function closeAfterOversize(request: IncomingMessage, response: ServerResponse, 
   if (error.statusCode === 413) response.once("finish", () => request.destroy());
 }
 
-function matchConversationMutation(pathname: string, action: "cancel"): string | undefined {
+function matchConversationMutation(pathname: string, action: "cancel" | "live-input" | "ask" | "replay"): string | undefined {
   const prefix = `${OPERATOR_ROUTES.conversations}/`;
   const suffix = `/${action}`;
   if (!pathname.startsWith(prefix) || !pathname.endsWith(suffix)) return undefined;
@@ -772,8 +1034,13 @@ function sendJson(
   extraHeaders: Readonly<Record<string, string>> = {},
 ): void {
   if (response.headersSent || response.destroyed) return;
-  const payload = Buffer.from(JSON.stringify(body), "utf8");
-  response.writeHead(statusCode, {
+  let resolvedStatus = statusCode;
+  let payload = Buffer.from(JSON.stringify(body), "utf8");
+  if (payload.byteLength > OPERATOR_LIMITS.jsonResponseBytes) {
+    resolvedStatus = 507;
+    payload = Buffer.from(JSON.stringify(errorBody("response_too_large", "The operator response exceeds its byte limit.")), "utf8");
+  }
+  response.writeHead(resolvedStatus, {
     "cache-control": "no-store",
     "content-type": "application/json; charset=utf-8",
     "content-length": String(payload.byteLength),

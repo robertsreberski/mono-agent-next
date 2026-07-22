@@ -39,14 +39,14 @@ export const runtimePiJsonSchema = {
       type: "object",
       additionalProperties: false,
       properties: {
-        path: { type: "string", minLength: 1 },
+        path: envEligibleSchema({ type: "string", minLength: 1 }),
       },
     },
     sessions: {
       type: "object",
       additionalProperties: false,
       properties: {
-        root: { type: "string", minLength: 1 },
+        root: envEligibleSchema({ type: "string", minLength: 1 }),
       },
     },
     retry: {
@@ -285,3 +285,4 @@ export function parsePiModelReference(reference: string): { provider: string; mo
   }
   return { provider, model };
 }
+import { envEligibleSchema } from "@mono-agent/module-sdk";

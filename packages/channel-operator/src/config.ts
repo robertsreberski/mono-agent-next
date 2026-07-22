@@ -6,7 +6,6 @@ export const DEFAULT_OPERATOR_HOST = "127.0.0.1";
 export const DEFAULT_OPERATOR_PORT = 0;
 export const MIN_OPERATOR_TOKEN_BYTES = 32;
 export const MAX_OPERATOR_TOKEN_BYTES = 4_096;
-export const MAX_OPERATOR_LABEL_CHARACTERS = 128;
 
 export interface OperatorListenConfig {
   readonly host: string;
@@ -21,7 +20,6 @@ export interface OperatorAuthConfig {
 export interface OperatorChannelConfig {
   readonly listen: OperatorListenConfig;
   readonly auth: OperatorAuthConfig;
-  readonly label?: string;
 }
 
 export class OperatorChannelConfigError extends Error {
@@ -33,7 +31,7 @@ export class OperatorChannelConfigError extends Error {
   }
 }
 
-const CONFIG_KEYS = new Set(["listen", "auth", "label"]);
+const CONFIG_KEYS = new Set(["listen", "auth"]);
 const LISTEN_KEYS = new Set(["host", "port"]);
 const AUTH_KEYS = new Set(["token"]);
 
@@ -42,7 +40,6 @@ export function parseOperatorChannelConfig(value: unknown): OperatorChannelConfi
   rejectUnknownKeys(input, CONFIG_KEYS, "Operator channel config");
   const listen = parseListen(input.listen);
   const auth = parseAuth(input.auth);
-  const label = parseOptionalLabel(input.label);
 
   if (!isLoopbackHost(listen.host)) {
     throw new OperatorChannelConfigError("listen.host must resolve only to the loopback interface.");
@@ -51,7 +48,6 @@ export function parseOperatorChannelConfig(value: unknown): OperatorChannelConfi
   return Object.freeze({
     listen: Object.freeze(listen),
     auth: Object.freeze(auth),
-    ...(label === undefined ? {} : { label }),
   });
 }
 
@@ -80,11 +76,6 @@ export const operatorChannelConfigSchema = Object.freeze({
           }, { secret: true }),
         },
         required: ["token"],
-      },
-      label: {
-        type: "string",
-        minLength: 1,
-        maxLength: MAX_OPERATOR_LABEL_CHARACTERS,
       },
     },
     required: ["auth"],
@@ -145,17 +136,6 @@ function parseAuth(value: unknown): OperatorAuthConfig {
     );
   }
   return { token: input.token };
-}
-
-function parseOptionalLabel(value: unknown): string | undefined {
-  if (value === undefined) return undefined;
-  const label = readString(value, "label");
-  if (label.length > MAX_OPERATOR_LABEL_CHARACTERS || /[\u0000-\u001f\u007f]/u.test(label)) {
-    throw new OperatorChannelConfigError(
-      `label must be no longer than ${String(MAX_OPERATOR_LABEL_CHARACTERS)} printable characters.`,
-    );
-  }
-  return label;
 }
 
 function readRecord(value: unknown, field: string): Record<string, unknown> {

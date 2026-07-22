@@ -1,4 +1,6 @@
 import { once } from "node:events";
+import { createHmac } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import { createConnection } from "node:net";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -29,6 +31,7 @@ import {
   type WebhookSubmit,
 } from "../server.js";
 import { monoAgentModule, type WebhookModuleChannel } from "../index.js";
+import { WebhookDelivery } from "../delivery.js";
 
 const channels = new Set<WebhookChannel>();
 const moduleChannels = new Set<WebhookModuleChannel>();
@@ -58,7 +61,7 @@ describe("webhook config", () => {
     });
   });
 
-  it("requires an env-only secret and rejects every non-loopback bind", () => {
+  it("requires env-only secrets and gates non-loopback binds behind explicit strong dual authentication", () => {
     const properties = webhookConfigSchema.jsonSchema.properties as Record<string, unknown>;
     const apiKeySchema = properties.apiKey as Readonly<Record<string, unknown>>;
     expect(isEnvEligibleSchema(apiKeySchema)).toBe(true);
@@ -74,9 +77,16 @@ describe("webhook config", () => {
       apiKey: "resolved-key",
     })).toThrowError(/must be loopback/u);
     expect(() => parseWebhookConfig({
+      listen: { host: "0.0.0.0" },
       allowNonLoopback: true,
       apiKey: "resolved-key",
-    })).toThrowError(/unknown field.*allowNonLoopback/u);
+    })).toThrowError(/at least 32/u);
+    expect(parseWebhookConfig({
+      listen: { host: "0.0.0.0" },
+      allowNonLoopback: true,
+      apiKey: "a".repeat(32),
+      signatureSecret: "s".repeat(32),
+    })).toMatchObject({ listen: { host: "0.0.0.0" }, allowNonLoopback: true });
     expect(parseWebhookConfig({
       listen: { host: "localhost", port: 0 },
       apiKey: "resolved-key",
@@ -92,7 +102,11 @@ describe("webhook config", () => {
     expect(() => createWebhookChannel({
       config,
       submit: async () => ({ text: "unexpected" }),
-    })).toThrowError(/only to loopback/u);
+    })).toThrowError(/outside loopback only with explicit/u);
+    expect(() => createWebhookChannel({
+      config: { ...config, allowNonLoopback: true },
+      submit: async () => ({ text: "unexpected" }),
+    })).toThrowError(/requires bearer and signature secrets/u);
   });
 });
 
@@ -117,6 +131,17 @@ describe("webhook HTTP channel", () => {
     expect(authorized.status).toBe(200);
     expect(await authorized.json()).toMatchObject({ status: "succeeded", text: "accepted" });
     expect(submit).toHaveBeenCalledOnce();
+  });
+
+  it("requires an exact HMAC of the raw authenticated body when signing is configured", async () => {
+    const secret = "signature-secret-that-is-long-enough";
+    const { info } = await startChannel({ signatureSecret: secret }, async () => ({ text: "signed" }));
+    const raw = JSON.stringify({ text: "signed request" });
+    const unsigned = await fetch(info.invokeUrl, { method: "POST", headers: { authorization: `Bearer ${TEST_API_KEY}`, "content-type": "application/json" }, body: raw });
+    expect(unsigned.status).toBe(401);
+    const signature = createHmac("sha256", secret).update(raw).digest("hex");
+    const signed = await fetch(info.invokeUrl, { method: "POST", headers: { authorization: `Bearer ${TEST_API_KEY}`, "content-type": "application/json", "x-mono-agent-signature": `sha256=${signature}` }, body: raw });
+    expect(signed.status).toBe(200);
   });
 
   it("rejects browser-simple content types before reading the body", async () => {
@@ -154,6 +179,21 @@ describe("webhook HTTP channel", () => {
       status: "error",
       error: { code: "unauthorized", message: "Unauthorized." },
     });
+  });
+
+  it("rejects query-bearing invoke routes without dispatch", async () => {
+    const submit = vi.fn<WebhookSubmit>(async () => ({ text: "unexpected" }));
+    const { info } = await startChannel({}, submit);
+    const response = await invoke(`${info.invokeUrl}?override=true`, { text: "query" });
+    expect(response.status).toBe(404);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("rejects an untrusted Host authority before route handling", async () => {
+    const submit = vi.fn<WebhookSubmit>(async () => ({ text: "unexpected" }));
+    const { info } = await startChannel({}, submit);
+    await expect(authorityStatus(info.port, `attacker.invalid:${String(info.port)}`, info.invokeUrl)).resolves.toBe(421);
+    expect(submit).not.toHaveBeenCalled();
   });
 
   it("rejects an authorized body over the configured byte bound", async () => {
@@ -309,6 +349,23 @@ describe("webhook HTTP channel", () => {
   });
 });
 
+describe("webhook outbound delivery", () => {
+  it("signs a fixed destination and collapses concurrent duplicate idempotency keys", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      expect(init?.redirect).toBe("error");
+      const body = Buffer.from(init?.body as Uint8Array);
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.authorization).toBe("Bearer outbound-key");
+      expect(headers["x-mono-agent-signature"]).toBe(`sha256=${createHmac("sha256", "outbound-signature-secret").update(body).digest("hex")}`);
+      return new Response('{"messageId":"remote-1"}', { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const delivery = new WebhookDelivery({ url: "https://hooks.example.test/deliver", apiKey: "outbound-key", signatureSecret: "outbound-signature-secret", timeoutMs: 1_000, maxResponseBytes: 1_024 }, fetchImpl);
+    const message = { conversationId: "webhook:destination", text: "notice", idempotencyKey: "delivery-1" };
+    await expect(Promise.all([delivery.deliver(message, new AbortController().signal), delivery.deliver(message, new AbortController().signal)])).resolves.toEqual([{ status: "delivered", idempotencyKey: "delivery-1", messageId: "remote-1" }, { status: "delivered", idempotencyKey: "delivery-1", messageId: "remote-1" }]);
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+});
+
 describe("mono-agent channel module", () => {
   it("declares the v1 channel boundary and dispatches through the injected host", async () => {
     expect(() => assertChannelModuleCompliance(monoAgentModule, {
@@ -428,4 +485,21 @@ function noopLogger(): ModuleLogger {
     warn() {},
     error() {},
   };
+}
+
+function authorityStatus(port: number, host: string, invokeUrl: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port,
+      method: "POST",
+      path: new URL(invokeUrl).pathname,
+      headers: { host, authorization: `Bearer ${TEST_API_KEY}`, "content-type": "application/json" },
+    }, (response) => {
+      response.resume();
+      response.once("end", () => resolve(response.statusCode ?? 0));
+    });
+    request.once("error", reject);
+    request.end(JSON.stringify({ text: "host attack" }));
+  });
 }

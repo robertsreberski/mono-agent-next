@@ -9,6 +9,16 @@ import type { DiscoveredOperator, OperatorRegistryDescriptor } from "./types.js"
 
 const DEFAULT_STALE_AFTER_MS = 45_000;
 const MAX_REGISTRY_FILE_BYTES = 1_048_576;
+const STATE_PRESENCE_SCHEMA = "mono-agent.state-presence.v1";
+const OPERATOR_REGISTRY_DETAILS_SCHEMA = "mono-agent.operator-registry-details.v1";
+
+type UnknownRecord = Record<string, unknown>;
+
+interface StatePresenceEnvelope {
+  readonly status: "starting" | "ready" | "degraded" | "stopping" | "stopped";
+  readonly heartbeatAt: string;
+  readonly details?: UnknownRecord;
+}
 
 export interface DiscoverOperatorsOptions {
   readonly registryDirectories?: readonly string[];
@@ -51,6 +61,169 @@ function staleWindow(value: number | undefined): number {
     throw new OperatorDirectoryError("INVALID_REGISTRY", "staleAfterMs must be a non-negative safe integer");
   }
   return parsed;
+}
+
+function invalid(path: string, message: string): never {
+  throw new TypeError(`${path} ${message}`);
+}
+
+function invalidDescriptor(sourcePath: string, cause: unknown): OperatorDirectoryError {
+  const detail = cause instanceof Error ? `: ${cause.message}` : "";
+  return new OperatorDirectoryError(
+    "INVALID_REGISTRY",
+    `registry entry ${sourcePath} has an invalid descriptor${detail}`,
+    { cause },
+  );
+}
+
+function strictRecord(value: unknown, path: string): UnknownRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return invalid(path, "must be a plain object");
+  }
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  if (prototype !== Object.prototype && prototype !== null) {
+    return invalid(path, "must be a plain object");
+  }
+  return value as UnknownRecord;
+}
+
+function strictKeys(value: UnknownRecord, allowed: readonly string[], path: string): void {
+  const unexpected = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unexpected.length > 0) invalid(path, `contains unknown field ${JSON.stringify(unexpected[0])}`);
+}
+
+function strictText(value: unknown, path: string, maximum: number): string {
+  if (
+    typeof value !== "string"
+    || value.trim().length === 0
+    || value.length > maximum
+    || /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    return invalid(path, `must be a non-empty printable string of at most ${maximum} characters`);
+  }
+  return value;
+}
+
+function strictTimestamp(value: unknown, path: string): string {
+  const parsed = strictText(value, path, 64);
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(parsed)
+    || !Number.isFinite(Date.parse(parsed))
+    || new Date(parsed).toISOString() !== parsed
+  ) {
+    return invalid(path, "must be a canonical UTC timestamp");
+  }
+  return parsed;
+}
+
+function strictPid(value: unknown, path: string): number {
+  if (!Number.isSafeInteger(value) || (value as number) < 1) {
+    return invalid(path, "must be a positive safe integer");
+  }
+  return value as number;
+}
+
+function validateJson(value: unknown, path: string, depth = 0): void {
+  if (depth > 16) invalid(path, "exceeds the maximum nesting depth");
+  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) invalid(path, "must contain only finite JSON numbers");
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      validateJson(value[index], `${path}[${index}]`, depth + 1);
+    }
+    return;
+  }
+  const record = strictRecord(value, path);
+  for (const [key, nested] of Object.entries(record)) {
+    validateJson(nested, `${path}.${key}`, depth + 1);
+  }
+}
+
+function parseStatePresenceEnvelope(value: unknown): StatePresenceEnvelope {
+  const input = strictRecord(value, "presence");
+  strictKeys(input, [
+    "schema",
+    "sourceId",
+    "sourceLabel",
+    "instanceId",
+    "pid",
+    "stateRoot",
+    "status",
+    "startedAt",
+    "heartbeatAt",
+    "details",
+  ], "presence");
+  if (input.schema !== STATE_PRESENCE_SCHEMA) {
+    invalid("presence.schema", `must equal ${STATE_PRESENCE_SCHEMA}`);
+  }
+  const sourceId = strictText(input.sourceId, "presence.sourceId", 128);
+  if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?$/u.test(sourceId)) {
+    invalid("presence.sourceId", "contains unsupported characters");
+  }
+  strictText(input.sourceLabel, "presence.sourceLabel", 256);
+  strictText(input.instanceId, "presence.instanceId", 256);
+  strictPid(input.pid, "presence.pid");
+  const stateRoot = strictText(input.stateRoot, "presence.stateRoot", 4_096);
+  if (stateRoot.includes("\0")) invalid("presence.stateRoot", "must not contain NUL bytes");
+  if (!["starting", "ready", "degraded", "stopping", "stopped"].includes(input.status as string)) {
+    invalid("presence.status", "must be starting, ready, degraded, stopping, or stopped");
+  }
+  strictTimestamp(input.startedAt, "presence.startedAt");
+  const heartbeatAt = strictTimestamp(input.heartbeatAt, "presence.heartbeatAt");
+  let details: UnknownRecord | undefined;
+  if (input.details !== undefined) {
+    details = strictRecord(input.details, "presence.details");
+    validateJson(details, "presence.details");
+  }
+  return {
+    status: input.status as StatePresenceEnvelope["status"],
+    heartbeatAt,
+    ...(details === undefined ? {} : { details }),
+  };
+}
+
+function parseStatePresenceOperatorDescriptor(value: unknown): OperatorRegistryDescriptor | undefined {
+  const presence = parseStatePresenceEnvelope(value);
+  if (presence.status !== "ready" && presence.status !== "degraded") return undefined;
+  const operatorRegistry = presence.details?.operatorRegistry;
+  if (operatorRegistry === undefined) return undefined;
+  const details = strictRecord(operatorRegistry, "presence.details.operatorRegistry");
+  strictKeys(details, ["schema", "agent", "operator", "process", "capabilities"], "presence.details.operatorRegistry");
+  if (details.schema !== OPERATOR_REGISTRY_DETAILS_SCHEMA) {
+    invalid(
+      "presence.details.operatorRegistry.schema",
+      `must equal ${OPERATOR_REGISTRY_DETAILS_SCHEMA}`,
+    );
+  }
+  if (!Object.hasOwn(details, "capabilities")) {
+    invalid("presence.details.operatorRegistry.capabilities", "is required");
+  }
+  const processDetails = strictRecord(details.process, "presence.details.operatorRegistry.process");
+  strictKeys(processDetails, ["pid", "startedAt"], "presence.details.operatorRegistry.process");
+  return parseRegistryDescriptor({
+    schema: "mono-agent.operator-registry.v1",
+    agent: details.agent,
+    operator: details.operator,
+    pid: strictPid(processDetails.pid, "presence.details.operatorRegistry.process.pid"),
+    startedAt: strictTimestamp(processDetails.startedAt, "presence.details.operatorRegistry.process.startedAt"),
+    heartbeatAt: presence.heartbeatAt,
+    capabilities: details.capabilities,
+  });
+}
+
+function parseDiscoveryDescriptor(value: unknown): OperatorRegistryDescriptor | undefined {
+  if (
+    typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+    && (value as { schema?: unknown }).schema === STATE_PRESENCE_SCHEMA
+  ) {
+    return parseStatePresenceOperatorDescriptor(value);
+  }
+  return parseRegistryDescriptor(value);
 }
 
 function assertOwnerPrivate(stat: { uid: number; mode: number; nlink: number }, path: string, kind: "directory" | "file"): void {
@@ -107,17 +280,11 @@ async function readOwnerPrivateRegistryFile(path: string): Promise<unknown> {
   }
 }
 
-export function normalizeDiscoveredOperator(
-  value: unknown,
+function normalizeParsedDescriptor(
+  descriptor: OperatorRegistryDescriptor,
   sourcePath: string,
   options: NormalizeDiscoveredOperatorOptions = {},
 ): DiscoveredOperator {
-  let descriptor: OperatorRegistryDescriptor;
-  try {
-    descriptor = parseRegistryDescriptor(value);
-  } catch (cause) {
-    throw new OperatorDirectoryError("INVALID_REGISTRY", `registry entry ${sourcePath} has an invalid descriptor`, { cause });
-  }
   const now = numericNow(options.now);
   const staleAfterMs = staleWindow(options.staleAfterMs);
   const heartbeat = Date.parse(descriptor.heartbeatAt);
@@ -133,6 +300,34 @@ export function normalizeDiscoveredOperator(
     sourcePath,
     ...(descriptor.capabilities === undefined ? {} : { capabilities: descriptor.capabilities }),
   };
+}
+
+export function normalizeDiscoveredOperator(
+  value: unknown,
+  sourcePath: string,
+  options: NormalizeDiscoveredOperatorOptions = {},
+): DiscoveredOperator {
+  try {
+    return normalizeParsedDescriptor(parseRegistryDescriptor(value), sourcePath, options);
+  } catch (cause) {
+    if (cause instanceof OperatorDirectoryError) throw cause;
+    throw invalidDescriptor(sourcePath, cause);
+  }
+}
+
+function normalizeRegistryEntry(
+  value: unknown,
+  sourcePath: string,
+  options: NormalizeDiscoveredOperatorOptions,
+): DiscoveredOperator | undefined {
+  try {
+    const descriptor = parseDiscoveryDescriptor(value);
+    if (descriptor === undefined) return undefined;
+    return normalizeParsedDescriptor(descriptor, sourcePath, options);
+  } catch (cause) {
+    if (cause instanceof OperatorDirectoryError) throw cause;
+    throw invalidDescriptor(sourcePath, cause);
+  }
 }
 
 async function readRegistryDirectory(
@@ -158,7 +353,8 @@ async function readRegistryDirectory(
       throw new OperatorDirectoryError("UNSAFE_REGISTRY", `registry contains an unsafe entry name ${JSON.stringify(name)}`);
     }
     const path = resolve(directory, name);
-    entries.push(normalizeDiscoveredOperator(await readOwnerPrivateRegistryFile(path), path, options));
+    const entry = normalizeRegistryEntry(await readOwnerPrivateRegistryFile(path), path, options);
+    if (entry !== undefined) entries.push(entry);
   }
   const after = await lstat(directory);
   if (!after.isDirectory() || !sameIdentity(before, after)) {

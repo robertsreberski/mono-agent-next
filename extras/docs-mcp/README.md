@@ -1,7 +1,7 @@
 # @mono-agent/docs-mcp
 
 Give Codex, Claude Code, or another MCP host offline, version-matched search over
-mono-agent documentation and composer references.
+the canonical mono-agent v1 documentation.
 
 ## Category
 
@@ -10,22 +10,22 @@ mono-agent documentation and composer references.
 
 Category: `context`
 Tier: `plugin`
-Catalog responsibility: Provides offline hybrid search and guided reading over version-matched mono-agent documentation through MCP.
+Catalog responsibility: Provides offline search and guided reading over version-matched v1 documentation through MCP.
 
 <!-- package-metadata:end -->
 
-Plugin tier: this package releases in the mono-agent lockstep but stays outside
-the default `@mono-agent/agent-app` dependency closure.
+Companion tier: this package releases in the mono-agent lockstep but is installed
+explicitly and remains outside every agent runtime dependency closure.
 
 ## Responsibility
 
 Provides version-matched, offline semantic and exact-identifier search plus
-guided reading over the canonical mono-agent documentation and the authoritative
-`mono-agent-composer` references through one read-only MCP tool.
+guided reading over the canonical mono-agent v1 documentation through one
+read-only MCP tool.
 
 ## Install / Usage
 
-Pair the exact version matching `@mono-agent/agent-app`:
+Pair the exact version matching `@mono-agent/cli`:
 
 ```bash
 MONO_AGENT_VERSION="$(mono-agent --version)"
@@ -37,8 +37,7 @@ With no arguments, this is a long-running MCP subprocess over stdio. Register
 that **bare command** with a harness; do not add `--check` or `--version`, because
 both are human diagnostics that print JSON and exit.
 
-`mono-agent install-skill` pairs the matching server with available Codex and
-Claude Code installations by default. To register it manually:
+Register the version-matched companion manually with the coding client:
 
 ```bash
 codex mcp add mono-agent-docs -- npx -y "@mono-agent/docs-mcp@$MONO_AGENT_VERSION"
@@ -59,9 +58,8 @@ npx -y "@mono-agent/docs-mcp@$MONO_AGENT_VERSION" --version
 
 ### Data flow
 
-1. A release build reads canonical documentation and composer references,
-   creates deterministic chunks and local embeddings, and packages the
-   checksummed corpus.
+1. A release build reads canonical v1 documentation, creates deterministic
+   chunks and local embeddings, and packages the checksummed corpus.
 2. At startup, the MCP server validates and loads that packaged corpus.
 3. A `search` action combines local semantic and BM25 rankings through
    reciprocal-rank fusion, then returns bounded Markdown excerpts and exact
@@ -94,7 +92,7 @@ integration.
 
 The MCP surface is one action-based tool, `mono_agent_docs`:
 
-- `{"action":"search","query":"...","limit":5,"scope":"composer"}`
+- `{"action":"search","query":"...","limit":5,"scope":"docs"}`
   returns ranked, section-deduplicated Markdown excerpts of roughly 2–3k
   characters. Treat them as a map and select a returned `readTarget`.
 - `{"action":"read","target":"<readTarget>"}` expands a search hit, logical
@@ -160,9 +158,9 @@ are no dependencies on other `@mono-agent/*` packages.
 ## What This Package Does Not Own
 
 It does not host the documentation website, mutate agent configuration, crawl
-source code, select a runtime model, or replace the composer references. The
-website remains the human reader surface; the bundled composer references remain
-the version-specific fallback when an MCP client is unavailable or mismatched.
+source code, select a runtime model, or carry deleted predecessor skills. The
+website remains the human reader surface; this package is its version-specific
+offline MCP companion.
 
 ## Related Documentation
 

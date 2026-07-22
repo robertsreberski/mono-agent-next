@@ -1,36 +1,37 @@
 ---
 title: "Getting Started"
-description: "Follow the path from installing mono-agent to creating, validating, and understanding your first agent."
+description: "Build the private v1 workspace, run the packed minimal proof, and learn the strict config-first model."
 sidebar:
   order: 0
 ---
 
-This section takes you from an empty folder to a readiness-proven agent. Bare `mono-agent init` on a TTY names the agent, searches the provider catalogs, and runs a real no-tool check for every selected route before the strict full **Agent ready** gate; flag/non-TTY init creates a scaffold only. mono-agent remains config-first: one `mono-agent.config.json`, driven by the CLI.
+The current getting-started path is source-first. `mono-agent-next` is private
+and unreleased, so these pages prove the implementation without publishing it or
+changing a live agent.
 
 ## The path
 
-1. **Install** — get the published CLI or build the source CLI.
-2. **Quickstart** — run guided init, understand catalog/auth/route verification and the full-agent gate, then smoke-test the ready webhook agent.
-3. **Concepts** — understand the moving parts so the rest of the docs make sense.
+1. [Install and build](/getting-started/install/) the pinned workspace.
+2. [Run the first-agent proof](/getting-started/quickstart/) and inspect the
+   generated minimal template.
+3. [Read the core concepts](/getting-started/concepts/) before selecting another
+   runtime, channel, durable capability, or operator product.
 
-## Pages
+## What you will prove
 
-| Page | What it covers |
-| --- | --- |
-| [Install](/getting-started/install/) | Install the `mono-agent` CLI, scaffold a new project with `mono-agent init`, and confirm your toolchain is ready. |
-| [Quickstart](/getting-started/quickstart/) | Scaffold a minimal `mono-agent.config.json`, validate it, and run your first agent turn when model auth is available. |
-| [Concepts](/getting-started/concepts/) | The core model — agent, runtime, channels, tools, memory, and context — and how config maps onto them. |
+The packed minimal verification builds the relevant packages, packs them,
+creates a clean consumer outside the workspace, installs an exact lockfile
+closure, validates its config, starts an authenticated loopback webhook, runs a
+deterministic Pi-native turn against a local test provider, and performs a clean
+signal-driven shutdown.
 
-## Where to go next
+The operator verification separately exercises the authenticated shared
+protocol, durable browser-product restart behavior, and a standalone terminal
+connection. Neither proof deploys or restarts an existing agent.
 
-Once your agent runs, branch out by topic:
+## What remains later
 
-- [Configuration](/config/) — the full annotated config blueprint, environment variables, and folder layout.
-- [Runtime](/runtime/) — model backends, fallback chains, sessions, and execution effort.
-- [Channels](/channels/) — connect Telegram, Slack, WhatsApp, webhooks, the OpenAI-compatible API, A2A, and cron.
-- [Always-on web console](/observability/web-console/) — keep multiple browser conversations with auto-discovered local agents over a trusted LAN or tailnet.
-- [Programmatic](/programmatic/) — for capabilities that are code-only rather than config-driven.
-
-:::note
-Every capability in mono-agent carries a coverage type — **config**, **cli**, **auto**, **code**, or **dev** — so you always know whether to reach for the config file, a CLI command, or the SDK. The [feature matrix](/reference/feature-matrix/) is the canonical map.
-:::
+Registry publication, clean installation from the real registry, provider
+credential setup, consumer data migration, service reconciliation, live smoke,
+soak, observation, cutover, and predecessor retirement are intentionally
+outside this phase.

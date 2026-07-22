@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
  * Getting-started install docs used to carry literal `@mono-agent/<pkg>@X.Y.Z`
  * pins that silently rotted one release behind (goal #164 E-evidence: docs pinned
  * `0.4.0` while the packages had already shipped `0.4.1`). This check reads the
- * lockstep version from `packages/agent-app/package.json` and fails whenever any
+ * lockstep version from `packages/module-sdk/package.json` and fails whenever any
  * version pin in the getting-started docs disagrees with it — so a pin is either
  * current or the docs go versionless (the preferred, un-rottable form). A shell
  * placeholder like `@mono-agent/agent-app@$version` is NOT a pin and is ignored.
@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
  */
 
 const GETTING_STARTED_DIR = join("docs", "getting-started");
-const AGENT_APP_PACKAGE_JSON = join("packages", "agent-app", "package.json");
+const LOCKSTEP_PACKAGE_JSON = join("packages", "module-sdk", "package.json");
 
 // A literal, concrete version pin for the scoped `@mono-agent/<name>`, the
 // unscoped `create-mono-agent` installer, or the bare `mono-agent` name. The
@@ -52,7 +52,7 @@ export async function checkGettingStartedVersionPins(options = {}) {
       if (version !== agentAppVersion) {
         issues.push(
           `${record.path}:${line}: version pin \`${match[0]}\` disagrees with the lockstep ` +
-            `@mono-agent/agent-app version \`${agentAppVersion}\`. Update the pin or make the docs versionless.`,
+            `@mono-agent lockstep version \`${agentAppVersion}\`. Update the pin or make the docs versionless.`,
         );
       }
     }
@@ -62,10 +62,10 @@ export async function checkGettingStartedVersionPins(options = {}) {
 }
 
 async function readAgentAppVersion(repoRoot) {
-  const raw = await readFile(join(repoRoot, AGENT_APP_PACKAGE_JSON), "utf8");
+  const raw = await readFile(join(repoRoot, LOCKSTEP_PACKAGE_JSON), "utf8");
   const version = JSON.parse(raw).version;
   if (typeof version !== "string" || version.length === 0) {
-    throw new Error(`${AGENT_APP_PACKAGE_JSON} has no version field.`);
+    throw new Error(`${LOCKSTEP_PACKAGE_JSON} has no version field.`);
   }
   return version;
 }
@@ -98,7 +98,7 @@ async function main() {
   }
   process.stdout.write(
     `Getting-started version pins OK: ${result.pins.length} pin(s) checked against ` +
-      `@mono-agent/agent-app@${result.agentAppVersion}.\n`,
+      `@mono-agent/module-sdk@${result.agentAppVersion}.\n`,
   );
 }
 

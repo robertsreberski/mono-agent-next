@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import {
   InMemorySessionRepo,
   JsonlSessionRepo,
+  type JsonlSessionMetadata,
   type Session,
 } from "@earendil-works/pi-agent-core";
 import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
@@ -26,10 +27,10 @@ export interface RuntimePiSessionAttemptOptions {
   readonly modelKey: string;
   readonly turnId: string;
   readonly signal: AbortSignal;
+  readonly resumeSessionId?: string;
 }
 
 interface OpenAttempt extends RuntimePiSessionAttempt {
-  readonly persistent: boolean;
   readonly discard: () => Promise<void>;
 }
 
@@ -167,7 +168,7 @@ export class RuntimePiSessionManager {
     return this.#jsonlRepo;
   }
 
-  async #openFreshAttempt(options: RuntimePiSessionAttemptOptions): Promise<OpenAttempt> {
+  async #openAttempt(options: RuntimePiSessionAttemptOptions): Promise<OpenAttempt> {
     throwIfAborted(options.signal);
     const id = attemptId({
       namespace: this.#namespace,
@@ -177,19 +178,34 @@ export class RuntimePiSessionManager {
     });
 
     if (this.#sessionsRoot === undefined) {
-      const session = await this.#memoryRepo.create({ id });
+      let session: Session;
+      if (options.resumeSessionId === undefined) {
+        session = await this.#memoryRepo.create({ id });
+      } else {
+        const source = (await this.#memoryRepo.list()).find((metadata) => metadata.id === options.resumeSessionId);
+        if (source === undefined) throw new Error("runtime-pi native session was not found");
+        session = await this.#memoryRepo.fork(source, { id });
+      }
       const metadata = await session.getMetadata();
       return {
         id,
         session,
-        persistent: false,
         discard: async () => this.#memoryRepo.delete(metadata),
       };
     }
 
     const repo = await this.#persistentRepository();
     throwIfAborted(options.signal);
-    const session = await repo.create({ id, cwd: this.#cwd });
+    let session: Session<JsonlSessionMetadata>;
+    if (options.resumeSessionId === undefined) {
+      session = await repo.create({ id, cwd: this.#cwd });
+    } else {
+      const source = (await repo.list({ cwd: this.#cwd })).find((metadata) => metadata.id === options.resumeSessionId);
+      if (source === undefined) throw new Error("runtime-pi native session was not found");
+      const sourceSession = await repo.open(source);
+      await validateSessionFile(sourceSession);
+      session = await repo.fork(source, { id, cwd: this.#cwd });
+    }
     const metadata = await session.getMetadata();
     try {
       await validateSessionFile(session);
@@ -204,7 +220,6 @@ export class RuntimePiSessionManager {
     return {
       id,
       session,
-      persistent: true,
       discard: async () => repo.delete(metadata),
     };
   }
@@ -214,12 +229,12 @@ export class RuntimePiSessionManager {
     task: (attempt: RuntimePiSessionAttempt) => Promise<RuntimePiSessionAttemptResult<T>>,
   ): Promise<T> {
     throwIfAborted(options.signal);
-    const attempt = await this.#openFreshAttempt(options);
+    const attempt = await this.#openAttempt(options);
     try {
       throwIfAborted(options.signal);
       const result = await task({ id: attempt.id, session: attempt.session });
       throwIfAborted(options.signal);
-      if (!result.completed || !attempt.persistent) await attempt.discard();
+      if (!result.completed) await attempt.discard();
       return result.value;
     } catch (error) {
       try {
@@ -232,8 +247,9 @@ export class RuntimePiSessionManager {
   }
 
   /**
-   * Run one fresh native Pi attempt. Attempts for a conversation are serialized,
-   * but a previous session is never reopened or supplied to a later attempt.
+   * Run an isolated Pi attempt. Resume forks the prior native session and only
+   * retains the fork when the attempt settles successfully, so a failed attempt
+   * can never corrupt the caller's previous continuation point.
    */
   withAttempt<T>(
     options: RuntimePiSessionAttemptOptions,

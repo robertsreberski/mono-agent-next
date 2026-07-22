@@ -22,18 +22,10 @@ import {
   type WebhookInboundRequest,
   type WebhookSubmit,
 } from "./server.js";
+import { WebhookDelivery } from "./delivery.js";
 
 const PACKAGE_NAME = "@mono-agent/channel-webhook";
 const PACKAGE_VERSION = "0.15.0";
-
-const CHANNEL_CAPABILITIES = Object.freeze({
-  attachments: false,
-  liveInput: false,
-  askUser: false,
-  proactive: false,
-  runtimeControl: true,
-  verbatim: false,
-});
 
 export interface WebhookModuleChannel extends Channel {
   readonly endpoint: string | undefined;
@@ -46,7 +38,7 @@ export const monoAgentModule = defineChannelModule({
     packageVersion: PACKAGE_VERSION,
     apiVersion: MODULE_API_VERSION,
     kind: "channel",
-    responsibility: "Accepts authenticated HTTP invocations and submits normalized inbound turns.",
+    responsibility: "Serves bounded authenticated webhook ingress and explicit proactive webhook delivery.",
     capabilities: [],
   },
   schema: webhookConfigSchema,
@@ -59,6 +51,7 @@ function createWebhookModuleChannel(
   let transport: WebhookChannel | undefined;
   let info: WebhookChannelStartInfo | undefined;
   let startPromise: Promise<void> | undefined;
+  const delivery = context.config.outbound === undefined ? undefined : new WebhookDelivery(context.config.outbound);
 
   const submit: WebhookSubmit = async (request) => {
     let replyText = "";
@@ -137,7 +130,15 @@ function createWebhookModuleChannel(
   };
 
   return {
-    capabilities: CHANNEL_CAPABILITIES,
+    capabilities: Object.freeze({
+      attachments: false,
+      liveInput: false,
+      askUser: false,
+      proactive: delivery !== undefined,
+      runtimeControl: true,
+      verbatim: false,
+      cancellation: true,
+    }),
     get endpoint(): string | undefined {
       return info?.invokeUrl;
     },
@@ -151,6 +152,7 @@ function createWebhookModuleChannel(
     },
     stop,
     health,
+    ...(delivery === undefined ? {} : { deliver: (message, signal) => delivery.deliver(message, signal) }),
   };
 }
 
@@ -182,4 +184,5 @@ function throwIfAborted(signal: AbortSignal): void {
 }
 
 export * from "./config.js";
+export * from "./delivery.js";
 export * from "./server.js";

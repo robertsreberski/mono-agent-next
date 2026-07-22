@@ -35,7 +35,9 @@ export interface CoreRuntimeTool {
   readonly name: string;
   readonly description: string;
   readonly inputSchema: Readonly<Record<string, unknown>>;
-  readonly source: { readonly kind: "mcp"; readonly server: string; readonly tool: string };
+  readonly source:
+    | { readonly kind: "mcp"; readonly server: string; readonly tool: string }
+    | { readonly kind: "core"; readonly capability: "skills.read" };
   execute(input: unknown, options?: { readonly signal?: AbortSignal }): Promise<unknown>;
 }
 

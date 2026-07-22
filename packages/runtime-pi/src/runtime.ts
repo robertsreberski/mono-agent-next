@@ -16,6 +16,7 @@ import {
   type TSchema,
   type Usage,
 } from "@earendil-works/pi-ai";
+import { RuntimeTurnError } from "@mono-agent/module-sdk";
 import type {
   JsonValue,
   ModuleDiagnostic,
@@ -67,8 +68,8 @@ export interface CreateRuntimePiOptions {
   readonly models?: RuntimePiModelRegistry["models"];
 }
 
-export class RuntimePiError extends Error {
-  readonly code: "RUNTIME_NOT_RUNNING" | "MODEL_INVALID" | "PROVIDER_FAILED" | "SESSION_INVALID";
+export class RuntimePiError extends RuntimeTurnError {
+  declare readonly code: "RUNTIME_NOT_RUNNING" | "MODEL_INVALID" | "PROVIDER_FAILED" | "SESSION_INVALID" | "UNSUPPORTED";
   readonly committedSideEffects: boolean;
   readonly retryable: boolean;
 
@@ -77,11 +78,17 @@ export class RuntimePiError extends Error {
     message: string,
     options: { readonly committedSideEffects?: boolean; readonly retryable?: boolean } = {},
   ) {
-    super(message);
+    const retryable = options.retryable ?? code === "PROVIDER_FAILED";
+    const committedSideEffects = options.committedSideEffects ?? false;
+    super({
+      code,
+      message,
+      retryability: retryable ? "retryable" : "not-retryable",
+      sideEffects: committedSideEffects ? "committed" : "none",
+    });
     this.name = "RuntimePiError";
-    this.code = code;
-    this.committedSideEffects = options.committedSideEffects ?? false;
-    this.retryable = options.retryable ?? code === "PROVIDER_FAILED";
+    this.committedSideEffects = committedSideEffects;
+    this.retryable = retryable;
   }
 }
 
@@ -108,6 +115,14 @@ function runtimeUsage(usage: Usage): RuntimeUsage {
     totalTokens: usage.totalTokens,
     cacheReadTokens: usage.cacheRead,
     cacheWriteTokens: usage.cacheWrite,
+    cost: {
+      currency: "USD",
+      input: usage.cost.input,
+      output: usage.cost.output,
+      cacheRead: usage.cost.cacheRead,
+      cacheWrite: usage.cost.cacheWrite,
+      total: usage.cost.total,
+    },
   };
 }
 
@@ -138,6 +153,16 @@ function textAndImages(parts: readonly TurnContentPart[]): { text: string; image
           mimeType: part.mediaType,
         });
       } else text.push(filePartText(part));
+    } else if (part.type === "attachment") {
+      if (part.attachment.kind === "image") {
+        images.push({
+          type: "image",
+          data: Buffer.from(part.attachment.data).toString("base64"),
+          mimeType: part.attachment.mediaType,
+        });
+      } else {
+        text.push(`[Attached file ${JSON.stringify(part.attachment.name)} (${part.attachment.mediaType})]`);
+      }
     }
   }
   return { text: text.join("\n"), images };
@@ -310,7 +335,8 @@ function exactCapabilities(attachments: boolean): RuntimeCapabilities {
     approvals: false,
     structuredOutput: false,
     sandbox: false,
-    sessions: false,
+    sessions: true,
+    liveInput: true,
   };
 }
 
@@ -378,7 +404,8 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
       approvals: false,
       structuredOutput: false,
       sandbox: false,
-      sessions: false,
+      sessions: true,
+      liveInput: true,
     },
 
     async start(_context: ModuleStartContext) {
@@ -458,11 +485,21 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
     async runTurn(request: RuntimeTurnRequest, context: RuntimeTurnContext): Promise<RuntimeTurnResult> {
       if (state !== "running") throw new RuntimePiError("RUNTIME_NOT_RUNNING", `runtime-pi is ${state}`);
       if (request.signal.aborted) return { status: "cancelled" };
-      if (request.session !== undefined) {
+      if (request.options?.responseSchema !== undefined) {
         throw new RuntimePiError(
-          "SESSION_INVALID",
-          "runtime-pi session resume is unavailable until atomic session reservations are implemented",
+          "UNSUPPORTED",
+          "runtime-pi does not support structured response schemas",
+          { retryable: false },
         );
+      }
+      if (request.session?.runtimeInstanceId !== undefined && request.session.runtimeInstanceId !== options.instanceId) {
+        throw new RuntimePiError("SESSION_INVALID", "runtime-pi session belongs to another runtime instance", { retryable: false });
+      }
+      if (request.session?.provider !== undefined && request.session.provider !== "pi") {
+        throw new RuntimePiError("SESSION_INVALID", "runtime-pi session has an incompatible provider", { retryable: false });
+      }
+      if (request.session?.model !== undefined && request.session.model !== request.model) {
+        throw new RuntimePiError("SESSION_INVALID", "runtime-pi session model does not match the requested model", { retryable: false });
       }
 
       let model: Model<string>;
@@ -486,12 +523,15 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
             modelKey: request.model,
             turnId: request.turnId,
             signal: request.signal,
+            ...(request.session === undefined ? {} : { resumeSessionId: request.session.id }),
           },
           async (attempt): Promise<RuntimePiSessionAttemptResult<RuntimeTurnResult>> => {
             if (request.signal.aborted) return { completed: false, value: { status: "cancelled" } };
-            for (const message of seedMessages(request.messages.slice(0, prompt.index), model)) {
-              await attempt.session.appendMessage(message);
-              if (request.signal.aborted) return { completed: false, value: { status: "cancelled" } };
+            if (request.session === undefined) {
+              for (const message of seedMessages(request.messages.slice(0, prompt.index), model)) {
+                await attempt.session.appendMessage(message);
+                if (request.signal.aborted) return { completed: false, value: { status: "cancelled" } };
+              }
             }
 
             const toolResults = new Map<string, RuntimeToolResult>();
@@ -526,6 +566,14 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
               (event) => toolErrors.has(event.toolCallId) ? { isError: true } : undefined,
             );
             active.add(harness);
+            const linkedSession = {
+              id: attempt.id,
+              runtimeInstanceId: options.instanceId,
+              provider: "pi",
+              model: request.model,
+              createdAt: new Date().toISOString(),
+              metadata: { provider: reference.provider, nativeModel: reference.model },
+            } as const;
             let maxTurnsHit = false;
             let turnCount = 0;
             let abortPromise: Promise<unknown> | undefined;
@@ -536,6 +584,15 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
             };
             request.signal.addEventListener("abort", abortHarness, { once: true });
             if (request.signal.aborted) abortHarness();
+            const unregisterLiveInput = context.registerLiveInput?.(async (input) => {
+              if (request.signal.aborted) return "requeue";
+              try {
+                await harness.steer(input.text);
+                return "applied";
+              } catch {
+                return "requeue";
+              }
+            });
             const unsubscribe = harness.subscribe(async (event) => {
               if (event.type === "message_update") {
                 const update = event.assistantMessageEvent;
@@ -556,6 +613,26 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                   maxTurnsHit = true;
                   abortHarness();
                 }
+              } else if (event.type === "session_compact") {
+                await context.emit({
+                  type: "compaction",
+                  compaction: {
+                    compacted: true,
+                    tokensBefore: event.compactionEntry.tokensBefore,
+                    ...(event.compactionEntry.firstKeptEntryId === undefined
+                      ? {}
+                      : { firstRetainedMessageId: event.compactionEntry.firstKeptEntryId }),
+                  },
+                });
+              } else if (event.type === "retry_scheduled") {
+                await context.emit({
+                  type: "diagnostic",
+                  diagnostic: diagnostic(
+                    "runtime-pi.retry",
+                    "warning",
+                    `Pi ${event.operation} retry ${event.attempt}/${event.maxAttempts} scheduled after ${event.delayMs}ms`,
+                  ),
+                });
               }
             });
 
@@ -593,12 +670,14 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                   { committedSideEffects },
                 );
               }
+              await context.emit({ type: "session", session: linkedSession });
               return {
                 completed: true,
                 value: {
                   status: "completed",
                   message,
                   usage,
+                  session: linkedSession,
                   metadata: { provider: reference.provider, model: reference.model, stopReason: result.stopReason },
                 },
               };
@@ -615,6 +694,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
               );
             } finally {
               request.signal.removeEventListener("abort", abortHarness);
+              unregisterLiveInput?.();
               unsubscribe();
               removeToolResultHandler();
               active.delete(harness);

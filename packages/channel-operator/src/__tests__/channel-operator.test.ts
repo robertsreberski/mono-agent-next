@@ -31,6 +31,7 @@ import {
   parseOperatorChannelConfig,
   type OperatorChannel,
   type OperatorModuleChannel,
+  type OperatorIdentityGrant,
 } from "../index.js";
 
 const TOKEN = "operator-fixture-token-that-is-long-enough";
@@ -83,8 +84,8 @@ describe("operator channel config", () => {
     expect(parseOperatorChannelConfig({
       auth: { token: TOKEN },
       listen: { host: "::1", port: 0 },
-      label: "Test Agent",
-    })).toMatchObject({ listen: { host: "::1" }, label: "Test Agent" });
+    })).toMatchObject({ listen: { host: "::1" } });
+    expect(() => parseOperatorChannelConfig({ auth: { token: TOKEN }, label: "wrong owner" })).toThrow(/unknown field.*label/u);
   });
 });
 
@@ -94,9 +95,8 @@ describe("operator HTTP channel", () => {
       config: parseOperatorChannelConfig({
         auth: { token: TOKEN },
         listen: { host: "localhost", port: 0 },
-        label: "Localhost Agent",
       }),
-      instanceId: "localhost-operator",
+      identity: identity("localhost-operator", "Localhost Agent"),
       dispatch: async () => ({ status: "completed", text: "unused" }),
     });
     channels.add(channel);
@@ -124,13 +124,14 @@ describe("operator HTTP channel", () => {
       protocol: "mono-agent.operator.v1",
       agent: { id: "operator", label: "Fixture Agent" },
       capabilities: {
-        attachments: false,
+        attachments: true,
         cancellation: true,
         runtimeOverrides: true,
         health: true,
       },
     });
     expect(second.process.startedAt).toBe(first.process.startedAt);
+    expect(channel.startInfo.startedAt).toBe(first.process.startedAt);
     expect(parseOperatorHealth(await authorizedJson(channel.startInfo.healthUrl))).toMatchObject({
       status: "healthy",
       details: [{ id: "channel-operator", status: "healthy" }],
@@ -187,7 +188,7 @@ describe("operator HTTP channel", () => {
       model: "openai:gpt-test",
       effort: "high",
       metadata: { source: "test", count: 2 },
-      sender: { id: "operator", displayName: "operator" },
+      sender: { id: "operator", displayName: "Fixture Agent" },
       attachments: [],
     });
     expect(inbound?.signal).toBeInstanceOf(AbortSignal);
@@ -301,6 +302,65 @@ describe("operator HTTP channel", () => {
     await expect(idle.json()).resolves.toEqual({ status: "idle" });
   });
 
+  it("projects Core-owned operator controls, AskUser state, replay, config, usage, and health", async () => {
+    const now = new Date().toISOString();
+    const answerAsk = vi.fn(async () => ({ status: "accepted" as const }));
+    const offerLiveInput = vi.fn(async () => ({ status: "applied" as const }));
+    const readReplay = vi.fn(async () => ({
+      entries: [{
+        turnId: "turn-1",
+        createdAt: now,
+        message: {
+          id: "message-1",
+          role: "assistant" as const,
+          content: [{ type: "text" as const, text: "remembered" }],
+        },
+      }],
+    }));
+    const host: NonNullable<Parameters<typeof createOperatorChannel>[0]["host"]> = {
+      answerAsk,
+      offerLiveInput,
+      async listConversations() {
+        return { conversations: [{ conversationId: "conversation-controls", title: "Controls", updatedAt: now }] };
+      },
+      readReplay,
+      async readConfig() { return { runtime: "pi", token: "[redacted]" }; },
+      async readHealth() { return { status: "unknown", checkedAt: now, summary: "Core is still starting." }; },
+      async openConversation() { return { conversationId: "opened", createdAt: now }; },
+    };
+    const channel = await startChannel(async (_request, reply) => {
+      await reply.emit({
+        type: "ask-user",
+        ask: {
+          interactionId: "ask-1",
+          requestedAt: now,
+          questions: [{ id: "choice", prompt: "Choose", allowFreeText: false, multiple: false, choices: [{ value: "yes", label: "Yes" }] }],
+        },
+      });
+      await reply.emit({ type: "usage", usage: { inputTokens: 3, outputTokens: 5 } });
+      return { status: "completed", text: "done" };
+    }, host);
+    const client = new OperatorClient({ endpoint: channel.startInfo.endpoint, token: TOKEN });
+
+    await expect(client.getInfo()).resolves.toMatchObject({
+      capabilities: { liveInput: true, askUser: true, proactive: true, configView: true, replay: true },
+    });
+    await expect(client.getConversations()).resolves.toMatchObject({ conversations: [{ id: "conversation-controls", title: "Controls" }] });
+    await expect(client.getReplay("conversation-controls")).resolves.toMatchObject({ conversationId: "conversation-controls", messages: [{ id: "message-1", text: "remembered" }] });
+    expect(readReplay).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conversation-controls", limit: 10_000 }));
+    await expect(client.getConfig()).resolves.toMatchObject({ value: { runtime: "pi", token: "[redacted]" }, redacted: true });
+    await expect(client.getHealth()).resolves.toMatchObject({ status: "degraded", details: [{ id: "channel-operator" }, { id: "core", status: "degraded" }] });
+    await expect(client.offerLiveInput("conversation-controls", { id: "live-1", text: "steer", receivedAt: now })).resolves.toEqual({ status: "applied" });
+    expect(offerLiveInput).toHaveBeenCalledOnce();
+
+    const frames = await readFrames(await postJson(channel.startInfo.turnsUrl, { conversationId: "conversation-controls", input: { text: "run" } }));
+    expect(frames).toContainEqual(expect.objectContaining({ type: "ask_user", ask: expect.objectContaining({ interactionId: "ask-1" }) }));
+    expect(frames).toContainEqual(expect.objectContaining({ type: "usage", usage: expect.objectContaining({ inputTokens: 3, outputTokens: 5 }) }));
+    await expect(client.getPendingAsk("conversation-controls")).resolves.toMatchObject({ ask: { interactionId: "ask-1" } });
+    await expect(client.answerAsk("conversation-controls", { interactionId: "ask-1", answers: { choice: ["yes"] } })).resolves.toEqual({ status: "accepted" });
+    expect(answerAsk).toHaveBeenCalledOnce();
+  });
+
   it("starts and stops idempotently and destroys open keep-alive sockets", async () => {
     const channel = await startChannel(async () => ({ status: "completed", text: "ok" }));
     const first = channel.startInfo;
@@ -319,17 +379,34 @@ describe("operator HTTP channel", () => {
 });
 
 describe("mono-agent operator channel module", () => {
+  it("declares and requires the exact Core-owned identity grant", () => {
+    expect(monoAgentModule.manifest.capabilities).toEqual(["operator.identity.v1"]);
+    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
+    expect(() => monoAgentModule.create({
+      instanceId: "operator",
+      config,
+      provenance: { "/auth/token": { source: "environment", environmentName: "OPERATOR_TOKEN" } },
+      configDirectory: "/config",
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: { grantedCapabilities: new Set(), getCapability() { return undefined; }, async dispatch() { return { status: "completed" }; } },
+      signal: new AbortController().signal,
+    })).toThrow(/operator\.identity\.v1/u);
+  });
+
   it("is a compliant side-effect-free typed channel with a runnable endpoint", async () => {
     expect(() => assertChannelModuleCompliance(monoAgentModule, {
       expectedPackageName: "@mono-agent/channel-operator",
       expectedPackageVersion: "0.15.0",
     })).not.toThrow();
-    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN }, label: "Module Agent" });
+    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
+    const operatorIdentity = identity("module-agent", "Module Agent");
     const dispatched: ChannelInboundRequest[] = [];
     const host: ChannelHost = {
-      grantedCapabilities: new Set(),
-      getCapability<T>(): T | undefined {
-        return undefined;
+      grantedCapabilities: new Set(["operator.identity.v1"]),
+      getCapability<T>(name: string): T | undefined {
+        return (name === "operator.identity.v1" ? operatorIdentity : undefined) as T | undefined;
       },
       async dispatch(request, reply): Promise<ChannelTurnResult> {
         dispatched.push(request);
@@ -341,7 +418,7 @@ describe("mono-agent operator channel module", () => {
     const channel = await monoAgentModule.create({
       instanceId: "operator",
       config,
-      provenance: {},
+      provenance: { "/auth/token": { source: "environment", environmentName: "OPERATOR_TOKEN" } },
       configDirectory: "/config",
       workspaceDirectory: "/workspace",
       dataDirectory: "/data",
@@ -355,6 +432,15 @@ describe("mono-agent operator channel module", () => {
 
     await channel.start?.({ signal: lifecycle.signal });
     expect(channel.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/u);
+    expect(channel.readHostPresence?.()).toMatchObject({
+      operatorRegistry: {
+        schema: "mono-agent.operator-registry-details.v1",
+        agent: operatorIdentity.agent,
+        operator: { endpoint: channel.endpoint, tokenEnvironment: "OPERATOR_TOKEN" },
+        process: { pid: process.pid, startedAt: channel.startInfo?.startedAt },
+        capabilities: { attachments: true, cancellation: true, health: true },
+      },
+    });
     const response = await postJson(`${channel.endpoint}/v1/turns`, {
       conversationId: "module-conversation",
       input: { text: "hello module" },
@@ -371,6 +457,27 @@ describe("mono-agent operator channel module", () => {
     await channel.drain?.({ signal: lifecycle.signal });
     await channel.stop?.({ signal: lifecycle.signal, reason: "shutdown" });
   });
+
+  it("collapses concurrent proactive opens and reports later duplicates", async () => {
+    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
+    const operatorIdentity = identity("module-agent", "Module Agent");
+    const openConversation = vi.fn<NonNullable<ChannelHost["openConversation"]>>(async () => ({ conversationId: "opened-1", createdAt: new Date().toISOString() }));
+    const host: ChannelHost = {
+      grantedCapabilities: new Set(["operator.identity.v1"]),
+      getCapability<T>(name: string): T | undefined { return (name === "operator.identity.v1" ? operatorIdentity : undefined) as T | undefined; },
+      async dispatch() { return { status: "completed" }; },
+      openConversation,
+    };
+    const channel = await monoAgentModule.create({ instanceId: "operator", config, provenance: {}, configDirectory: "/config", workspaceDirectory: "/workspace", dataDirectory: "/data", logger: noopLogger(), host, signal: new AbortController().signal });
+    moduleChannels.add(channel);
+    const message = { conversationId: "", text: "proactive", idempotencyKey: "open-once" };
+    await expect(Promise.all([channel.deliver!(message, new AbortController().signal), channel.deliver!(message, new AbortController().signal)])).resolves.toEqual([
+      { status: "delivered", idempotencyKey: "open-once", messageId: "opened-1" },
+      { status: "delivered", idempotencyKey: "open-once", messageId: "opened-1" },
+    ]);
+    await expect(channel.deliver!(message, new AbortController().signal)).resolves.toEqual({ status: "duplicate", idempotencyKey: "open-once", messageId: "opened-1" });
+    expect(openConversation).toHaveBeenCalledOnce();
+  });
 });
 
 async function startChannel(
@@ -378,15 +485,27 @@ async function startChannel(
     request: ChannelInboundRequest,
     reply: ChannelReplySink,
   ) => Promise<ChannelTurnResult>,
+  host?: NonNullable<Parameters<typeof createOperatorChannel>[0]["host"]>,
 ): Promise<{ readonly channel: OperatorChannel; readonly startInfo: NonNullable<OperatorChannel["startInfo"]> }> {
   const channel = createOperatorChannel({
-    config: parseOperatorChannelConfig({ auth: { token: TOKEN }, label: "Fixture Agent" }),
-    instanceId: "operator",
+    config: parseOperatorChannelConfig({ auth: { token: TOKEN } }),
+    identity: identity("operator", "Fixture Agent"),
     dispatch,
+    ...(host === undefined ? {} : { host }),
   });
   channels.add(channel);
   const startInfo = await channel.start();
   return { channel, startInfo };
+}
+
+function identity(id: string, label: string): OperatorIdentityGrant {
+  return {
+    agent: { id, label },
+    process: { pid: process.pid },
+    defaults: { runtime: "pi", model: "openai:test", effort: "medium" },
+    configPath: "/config/mono-agent.config.json",
+    projectRoot: "/project",
+  };
 }
 
 function authHeaders(): Record<string, string> {

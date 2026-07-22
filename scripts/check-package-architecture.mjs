@@ -23,20 +23,44 @@ const packageScope = "@mono-agent/";
 const requiredReadmeSections = REQUIRED_PACKAGE_README_SECTIONS.map((section) => `## ${section}`);
 const v1ModuleKinds = new Map([
   ["@mono-agent/runtime-pi", "runtime"],
+  ["@mono-agent/runtime-claude", "runtime"],
+  ["@mono-agent/runtime-codex", "runtime"],
+  ["@mono-agent/runtime-opencode", "runtime"],
+  ["@mono-agent/channel-telegram", "channel"],
+  ["@mono-agent/channel-slack", "channel"],
   ["@mono-agent/channel-webhook", "channel"],
+  ["@mono-agent/channel-openai-api", "channel"],
   ["@mono-agent/channel-operator", "channel"],
+  ["@mono-agent/trigger-cron", "trigger"],
+  ["@mono-agent/memory-local", "memory"],
+  ["@mono-agent/state-local", "state"],
+  ["@mono-agent/exporter-otlp", "exporter"],
+  ["@mono-agent/sandbox-srt", "sandbox"],
 ]);
 const v1InternalDependencyClosure = new Map([
   ["@mono-agent/module-sdk", []],
   ["@mono-agent/core", ["@mono-agent/module-sdk"]],
   ["@mono-agent/cli", ["@mono-agent/core"]],
   ["@mono-agent/runtime-pi", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/runtime-claude", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/runtime-codex", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/runtime-opencode", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/channel-telegram", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/channel-slack", ["@mono-agent/module-sdk"]],
   ["@mono-agent/channel-webhook", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/channel-openai-api", ["@mono-agent/module-sdk"]],
   ["@mono-agent/operator", []],
   ["@mono-agent/channel-operator", ["@mono-agent/module-sdk", "@mono-agent/operator"]],
+  ["@mono-agent/trigger-cron", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/memory-local", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/state-local", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/exporter-otlp", ["@mono-agent/module-sdk"]],
+  ["@mono-agent/sandbox-srt", ["@mono-agent/module-sdk"]],
   ["@mono-agent/tui", ["@mono-agent/operator"]],
   ["@mono-agent/web", ["@mono-agent/operator"]],
   ["create-mono-agent", ["@mono-agent/cli"]],
+  ["@mono-agent/docs-mcp", []],
+  ["@mono-agent/service-macos", ["@mono-agent/core"]],
 ]);
 
 const errors = [];
@@ -181,101 +205,6 @@ for (const catalogEntry of packageCatalog) {
     if (depEntry.category === "communication" && catalogEntry.category !== "app") {
       errors.push(`${packagePath} may not depend on communication adapter ${depName}; compose adapters only in app hosts/demos.`);
     }
-  }
-}
-
-const oldReferences = [
-  `@mono-agent/${"config"}-${"ui"}`,
-  `@mono-agent/${"telegram"}-${"bridge"}`,
-  `@mono-agent/${"whatsapp"}-${"bridge"}`,
-];
-for (const file of ["package.json", "README.md", "pnpm-lock.yaml"]) {
-  const text = readFileSync(join(root, file), "utf8");
-  for (const oldReference of oldReferences) {
-    if (text.includes(oldReference)) {
-      errors.push(`${file} still references ${oldReference}.`);
-    }
-  }
-}
-
-const staleReferences = [
-  `@mono-agent/${"comm"}/`,
-  `${packageScope}${"context"}`,
-  `${packageScope}${"skills"}`,
-  `${packageScope}${"sandbox"}`,
-  `${packageScope}${"tool"}-${"policy"}`,
-  `${packageScope}${"agent"}-${"host"}`,
-  `${packageScope}${"tui"}-${"adapter"}`,
-  `${packageScope}${"live"}-${"adapter"}`,
-  `packages/${"context"}`,
-  `packages/${"skills"}`,
-  `packages/${"sandbox"}`,
-  `packages/${"tool"}-${"policy"}`,
-  `packages/${"agent"}-${"host"}`,
-  `packages/${"tui"}-${"adapter"}`,
-  `packages/${"live"}-${"adapter"}`,
-  `${"config"}-${"ui"}`,
-  `${"telegram"}-${"bridge"}`,
-  `${"whatsapp"}-${"bridge"}`,
-];
-for (const staleReference of staleReferences) {
-  for (const file of walkTextFiles(root)) {
-    const text = readFileSync(file, "utf8");
-    if (text.includes(staleReference)) {
-      errors.push(`${relative(root, file)} still references ${staleReference}.`);
-    }
-  }
-}
-
-const controllerOperationModules = [
-  "app-controller-channels.ts",
-  "app-controller-continuation.ts",
-  "app-controller-lifecycle.ts",
-  "app-controller-maintenance.ts",
-  "app-controller-memory-health.ts",
-  "app-controller-memory.ts",
-  "app-controller-responder.ts",
-  "app-controller-traceability.ts",
-];
-for (const file of controllerOperationModules) {
-  const relativePath = join("packages", "agent-app", "src", file);
-  const text = readFileSync(join(root, relativePath), "utf8");
-  if (/from\s+["']\.\/app-controller\.js["']/u.test(text)) {
-    errors.push(`${relativePath} must depend on a narrow controller port, not MonoAgentAppController.`);
-  }
-}
-
-const extractedResponsibilityDeclarations = [
-  {
-    file: join("packages", "agent-app", "src", "web-command.ts"),
-    declaration: "function rolloverManagedWebLogs",
-    owner: "managed-web-logs.ts",
-  },
-  {
-    file: join("packages", "agent-app", "src", "background.ts"),
-    declaration: "function maintainLaunchdLogsOperation",
-    owner: "background-log-maintenance.ts",
-  },
-  {
-    file: join("packages", "agent-app", "src", "doctor.ts"),
-    declaration: "function probeExporterEndpoint",
-    owner: "doctor-observability.ts",
-  },
-  {
-    file: join("packages", "slack-adapter", "src", "adapter.ts"),
-    declaration: "function buildSlackRuntimeControlCatalog",
-    owner: "runtime-controls.ts",
-  },
-  {
-    file: join("packages", "memory", "src", "bujo", "rebuild.ts"),
-    declaration: "function acquireSqliteWriterFences",
-    owner: "rebuild-sqlite-safety.ts",
-  },
-];
-for (const rule of extractedResponsibilityDeclarations) {
-  const text = readFileSync(join(root, rule.file), "utf8");
-  if (text.includes(rule.declaration)) {
-    errors.push(`${rule.file} must keep ${rule.declaration} in ${rule.owner}.`);
   }
 }
 

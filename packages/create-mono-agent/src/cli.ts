@@ -6,6 +6,11 @@ import {
   type InstallPackageManager,
   type PackageInstaller,
 } from "./scaffold.js";
+import {
+  PROJECT_TEMPLATES,
+  isProjectTemplate,
+  type ProjectTemplate,
+} from "./templates.js";
 
 export interface CreateMonoAgentCliOptions {
   invocationName?: string;
@@ -44,6 +49,7 @@ export async function runCreateMonoAgentCli(
       targetDirectory: parsed.targetDirectory,
       cwd,
       ...(parsed.projectName === undefined ? {} : { projectName: parsed.projectName }),
+      template: parsed.template,
       install: parsed.install,
       packageManager: parsed.packageManager,
       ...(options.installer === undefined ? {} : { installer: options.installer }),
@@ -63,6 +69,7 @@ export async function runCreateMonoAgentCli(
 interface ParsedScaffoldArgs {
   targetDirectory: string;
   projectName?: string;
+  template: ProjectTemplate;
   install: boolean;
   packageManager: InstallPackageManager;
   help: boolean;
@@ -71,6 +78,8 @@ interface ParsedScaffoldArgs {
 function parseScaffoldArgs(argv: readonly string[]): ParsedScaffoldArgs {
   let targetDirectory: string | undefined;
   let projectName: string | undefined;
+  let template: ProjectTemplate = "minimal";
+  let templateSeen = false;
   let install = false;
   let packageManager: InstallPackageManager = "pnpm";
   let packageManagerSeen = false;
@@ -86,6 +95,17 @@ function parseScaffoldArgs(argv: readonly string[]): ParsedScaffoldArgs {
     if (argument === "--install") {
       if (install) throw new CreateUsageError("--install may be supplied only once");
       install = true;
+      continue;
+    }
+    if (argument === "--template") {
+      if (templateSeen) throw new CreateUsageError("--template may be supplied only once");
+      const candidate = argv[index + 1];
+      if (candidate === undefined || candidate.startsWith("-")) {
+        throw new CreateUsageError(`--template requires ${PROJECT_TEMPLATES.join(", ")}`);
+      }
+      template = parseTemplate(candidate);
+      templateSeen = true;
+      index += 1;
       continue;
     }
     if (argument === "--package-manager") {
@@ -125,10 +145,16 @@ function parseScaffoldArgs(argv: readonly string[]): ParsedScaffoldArgs {
   return {
     targetDirectory: targetDirectory ?? ".",
     ...(projectName === undefined ? {} : { projectName }),
+    template,
     install,
     packageManager,
     help,
   };
+}
+
+function parseTemplate(value: string): ProjectTemplate {
+  if (isProjectTemplate(value)) return value;
+  throw new CreateUsageError(`Unsupported template: ${value}`);
 }
 
 function parsePackageManager(value: string): InstallPackageManager {
@@ -143,11 +169,12 @@ function reasonOf(error: unknown): string {
 function createUsage(): string {
   return [
     "Usage:",
-    "  npm create mono-agent@latest [directory] [-- --install]",
-    "  create-mono-agent [directory] [--install] [--package-manager <pnpm|npm>]",
-    "  mono-agent init [directory] [--install] [--name <package-name>]",
-    "  mono-agent setup [directory] [--install] [--name <package-name>]",
+    "  npm create mono-agent@latest [directory] [-- --template <minimal|personal|multi-runtime>]",
+    "  create-mono-agent [directory] [--template <minimal|personal|multi-runtime>] [--install] [--package-manager <pnpm|npm>]",
+    "  mono-agent init [directory] [--template <minimal|personal|multi-runtime>] [--install] [--package-manager <pnpm|npm>] [--name <package-name>]",
+    "  mono-agent setup [directory] [--template <minimal|personal|multi-runtime>] [--install] [--package-manager <pnpm|npm>] [--name <package-name>]",
     "",
+    "The default template is minimal.",
     "Package installation never runs unless --install is supplied.",
     "",
   ].join("\n");

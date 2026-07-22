@@ -1,0 +1,237 @@
+import { constants } from "node:fs";
+import { lstat, open } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
+
+export const SERVICE_MACOS_CONFIG_VERSION = 1;
+export const DEFAULT_LOG_MAX_BYTES = 10_485_760;
+export const DEFAULT_LOG_RETAIN_FILES = 5;
+export const MAX_SERVICE_CONFIG_BYTES = 1_048_576;
+
+export type ServiceRestartPolicy = "never" | "on-failure" | "always";
+
+export interface ServiceMacosLogsConfig {
+  readonly directory: string;
+  readonly maxBytes: number;
+  readonly retainFiles: number;
+}
+
+export interface ServiceMacosServiceConfig {
+  readonly agentConfig: string;
+  readonly startAtLogin: boolean;
+  readonly restartPolicy: ServiceRestartPolicy;
+  readonly environmentFile?: string;
+  readonly logs: ServiceMacosLogsConfig;
+}
+
+export interface ServiceMacosConfig {
+  readonly $schema?: string;
+  readonly configVersion: 1;
+  readonly services: Readonly<Record<string, ServiceMacosServiceConfig>>;
+}
+
+export interface LoadedServiceMacosConfig {
+  readonly path: string;
+  readonly source: string;
+  readonly config: ServiceMacosConfig;
+}
+
+export class ServiceMacosConfigError extends Error {
+  readonly code = "invalid_service_macos_config";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ServiceMacosConfigError";
+  }
+}
+
+const ROOT_KEYS = new Set(["$schema", "configVersion", "services"]);
+const SERVICE_KEYS = new Set(["agentConfig", "startAtLogin", "restartPolicy", "environmentFile", "logs"]);
+const LOG_KEYS = new Set(["directory", "maxBytes", "retainFiles"]);
+
+export async function loadServiceMacosConfig(path: string): Promise<LoadedServiceMacosConfig> {
+  const absolutePath = resolve(path);
+  const before = await lstat(absolutePath);
+  if (!before.isFile() || before.isSymbolicLink()) {
+    throw new ServiceMacosConfigError("Service config must be a regular file, not a symlink.");
+  }
+  if (before.size > MAX_SERVICE_CONFIG_BYTES) {
+    throw new ServiceMacosConfigError(`Service config exceeds ${String(MAX_SERVICE_CONFIG_BYTES)} bytes.`);
+  }
+  const handle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let source: string;
+  try {
+    const after = await handle.stat();
+    if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino || after.nlink !== 1) {
+      throw new ServiceMacosConfigError("Service config changed identity while it was opened.");
+    }
+    source = await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(source) as unknown;
+  } catch (error) {
+    throw new ServiceMacosConfigError(`Service config must be strict JSON: ${errorMessage(error)}`);
+  }
+  return Object.freeze({ path: absolutePath, source, config: parseServiceMacosConfig(value) });
+}
+
+export function parseServiceMacosConfig(value: unknown): ServiceMacosConfig {
+  const input = readRecord(value, "Service config");
+  rejectUnknown(input, ROOT_KEYS, "Service config");
+  if (input.configVersion !== SERVICE_MACOS_CONFIG_VERSION) {
+    throw new ServiceMacosConfigError("configVersion must be exactly 1.");
+  }
+  const schema = optionalString(input.$schema, "$schema", true);
+  const servicesInput = readRecord(input.services, "services");
+  const serviceIds = Object.keys(servicesInput).sort();
+  if (serviceIds.length === 0 || serviceIds.length > 256) {
+    throw new ServiceMacosConfigError("services must contain between 1 and 256 entries.");
+  }
+  const services: Record<string, ServiceMacosServiceConfig> = Object.create(null);
+  for (const id of serviceIds) {
+    if (!/^[a-z0-9][a-z0-9.-]{0,62}$/u.test(id)) {
+      throw new ServiceMacosConfigError(`Service id "${id}" must use lowercase letters, digits, dot, or hyphen.`);
+    }
+    services[id] = parseService(servicesInput[id], id);
+  }
+  return Object.freeze({
+    ...(schema === undefined ? {} : { $schema: schema }),
+    configVersion: 1 as const,
+    services: Object.freeze(services),
+  });
+}
+
+export const serviceMacosConfigSchema = Object.freeze({
+  $schema: "https://json-schema.org/draft/2020-12/schema",
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    $schema: { type: "string" },
+    configVersion: { const: 1 },
+    services: {
+      type: "object",
+      minProperties: 1,
+      maxProperties: 256,
+      patternProperties: {
+        "^[a-z0-9][a-z0-9.-]{0,62}$": {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            agentConfig: { type: "string", minLength: 1 },
+            startAtLogin: { type: "boolean" },
+            restartPolicy: { enum: ["never", "on-failure", "always"] },
+            environmentFile: { type: "string", minLength: 1 },
+            logs: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                directory: { type: "string", minLength: 1 },
+                maxBytes: { type: "integer", minimum: 1, maximum: 1_073_741_824 },
+                retainFiles: { type: "integer", minimum: 1, maximum: 100 },
+              },
+              required: ["directory"],
+            },
+          },
+          required: ["agentConfig", "startAtLogin", "restartPolicy", "logs"],
+        },
+      },
+      additionalProperties: false,
+    },
+  },
+  required: ["configVersion", "services"],
+});
+
+function parseService(value: unknown, id: string): ServiceMacosServiceConfig {
+  const input = readRecord(value, `services.${id}`);
+  rejectUnknown(input, SERVICE_KEYS, `services.${id}`);
+  const agentConfig = absolutePath(input.agentConfig, `services.${id}.agentConfig`);
+  const startAtLogin = boolean(input.startAtLogin, `services.${id}.startAtLogin`);
+  const restartPolicy = enumValue(
+    input.restartPolicy,
+    ["never", "on-failure", "always"] as const,
+    `services.${id}.restartPolicy`,
+  );
+  const environmentFile = input.environmentFile === undefined
+    ? undefined
+    : absolutePath(input.environmentFile, `services.${id}.environmentFile`);
+  const logs = parseLogs(input.logs, id);
+  return Object.freeze({
+    agentConfig,
+    startAtLogin,
+    restartPolicy,
+    ...(environmentFile === undefined ? {} : { environmentFile }),
+    logs,
+  });
+}
+
+function parseLogs(value: unknown, id: string): ServiceMacosLogsConfig {
+  const input = readRecord(value, `services.${id}.logs`);
+  rejectUnknown(input, LOG_KEYS, `services.${id}.logs`);
+  return Object.freeze({
+    directory: absolutePath(input.directory, `services.${id}.logs.directory`),
+    maxBytes: integer(input.maxBytes, DEFAULT_LOG_MAX_BYTES, 1_073_741_824, `services.${id}.logs.maxBytes`),
+    retainFiles: integer(input.retainFiles, DEFAULT_LOG_RETAIN_FILES, 100, `services.${id}.logs.retainFiles`),
+  });
+}
+
+function readRecord(value: unknown, field: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ServiceMacosConfigError(`${field} must be an object.`);
+  }
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new ServiceMacosConfigError(`${field} must be a plain object.`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function rejectUnknown(input: Record<string, unknown>, allowed: ReadonlySet<string>, field: string): void {
+  const unknown = Object.keys(input).filter((key) => !allowed.has(key)).sort();
+  if (unknown.length > 0) throw new ServiceMacosConfigError(`${field} contains unknown field(s): ${unknown.join(", ")}.`);
+}
+
+function absolutePath(value: unknown, field: string): string {
+  const path = optionalString(value, field, true);
+  if (path === undefined || !isAbsolute(path)) throw new ServiceMacosConfigError(`${field} must be an absolute path.`);
+  return resolve(path);
+}
+
+function optionalString(value: unknown, field: string, rejectControl: boolean): string | undefined {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value !== value.trim()
+    || value.length > 4_096
+    || (rejectControl && /[\u0000-\u001f\u007f]/u.test(value))
+  ) {
+    throw new ServiceMacosConfigError(`${field} must be a non-empty bounded string without surrounding whitespace.`);
+  }
+  return value;
+}
+
+function boolean(value: unknown, field: string): boolean {
+  if (typeof value !== "boolean") throw new ServiceMacosConfigError(`${field} must be a boolean.`);
+  return value;
+}
+
+function integer(value: unknown, fallback: number, maximum: number, field: string): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || (value as number) <= 0 || (value as number) > maximum) {
+    throw new ServiceMacosConfigError(`${field} must be a positive integer no greater than ${String(maximum)}.`);
+  }
+  return value as number;
+}
+
+function enumValue<T extends string>(value: unknown, allowed: readonly T[], field: string): T {
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    throw new ServiceMacosConfigError(`${field} must be one of: ${allowed.join(", ")}.`);
+  }
+  return value as T;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

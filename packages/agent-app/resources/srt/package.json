@@ -1,9 +1,0 @@
-{
-  "name": "@mono-agent/managed-srt",
-  "version": "0.0.0",
-  "private": true,
-  "description": "Integrity-locked install input for mono-agent's managed sandbox runtime.",
-  "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "0.0.64"
-  }
-}

@@ -25,14 +25,26 @@ export interface WebhookListenConfig {
 
 export interface WebhookConfig {
   readonly listen: WebhookListenConfig;
+  readonly allowNonLoopback: boolean;
   /** Resolved secret. Public config accepts only the SDK-owned {$env} directive. */
   readonly apiKey: string;
+  /** Optional resolved HMAC-SHA256 secret required in addition to bearer auth. */
+  readonly signatureSecret?: string;
   readonly path: string;
   readonly mode: WebhookMode;
   readonly maxBodyBytes: number;
   readonly maxRunMs: number;
   readonly retentionMs: number;
   readonly maxStoredRequests: number;
+  readonly outbound?: WebhookOutboundConfig;
+}
+
+export interface WebhookOutboundConfig {
+  readonly url: string;
+  readonly apiKey?: string;
+  readonly signatureSecret?: string;
+  readonly timeoutMs: number;
+  readonly maxResponseBytes: number;
 }
 
 export class WebhookConfigError extends Error {
@@ -46,13 +58,16 @@ export class WebhookConfigError extends Error {
 
 const CONFIG_KEYS = new Set([
   "listen",
+  "allowNonLoopback",
   "apiKey",
+  "signatureSecret",
   "path",
   "mode",
   "maxBodyBytes",
   "maxRunMs",
   "retentionMs",
   "maxStoredRequests",
+  "outbound",
 ]);
 
 export function parseWebhookConfig(value: unknown): WebhookConfig {
@@ -60,7 +75,9 @@ export function parseWebhookConfig(value: unknown): WebhookConfig {
   rejectUnknownKeys(input, CONFIG_KEYS, "Webhook channel config");
 
   const listen = parseListen(input.listen);
+  const allowNonLoopback = readBoolean(input.allowNonLoopback, "allowNonLoopback", false);
   const apiKey = parseApiKey(input.apiKey);
+  const signatureSecret = parseOptionalSecret(input.signatureSecret, "signatureSecret");
   const path = parsePath(input.path);
   const mode = parseMode(input.mode);
   const maxBodyBytes = readBoundedInteger(
@@ -92,21 +109,28 @@ export function parseWebhookConfig(value: unknown): WebhookConfig {
     MAX_STORED_REQUESTS,
   );
 
-  if (!isLoopbackHost(listen.host)) {
+  if (!isLoopbackHost(listen.host) && !allowNonLoopback) {
     throw new WebhookConfigError(
-      "listen.host must be loopback for the HTTP-only webhook channel.",
+      "listen.host must be loopback unless allowNonLoopback is explicitly true.",
     );
   }
+  if (!isLoopbackHost(listen.host) && (apiKey.length < 32 || (signatureSecret?.length ?? 0) < 32)) {
+    throw new WebhookConfigError("A non-loopback webhook listener requires bearer and signature secrets of at least 32 characters.");
+  }
+  const outbound = parseOutbound(input.outbound);
 
   return {
     listen,
+    allowNonLoopback,
     apiKey,
+    ...(signatureSecret === undefined ? {} : { signatureSecret }),
     path,
     mode,
     maxBodyBytes,
     maxRunMs,
     retentionMs,
     maxStoredRequests,
+    ...(outbound === undefined ? {} : { outbound }),
   };
 }
 
@@ -123,12 +147,14 @@ export const webhookConfigSchema = Object.freeze({
           port: { type: "integer", minimum: 0, maximum: 65_535, default: DEFAULT_WEBHOOK_PORT },
         },
       },
+      allowNonLoopback: { type: "boolean", default: false },
       apiKey: envEligibleSchema({
         type: "string",
         minLength: 1,
         maxLength: 4_096,
         pattern: "^\\S+$",
       }, { secret: true }),
+      signatureSecret: envEligibleSchema({ type: "string", minLength: 20, maxLength: 4_096 }, { secret: true }),
       path: { type: "string", default: DEFAULT_WEBHOOK_PATH },
       mode: { enum: ["sync", "async"], default: DEFAULT_WEBHOOK_MODE },
       maxBodyBytes: {
@@ -154,6 +180,18 @@ export const webhookConfigSchema = Object.freeze({
         minimum: 1,
         maximum: MAX_STORED_REQUESTS,
         default: DEFAULT_MAX_STORED_REQUESTS,
+      },
+      outbound: {
+        type: "object",
+        additionalProperties: false,
+        required: ["url"],
+        properties: {
+          url: { type: "string", format: "uri" },
+          apiKey: envEligibleSchema({ type: "string", minLength: 1, maxLength: 4_096 }, { secret: true }),
+          signatureSecret: envEligibleSchema({ type: "string", minLength: 20, maxLength: 4_096 }, { secret: true }),
+          timeoutMs: { type: "integer", minimum: 1, maximum: 60_000, default: 10_000 },
+          maxResponseBytes: { type: "integer", minimum: 1, maximum: 1024 * 1024, default: 256 * 1024 },
+        },
       },
     },
     required: ["apiKey"],
@@ -203,6 +241,36 @@ function parseApiKey(value: unknown): string {
     );
   }
   return value;
+}
+
+function parseOptionalSecret(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length < 20 || value.length > 4_096 || /\s/u.test(value)) {
+    throw new WebhookConfigError(`${field} must be a resolved 20-4096 character env-only secret.`);
+  }
+  return value;
+}
+
+function parseOutbound(value: unknown): WebhookOutboundConfig | undefined {
+  if (value === undefined) return undefined;
+  const input = readRecord(value, "outbound");
+  rejectUnknownKeys(input, new Set(["url", "apiKey", "signatureSecret", "timeoutMs", "maxResponseBytes"]), "outbound");
+  const urlText = readString(input.url, "outbound.url");
+  let url: URL;
+  try { url = new URL(urlText); } catch { throw new WebhookConfigError("outbound.url must be an absolute URL."); }
+  if (url.username !== "" || url.password !== "" || url.hash !== "" || (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname)))) {
+    throw new WebhookConfigError("outbound.url must use HTTPS, or HTTP on loopback, without credentials or a fragment.");
+  }
+  const apiKey = input.apiKey === undefined ? undefined : parseApiKey(input.apiKey);
+  const signatureSecret = parseOptionalSecret(input.signatureSecret, "outbound.signatureSecret");
+  if (apiKey === undefined && signatureSecret === undefined) throw new WebhookConfigError("outbound requires apiKey or signatureSecret authentication.");
+  return Object.freeze({
+    url: url.toString(),
+    ...(apiKey === undefined ? {} : { apiKey }),
+    ...(signatureSecret === undefined ? {} : { signatureSecret }),
+    timeoutMs: readBoundedInteger(input.timeoutMs, "outbound.timeoutMs", 10_000, 1, 60_000),
+    maxResponseBytes: readBoundedInteger(input.maxResponseBytes, "outbound.maxResponseBytes", 256 * 1024, 1, 1024 * 1024),
+  });
 }
 
 function parsePath(value: unknown): string {
@@ -283,4 +351,10 @@ function readBoundedInteger(
     throw new WebhookConfigError(`${field} must be an integer from ${String(minimum)} to ${String(maximum)}.`);
   }
   return value as number;
+}
+
+function readBoolean(value: unknown, field: string, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") throw new WebhookConfigError(`${field} must be a boolean.`);
+  return value;
 }

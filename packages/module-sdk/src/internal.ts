@@ -71,11 +71,63 @@ export interface StateWriteResult {
   readonly updatedAt: string;
 }
 
+export interface StateCompareAndSwapRequest {
+  readonly key: string;
+  /** `null` means the key must not exist. */
+  readonly expectedVersion: string | null;
+  readonly value: Uint8Array;
+  readonly signal: AbortSignal;
+}
+
+export type StateCompareAndSwapResult =
+  | { readonly status: "applied"; readonly record: StateRecord }
+  | { readonly status: "conflict"; readonly currentVersion?: string };
+
+export interface StatePresenceRecord {
+  readonly presenceId: string;
+  readonly agentId: string;
+  readonly instanceId: string;
+  readonly updatedAt: string;
+  readonly expiresAt: string;
+  readonly metadata?: JsonObject;
+}
+
+export interface StatePresenceUpsertRequest {
+  readonly presence: StatePresenceRecord;
+  readonly signal: AbortSignal;
+}
+
+export interface StatePresenceRemoveRequest {
+  readonly presenceId: string;
+  readonly instanceId: string;
+  readonly signal: AbortSignal;
+}
+
+export interface StatePresenceListRequest {
+  readonly agentId?: string;
+  readonly includeExpired?: boolean;
+  readonly signal: AbortSignal;
+}
+
+export type StateHostPresenceStatus = "starting" | "ready" | "degraded" | "stopping" | "stopped";
+
+export interface StateHostPresenceRequest {
+  readonly status: StateHostPresenceStatus;
+  readonly details?: JsonObject;
+  readonly signal: AbortSignal;
+}
+
 export interface StateStore extends ModuleInstance {
   read(request: StateReadRequest): Promise<StateRecord | undefined>;
   write(request: StateWriteRequest): Promise<StateWriteResult>;
   delete(request: StateDeleteRequest): Promise<boolean>;
   list(request: StateListRequest): Promise<StateListResult>;
+  compareAndSwap(request: StateCompareAndSwapRequest): Promise<StateCompareAndSwapResult>;
+  upsertPresence(request: StatePresenceUpsertRequest): Promise<StatePresenceRecord>;
+  removePresence(request: StatePresenceRemoveRequest): Promise<boolean>;
+  listPresence(request: StatePresenceListRequest): Promise<readonly StatePresenceRecord[]>;
+  /** Optionally publishes owner-private process discovery outside the key/value namespace. */
+  publishHostPresence?(request: StateHostPresenceRequest): Promise<void>;
 }
 
 export type StateHost = ModuleHost;
@@ -137,7 +189,7 @@ export interface ExportResult {
 
 export interface Exporter extends ModuleInstance {
   export(batch: ExportBatch): Promise<ExportResult>;
-  flush?(signal: AbortSignal): Promise<void>;
+  flush(signal: AbortSignal): Promise<void>;
 }
 
 export type ExporterHost = ModuleHost;

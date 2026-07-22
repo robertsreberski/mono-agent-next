@@ -108,26 +108,17 @@ async function collectSources() {
       return firstSegment !== "skills" && firstSegment !== "superpowers";
     })
     .map((path) => ({ path, source: "docs" }));
-  const composerRoot = join(repositoryRoot, "packages", "agent-app", "skills", "mono-agent-composer");
-  const composerFiles = [
-    join(composerRoot, "SKILL.md"),
-    ...(await walkMarkdown(join(composerRoot, "references"))),
-  ].map((path) => ({ path, source: "composer" }));
 
   const records = [];
-  for (const record of [...docsFiles, ...composerFiles].sort((left, right) => left.path.localeCompare(right.path))) {
+  for (const record of docsFiles.sort((left, right) => left.path.localeCompare(right.path))) {
     const markdown = await readFile(record.path, "utf8");
-    const logicalPath = record.source === "docs"
-      ? `docs/${toPosixPath(relative(docsRoot, record.path))}`
-      : `composer/${toPosixPath(relative(composerRoot, record.path))}`;
+    const logicalPath = `docs/${toPosixPath(relative(docsRoot, record.path))}`;
     records.push({
-      source: record.source,
+      source: "docs",
       path: logicalPath,
       markdown,
-      ...(record.source === "docs" ? {
-        route: docsRoute(logicalPath),
-        canonicalUrl: canonicalDocsUrl(logicalPath),
-      } : {}),
+      route: docsRoute(logicalPath),
+      canonicalUrl: canonicalDocsUrl(logicalPath),
     });
   }
   return records;

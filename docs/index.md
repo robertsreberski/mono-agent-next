@@ -1,50 +1,80 @@
 ---
 title: "Home"
-description: "Build and operate a config-first agent across channels, runtimes, tools, memory, and observability."
+description: "Build and understand the private mono-agent v1 source target: strict selected modules, standalone operator products, and explicit delivery phases."
 sidebar:
   order: 0
 ---
 
-**mono-agent** is a config-first agent framework: one `mono-agent.config.json` turns any folder into a running agent, served at once over Webhook, an OpenAI-compatible API, Telegram, Slack, WhatsApp, A2A, and cron. It is published as `@mono-agent/*` packages on npm and driven by the `mono-agent` CLI — point a model at a workspace, flip on the channels you want, and `mono-agent start`.
+mono-agent v1 is a config-first agent framework. One strict
+`mono-agent.config.json` selects typed runtime, channel, memory, state, trigger,
+exporter, and sandbox modules; `@mono-agent/core` validates their installed
+identity and runs them through neutral contracts.
 
-:::note
-New here? Read [Getting Started → Quickstart](/getting-started/quickstart/) to go from an empty folder to a live agent in a few commands.
+This documentation describes the private `mono-agent-next` source target. The
+repository is not yet a published release and is not the live source for
+existing agents.
+
+:::caution
+Building or testing this source tree does not authorize package publication,
+deployment, service changes, data migration, production soak, cutover, or
+predecessor retirement. Those are a later, separately approved phase.
 :::
 
-## What you get
+## Start here
 
-- **Any backend, one model string** — `runtime.model` defaults to `codex:gpt-5.6-terra` and can select claude (sdk/cli), codex (cli), pi (sdk, 15+ providers), or opencode (cli); e.g. `codex:gpt-5.6-terra`, `codex:gpt-5.6-sol`, `pi:openai-codex:gpt-5.6-sol`, and `pi:opencode-go:kimi-k2.6`.
-- **Many channels, one config** — external transports are opt-in, the loopback TUI operator endpoint is opt-out, and every active surface uses the same configured runtime, tools, memory, and context through its own responder/harness.
-- **Batteries included** — managed Read/Write/Edit/Glob/Grep/Bash/NodeRepl/WebFetch/WebSearch tools, a tool policy, MCP servers, a native sandbox, tiered memory, and observability.
+1. [Install the private source workspace](/getting-started/install/) and run its
+   focused verification.
+2. [Prove and inspect a first agent](/getting-started/quickstart/) through the
+   packed minimal path.
+3. [Learn the v1 concepts](/getting-started/concepts/) before changing config or
+   adding a module.
+4. Read the [exact v1 architecture](/reference/v1-architecture/) for the closed
+   23-package roster and dependency rules.
 
-```json
-{
-  "runtime": { "model": "codex:gpt-5.6-terra" },
-  "context": { "identityPath": "./IDENTITY.md" },
-  "telegram": { "enabled": true },
-  "openaiApi": { "enabled": true }
-}
+## What v1 contains
+
+- Four runtime modules: Pi, Claude, Codex, and OpenCode.
+- Five channel modules: Telegram, Slack, webhook, OpenAI-compatible API, and the
+  authenticated operator channel.
+- Optional local memory, durable state, cron triggers, OTLP export, and SRT
+  sandboxing.
+- A shared operator protocol plus separate terminal and browser products.
+- A thin CLI, a transactional three-template scaffolder, explicit macOS service
+  management, and a version-matched documentation MCP companion.
+
+The implementation is 23 publishable packages with narrow ownership. Installing
+a package does not activate it: agent-process modules require an explicit
+`$use`, a direct project dependency, and matching root lockfile evidence.
+
+## Core execution path
+
+```text
+strict config + direct dependencies + lockfile
+  -> @mono-agent/core
+  -> selected modules
+  -> normalized turn, delivery, persistence, telemetry, and lifecycle contracts
 ```
 
-Equivalent env overrides: `MONO_AGENT_MODEL=codex:gpt-5.6-terra` and, for the enabled Telegram channel, `MONO_AGENT_TELEGRAM_BOT_TOKEN=...` in `.env`. Source configs omit credentials; see [Environment variables](/config/env-vars/) for the full mapping.
+Provider and channel behavior stays in the selected implementation. Core
+coordinates; it does not hide errors, install packages, discover arbitrary
+paths, or silently substitute another capability.
 
-## Site map
+## Operator boundary
 
-- **[Getting Started](/getting-started/)** — install the CLI, scaffold a config, and run your first agent.
-- **[Config](/config/)** — the `mono-agent.config.json` blueprint, env-var precedence, and folder layout.
-- **[Runtime](/runtime/)** — model backends, fallback chains, local providers, effort/permissions, sessions, concurrency, and tool guards.
-- **[Channels](/channels/)** — Telegram, Slack, WhatsApp, Webhook, OpenAI-compatible API, A2A, cron, and proactive delivery.
-- **[Memory](/memory/)** — tiered capture/recall, embeddings, consolidation, the entity graph, and validation/CLI.
-- **[Context](/context/)** — identity/soul, skills, and how the system prompt is assembled per turn.
-- **[Tools](/tools/)** — the tool policy (allow/deny), MCP integration, and the native sandbox.
-- **[Observability & operator consoles](/observability/)** — JSONL artifacts and traces, Phoenix/OTLP export and backfill, the CLI, TUI, and always-on web console.
-- **[Programmatic](/programmatic/)** — the `code`-only escape hatches: composition, approval gates, structured output, multi-agent, A2A consumers, and custom channels.
-- **[Playbooks](/playbooks/)** — end-to-end recipes (Telegram BuJo assistant, Slack MCP bot, local-only Ollama, sandboxed code agent, and more).
-- **[Packages](/reference/packages/)** — every published package, its ownership tier, responsibility, npm page, and authoritative README.
-- **[Reference](/reference/)** — the feature matrix, glossary, compatibility decisions, and setup-security contracts.
+An agent opts into operator access by selecting
+`@mono-agent/channel-operator`, an authenticated loopback channel. The
+standalone `@mono-agent/tui` and `@mono-agent/web` products connect through the
+shared `@mono-agent/operator` protocol. They are not embedded in agent config,
+and closing a renderer does not stop the agent.
 
-## Config-first philosophy
+Web has a separate config, process, listener, authentication boundary, and
+owner-private durable conversation store. The TUI owns terminal presentation
+only.
 
-Everything that defines a running agent lives in `mono-agent.config.json`, resolved with a strict precedence for fields that expose an environment mapping: **process env > `mono-agent.config.json` > built-in defaults**. Documented `MONO_AGENT_*` overrides let one source config run in different environments without embedding credentials; JSON-only fields remain in the config file.
+## Safety model
 
-External channels and optional subsystems are generally **opt-in**: a transport is dormant until you enable it, while the loopback TUI endpoint defaults on and can be disabled explicitly. Security-sensitive surfaces (sandbox fallback, network policy, send-tool allowlists) **fail closed** by default. Approval gates, structured output, custom runtimes/channels, and direct runtime live input are programmatic escape hatches; managed Slack, Telegram, and web-console turns provide live follow-up steering automatically on capable backends. See [Programmatic](/programmatic/).
+V1 rejects unknown config, implicit secrets, unsafe module locations, dependency
+or lockfile drift, incompatible module metadata, unsafe local storage, corrupt
+durable formats, unbounded transport inputs, and unverifiable sandbox or export
+destinations. Failures remain observable; unsafe state is preserved for
+inspection instead of being repaired or overwritten.

@@ -19,8 +19,10 @@ Catalog responsibility: Defines the Apache-licensed typed module contracts, sche
 
 Define the stable module manifest and executable-schema shape, normalized
 runtime/channel/memory contracts, lifecycle and diagnostic primitives,
-configuration provenance helpers, and public compliance assertions used at the
-mono-agent extension boundary.
+configuration provenance and cross-slot reference helpers, and public
+compliance assertions used at the mono-agent extension boundary. The package
+also owns the small owner-private filesystem and bounded HTTP primitives shared
+by modules so their security behavior does not drift by implementation.
 
 ## Install / Usage
 
@@ -115,7 +117,9 @@ working directory.
 
 | Entry point | Audience | Contents |
 | --- | --- | --- |
-| `@mono-agent/module-sdk` | Public module authors and core | Open runtime, channel, and memory contracts plus schema/provenance and lifecycle primitives. |
+| `@mono-agent/module-sdk` | Public module authors and core | Open runtime, channel, and memory contracts plus schema/provenance, lifecycle, and shared security primitives. |
+| `@mono-agent/module-sdk/secure-fs` | Durable modules and host products | Exact-owner/mode, no-follow file inspection and transactional create/replace helpers. |
+| `@mono-agent/module-sdk/http` | Modules with bounded HTTP clients | HTTPS-or-literal-loopback URL policy, checked redirects, timeout, and bounded response reads. |
 | `@mono-agent/module-sdk/testing` | Module test suites and loaders | Structural compliance assertions for definitions and created instances. |
 | `@mono-agent/module-sdk/internal` | First-party monorepo packages only | Reserved state, trigger, exporter, and sandbox definitions pending future promotion. |
 
@@ -130,13 +134,18 @@ There is no generic plugin hook or discovery registry.
 | Need | Primary API |
 | --- | --- |
 | Declare compatible module metadata | `MODULE_API_VERSION`, `ModuleManifest`, `ModuleSchema` |
-| Implement a runtime | `defineRuntimeModule`, `Runtime`, `RuntimeTurnRequest`, `RuntimeTurnContext`, `RuntimeTurnResult` |
-| Implement a channel | `defineChannelModule`, `Channel`, `ChannelHost`, `ChannelInboundRequest`, `ChannelReplySink` |
-| Implement memory | `defineMemoryModule`, `Memory`, `MemoryRecallRequest`, `MemoryRecallResult` |
+| Implement a runtime | `defineRuntimeModule`, `Runtime`, `RuntimeTurnRequest`, `RuntimeTurnContext`, `RuntimeTurnResult`, `RuntimeTurnError` |
+| Stream usage, compaction, sessions, and live input | `RuntimeTurnEvent`, `RuntimeUsage`, `RuntimeSession`, `RuntimeLiveInputHandler` |
+| Implement a channel | `defineChannelModule`, `Channel`, `ChannelHost`, `ChannelInboundRequest`, `ChannelReplySink`, `ChannelCapabilities` |
+| Normalize attachments and blocking questions | `NormalizedAttachment`, `AskUserRequest`, `AskUserAnswer` |
+| Implement memory | `defineMemoryModule`, `Memory`, `MemoryRecallRequest`, `MemoryRecallResult`, `MemoryRuntimeCaptureGrant` |
 | Report lifecycle and health | `ModuleInstance`, `ModuleHealth`, `ModuleDiagnostic`, `ModuleCommand` |
 | Explain config sources safely | `ConfigProvenance`, `ConfigProvenanceMap`, `configPathToPointer`, `provenanceAt` |
 | Return structured config failures | `ModuleConfigError`, `ConfigIssue`, `configIssue`, `parseModuleConfig` |
 | Mark an env-backed or secret scalar | `envEligibleSchema`, `MODULE_SCHEMA_ENV_ELIGIBLE`, `MODULE_SCHEMA_SECRET` |
+| Reference another selected slot | `crossSlotReferenceSchema`, `readCrossSlotReference`, `MODULE_SCHEMA_SLOT_REFERENCE` |
+| Read or atomically replace owner-private data | `readOwnerPrivateFile`, `createOwnerPrivateFile`, `atomicReplaceOwnerPrivateFile` from `@mono-agent/module-sdk/secure-fs` |
+| Make a bounded checked HTTP request | `checkedFetch`, `assertSafeHttpUrl` from `@mono-agent/module-sdk/http` |
 | Test a third-party implementation | `assertRuntimeModuleCompliance`, `assertChannelModuleCompliance`, `assertMemoryModuleCompliance` from `@mono-agent/module-sdk/testing` |
 
 Reserved-slot definitions are not public extension contracts. They are
@@ -150,31 +159,62 @@ Every symbol exported by each public code entrypoint is listed below.
 **`@mono-agent/module-sdk`**
 
 ```text
+AskUserAnswer
+AskUserChoice
+AskUserQuestion
+AskUserRequest
+AtomicReplaceOwnerPrivateFileOptions
+AttachmentKind
 Awaitable
+BoundedHttpResponse
 Channel
 ChannelActor
+ChannelAskAnswerResult
 ChannelAttachment
+ChannelCancelRequest
+ChannelCancelResult
 ChannelCapabilities
+ChannelConversationListRequest
+ChannelConversationListResult
+ChannelConversationSummary
 ChannelDeliveryResult
 ChannelHost
 ChannelInboundRequest
+ChannelLiveInput
+ChannelLiveInputResult
 ChannelModuleCreateContext
 ChannelModuleDefinition
+ChannelOpenConversationRequest
+ChannelOpenConversationResult
 ChannelOutboundMessage
+ChannelReplayEntry
+ChannelReplayRequest
+ChannelReplayResult
 ChannelReplyActivityEvent
+ChannelReplyAskUserEvent
 ChannelReplyAttachmentEvent
 ChannelReplyEvent
 ChannelReplySink
 ChannelReplyTextDeltaEvent
 ChannelReplyTextReplaceEvent
+ChannelReplyUsageEvent
 ChannelTurnResult
+CheckedFetchOptions
 ConfigIssue
 ConfigPath
 ConfigPathSegment
 ConfigProvenance
 ConfigProvenanceMap
 ConfigProvenanceSource
+CrossSlotReference
+DEFAULT_HTTP_MAX_REDIRECTS
+DEFAULT_HTTP_MAX_RESPONSE_BYTES
+DEFAULT_HTTP_TIMEOUT_MS
+DEFAULT_OWNER_PRIVATE_READ_MAX_BYTES
 EnvEligibleSchemaOptions
+HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE
+HttpSafetyError
+HttpSafetyErrorCode
 JsonObject
 JsonPrimitive
 JsonSchema
@@ -182,6 +222,7 @@ JsonValue
 MODULE_API_VERSION
 MODULE_SCHEMA_ENV_ELIGIBLE
 MODULE_SCHEMA_SECRET
+MODULE_SCHEMA_SLOT_REFERENCE
 Memory
 MemoryCapabilities
 MemoryCaptureRequest
@@ -192,6 +233,9 @@ MemoryModuleDefinition
 MemoryRecallRequest
 MemoryRecallResult
 MemoryRecord
+MemoryRuntimeCaptureGrant
+MemoryRuntimeCaptureRequest
+MemoryRuntimeCaptureResult
 ModuleApiVersion
 ModuleCapability
 ModuleCommand
@@ -215,24 +259,40 @@ ModuleLogFields
 ModuleLogger
 ModuleManifest
 ModuleSchema
+ModuleSlot
 ModuleStartContext
 ModuleStopContext
 ModuleStopReason
 MonoAgentModule
+NormalizedAttachment
 OPEN_MODULE_KINDS
+OWNER_PRIVATE_DIRECTORY_MODE
+OWNER_PRIVATE_FILE_MODE
 OpenModuleDefinition
+OwnerPrivateOperationOptions
+OwnerPrivatePathError
+OwnerPrivatePathErrorCode
+OwnerPrivatePathIdentity
 ParseModuleConfigOptions
+ReadOwnerPrivateFileOptions
 Runtime
 RuntimeCapabilities
+RuntimeCompaction
+RuntimeCompactionEvent
 RuntimeCompletedTurnResult
 RuntimeDiagnosticEvent
 RuntimeHost
 RuntimeIncompleteTurnResult
+RuntimeLiveInput
+RuntimeLiveInputDisposition
+RuntimeLiveInputHandler
 RuntimeModelValidation
 RuntimeModuleCreateContext
 RuntimeModuleDefinition
+RuntimeRetryability
 RuntimeSession
 RuntimeSessionEvent
+RuntimeSideEffectStatus
 RuntimeTextDeltaEvent
 RuntimeThinkingDeltaEvent
 RuntimeToolCall
@@ -245,12 +305,16 @@ RuntimeToolResultJsonPart
 RuntimeToolResultPart
 RuntimeToolResultTextPart
 RuntimeTurnContext
+RuntimeTurnError
+RuntimeTurnErrorOptions
 RuntimeTurnEvent
 RuntimeTurnOptions
 RuntimeTurnRequest
 RuntimeTurnResult
 RuntimeUsage
+RuntimeUsageCost
 RuntimeUsageEvent
+TurnAttachmentPart
 TurnContentPart
 TurnFilePart
 TurnImagePart
@@ -259,19 +323,48 @@ TurnRole
 TurnTextPart
 TurnToolCallPart
 TurnToolResultPart
+assertSafeHttpUrl
+atomicReplaceOwnerPrivateFile
+checkedFetch
 configIssue
 configPathToPointer
+createOwnerPrivateFile
+crossSlotReferenceSchema
 defineChannelModule
 defineConfigProvenance
 defineMemoryModule
 defineModuleSchema
 defineRuntimeModule
+ensureOwnerPrivateDirectory
 envEligibleSchema
+fetchBounded
+inspectOwnerPrivateDirectory
+inspectOwnerPrivateFile
 isEnvEligibleSchema
+isLiteralLoopbackHostname
 isModuleConfigError
+isRuntimeTurnError
 isSecretSchema
 parseModuleConfig
 provenanceAt
+readCrossSlotReference
+readOwnerPrivateFile
+```
+
+**`@mono-agent/module-sdk/http`**
+
+```text
+BoundedHttpResponse
+CheckedFetchOptions
+DEFAULT_HTTP_MAX_REDIRECTS
+DEFAULT_HTTP_MAX_RESPONSE_BYTES
+DEFAULT_HTTP_TIMEOUT_MS
+HttpSafetyError
+HttpSafetyErrorCode
+assertSafeHttpUrl
+checkedFetch
+fetchBounded
+isLiteralLoopbackHostname
 ```
 
 **`@mono-agent/module-sdk/internal`**
@@ -294,12 +387,20 @@ SandboxHost
 SandboxModuleCreateContext
 SandboxModuleDefinition
 SandboxResult
+StateCompareAndSwapRequest
+StateCompareAndSwapResult
 StateDeleteRequest
 StateHost
+StateHostPresenceRequest
+StateHostPresenceStatus
 StateListRequest
 StateListResult
 StateModuleCreateContext
 StateModuleDefinition
+StatePresenceListRequest
+StatePresenceRecord
+StatePresenceRemoveRequest
+StatePresenceUpsertRequest
 StateReadRequest
 StateRecord
 StateStore
@@ -315,6 +416,26 @@ defineExporterModule
 defineSandboxModule
 defineStateModule
 defineTriggerModule
+```
+
+**`@mono-agent/module-sdk/secure-fs`**
+
+```text
+AtomicReplaceOwnerPrivateFileOptions
+DEFAULT_OWNER_PRIVATE_READ_MAX_BYTES
+OWNER_PRIVATE_DIRECTORY_MODE
+OWNER_PRIVATE_FILE_MODE
+OwnerPrivateOperationOptions
+OwnerPrivatePathError
+OwnerPrivatePathErrorCode
+OwnerPrivatePathIdentity
+ReadOwnerPrivateFileOptions
+atomicReplaceOwnerPrivateFile
+createOwnerPrivateFile
+ensureOwnerPrivateDirectory
+inspectOwnerPrivateDirectory
+inspectOwnerPrivateFile
+readOwnerPrivateFile
 ```
 
 **`@mono-agent/module-sdk/testing`**
@@ -337,9 +458,10 @@ assertSchemaCompliance
 
 ## Dependency Boundary
 
-This package has no runtime dependencies and imports no core host, provider
-SDK, transport, storage engine, UI, or service package. Core and configured
-modules depend on this package; this package never depends on them.
+This package has no runtime package dependencies and imports no core host,
+provider SDK, transport, storage engine, UI, or service package. Its shared
+security helpers use only Node.js built-ins and the built-in Fetch API. Core and
+configured modules depend on this package; this package never depends on them.
 
 Core resolves marked `$env` values before module parsing and retains raw
 references only in provenance and explain data. Modules must not retain or
@@ -354,6 +476,9 @@ render resolved secrets in diagnostics.
 - Generic plugin hooks, automatic installation, package scanning, or local-path
   modules.
 - Public extension promises for state, trigger, exporter, or sandbox slots.
+- A general-purpose filesystem abstraction, HTTP client, DNS/private-network
+  policy, credential store, retry loop, or transport-specific attachment
+  downloader.
 - Product protocols, TUI/web rendering, service management, or MCP behavior.
 
 ## Related Documentation
@@ -371,5 +496,8 @@ pnpm --filter @mono-agent/module-sdk test
 ```
 
 Focused tests cover immutable delayed definitions, all seven typed slots,
-structured config failures, provenance lookup, reserved-entrypoint isolation,
-and definition/instance compliance assertions.
+structured config failures, provenance and cross-slot annotations,
+reserved-entrypoint isolation, and definition/instance compliance assertions.
+Adversarial helper tests cover exact permissions, symlink rejection,
+no-clobber atomic writes, stale replacement identities, literal-loopback URL
+policy, checked redirects, byte bounds, and whole-request timeouts.

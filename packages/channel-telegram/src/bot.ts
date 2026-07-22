@@ -1,0 +1,241 @@
+import type { ChannelAttachment } from "@mono-agent/module-sdk";
+
+import type { TelegramConfig } from "./config.js";
+
+export interface TelegramRemoteAttachment {
+  readonly fileId: string;
+  readonly name: string;
+  readonly mediaType: string;
+  readonly sizeBytes?: number;
+}
+
+export interface TelegramMessageUpdate {
+  readonly updateId: number;
+  readonly kind: "message";
+  readonly chatId: string;
+  readonly messageId: string;
+  readonly senderId: string;
+  readonly senderName?: string;
+  readonly text: string;
+  readonly attachments: readonly TelegramRemoteAttachment[];
+  readonly receivedAt: string;
+}
+
+export interface TelegramCallbackUpdate {
+  readonly updateId: number;
+  readonly kind: "callback";
+  readonly callbackId: string;
+  readonly chatId: string;
+  readonly messageId: string;
+  readonly senderId: string;
+  readonly data: string;
+  readonly receivedAt: string;
+}
+
+export type TelegramUpdate = TelegramMessageUpdate | TelegramCallbackUpdate;
+
+export interface TelegramSendMessageRequest {
+  readonly chatId: string;
+  readonly text: string;
+  readonly replyToMessageId?: string;
+  readonly buttons?: readonly { readonly label: string; readonly data: string }[];
+  readonly idempotencyKey?: string;
+  readonly signal: AbortSignal;
+}
+
+export interface TelegramSendAttachmentRequest {
+  readonly chatId: string;
+  readonly attachment: ChannelAttachment;
+  readonly caption?: string;
+  readonly idempotencyKey?: string;
+  readonly signal: AbortSignal;
+}
+
+export interface TelegramBotClient {
+  poll(offset: number, timeoutSeconds: number, signal: AbortSignal): Promise<readonly TelegramUpdate[]>;
+  download(attachment: TelegramRemoteAttachment, maxBytes: number, signal: AbortSignal): Promise<ChannelAttachment>;
+  sendMessage(request: TelegramSendMessageRequest): Promise<{ readonly messageId: string }>;
+  sendAttachment(request: TelegramSendAttachmentRequest): Promise<{ readonly messageId: string }>;
+  answerCallback?(callbackId: string, signal: AbortSignal): Promise<void>;
+  setReaction?(chatId: string, messageId: string, emoji: string, signal: AbortSignal): Promise<void>;
+}
+
+export type TelegramBotClientFactory = (config: TelegramConfig) => TelegramBotClient;
+
+export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: typeof fetch = fetch): TelegramBotClient {
+  const api = `https://api.telegram.org/bot${config.botToken}`;
+  const fileApi = `https://api.telegram.org/file/bot${config.botToken}`;
+  const call = async (method: string, body: Readonly<Record<string, unknown>>, signal: AbortSignal): Promise<unknown> => {
+    const response = await fetchImpl(`${api}/${method}`, {
+      method: "POST",
+      redirect: "error",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    const value = await readBoundedJson(response, 2 * 1024 * 1024);
+    if (!response.ok || !isRecord(value) || value.ok !== true) throw new Error(`Telegram API ${method} failed with HTTP ${response.status}.`);
+    return value.result;
+  };
+
+  return {
+    async poll(offset, timeoutSeconds, signal) {
+      const raw = await call("getUpdates", { offset, timeout: timeoutSeconds, allowed_updates: ["message", "callback_query"] }, signal);
+      if (!Array.isArray(raw)) throw new Error("Telegram getUpdates returned an invalid result.");
+      return raw.map(parseUpdate).filter((update): update is TelegramUpdate => update !== undefined);
+    },
+    async download(attachment, maxBytes, signal) {
+      if (attachment.sizeBytes !== undefined && attachment.sizeBytes > maxBytes) throw new Error("Telegram attachment exceeds the configured byte limit.");
+      const file = await call("getFile", { file_id: attachment.fileId }, signal);
+      if (!isRecord(file) || typeof file.file_path !== "string" || !safeFilePath(file.file_path)) throw new Error("Telegram getFile returned an invalid path.");
+      const response = await fetchImpl(`${fileApi}/${file.file_path}`, { signal, redirect: "error" });
+      if (!response.ok) throw new Error(`Telegram file download failed with HTTP ${response.status}.`);
+      const data = await readBoundedBytes(response, maxBytes, "Telegram attachment");
+      return { id: attachment.fileId, kind: attachmentKind(attachment.mediaType), name: safeName(attachment.name), mediaType: attachment.mediaType, sizeBytes: data.byteLength, data };
+    },
+    async sendMessage(request) {
+      const result = await call("sendMessage", {
+        chat_id: request.chatId,
+        text: request.text,
+        ...(request.replyToMessageId === undefined ? {} : { reply_parameters: { message_id: numericMessageId(request.replyToMessageId) } }),
+        ...(request.buttons === undefined || request.buttons.length === 0 ? {} : { reply_markup: { inline_keyboard: [request.buttons.map((button) => ({ text: button.label, callback_data: button.data }))] } }),
+      }, request.signal);
+      return { messageId: telegramMessageId(result) };
+    },
+    async sendAttachment(request) {
+      const bytes = Buffer.from(request.attachment.data);
+      const form = new FormData();
+      form.set("chat_id", request.chatId);
+      form.set("document", new Blob([bytes], { type: request.attachment.mediaType }), safeName(request.attachment.name));
+      if (request.caption !== undefined) form.set("caption", request.caption);
+      const response = await fetchImpl(`${api}/sendDocument`, { method: "POST", body: form, signal: request.signal, redirect: "error" });
+      const value = await readBoundedJson(response, 2 * 1024 * 1024);
+      if (!response.ok || !isRecord(value) || value.ok !== true) throw new Error(`Telegram sendDocument failed with HTTP ${response.status}.`);
+      return { messageId: telegramMessageId(value.result) };
+    },
+    async answerCallback(callbackId, signal) { await call("answerCallbackQuery", { callback_query_id: callbackId }, signal); },
+    async setReaction(chatId, messageId, emoji, signal) { await call("setMessageReaction", { chat_id: chatId, message_id: numericMessageId(messageId), reaction: [{ type: "emoji", emoji }] }, signal); },
+  };
+}
+
+function parseUpdate(value: unknown): TelegramUpdate | undefined {
+  if (!isRecord(value) || !Number.isSafeInteger(value.update_id)) return undefined;
+  const updateId = value.update_id as number;
+  const now = new Date().toISOString();
+  if (isRecord(value.message)) {
+    const message = value.message;
+    if (!isRecord(message.chat) || !isRecord(message.from) || !Number.isSafeInteger(message.message_id)) return undefined;
+    const chatId = identifier(message.chat.id);
+    const senderId = identifier(message.from.id);
+    if (chatId === undefined || senderId === undefined) return undefined;
+    const text = typeof message.text === "string" ? message.text : typeof message.caption === "string" ? message.caption : "";
+    const senderName = telegramName(message.from);
+    return { updateId, kind: "message", chatId, messageId: String(message.message_id), senderId, ...(senderName === undefined ? {} : { senderName }), text, attachments: Object.freeze(parseAttachments(message)), receivedAt: typeof message.date === "number" ? new Date(message.date * 1_000).toISOString() : now };
+  }
+  if (isRecord(value.callback_query)) {
+    const callback = value.callback_query;
+    if (typeof callback.id !== "string" || typeof callback.data !== "string" || !isRecord(callback.from) || !isRecord(callback.message) || !isRecord(callback.message.chat) || !Number.isSafeInteger(callback.message.message_id)) return undefined;
+    const chatId = identifier(callback.message.chat.id);
+    const senderId = identifier(callback.from.id);
+    if (chatId === undefined || senderId === undefined) return undefined;
+    return { updateId, kind: "callback", callbackId: callback.id, chatId, messageId: String(callback.message.message_id), senderId, data: callback.data, receivedAt: now };
+  }
+  return undefined;
+}
+
+function parseAttachments(message: Record<string, unknown>): TelegramRemoteAttachment[] {
+  const result: TelegramRemoteAttachment[] = [];
+  if (isRecord(message.document) && typeof message.document.file_id === "string") result.push(remote(message.document, typeof message.document.file_name === "string" ? message.document.file_name : "document", typeof message.document.mime_type === "string" ? message.document.mime_type : "application/octet-stream"));
+  if (isRecord(message.voice) && typeof message.voice.file_id === "string") result.push(remote(message.voice, "voice.ogg", typeof message.voice.mime_type === "string" ? message.voice.mime_type : "audio/ogg"));
+  if (isRecord(message.audio) && typeof message.audio.file_id === "string") result.push(remote(message.audio, typeof message.audio.file_name === "string" ? message.audio.file_name : "audio", typeof message.audio.mime_type === "string" ? message.audio.mime_type : "audio/mpeg"));
+  if (Array.isArray(message.photo)) {
+    const photo = [...message.photo].reverse().find(isRecord);
+    if (photo !== undefined && typeof photo.file_id === "string") result.push(remote(photo, "photo.jpg", "image/jpeg"));
+  }
+  return result;
+}
+
+function remote(value: Record<string, unknown>, name: string, mediaType: string): TelegramRemoteAttachment {
+  return { fileId: value.file_id as string, name: safeName(name), mediaType, ...(Number.isSafeInteger(value.file_size) ? { sizeBytes: value.file_size as number } : {}) };
+}
+
+function telegramName(from: Record<string, unknown>): string | undefined {
+  const parts = [from.first_name, from.last_name].filter((value): value is string => typeof value === "string" && value.length > 0);
+  return parts.length > 0 ? parts.join(" ").slice(0, 256) : undefined;
+}
+
+function telegramMessageId(value: unknown): string {
+  if (!isRecord(value) || !Number.isSafeInteger(value.message_id)) throw new Error("Telegram send returned an invalid message id.");
+  return String(value.message_id);
+}
+
+function identifier(value: unknown): string | undefined {
+  return typeof value === "string" || typeof value === "number" || typeof value === "bigint" ? String(value) : undefined;
+}
+
+function safeName(value: string): string {
+  const name = value.replaceAll("\\", "/").split("/").at(-1)?.replace(/[\u0000-\u001f\u007f]/gu, "_").trim() ?? "attachment";
+  return (name.length === 0 ? "attachment" : name).slice(0, 255);
+}
+
+function attachmentKind(mediaType: string): "image" | "audio" | "file" {
+  return mediaType.startsWith("image/") ? "image" : mediaType.startsWith("audio/") ? "audio" : "file";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+
+async function readBoundedJson(response: Response, maxBytes: number): Promise<unknown> {
+  const bytes = await readBoundedBytes(response, maxBytes, "Telegram API response");
+  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+}
+
+async function readBoundedBytes(response: Response, maxBytes: number, label: string): Promise<Uint8Array> {
+  const declared = response.headers.get("content-length");
+  if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > maxBytes)) {
+    await response.body?.cancel();
+    throw new Error(`${label} exceeds the byte limit.`);
+  }
+  if (response.body === null) return new Uint8Array();
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      total += next.value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error(`${label} exceeds the byte limit.`);
+      }
+      chunks.push(next.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const result = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return result;
+}
+
+function safeFilePath(value: string): boolean {
+  return value.length > 0
+    && value.length <= 1_024
+    && !value.startsWith("/")
+    && !value.includes("\\")
+    && !value.includes("?")
+    && !value.includes("#")
+    && !/[\u0000-\u001f\u007f]/u.test(value)
+    && !value.split("/").some((part) => part.length === 0 || part === "." || part === "..");
+}
+
+function numericMessageId(value: string): number {
+  if (!/^\d+$/u.test(value)) throw new Error("Telegram reply message id is invalid.");
+  const result = Number(value);
+  if (!Number.isSafeInteger(result)) throw new Error("Telegram reply message id is invalid.");
+  return result;
+}

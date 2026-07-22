@@ -34,8 +34,6 @@ describe.sequential("@mono-agent/docs-mcp", () => {
 
     const corpus = await loadDocsCorpus(corpusDir);
     const paths = new Set(corpus.documents.map((document) => document.path));
-    expect(paths).toContain("composer/SKILL.md");
-    expect(paths).toContain("composer/references/feature-coverage.md");
     expect(paths).toContain("docs/reference/feature-matrix.md");
     expect(paths).toContain("docs/tools/documentation-mcp.md");
     expect([...paths].some((path) => path.startsWith("docs/skills/"))).toBe(false);
@@ -66,10 +64,10 @@ describe.sequential("@mono-agent/docs-mcp", () => {
 
   it("finds paraphrased concepts and exact identifiers as expanded, section-deduplicated excerpts", async () => {
     const index = new MonoAgentDocsSearchIndex(await loadDocsCorpus(corpusDir));
-    const exact = await index.search({ query: "runtime.fallbackModels", scope: "composer", limit: 5 });
+    const exact = await index.search({ query: "routing fallbacks", scope: "docs", limit: 5 });
     expect(exact.schema).toBe("mono-agent.docs.v2");
     expect(exact.results).toHaveLength(5);
-    expect(exact.results.every((result) => result.source === "composer")).toBe(true);
+    expect(exact.results.every((result) => result.source === "docs")).toBe(true);
     expect(exact.results.some((result) => /fallback/iu.test(`${result.headingPath.join(" ")} ${result.markdown}`))).toBe(true);
     expect(exact.results.every((result) => result.markdown.length <= 3_000 && result.markdown.length > 1_200)).toBe(true);
     expect(exact.navigation.nextActions[0]?.arguments).toEqual({ action: "read", target: exact.results[0]?.readTarget });
@@ -91,7 +89,7 @@ describe.sequential("@mono-agent/docs-mcp", () => {
 
   it("reads chunk, path, link, and exact non-overlapping continuation targets", async () => {
     const index = new MonoAgentDocsSearchIndex(await loadDocsCorpus(corpusDir));
-    const search = await index.search({ query: "channels.plugins[]", scope: "composer", limit: 3 });
+    const search = await index.search({ query: "channel-operator protocol", scope: "docs", limit: 3 });
     const expanded = index.read(search.results[0]!.readTarget);
     expect("error" in expanded).toBe(false);
     if ("error" in expanded) throw new Error(expanded.error.message);
@@ -162,7 +160,7 @@ describe.sequential("@mono-agent/docs-mcp", () => {
 
       const response = await client.callTool({
         name: MONO_AGENT_DOCS_TOOL_NAME,
-        arguments: { action: "search", query: "channels.plugins[]", scope: "composer", limit: 3 },
+        arguments: { action: "search", query: "channel-operator protocol", scope: "docs", limit: 3 },
       }) as unknown as { content: Array<{ type: string; text?: string; uri?: string }>; structuredContent?: MonoAgentDocsSearchResult };
       expect(response.structuredContent?.results[0]?.markdown.length).toBeGreaterThan(1_200);
       expect(response.content.some((block) => block.type === "text" && block.text?.includes('"action":"read"'))).toBe(true);
@@ -175,7 +173,7 @@ describe.sequential("@mono-agent/docs-mcp", () => {
         arguments: { action: "read", target },
       }) as unknown as { content: Array<{ type: string; text?: string }>; structuredContent?: MonoAgentDocsReadResult };
       expect(readResponse.structuredContent?.markdown.length).toBeGreaterThan(response.structuredContent!.results[0]!.markdown.length);
-      expect(readResponse.content.some((block) => block.text?.includes("Expanded documentation window"))).toBe(true);
+      expect(readResponse.content.some((block) => block.text?.includes("document window"))).toBe(true);
 
       const resource = await client.readResource({ uri: target! });
       expect(resource.contents[0]).toMatchObject({ uri: target, mimeType: "text/markdown" });

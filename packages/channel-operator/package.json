@@ -28,7 +28,7 @@
     "packageName": "@mono-agent/channel-operator",
     "apiVersion": 1,
     "kind": "channel",
-    "responsibility": "Serves one agent over the authenticated shared operator protocol."
+    "responsibility": "Serves one selected agent through the authenticated shared operator protocol."
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

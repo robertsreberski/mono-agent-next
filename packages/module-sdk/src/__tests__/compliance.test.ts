@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import * as publicApi from "../index.js";
 import {
   MODULE_API_VERSION,
+  MODULE_SCHEMA_SLOT_REFERENCE,
   defineChannelModule,
   defineMemoryModule,
   defineModuleSchema,
@@ -75,6 +76,7 @@ describe("public compliance assertions", () => {
           proactive: false,
           runtimeControl: false,
           verbatim: false,
+          cancellation: true,
         },
       }),
     });
@@ -121,6 +123,7 @@ describe("public compliance assertions", () => {
         proactive: false,
         runtimeControl: false,
         verbatim: false,
+        cancellation: true,
       },
     })).not.toThrow();
     expect(() => assertMemoryInstanceCompliance({
@@ -150,15 +153,48 @@ describe("public compliance assertions", () => {
         parse: () => ({}),
       }),
     };
+    const invalidReferenceSchema = {
+      ...invalid,
+      manifest: { ...invalid.manifest, apiVersion: 1, capabilities: [] },
+      schema: defineModuleSchema({
+        jsonSchema: {
+          type: "object",
+          properties: {
+            channel: {
+              type: "string",
+              [MODULE_SCHEMA_SLOT_REFERENCE]: { slot: "channel", capability: "" },
+            },
+          },
+        },
+        parse: () => ({}),
+      }),
+    };
 
     expect(() => assertRuntimeModuleCompliance(invalid)).toThrow("manifest.apiVersion must be 1");
     expect(() => assertRuntimeModuleCompliance(reservedSchema)).toThrow(
       "module schema may not define reserved directive property $use",
     );
+    expect(() => assertRuntimeModuleCompliance(invalidReferenceSchema)).toThrow(
+      "module schema has an invalid cross-slot reference annotation",
+    );
     expect(() => assertChannelModuleCompliance({
       ...reservedSchema,
       schema,
     })).toThrow("manifest.kind must be channel");
+  });
+
+  it("requires proactive channels to implement delivery", () => {
+    expect(() => assertChannelInstanceCompliance({
+      capabilities: {
+        attachments: false,
+        liveInput: false,
+        askUser: false,
+        proactive: true,
+        runtimeControl: false,
+        verbatim: false,
+        cancellation: true,
+      },
+    })).toThrow("proactive channel instance deliver must be a function");
   });
 });
 
