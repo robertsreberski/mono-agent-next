@@ -20,13 +20,16 @@ import {
   validateRelease,
 } from "../validate-release.mjs";
 import {
+  EMPTY_NPM_GLOBAL_CONFIG,
   PUBLIC_NPM_REGISTRY,
   assertBuildMarkerForHead,
   assertCurrentBuildProvenance,
+  assertNeutralNpmGlobalConfig,
   assertReleaseGitState,
   computeTarballIntegrity,
   executeFrozenPublish,
   freezeReleaseTarballs,
+  publishFrozenTarball,
   publicNpmEnvironment,
   runWorkspaceBuild,
   stagingDistTagForRelease,
@@ -49,6 +52,25 @@ describe("successor publish guard", () => {
       expect(() => assertPublishingAllowed({ repo })).not.toThrow();
     } finally {
       fs.rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("neutral npm config authority", () => {
+  test("rejects a group/world-writable global config even when its bytes are canonical", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-neutral-npmrc-"));
+    const configPath = path.join(directory, "empty.npmrc");
+    try {
+      fs.writeFileSync(
+        configPath,
+        "; Intentionally empty neutral npm global configuration for release subprocesses.\n",
+        { mode: 0o600 },
+      );
+      expect(() => assertNeutralNpmGlobalConfig(configPath)).not.toThrow();
+      fs.chmodSync(configPath, 0o666);
+      expect(() => assertNeutralNpmGlobalConfig(configPath)).toThrow(/unsafe or modified/u);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
     }
   });
 });
@@ -846,5 +868,98 @@ describe("hardened local release publish", () => {
       distTag: "mono-agent-stage-1-2-3",
       dryRun: true,
     }]);
+  });
+
+  test("uses force only for credential-free npm dry runs of immutable versions", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-release-dry-run-"));
+    const tarballPath = path.join(directory, "package.tgz");
+    fs.writeFileSync(tarballPath, "immutable tarball");
+    const pkg = {
+      name: "@mono-agent/example",
+      version: "1.2.3",
+      publishConfig: { access: "public" },
+      tarballPath,
+      integrity: computeTarballIntegrity(tarballPath),
+    };
+    const invocations = [];
+    const spawn = (command, args, options) => {
+      invocations.push({ command, args, cwd: options.cwd, env: options.env });
+      return { status: 0 };
+    };
+
+    try {
+      publishFrozenTarball(pkg, {
+        distTag: "mono-agent-stage-1-2-3",
+        dryRun: true,
+        npmEnvSource: {
+          NODE_AUTH_TOKEN: "not-a-real-node-token",
+          NPM_TOKEN: "not-a-real-dry-run-token",
+          NPM_DEV_TOKEN: "not-a-real-dev-token",
+          NPM_AUTH_TOKEN: "not-a-real-auth-token",
+          NPM_ID_TOKEN: "not-a-real-id-token",
+          ACTIONS_ID_TOKEN_REQUEST_TOKEN: "not-a-real-oidc-token",
+          ACTIONS_ID_TOKEN_REQUEST_URL: "https://oidc.invalid/",
+          SIGSTORE_ID_TOKEN: "not-a-real-sigstore-token",
+          NPM_CONFIG__AUTH: "not-a-real-basic-auth",
+          NPM_CONFIG_OTP: "123456",
+          "npm_config_//registry.npmjs.org/:_auth": "not-a-real-scoped-auth",
+          "npm_config_//registry.npmjs.org/:username": "not-a-real-user",
+          "npm_config_//registry.npmjs.org/:_password": "not-a-real-password",
+          "npm_config_//registry.npmjs.org/:certfile": "/private/cert",
+          "npm_config_//registry.npmjs.org/:keyfile": "/private/key",
+        },
+        spawn,
+      });
+      publishFrozenTarball(pkg, {
+        distTag: "latest",
+        dryRun: false,
+        npmEnvSource: {
+          NPM_TOKEN: "not-a-real-publish-token",
+          NPM_CONFIG_FORCE: "true",
+          npm_config_dry_run: "true",
+        },
+        spawn,
+      });
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+
+    expect(invocations).toHaveLength(2);
+    expect(invocations[0].command).toBe("npm");
+    expect(invocations[0].args).toEqual(expect.arrayContaining(["--dry-run", "--force"]));
+    expect(invocations[0].args).toEqual(expect.arrayContaining([
+      "--userconfig", "/dev/null", "--globalconfig", EMPTY_NPM_GLOBAL_CONFIG,
+    ]));
+    expect(invocations[0].env).toMatchObject({
+      NPM_CONFIG_USERCONFIG: "/dev/null",
+      NPM_CONFIG_GLOBALCONFIG: EMPTY_NPM_GLOBAL_CONFIG,
+    });
+    for (const key of [
+      "NODE_AUTH_TOKEN",
+      "NPM_TOKEN",
+      "NPM_DEV_TOKEN",
+      "NPM_AUTH_TOKEN",
+      "NPM_ID_TOKEN",
+      "ACTIONS_ID_TOKEN_REQUEST_TOKEN",
+      "ACTIONS_ID_TOKEN_REQUEST_URL",
+      "SIGSTORE_ID_TOKEN",
+      "NPM_CONFIG__AUTH",
+      "NPM_CONFIG_OTP",
+      "npm_config_//registry.npmjs.org/:_auth",
+      "npm_config_//registry.npmjs.org/:username",
+      "npm_config_//registry.npmjs.org/:_password",
+      "npm_config_//registry.npmjs.org/:certfile",
+      "npm_config_//registry.npmjs.org/:keyfile",
+    ]) {
+      expect(invocations[0].env[key], key).toBeUndefined();
+    }
+    expect(invocations[0].cwd).toBe(directory);
+    expect(invocations[1].args).not.toContain("--dry-run");
+    expect(invocations[1].args).not.toContain("--force");
+    expect(invocations[1].env.NPM_CONFIG_FORCE).toBeUndefined();
+    expect(invocations[1].env.npm_config_force).toBeUndefined();
+    expect(invocations[1].env.npm_config_dry_run).toBeUndefined();
+    expect(invocations[1].env["npm_config_//registry.npmjs.org/:_authToken"])
+      .toBe("not-a-real-publish-token");
   });
 });

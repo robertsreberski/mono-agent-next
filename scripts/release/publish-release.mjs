@@ -18,14 +18,48 @@ import { validateRelease } from "./validate-release.mjs";
 
 export const PUBLIC_NPM_REGISTRY = "https://registry.npmjs.org/";
 const NULL_CONFIG = "/dev/null";
+export const EMPTY_NPM_GLOBAL_CONFIG = path.join(REPO_ROOT, "scripts", "release", "empty.npmrc");
+const EMPTY_NPM_GLOBAL_CONFIG_CONTENT = "; Intentionally empty neutral npm global configuration for release subprocesses.\n";
 const REGISTRY_AUTH_ENV = "npm_config_//registry.npmjs.org/:_authToken";
+
+export function assertNeutralNpmGlobalConfig(configPath = EMPTY_NPM_GLOBAL_CONFIG) {
+  const configStat = fs.lstatSync(configPath);
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  if (configStat.isSymbolicLink() || !configStat.isFile() || configStat.nlink !== 1
+    || (configStat.mode & 0o022) !== 0
+    || (currentUid !== undefined && configStat.uid !== currentUid)
+    || fs.readFileSync(configPath, "utf8") !== EMPTY_NPM_GLOBAL_CONFIG_CONTENT) {
+    throw new Error("refusing npm subprocess: neutral global npm config is unsafe or modified");
+  }
+}
 
 function isNpmCredentialKey(key) {
   const normalized = key.toLowerCase();
-  return normalized === "node_auth_token"
+  if (normalized === "actions_id_token_request_token"
+    || normalized === "actions_id_token_request_url"
+    || normalized === "node_auth_token"
+    || normalized === "npm_auth_token"
+    || normalized === "npm_id_token"
     || normalized === "npm_token"
     || normalized === "npm_dev_token"
-    || (normalized.startsWith("npm_config_") && normalized.endsWith(":_authtoken"));
+    || normalized === "sigstore_id_token") {
+    return true;
+  }
+  if (!normalized.startsWith("npm_config_")) return false;
+  const configName = normalized.slice("npm_config_".length);
+  return [
+    "_auth",
+    "_authtoken",
+    "auth",
+    "authtoken",
+    "username",
+    "_password",
+    "password",
+    "otp",
+    "certfile",
+    "keyfile",
+    "token",
+  ].some((credentialName) => configName === credentialName || configName.endsWith(`:${credentialName}`));
 }
 
 function environmentWithoutNpmCredentials(source = process.env) {
@@ -64,11 +98,14 @@ function commandOutput(result, description) {
  * user/global/scope registry overrides. Authentication remains in-memory.
  */
 export function publicNpmEnvironment(source = process.env, options = {}) {
+  assertNeutralNpmGlobalConfig();
   const token = source.NODE_AUTH_TOKEN || source.NPM_TOKEN;
   const env = environmentWithoutNpmCredentials(source);
   for (const key of Object.keys(env)) {
     const normalized = key.toLowerCase();
     if (normalized === "npm_config_registry"
+      || normalized === "npm_config_force"
+      || normalized === "npm_config_dry_run"
       || normalized === "npm_config_userconfig"
       || normalized === "npm_config_globalconfig"
       || (normalized.startsWith("npm_config_") && normalized.endsWith(":registry"))) {
@@ -78,6 +115,7 @@ export function publicNpmEnvironment(source = process.env, options = {}) {
 
   env.NPM_CONFIG_REGISTRY = PUBLIC_NPM_REGISTRY;
   env.NPM_CONFIG_USERCONFIG = NULL_CONFIG;
+  env.NPM_CONFIG_GLOBALCONFIG = EMPTY_NPM_GLOBAL_CONFIG;
   env["npm_config_@mono-agent:registry"] = PUBLIC_NPM_REGISTRY;
   if (options.authenticated !== false && token) env[REGISTRY_AUTH_ENV] = token;
   return env;
@@ -89,6 +127,8 @@ function npmConfigArgs() {
     PUBLIC_NPM_REGISTRY,
     "--userconfig",
     NULL_CONFIG,
+    "--globalconfig",
+    EMPTY_NPM_GLOBAL_CONFIG,
   ];
 }
 
@@ -295,7 +335,12 @@ function assertMatchingIntegrity(pkg, publishedIntegrity) {
   }
 }
 
-function publishFrozenTarball(pkg, { distTag, dryRun, npmEnvSource = process.env }) {
+export function publishFrozenTarball(pkg, {
+  distTag,
+  dryRun,
+  npmEnvSource = process.env,
+  spawn = spawnSync,
+}) {
   const currentIntegrity = computeTarballIntegrity(pkg.tarballPath);
   if (currentIntegrity !== pkg.integrity) {
     throw new Error(`refusing to publish: frozen tarball changed for ${pkg.name}@${pkg.version}`);
@@ -309,10 +354,16 @@ function publishFrozenTarball(pkg, { distTag, dryRun, npmEnvSource = process.env
     distTag,
     ...npmConfigArgs(),
   ];
-  if (dryRun) args.push("--dry-run");
-  console.log(`$ npm publish ${path.basename(pkg.tarballPath)} --access ${pkg.publishConfig.access} --tag ${distTag}${dryRun ? " --dry-run" : ""}`);
-  const result = spawnSync("npm", args, {
-    cwd: REPO_ROOT,
+  // npm 11 checks the public registry even for --dry-run and otherwise rejects
+  // an already-published immutable version. --force suppresses only that local
+  // dry-run guard; this branch receives no registry credential or npm config
+  // file and remains non-mutating. A real publish never receives --force.
+  if (dryRun) args.push("--dry-run", "--force");
+  console.log(`$ npm publish ${path.basename(pkg.tarballPath)} --access ${pkg.publishConfig.access} --tag ${distTag}${dryRun ? " --dry-run --force" : ""}`);
+  const result = spawn("npm", args, {
+    // Publishing the absolute frozen tarball from its private temporary
+    // directory prevents a repository-local .npmrc from contributing auth.
+    cwd: path.dirname(pkg.tarballPath),
     env: publicNpmEnvironment(npmEnvSource, { authenticated: !dryRun }),
     stdio: "inherit",
   });
