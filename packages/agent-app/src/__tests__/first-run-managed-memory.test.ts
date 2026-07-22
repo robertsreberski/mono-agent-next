@@ -1,4 +1,18 @@
-import { access, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  access,
+  chmod,
+  link,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -181,7 +195,7 @@ describe("initializeFirstRunManagedMemory", () => {
     expect(await readFile(join(root, "sentinel"), "utf8")).toBe("external-winner\n");
   });
 
-  it("cleans only its claimed root when initialization fails", async () => {
+  it("retains its claimed root and in-flight marker when initialization fails", async () => {
     const root = join(dir, ".mono-agent", "memory");
     const sibling = join(dir, ".mono-agent", "keep.txt");
     await writeFile(sibling, "keep\n");
@@ -194,7 +208,9 @@ describe("initializeFirstRunManagedMemory", () => {
       },
     })).rejects.toThrow("injected rebuild failure");
 
-    await expect(access(root)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(root, FIRST_RUN_MEMORY_INITIALIZING_MARKER), "utf8"))
+      .toMatch(/^initializing:[0-9a-f-]+\n$/u);
+    await expect(access(join(root, ".index"))).rejects.toMatchObject({ code: "ENOENT" });
     expect(await readFile(sibling, "utf8")).toBe("keep\n");
   });
 
@@ -213,7 +229,8 @@ describe("initializeFirstRunManagedMemory", () => {
       },
     })).rejects.toThrow("external race");
 
-    await expect(access(finalRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(finalRoot, FIRST_RUN_MEMORY_INITIALIZING_MARKER), "utf8"))
+      .toMatch(/^initializing:[0-9a-f-]+\n$/u);
     expect(await readFile(join(stagingRoot, "external-sentinel"), "utf8")).toBe("external\n");
   });
 
@@ -258,8 +275,55 @@ describe("initializeFirstRunManagedMemory", () => {
 
     expect(result).toEqual({ initialized: true, root: finalRoot });
     await expect(access(stagingRoot)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(finalRoot, FIRST_RUN_MEMORY_INITIALIZING_MARKER), "utf8"))
+      .toMatch(/^initialized:[0-9a-f-]+\n$/u);
+    expect((await readdir(finalRoot)).some((name) => name.startsWith(FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX)))
+      .toBe(false);
+    const completedReport = await validateMonoAgentFolder({
+      cwd: dir,
+      configPath,
+      env: {},
+      allowFilesystemWrites: true,
+      liveness: false,
+    });
+    expect(completedReport.sections.find((section) => section.id === "memory")?.details.join("\n"))
+      .not.toMatch(/initialization is incomplete/u);
     const { readManagedIndexManifest } = await import("@mono-agent/memory/bujo");
     expect(readManagedIndexManifest(finalRoot)?.rollback).toBeUndefined();
+  });
+
+  it.each([
+    {
+      label: "content is malformed",
+      mutate: async (path: string) => await writeFile(path, "initialized:forged\n"),
+    },
+    {
+      label: "mode is permissive",
+      mutate: async (path: string) => await chmod(path, 0o644),
+    },
+    {
+      label: "inode gains another link",
+      mutate: async (path: string) => await link(path, `${path}.alias`),
+    },
+  ])("doctor fails closed when a committed canonical marker's $label", async ({ mutate }) => {
+    const plan = localPrivatePlan();
+    const configPath = join(dir, "mono-agent.config.json");
+    await writeFile(configPath, JSON.stringify(plan.configJson));
+    await writeFile(join(dir, "IDENTITY.md"), "# Identity\n");
+    const result = await initializeFirstRunManagedMemory({ agentRoot: dir, plan });
+    await mutate(join(result.root!, FIRST_RUN_MEMORY_INITIALIZING_MARKER));
+
+    const report = await validateMonoAgentFolder({
+      cwd: dir,
+      configPath,
+      env: {},
+      allowFilesystemWrites: true,
+      liveness: false,
+    });
+    expect(report.sections.find((section) => section.id === "memory")).toMatchObject({
+      status: "error",
+      details: expect.arrayContaining([expect.stringMatching(/initialization is incomplete/u)]),
+    });
   });
 
   it("does not replace an external final root created at promotion time", async () => {
@@ -340,46 +404,83 @@ describe("initializeFirstRunManagedMemory", () => {
     await access(join(finalRoot, ".index", "manifest.json"));
   });
 
-  it("leaves a replacement untouched when the marker changes at its release boundary", async () => {
+  it("retains both inodes when the canonical marker is swapped before descriptor commit", async () => {
     const finalRoot = join(await realpath(dir), ".mono-agent", "memory");
     const markerPath = join(finalRoot, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
+    let ownedMarkerPath = "";
     await expect(initializeFirstRunManagedMemory({
       agentRoot: dir,
       plan: localPrivatePlan(),
       hooks: {
-        beforeMarkerRelease: async (candidate) => {
+        beforeMarkerCommit: async (candidate) => {
           expect(candidate).toBe(markerPath);
-          await rm(candidate);
-          await writeFile(candidate, "release-boundary replacement\n");
+          ownedMarkerPath = `${candidate}.owned-marker`;
+          await rename(candidate, ownedMarkerPath);
+          await writeFile(candidate, "pre-commit replacement\n");
         },
       },
     })).rejects.toThrow(/exact initialization marker/u);
 
-    expect(await readFile(markerPath, "utf8")).toBe("release-boundary replacement\n");
+    expect(await readFile(markerPath, "utf8")).toBe("pre-commit replacement\n");
+    expect(await readFile(ownedMarkerPath, "utf8")).toMatch(/^initializing:[0-9a-f-]+\n$/u);
     await access(join(finalRoot, ".index", "manifest.json"));
   });
 
-  it("retains a canonical replacement raced after marker quarantine", async () => {
+  it("fails closed when the canonical marker loses owner-only mode before descriptor commit", async () => {
     const finalRoot = join(await realpath(dir), ".mono-agent", "memory");
     const markerPath = join(finalRoot, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
     await expect(initializeFirstRunManagedMemory({
       agentRoot: dir,
       plan: localPrivatePlan(),
       hooks: {
-        afterMarkerQuarantined: async (releasedPath, candidate) => {
+        beforeMarkerCommit: async (candidate) => await chmod(candidate, 0o644),
+      },
+    })).rejects.toThrow(/exact initialization marker/u);
+
+    expect((await lstat(markerPath)).mode & 0o777).toBe(0o644);
+    expect(await readFile(markerPath, "utf8")).toMatch(/^initializing:[0-9a-f-]+\n$/u);
+    await access(join(finalRoot, ".index", "manifest.json"));
+  });
+
+  it("retains both inodes when the canonical marker is swapped after descriptor commit", async () => {
+    const finalRoot = join(await realpath(dir), ".mono-agent", "memory");
+    const markerPath = join(finalRoot, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
+    let ownedMarkerPath = "";
+    await expect(initializeFirstRunManagedMemory({
+      agentRoot: dir,
+      plan: localPrivatePlan(),
+      hooks: {
+        afterMarkerCommitted: async (candidate) => {
           expect(candidate).toBe(markerPath);
-          await access(releasedPath);
-          await writeFile(candidate, "post-quarantine replacement\n");
+          ownedMarkerPath = `${candidate}.owned-marker`;
+          await rename(candidate, ownedMarkerPath);
+          await writeFile(candidate, "post-commit replacement\n");
         },
       },
     })).rejects.toThrow(/exact initialization marker/u);
 
-    expect(await readFile(markerPath, "utf8")).toBe("post-quarantine replacement\n");
-    expect((await readdir(finalRoot)).some((name) => name.startsWith(FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX)))
-      .toBe(true);
+    expect(await readFile(markerPath, "utf8")).toBe("post-commit replacement\n");
+    expect(await readFile(ownedMarkerPath, "utf8")).toMatch(/^initialized:[0-9a-f-]+\n$/u);
+    await access(join(finalRoot, ".index", "manifest.json"));
   });
 
-  it("reports a quarantined marker as incomplete when release fails after rename", async () => {
+  it("rejects same-inode content replacement after descriptor commit", async () => {
+    const finalRoot = join(await realpath(dir), ".mono-agent", "memory");
+    const markerPath = join(finalRoot, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
+    const forged = "initialized:00000000-0000-4000-8000-000000000000\n";
+    await expect(initializeFirstRunManagedMemory({
+      agentRoot: dir,
+      plan: localPrivatePlan(),
+      hooks: {
+        afterMarkerCommitted: async (candidate) => await writeFile(candidate, forged),
+      },
+    })).rejects.toThrow(/exact initialization marker/u);
+
+    expect(await readFile(markerPath, "utf8")).toBe(forged);
+    await access(join(finalRoot, ".index", "manifest.json"));
+  });
+
+  it("reports an in-flight canonical marker as incomplete when commit is interrupted", async () => {
     const finalRoot = join(await realpath(dir), ".mono-agent", "memory");
     const plan = localPrivatePlan();
     const configPath = join(dir, "mono-agent.config.json");
@@ -390,14 +491,14 @@ describe("initializeFirstRunManagedMemory", () => {
       agentRoot: dir,
       plan,
       hooks: {
-        afterMarkerQuarantined: async () => { throw new Error("injected post-quarantine failure"); },
+        beforeMarkerCommit: async () => { throw new Error("injected pre-commit failure"); },
       },
-    })).rejects.toThrow("injected post-quarantine failure");
+    })).rejects.toThrow("injected pre-commit failure");
 
-    await expect(access(join(finalRoot, FIRST_RUN_MEMORY_INITIALIZING_MARKER)))
-      .rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readFile(join(finalRoot, FIRST_RUN_MEMORY_INITIALIZING_MARKER), "utf8"))
+      .toMatch(/^initializing:[0-9a-f-]+\n$/u);
     expect((await readdir(finalRoot)).some((name) => name.startsWith(FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX)))
-      .toBe(true);
+      .toBe(false);
     const report = await validateMonoAgentFolder({
       cwd: dir,
       configPath,

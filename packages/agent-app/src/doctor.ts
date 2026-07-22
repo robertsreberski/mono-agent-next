@@ -83,8 +83,7 @@ import {
 import { CONTINUATION_STATES, continuationDigest, type ContinuationState } from "./continuations.js";
 import { formatInteractionBridgeUrl, loadInteractionSettings } from "./interaction-bridge.js";
 import {
-  FIRST_RUN_MEMORY_INITIALIZING_MARKER,
-  FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX,
+  firstRunMemoryInitializationIsIncomplete,
 } from "./first-run-managed-memory.js";
 import {
   DEFAULT_MEMORY_EMBEDDING_ENDPOINTS,
@@ -1700,15 +1699,6 @@ async function managedMemoryIdentityStatus(
       "Stop the agent with `mono-agent stop`, run `mono-agent memory rebuild`, then re-run `mono-agent validate` before restarting.",
     ],
   };
-}
-
-async function firstRunMemoryInitializationIsIncomplete(root: string): Promise<boolean> {
-  if (await pathExists(join(root, FIRST_RUN_MEMORY_INITIALIZING_MARKER))) return true;
-  try {
-    return (await readdir(root)).some((name) => name.startsWith(FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX));
-  } catch {
-    return false;
-  }
 }
 
 async function builtInMemoryNativeStatus(

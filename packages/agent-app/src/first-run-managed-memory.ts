@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Stats } from "node:fs";
+import { constants, type Stats } from "node:fs";
 import {
   link,
   lstat,
@@ -43,10 +43,10 @@ export interface FirstRunManagedMemoryHooks {
   readonly beforePromotion?: (stagingRoot: string, finalRoot: string) => void | Promise<void>;
   /** Test seam after manifest authority exists but before source-link cleanup/directory fsync. */
   readonly afterManifestLinked?: (finalRoot: string) => void | Promise<void>;
-  /** Test seam immediately before the exact initialization marker release boundary. */
-  readonly beforeMarkerRelease?: (markerPath: string) => void | Promise<void>;
-  /** Test seam after the marker name is quarantined but before its identity is revalidated. */
-  readonly afterMarkerQuarantined?: (releasedPath: string, markerPath: string) => void | Promise<void>;
+  /** Test seam immediately before the exact initialization marker commit boundary. */
+  readonly beforeMarkerCommit?: (markerPath: string) => void | Promise<void>;
+  /** Test seam after descriptor commit but before the canonical marker is revalidated. */
+  readonly afterMarkerCommitted?: (markerPath: string) => void | Promise<void>;
 }
 
 export interface InitializeFirstRunManagedMemoryOptions {
@@ -72,6 +72,7 @@ interface ClaimedDirectoryIdentity {
 interface DurableMarker {
   readonly handle: FileHandle;
   readonly identity: ClaimedDirectoryIdentity;
+  readonly token: string;
 }
 
 interface PinnedDirectoryIdentity extends ClaimedDirectoryIdentity {
@@ -201,16 +202,42 @@ async function cleanupEmptyClaimedRoot(root: string, expected: ClaimedDirectoryI
 }
 
 async function createDurableMarker(path: string): Promise<DurableMarker> {
-  const handle = await open(path, "wx", 0o600);
+  const token = randomUUID();
+  const handle = await open(path, "wx+", 0o600);
   try {
-    await handle.writeFile("initializing\n", "utf8");
+    await handle.writeFile(`initializing:${token}\n`, "utf8");
     await handle.sync();
     const pathStat = await handle.stat();
-    return { handle, identity: { dev: pathStat.dev, ino: pathStat.ino } };
+    return { handle, identity: { dev: pathStat.dev, ino: pathStat.ino }, token };
   } catch (error) {
     await handle.close().catch(() => undefined);
     throw error;
   }
+}
+
+async function commitDurableMarker(marker: DurableMarker): Promise<void> {
+  const content = Buffer.from(`initialized:${marker.token}\n`, "utf8");
+  let offset = 0;
+  while (offset < content.length) {
+    const { bytesWritten } = await marker.handle.write(content, offset, content.length - offset, offset);
+    if (bytesWritten === 0) throw new Error("Could not commit the first-run managed-memory marker.");
+    offset += bytesWritten;
+  }
+  await marker.handle.truncate(content.length);
+  await marker.handle.sync();
+}
+
+async function durableMarkerHasExactContent(marker: DurableMarker, state: "initializing" | "initialized"): Promise<boolean> {
+  const expected = Buffer.from(`${state}:${marker.token}\n`, "utf8");
+  if ((await marker.handle.stat()).size !== expected.length) return false;
+  const actual = Buffer.alloc(expected.length);
+  let offset = 0;
+  while (offset < actual.length) {
+    const { bytesRead } = await marker.handle.read(actual, offset, actual.length - offset, offset);
+    if (bytesRead === 0) return false;
+    offset += bytesRead;
+  }
+  return actual.equals(expected) && (await marker.handle.stat()).size === expected.length;
 }
 
 async function fsyncPath(path: string): Promise<void> {
@@ -222,58 +249,114 @@ async function fsyncPath(path: string): Promise<void> {
   }
 }
 
-async function removeOwnedMarker(
+function isOwnerPrivateSingleLinkFile(pathStat: Stats): boolean {
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  return pathStat.isFile() && pathStat.nlink === 1
+    && (pathStat.mode & 0o777) === 0o600
+    && (currentUid === undefined || pathStat.uid === currentUid);
+}
+
+async function exactOwnedMarkerAtPath(
+  root: string,
+  rootIdentity: ClaimedDirectoryIdentity,
+  path: string,
+  marker: DurableMarker,
+): Promise<boolean> {
+  const rootStat = await optionalLstat(root);
+  const pathStat = await optionalLstat(path);
+  const openedMarkerStat = await marker.handle.stat();
+  return rootStat !== undefined && !rootStat.isSymbolicLink() && rootStat.isDirectory()
+    && sameIdentity(rootStat, rootIdentity)
+    && pathStat !== undefined && !pathStat.isSymbolicLink() && isOwnerPrivateSingleLinkFile(pathStat)
+    && sameIdentity(pathStat, marker.identity)
+    && isOwnerPrivateSingleLinkFile(openedMarkerStat)
+    && sameIdentity(openedMarkerStat, marker.identity);
+}
+
+async function commitOwnedMarker(
   root: string,
   rootIdentity: ClaimedDirectoryIdentity,
   markerPath: string,
   marker: DurableMarker,
-  beforeRelease?: (markerPath: string) => void | Promise<void>,
-  afterQuarantined?: (releasedPath: string, markerPath: string) => void | Promise<void>,
+  beforeCommit?: (markerPath: string) => void | Promise<void>,
+  afterCommitted?: (markerPath: string) => void | Promise<void>,
 ): Promise<boolean> {
-  const exactMarkerIsPublished = async (): Promise<boolean> => {
-    const rootStat = await optionalLstat(root);
-    const openedMarkerStat = await marker.handle.stat();
-    const markerStat = await optionalLstat(markerPath);
-    return rootStat !== undefined && !rootStat.isSymbolicLink() && rootStat.isDirectory()
-      && sameIdentity(rootStat, rootIdentity)
-      && openedMarkerStat.isFile() && openedMarkerStat.nlink === 1
-      && sameIdentity(openedMarkerStat, marker.identity)
-      && markerStat !== undefined && !markerStat.isSymbolicLink() && markerStat.isFile()
-      && sameIdentity(markerStat, marker.identity);
-  };
-  if (!await exactMarkerIsPublished()) return false;
-  await beforeRelease?.(markerPath);
-  if (!await exactMarkerIsPublished()) return false;
+  const exactInitializingMarker = async (): Promise<boolean> =>
+    await exactOwnedMarkerAtPath(root, rootIdentity, markerPath, marker)
+    && await durableMarkerHasExactContent(marker, "initializing")
+    && await exactOwnedMarkerAtPath(root, rootIdentity, markerPath, marker);
+  if (!await exactInitializingMarker()) return false;
+  await beforeCommit?.(markerPath);
+  if (!await exactInitializingMarker()) return false;
 
-  // Path unlink is intrinsically check-then-act. First atomically move the
-  // candidate to an unguessable private name, then delete only if the moved
-  // inode is still the marker pinned by our open handle. A racer is retained
-  // at the private name instead of being unlinked as collateral cleanup.
-  const releasedPath = join(root, `${FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX}${randomUUID()}`);
+  // Node has no unlink-by-open-handle primitive. Keep the canonical marker for
+  // the lifetime of this root and commit its state only through the descriptor
+  // held since exclusive creation. No marker pathname is ever renamed,
+  // replaced, or unlinked, so a swap can only make the operation fail closed.
+  await commitDurableMarker(marker);
+  await afterCommitted?.(markerPath);
+  return await exactOwnedMarkerAtPath(root, rootIdentity, markerPath, marker)
+    && await durableMarkerHasExactContent(marker, "initialized")
+    && await exactOwnedMarkerAtPath(root, rootIdentity, markerPath, marker);
+}
+
+const UUID_SOURCE = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+const INITIALIZED_MARKER_PATTERN = new RegExp(`^initialized:${UUID_SOURCE}\\n$`, "u");
+
+async function canonicalMarkerIsCommitted(root: string, rootIdentity: ClaimedDirectoryIdentity): Promise<boolean> {
+  const markerPath = join(root, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
+  let handle: FileHandle;
   try {
-    await rename(markerPath, releasedPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
+    handle = await open(markerPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return false;
   }
-  await afterQuarantined?.(releasedPath, markerPath);
-  const rootStat = await optionalLstat(root);
-  const releasedStat = await optionalLstat(releasedPath);
-  const openedMarkerStat = await marker.handle.stat();
-  if (
-    rootStat === undefined || rootStat.isSymbolicLink() || !rootStat.isDirectory()
-    || !sameIdentity(rootStat, rootIdentity)
-    || releasedStat === undefined || releasedStat.isSymbolicLink() || !releasedStat.isFile()
-    || !sameIdentity(releasedStat, marker.identity)
-    || !openedMarkerStat.isFile() || openedMarkerStat.nlink !== 1
-    || !sameIdentity(openedMarkerStat, marker.identity)
-    || await optionalLstat(markerPath) !== undefined
-  ) return false;
-  await unlink(releasedPath);
-  const unlinkedMarkerStat = await marker.handle.stat();
-  return unlinkedMarkerStat.nlink === 0
-    && await optionalLstat(markerPath) === undefined
-    && await optionalLstat(releasedPath) === undefined;
+  try {
+    const opened = await handle.stat();
+    if (!isOwnerPrivateSingleLinkFile(opened) || opened.size > 64) return false;
+    const content = await handle.readFile();
+    if (!INITIALIZED_MARKER_PATTERN.test(content.toString("utf8"))) {
+      return false;
+    }
+    const openedAfterRead = await handle.stat();
+    const namedAfterRead = await optionalLstat(markerPath);
+    const rootAfterRead = await optionalLstat(root);
+    return sameIdentity(openedAfterRead, opened)
+      && openedAfterRead.nlink === 1
+      && namedAfterRead !== undefined && !namedAfterRead.isSymbolicLink() && namedAfterRead.isFile()
+      && sameIdentity(namedAfterRead, opened)
+      && rootAfterRead !== undefined && !rootAfterRead.isSymbolicLink() && rootAfterRead.isDirectory()
+      && sameIdentity(rootAfterRead, rootIdentity);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Treat every in-flight/malformed canonical marker or legacy released marker as incomplete. */
+export async function firstRunMemoryInitializationIsIncomplete(root: string): Promise<boolean> {
+  let rootStat: Stats;
+  let names: readonly string[];
+  try {
+    rootStat = await lstat(root);
+    if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) return false;
+    names = await readdir(root);
+  } catch {
+    // This narrow gate classifies first-run marker state only. Other doctor
+    // checks retain authority for missing, inaccessible, or non-directory
+    // memory roots.
+    return false;
+  }
+  const rootIdentity = { dev: rootStat.dev, ino: rootStat.ino };
+  if (names.some((name) => name.startsWith(FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX))) return true;
+  if (!names.includes(FIRST_RUN_MEMORY_INITIALIZING_MARKER)) return false;
+  if (!await canonicalMarkerIsCommitted(root, rootIdentity)) return true;
+  try {
+    const namesAfterRead = await readdir(root);
+    return !namesAfterRead.includes(FIRST_RUN_MEMORY_INITIALIZING_MARKER)
+      || namesAfterRead.some((name) => name.startsWith(FIRST_RUN_MEMORY_RELEASED_MARKER_PREFIX));
+  } catch {
+    return true;
+  }
 }
 
 function treeIdentity(pathStat: Stats): TreeEntryIdentity {
@@ -333,7 +416,6 @@ async function linkStagedFile(
   destination: string,
   expected: TreeEntryIdentity,
   hooks: {
-    readonly onLinkCreated?: () => void;
     readonly afterLinkVerified?: () => void | Promise<void>;
     readonly assertDestination?: () => void | Promise<void>;
   } = {},
@@ -348,10 +430,6 @@ async function linkStagedFile(
     }
     throw error;
   }
-  // Creating the destination name is the authority commit point for the
-  // manifest. Record it before any later identity/fsync/source-cleanup step can
-  // fail, so outer recovery keeps the fail-closed marker once authority exists.
-  hooks.onLinkCreated?.();
   const destinationStat = await lstat(destination);
   if (destinationStat.isSymbolicLink() || !destinationStat.isFile() || !sameIdentity(destinationStat, expected)) {
     throw new Error("First-run managed memory linked an unexpected staged file identity.");
@@ -367,7 +445,6 @@ async function promoteManagedIndex(options: {
   readonly stagingRoot: string;
   readonly finalRoot: string;
   readonly snapshot: readonly TreeEntrySnapshot[];
-  readonly onManifestPublished: () => void;
   readonly afterManifestLinked?: (finalRoot: string) => void | Promise<void>;
   readonly assertDestination: () => void | Promise<void>;
 }): Promise<void> {
@@ -449,7 +526,6 @@ async function promoteManagedIndex(options: {
     join(finalIndex, manifest.pathRelative),
     manifest,
     {
-      onLinkCreated: options.onManifestPublished,
       assertDestination: assertPublishedTree,
       ...(options.afterManifestLinked === undefined
         ? {}
@@ -660,7 +736,6 @@ export async function initializeFirstRunManagedMemory(
   let rootIdentity: ClaimedDirectoryIdentity | undefined;
   let marker: DurableMarker | undefined;
   const markerPath = join(root, FIRST_RUN_MEMORY_INITIALIZING_MARKER);
-  let published = false;
   try {
     await assertPinnedDirectoryChain(pinnedParents);
     try {
@@ -741,22 +816,21 @@ export async function initializeFirstRunManagedMemory(
       stagingRoot,
       finalRoot: root,
       snapshot: stagedSnapshot,
-      onManifestPublished: () => { published = true; },
       assertDestination,
       ...(options.hooks?.afterManifestLinked === undefined
         ? {}
         : { afterManifestLinked: options.hooks.afterManifestLinked }),
     });
     await assertDestination();
-    if (!await removeOwnedMarker(
+    if (!await commitOwnedMarker(
       root,
       rootIdentity,
       markerPath,
       marker,
-      options.hooks?.beforeMarkerRelease,
-      options.hooks?.afterMarkerQuarantined,
+      options.hooks?.beforeMarkerCommit,
+      options.hooks?.afterMarkerCommitted,
     )) {
-      throw new Error("First-run managed memory could not remove its exact initialization marker.");
+      throw new Error("First-run managed memory could not commit its exact initialization marker.");
     }
     await assertDestination();
     await fsyncPath(root);
@@ -771,14 +845,8 @@ export async function initializeFirstRunManagedMemory(
       // Never follow a replaced parent for cleanup.
     }
     if (parentsStable) {
-      if (!published && rootIdentity !== undefined && marker !== undefined) {
-        await removeOwnedMarker(root, rootIdentity, markerPath, marker);
-      }
       if (stagingRoot !== undefined && stagingIdentity !== undefined) {
         await cleanupEmptyClaimedRoot(stagingRoot, stagingIdentity);
-      }
-      if (!published && rootIdentity !== undefined) {
-        await cleanupEmptyClaimedRoot(root, rootIdentity);
       }
     }
     throw error;
