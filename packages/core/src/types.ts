@@ -1,7 +1,13 @@
 import type {
+  ChannelAttachment,
+  ChannelDeliveryResult,
   ChannelModuleDefinition,
+  ChannelOutboundMessage,
+  JsonObject,
+  JsonValue,
   MemoryModuleDefinition,
   RuntimeModuleDefinition,
+  TurnMessage,
 } from "@mono-agent/module-sdk";
 
 import type { AgentConfigIssue } from "./errors.js";
@@ -61,7 +67,7 @@ export interface AgentConfig {
   readonly context?: {
     readonly skills?: {
       readonly roots: readonly string[];
-      readonly load?: "all" | "selected";
+      readonly load?: "all";
       readonly disclosure?: "full" | "index";
       readonly maxBytes?: number;
     };
@@ -170,6 +176,7 @@ export interface AgentInspection {
 export interface AgentSubmitInput {
   readonly conversationId: string;
   readonly text: string;
+  readonly attachments?: readonly ChannelAttachment[];
   readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
@@ -190,6 +197,48 @@ export interface AgentResponse {
   readonly text: string;
   readonly output: unknown;
   readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+export interface AgentConversationSummary {
+  readonly id: string;
+  readonly updatedAt: string;
+  readonly active: boolean;
+  readonly title?: string;
+  readonly metadata?: JsonObject;
+}
+
+export interface AgentConversationReplay {
+  readonly conversationId: string;
+  readonly messages: readonly TurnMessage[];
+  readonly activeTurnId?: string;
+}
+
+export interface AgentLiveInput {
+  readonly id: string;
+  readonly text: string;
+  readonly receivedAt: string;
+}
+
+export type AgentLiveInputStatus = "applied" | "requeue" | "discarded" | "unavailable";
+
+export interface AgentAskAnswer {
+  readonly interactionId: string;
+  readonly answers: Readonly<Record<string, readonly string[]>>;
+}
+
+export type AgentAskAnswerStatus = "accepted" | "expired" | "mismatch";
+
+export interface AgentConfigView {
+  readonly revision: string;
+  readonly generatedAt: string;
+  readonly value: Readonly<Record<string, unknown>>;
+  readonly redacted: true;
+}
+
+export interface AgentModuleCommandResult {
+  readonly module: string;
+  readonly command: string;
+  readonly value?: JsonValue;
 }
 
 export interface AgentHealth {
@@ -221,6 +270,14 @@ export interface AgentHost {
   readonly startInfo: AgentHostStartInfo;
   start(): Promise<void>;
   submit(input: AgentSubmitInput): Promise<AgentResponse>;
+  cancel(conversationId: string, reason?: string): Promise<boolean>;
+  offerLiveInput(conversationId: string, input: AgentLiveInput): Promise<AgentLiveInputStatus>;
+  answerAsk(conversationId: string, answer: AgentAskAnswer): Promise<AgentAskAnswerStatus>;
+  conversations(): Promise<readonly AgentConversationSummary[]>;
+  replay(conversationId: string): Promise<AgentConversationReplay>;
+  configView(): Promise<AgentConfigView>;
+  deliver(channelInstanceId: string, message: ChannelOutboundMessage): Promise<ChannelDeliveryResult>;
+  runModuleCommand(moduleInstanceId: string, commandName: string, input?: unknown): Promise<AgentModuleCommandResult>;
   health(): Promise<AgentHealth>;
   drain(): Promise<void>;
   stop(): Promise<void>;

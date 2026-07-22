@@ -14,6 +14,7 @@ export const OPEN_MODULE_KINDS = ["runtime", "channel", "memory"] as const;
 export type Awaitable<T> = T | PromiseLike<T>;
 export type ModuleApiVersion = typeof MODULE_API_VERSION;
 export type ModuleKind = (typeof OPEN_MODULE_KINDS)[number];
+export type ModuleSlot = ModuleKind | "state" | "trigger" | "exporter" | "sandbox";
 export type ModuleCapability = string;
 export type ConfigPathSegment = string | number;
 export type ConfigPath = readonly ConfigPathSegment[];
@@ -29,8 +30,16 @@ export const MODULE_SCHEMA_ENV_ELIGIBLE = "x-mono-agent-env-eligible" as const;
 /** JSON Schema annotation that rejects inline literals and redacts explain output. */
 export const MODULE_SCHEMA_SECRET = "x-mono-agent-secret" as const;
 
+/** JSON Schema annotation naming a configured instance in another typed slot. */
+export const MODULE_SCHEMA_SLOT_REFERENCE = "x-mono-agent-slot-reference" as const;
+
 export interface EnvEligibleSchemaOptions {
   readonly secret?: boolean;
+}
+
+export interface CrossSlotReference {
+  readonly slot: ModuleSlot;
+  readonly capability?: string;
 }
 
 /**
@@ -55,6 +64,38 @@ export function isEnvEligibleSchema(schema: JsonSchema): boolean {
 
 export function isSecretSchema(schema: JsonSchema): boolean {
   return schema[MODULE_SCHEMA_SECRET] === true;
+}
+
+/**
+ * Marks a string schema as an instance-id reference into another configured
+ * slot. Core validates existence, slot kind, and the optional capability after
+ * every selected module schema has been composed.
+ */
+export function crossSlotReferenceSchema(
+  schema: JsonSchema,
+  reference: CrossSlotReference,
+): JsonSchema {
+  if (schema.type !== "string") throw new TypeError("Cross-slot references must annotate a string schema");
+  if (!isModuleSlot(reference.slot)) throw new TypeError(`Unknown module slot: ${reference.slot}`);
+  if (reference.capability !== undefined && reference.capability.trim().length === 0) {
+    throw new TypeError("Cross-slot capability must not be empty");
+  }
+  return Object.freeze({
+    ...schema,
+    [MODULE_SCHEMA_SLOT_REFERENCE]: Object.freeze({ ...reference }),
+  });
+}
+
+export function readCrossSlotReference(schema: JsonSchema): CrossSlotReference | undefined {
+  const value = schema[MODULE_SCHEMA_SLOT_REFERENCE];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const slot = Reflect.get(value, "slot");
+  const capability = Reflect.get(value, "capability");
+  if (!isModuleSlot(slot)) return undefined;
+  if (capability !== undefined && (typeof capability !== "string" || capability.trim().length === 0)) {
+    return undefined;
+  }
+  return Object.freeze({ slot, ...(capability === undefined ? {} : { capability }) });
 }
 
 export interface ModuleManifest<K extends ModuleKind = ModuleKind> {
@@ -299,6 +340,44 @@ export interface ModuleInstance {
   diagnostics?(context: ModuleDiagnosticsContext): Awaitable<readonly ModuleDiagnostic[]>;
 }
 
+export type AttachmentKind = "image" | "audio" | "file";
+
+/** A transport-neutral attachment whose size and bytes have already been bounded. */
+export interface NormalizedAttachment {
+  readonly id: string;
+  readonly kind: AttachmentKind;
+  readonly name: string;
+  readonly mediaType: string;
+  readonly sizeBytes: number;
+  readonly data: Uint8Array;
+}
+
+export interface AskUserChoice {
+  readonly value: string;
+  readonly label: string;
+  readonly description?: string;
+}
+
+export interface AskUserQuestion {
+  readonly id: string;
+  readonly prompt: string;
+  readonly choices?: readonly AskUserChoice[];
+  readonly allowFreeText: boolean;
+  readonly multiple: boolean;
+}
+
+export interface AskUserRequest {
+  readonly interactionId: string;
+  readonly questions: readonly AskUserQuestion[];
+  readonly requestedAt: string;
+}
+
+export interface AskUserAnswer {
+  readonly interactionId: string;
+  readonly answers: Readonly<Record<string, readonly string[]>>;
+  readonly answeredAt: string;
+}
+
 export interface TurnTextPart {
   readonly type: "text";
   readonly text: string;
@@ -316,6 +395,11 @@ export interface TurnFilePart {
   readonly mediaType: string;
   readonly data: Uint8Array | string;
   readonly name: string;
+}
+
+export interface TurnAttachmentPart {
+  readonly type: "attachment";
+  readonly attachment: NormalizedAttachment;
 }
 
 export interface RuntimeToolCall {
@@ -366,6 +450,7 @@ export type TurnContentPart =
   | TurnTextPart
   | TurnImagePart
   | TurnFilePart
+  | TurnAttachmentPart
   | TurnToolCallPart
   | TurnToolResultPart;
 
@@ -388,12 +473,18 @@ export interface RuntimeToolDefinition {
 export interface RuntimeSession {
   /** Runtime-owned opaque identifier. Core must not interpret it. */
   readonly id: string;
+  readonly runtimeInstanceId?: string;
+  readonly provider?: string;
+  readonly model?: string;
+  readonly createdAt?: string;
+  readonly expiresAt?: string;
   readonly metadata?: JsonObject;
 }
 
 export interface RuntimeTurnOptions {
   readonly effort?: string;
   readonly maxTurns?: number;
+  readonly maxOutputTokens?: number;
   readonly responseSchema?: JsonSchema;
 }
 
@@ -415,6 +506,29 @@ export interface RuntimeUsage {
   readonly totalTokens?: number;
   readonly cacheReadTokens?: number;
   readonly cacheWriteTokens?: number;
+  readonly reasoningTokens?: number;
+  readonly contextWindow?: number;
+  readonly contextUsed?: number;
+  readonly cost?: RuntimeUsageCost;
+  readonly compaction?: RuntimeCompaction;
+  readonly sessionEvicted?: boolean;
+}
+
+export interface RuntimeUsageCost {
+  readonly currency: "USD";
+  readonly input?: number;
+  readonly output?: number;
+  readonly cacheRead?: number;
+  readonly cacheWrite?: number;
+  readonly total: number;
+}
+
+export interface RuntimeCompaction {
+  readonly compacted: boolean;
+  readonly tokensBefore?: number;
+  readonly tokensAfter?: number;
+  readonly summaryTokens?: number;
+  readonly firstRetainedMessageId?: string;
 }
 
 export interface RuntimeTextDeltaEvent {
@@ -452,6 +566,11 @@ export interface RuntimeSessionEvent {
   readonly session: RuntimeSession;
 }
 
+export interface RuntimeCompactionEvent {
+  readonly type: "compaction";
+  readonly compaction: RuntimeCompaction;
+}
+
 export type RuntimeTurnEvent =
   | RuntimeTextDeltaEvent
   | RuntimeThinkingDeltaEvent
@@ -459,16 +578,34 @@ export type RuntimeTurnEvent =
   | RuntimeToolResultEvent
   | RuntimeUsageEvent
   | RuntimeDiagnosticEvent
-  | RuntimeSessionEvent;
+  | RuntimeSessionEvent
+  | RuntimeCompactionEvent;
+
+export interface RuntimeLiveInput {
+  readonly id: string;
+  readonly text: string;
+  readonly receivedAt: string;
+}
+
+export type RuntimeLiveInputDisposition = "applied" | "requeue" | "discarded";
+
+export type RuntimeLiveInputHandler = (
+  input: RuntimeLiveInput,
+) => Awaitable<RuntimeLiveInputDisposition>;
 
 export interface RuntimeTurnContext {
   emit(event: RuntimeTurnEvent): Awaitable<void>;
   executeTool(call: RuntimeToolCall, signal: AbortSignal): Promise<RuntimeToolResult>;
+  /** Bind steering to this exact active attempt; unregister before it settles. */
+  registerLiveInput?(handler: RuntimeLiveInputHandler): () => void;
+  /** Run one provider-neutral blocking human interaction through Core. */
+  askUser?(request: AskUserRequest, signal: AbortSignal): Promise<AskUserAnswer>;
 }
 
 export interface RuntimeCompletedTurnResult {
   readonly status: "completed";
   readonly message: TurnMessage;
+  readonly structuredOutput?: JsonValue;
   readonly usage?: RuntimeUsage;
   readonly session?: RuntimeSession;
   readonly metadata?: JsonObject;
@@ -483,6 +620,61 @@ export interface RuntimeIncompleteTurnResult {
 }
 
 export type RuntimeTurnResult = RuntimeCompletedTurnResult | RuntimeIncompleteTurnResult;
+
+export type RuntimeRetryability = "retryable" | "not-retryable" | "unknown";
+export type RuntimeSideEffectStatus = "none" | "committed" | "unknown";
+
+export interface RuntimeTurnErrorOptions {
+  readonly code: string;
+  readonly message: string;
+  readonly retryability: RuntimeRetryability;
+  readonly sideEffects: RuntimeSideEffectStatus;
+  readonly retryAfterMs?: number;
+  readonly cause?: unknown;
+}
+
+/** A runtime failure whose fallback safety can be decided without string matching. */
+export class RuntimeTurnError extends Error {
+  readonly code: string;
+  readonly retryability: RuntimeRetryability;
+  readonly sideEffects: RuntimeSideEffectStatus;
+  readonly retryAfterMs?: number;
+
+  constructor(options: RuntimeTurnErrorOptions) {
+    if (options.code.trim().length === 0) throw new TypeError("Runtime turn error code must not be empty");
+    if (!isRuntimeRetryability(options.retryability)) {
+      throw new TypeError("Runtime turn error retryability is invalid");
+    }
+    if (!isRuntimeSideEffectStatus(options.sideEffects)) {
+      throw new TypeError("Runtime turn error side-effects status is invalid");
+    }
+    if (options.retryAfterMs !== undefined
+      && (!Number.isSafeInteger(options.retryAfterMs) || options.retryAfterMs < 0)) {
+      throw new RangeError("Runtime turn error retryAfterMs must be a non-negative safe integer");
+    }
+    if (options.cause === undefined) super(options.message);
+    else super(options.message, { cause: options.cause });
+    this.name = "RuntimeTurnError";
+    this.code = options.code;
+    this.retryability = options.retryability;
+    this.sideEffects = options.sideEffects;
+    if (options.retryAfterMs !== undefined) this.retryAfterMs = options.retryAfterMs;
+  }
+}
+
+export function isRuntimeTurnError(value: unknown): value is RuntimeTurnError {
+  if (!(value instanceof Error)) return false;
+  const code = Reflect.get(value, "code");
+  const retryability = Reflect.get(value, "retryability");
+  const sideEffects = Reflect.get(value, "sideEffects");
+  const retryAfterMs = Reflect.get(value, "retryAfterMs");
+  return typeof code === "string"
+    && code.trim().length > 0
+    && isRuntimeRetryability(retryability)
+    && isRuntimeSideEffectStatus(sideEffects)
+    && (retryAfterMs === undefined
+      || (typeof retryAfterMs === "number" && Number.isSafeInteger(retryAfterMs) && retryAfterMs >= 0));
+}
 
 export interface RuntimeModelValidation {
   readonly supported: boolean;
@@ -499,6 +691,8 @@ export interface RuntimeCapabilities {
   readonly structuredOutput: boolean;
   readonly sandbox: boolean;
   readonly sessions: boolean;
+  /** Absent means unsupported for API-version-1 source compatibility. */
+  readonly liveInput?: boolean;
 }
 
 export interface Runtime extends ModuleInstance {
@@ -516,11 +710,7 @@ export interface RuntimeModuleDefinition<TConfig = unknown, TInstance extends Ru
   create(context: RuntimeModuleCreateContext<TConfig>): Awaitable<TInstance>;
 }
 
-export interface ChannelAttachment {
-  readonly name: string;
-  readonly mediaType: string;
-  readonly data: Uint8Array | string;
-}
+export interface ChannelAttachment extends NormalizedAttachment {}
 
 export interface ChannelActor {
   readonly id: string;
@@ -562,11 +752,23 @@ export interface ChannelReplyAttachmentEvent {
   readonly attachment: ChannelAttachment;
 }
 
+export interface ChannelReplyAskUserEvent {
+  readonly type: "ask-user";
+  readonly ask: AskUserRequest;
+}
+
+export interface ChannelReplyUsageEvent {
+  readonly type: "usage";
+  readonly usage: RuntimeUsage;
+}
+
 export type ChannelReplyEvent =
   | ChannelReplyTextDeltaEvent
   | ChannelReplyTextReplaceEvent
   | ChannelReplyActivityEvent
-  | ChannelReplyAttachmentEvent;
+  | ChannelReplyAttachmentEvent
+  | ChannelReplyAskUserEvent
+  | ChannelReplyUsageEvent;
 
 export interface ChannelReplySink {
   emit(event: ChannelReplyEvent): Awaitable<void>;
@@ -578,8 +780,91 @@ export interface ChannelTurnResult {
   readonly diagnostics?: readonly ModuleDiagnostic[];
 }
 
+export interface ChannelCancelRequest {
+  readonly conversationId: string;
+  readonly reason?: string;
+  readonly signal: AbortSignal;
+}
+
+export interface ChannelCancelResult {
+  readonly status: "accepted" | "idle" | "unsupported";
+}
+
+export interface ChannelLiveInput extends RuntimeLiveInput {
+  readonly conversationId: string;
+  readonly signal: AbortSignal;
+}
+
+export interface ChannelLiveInputResult {
+  readonly status: RuntimeLiveInputDisposition | "unavailable";
+}
+
+export interface ChannelAskAnswerResult {
+  readonly status: "accepted" | "expired" | "mismatch" | "unsupported";
+}
+
+export interface ChannelConversationSummary {
+  readonly conversationId: string;
+  readonly title?: string;
+  readonly updatedAt: string;
+  readonly metadata?: JsonObject;
+}
+
+export interface ChannelConversationListRequest {
+  readonly cursor?: string;
+  readonly limit: number;
+  readonly signal: AbortSignal;
+}
+
+export interface ChannelConversationListResult {
+  readonly conversations: readonly ChannelConversationSummary[];
+  readonly cursor?: string;
+}
+
+export interface ChannelReplayRequest {
+  readonly conversationId: string;
+  readonly cursor?: string;
+  readonly limit: number;
+  readonly signal: AbortSignal;
+}
+
+export interface ChannelReplayEntry {
+  readonly turnId: string;
+  readonly message: TurnMessage;
+  readonly createdAt: string;
+}
+
+export interface ChannelReplayResult {
+  readonly entries: readonly ChannelReplayEntry[];
+  readonly cursor?: string;
+}
+
+export interface ChannelOpenConversationRequest {
+  readonly title?: string;
+  readonly initialText?: string;
+  readonly metadata?: JsonObject;
+  readonly signal: AbortSignal;
+}
+
+export interface ChannelOpenConversationResult {
+  readonly conversationId: string;
+  readonly createdAt: string;
+}
+
 export interface ChannelHost extends ModuleHost {
   dispatch(request: ChannelInboundRequest, reply: ChannelReplySink): Promise<ChannelTurnResult>;
+  cancel?(request: ChannelCancelRequest): Promise<ChannelCancelResult>;
+  offerLiveInput?(input: ChannelLiveInput): Promise<ChannelLiveInputResult>;
+  answerAsk?(
+    conversationId: string,
+    answer: AskUserAnswer,
+    signal: AbortSignal,
+  ): Promise<ChannelAskAnswerResult>;
+  listConversations?(request: ChannelConversationListRequest): Promise<ChannelConversationListResult>;
+  readReplay?(request: ChannelReplayRequest): Promise<ChannelReplayResult>;
+  readConfig?(signal: AbortSignal): Promise<JsonValue>;
+  readHealth?(signal: AbortSignal): Promise<ModuleHealth>;
+  openConversation?(request: ChannelOpenConversationRequest): Promise<ChannelOpenConversationResult>;
 }
 
 export interface ChannelOutboundMessage {
@@ -587,12 +872,13 @@ export interface ChannelOutboundMessage {
   readonly text: string;
   readonly attachments?: readonly ChannelAttachment[];
   readonly replyToMessageId?: string;
-  readonly idempotencyKey?: string;
+  readonly idempotencyKey: string;
   readonly metadata?: JsonObject;
 }
 
 export interface ChannelDeliveryResult {
-  readonly status: "delivered" | "unknown" | "failed";
+  readonly status: "delivered" | "duplicate" | "unknown" | "failed";
+  readonly idempotencyKey: string;
   readonly messageId?: string;
   readonly diagnostic?: ModuleDiagnostic;
 }
@@ -604,10 +890,18 @@ export interface ChannelCapabilities {
   readonly proactive: boolean;
   readonly runtimeControl: boolean;
   readonly verbatim: boolean;
+  readonly cancellation: boolean;
 }
 
 export interface Channel extends ModuleInstance {
   readonly capabilities: ChannelCapabilities;
+  /**
+   * Returns a bounded JSON discovery fragment after start. Core combines
+   * fragments by top-level key and publishes them through an optional state
+   * store; channel modules retain ownership of their protocol-specific shape.
+   * Secret values must never be included.
+   */
+  readHostPresence?(): JsonObject | undefined;
   deliver?(message: ChannelOutboundMessage, signal: AbortSignal): Promise<ChannelDeliveryResult>;
 }
 
@@ -652,6 +946,27 @@ export interface MemoryCapabilities {
   readonly forget: boolean;
 }
 
+export const HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE = "memory.runtime-capture" as const;
+
+/** Tool-free, session-free completion surface granted only to selected memory. */
+export interface MemoryRuntimeCaptureRequest {
+  readonly instructions: string;
+  readonly input: string;
+  readonly responseSchema?: JsonSchema;
+  readonly maxOutputTokens: number;
+  readonly signal: AbortSignal;
+}
+
+export interface MemoryRuntimeCaptureResult {
+  readonly text: string;
+  readonly structuredOutput?: JsonValue;
+  readonly usage?: RuntimeUsage;
+}
+
+export interface MemoryRuntimeCaptureGrant {
+  complete(request: MemoryRuntimeCaptureRequest): Promise<MemoryRuntimeCaptureResult>;
+}
+
 export interface Memory extends ModuleInstance {
   readonly capabilities: MemoryCapabilities;
   recall(request: MemoryRecallRequest): Promise<MemoryRecallResult>;
@@ -659,7 +974,10 @@ export interface Memory extends ModuleInstance {
   forget?(request: MemoryForgetRequest): Promise<boolean>;
 }
 
-export type MemoryHost = ModuleHost;
+export interface MemoryHost extends ModuleHost {
+  /** Present only when declared by the module and bound to a validated route. */
+  readonly runtimeCapture?: MemoryRuntimeCaptureGrant;
+}
 export type MemoryModuleCreateContext<TConfig> = ModuleCreateContext<TConfig, MemoryHost>;
 
 export interface MemoryModuleDefinition<TConfig = unknown, TInstance extends Memory = Memory> {
@@ -717,3 +1035,24 @@ function freezeConfigIssue(issue: ConfigIssue): ConfigIssue {
 function escapeJsonPointerSegment(segment: string): string {
   return segment.replaceAll("~", "~0").replaceAll("/", "~1");
 }
+
+function isModuleSlot(value: unknown): value is ModuleSlot {
+  return value === "runtime"
+    || value === "channel"
+    || value === "memory"
+    || value === "state"
+    || value === "trigger"
+    || value === "exporter"
+    || value === "sandbox";
+}
+
+function isRuntimeRetryability(value: unknown): value is RuntimeRetryability {
+  return value === "retryable" || value === "not-retryable" || value === "unknown";
+}
+
+function isRuntimeSideEffectStatus(value: unknown): value is RuntimeSideEffectStatus {
+  return value === "none" || value === "committed" || value === "unknown";
+}
+
+export * from "./http.js";
+export * from "./secure-fs.js";

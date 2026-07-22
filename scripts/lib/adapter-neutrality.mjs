@@ -2,8 +2,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
 export const ADAPTER_NEUTRAL_SOURCE_DIRS = [
-  "packages/agent-contracts/src",
-  "packages/agent-harness/src",
+  "packages/module-sdk/src",
+  "packages/core/src",
 ];
 
 const IGNORED_SOURCE_DIRS = new Set(["__fixtures__", "__tests__", "fixtures"]);

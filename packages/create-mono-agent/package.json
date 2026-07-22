@@ -1,7 +1,7 @@
 {
   "name": "create-mono-agent",
   "version": "0.15.0",
-  "description": "Transactional, schema-derived minimal mono-agent project scaffolder and unscoped CLI entry point.",
+  "description": "Transactional minimal, personal, and multi-runtime mono-agent project scaffolder.",
   "type": "module",
   "license": "GPL-3.0-only",
   "repository": {
@@ -28,6 +28,7 @@
   },
   "files": [
     "dist",
+    "LICENSE",
     "README.md"
   ],
   "scripts": {

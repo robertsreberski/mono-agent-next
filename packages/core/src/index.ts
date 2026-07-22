@@ -6,14 +6,22 @@ export { composeAgentConfigSchema, explainAgentConfig } from "./schema.js";
 
 export type { JsonSchema } from "./schema.js";
 export type {
+  AgentAskAnswer,
+  AgentAskAnswerStatus,
   AgentConfig,
   AgentConfigExplanation,
+  AgentConfigView,
+  AgentConversationReplay,
+  AgentConversationSummary,
   AgentHealth,
   AgentHost,
   AgentHostOptions,
   AgentHostStartInfo,
   AgentInspection,
+  AgentLiveInput,
+  AgentLiveInputStatus,
   AgentLoadOptions,
+  AgentModuleCommandResult,
   AgentPolicyConfig,
   AgentResponse,
   AgentSubmitInput,

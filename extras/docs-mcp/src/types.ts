@@ -1,4 +1,4 @@
-export type MonoAgentDocsScope = "all" | "composer" | "docs";
+export type MonoAgentDocsScope = "all" | "docs";
 
 export interface MonoAgentDocsSearchAction {
   readonly action: "search";
@@ -39,7 +39,7 @@ export interface MonoAgentDocsSearchHit {
   readonly rank: number;
   readonly chunkId: string;
   readonly readTarget: string;
-  readonly source: "composer" | "docs";
+  readonly source: "docs";
   readonly path: string;
   readonly title: string;
   readonly headingPath: readonly string[];
@@ -68,7 +68,7 @@ export interface MonoAgentDocsReadResult {
   readonly docsVersion: string;
   readonly corpusDigest: string;
   readonly target: string;
-  readonly source: "composer" | "docs";
+  readonly source: "docs";
   readonly path: string;
   readonly title: string;
   readonly headingPath: readonly string[];

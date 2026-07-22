@@ -10,7 +10,7 @@ conversation state between mono-agent operator products.
 
 Category: `operator-surface`
 Tier: `core`
-Catalog responsibility: Defines the shared operator protocol, strict client, directory, domain state, action eligibility, and golden fixtures used by every renderer.
+Catalog responsibility: Defines the Apache-licensed operator protocol, strict client, directory, domain state, actions, and fixtures.
 
 <!-- package-metadata:end -->
 

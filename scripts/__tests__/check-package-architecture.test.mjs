@@ -31,7 +31,7 @@ describe("package architecture adapter-neutrality guard", () => {
     expect(packageCatalog.find((entry) => entry.name === "@mono-agent/web")).toMatchObject({
       dir: "web",
       category: "operator-surface",
-      allowedDependencyCategories: ["core", "observability"],
+      allowedDependencyCategories: ["operator-surface"],
       publishable: true,
     });
   });
@@ -44,10 +44,9 @@ describe("package architecture adapter-neutrality guard", () => {
     expect(TEST_CHANNEL_IDS).toEqual([...SHIPPED_CHANNEL_IDS, SYNTHETIC_CHANNEL_ID]);
   });
 
-  it("keeps the legacy webhook package explicitly superseded during the vertical migration", () => {
-    expect(packageCatalog.find((entry) => entry.name === "@mono-agent/webhook-adapter")).toMatchObject({
-      supersededBy: "@mono-agent/channel-webhook",
-    });
+  it("contains exactly the 23-package v1 roster and no compatibility webhook package", () => {
+    expect(packageCatalog).toHaveLength(23);
+    expect(packageCatalog.find((entry) => entry.name === "@mono-agent/webhook-adapter")).toBeUndefined();
     expect(packageCatalog.find((entry) => entry.name === "@mono-agent/channel-webhook")).toMatchObject({
       category: "communication",
       channelIds: ["webhook"],

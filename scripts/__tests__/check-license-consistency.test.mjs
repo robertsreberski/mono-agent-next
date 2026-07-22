@@ -22,7 +22,7 @@ let canonicalLicense;
 let canonicalApacheLicense;
 
 beforeAll(async () => {
-  canonicalLicense = await readFile(new URL("../../packages/agent-runtime/LICENSE", import.meta.url));
+  canonicalLicense = await readFile(new URL("../../LICENSE", import.meta.url));
   canonicalApacheLicense = await readFile(new URL("../../packages/module-sdk/LICENSE", import.meta.url));
 });
 
@@ -96,7 +96,7 @@ describe("check-license-consistency", () => {
   it("reports drift in both canonical GPL text copies", async () => {
     const repoRoot = await fixtureRepo();
     await writeFile(join(repoRoot, "LICENSE"), "not the GPL\n", "utf8");
-    await writeFile(join(repoRoot, "packages/agent-runtime/LICENSE"), "also not the GPL\n", "utf8");
+    await writeFile(join(repoRoot, "packages/example/LICENSE"), "also not the GPL\n", "utf8");
 
     const result = await checkLicenseConsistency({ repoRoot, catalog });
     const report = renderLicenseConsistencyReport(result);
@@ -105,7 +105,7 @@ describe("check-license-consistency", () => {
     expect(result.issues).toHaveLength(2);
     expect(report).toContain(`sha256 ${CANONICAL_GPL3_SHA256}`);
     expect(report).toContain("LICENSE must be the canonical GPL-3.0 text");
-    expect(report).toContain("packages/agent-runtime/LICENSE must be the canonical GPL-3.0 text");
+    expect(report).toContain("packages/example/LICENSE must be the canonical GPL-3.0 text");
   });
 });
 
@@ -122,7 +122,6 @@ async function fixtureRepo(options = {}) {
     license: options.packageLicense ?? REQUIRED_LICENSE,
   });
   await writeFileAt(join(repoRoot, "LICENSE"), canonicalLicense);
-  await writeFileAt(join(repoRoot, "packages/agent-runtime/LICENSE"), canonicalLicense);
   await writeFileAt(
     join(repoRoot, "packages/example/LICENSE"),
     options.packageLicense === "Apache-2.0" ? canonicalApacheLicense : canonicalLicense,

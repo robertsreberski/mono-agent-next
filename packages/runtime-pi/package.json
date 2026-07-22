@@ -20,7 +20,7 @@
     "packageName": "@mono-agent/runtime-pi",
     "apiVersion": 1,
     "kind": "runtime",
-    "responsibility": "Runs turns through Pi-native providers as isolated native attempts."
+    "responsibility": "Runs Pi-native turns with atomic session forks and live steering."
   },
   "private": false,
   "engines": {

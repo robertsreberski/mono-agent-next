@@ -59,7 +59,7 @@ try {
     arguments: {
       action: "search",
       query: "Which config field loads channel plugin packages?",
-      scope: "composer",
+      scope: "docs",
       limit: 3,
     },
   });

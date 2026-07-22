@@ -11,7 +11,7 @@ listener, and durable state; it is never selected by agent config.
 
 Category: `operator-surface`
 Tier: `core`
-Catalog responsibility: Runs the standalone authenticated browser product over the shared operator protocol with owner-private durable conversations.
+Catalog responsibility: Runs the standalone authenticated browser product with owner-private durable conversations.
 
 <!-- package-metadata:end -->
 

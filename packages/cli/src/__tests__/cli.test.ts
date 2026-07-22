@@ -8,6 +8,7 @@ const core = vi.hoisted(() => ({
   composeAgentConfigSchema: vi.fn(),
   createAgentHost: vi.fn(),
   explainAgentConfig: vi.fn(),
+  inspectAgent: vi.fn(),
   validateAgentConfig: vi.fn(),
 }));
 
@@ -22,6 +23,7 @@ beforeEach(() => {
   core.validateAgentConfig.mockResolvedValue({ ok: true, issues: [] });
   core.composeAgentConfigSchema.mockResolvedValue({ type: "object", additionalProperties: false });
   core.explainAgentConfig.mockResolvedValue({ path: "routing.primary", source: "config" });
+  core.inspectAgent.mockResolvedValue({ agent: { id: "fixture" }, modules: [] });
 });
 
 afterEach(async () => {
@@ -197,6 +199,29 @@ describe("runCli", () => {
     expect(JSON.parse(output.stdout.join(""))).toMatchObject({
       entries: [{ env: "WEBHOOK_API_KEY", redacted: true }],
     });
+  });
+
+  it("inspects without starting modules and runs one selected module command with bounded cleanup", async () => {
+    const inspectOutput = captureOutput();
+    await expect(runCli(["inspect", "--config", "/agent/config.json", "--json"], inspectOutput.io)).resolves.toBe(0);
+    expect(core.inspectAgent).toHaveBeenCalledWith("/agent/config.json");
+    expect(JSON.parse(inspectOutput.stdout.join(""))).toMatchObject({ agent: { id: "fixture" } });
+
+    const host = {
+      runModuleCommand: vi.fn(async () => ({ module: "cron", command: "cron:invoke", value: { accepted: true } })),
+      stop: vi.fn(async () => undefined),
+    };
+    core.createAgentHost.mockResolvedValue(host);
+    const commandOutput = captureOutput();
+    await expect(runCli([
+      "module", "command",
+      "--config", "/agent/config.json",
+      "--module", "cron",
+      "--name", "cron:invoke",
+      "--input-json", '{"jobId":"daily"}',
+    ], commandOutput.io)).resolves.toBe(0);
+    expect(host.runModuleCommand).toHaveBeenCalledWith("cron", "cron:invoke", { jobId: "daily" });
+    expect(host.stop).toHaveBeenCalledOnce();
   });
 });
 

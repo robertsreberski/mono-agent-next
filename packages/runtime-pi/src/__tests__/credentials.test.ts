@@ -20,22 +20,36 @@ async function fixture(contents: unknown): Promise<{ root: string; path: string 
   return { root, path };
 }
 
-describe("read-only Pi credential store", () => {
-  it("reads API-key credentials and keeps process-local modifications out of auth.json", async () => {
+describe("atomic Pi credential store", () => {
+  it("reads and atomically persists API-key credentials", async () => {
     const { path } = await fixture({ anthropic: { type: "api_key", key: "api-secret" } });
     const store = new ReadOnlyPiCredentialStore(path);
 
     expect(await store.read("anthropic")).toEqual({ type: "api_key", key: "api-secret" });
-    expect(await store.modify("anthropic", async (current) => current)).toEqual({ type: "api_key", key: "api-secret" });
+    expect(await store.modify("anthropic", async () => ({ type: "api_key", key: "rotated-secret" })))
+      .toEqual({ type: "api_key", key: "rotated-secret" });
     expect(await store.list()).toEqual([{ providerId: "anthropic", type: "api_key" }]);
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual({ anthropic: { type: "api_key", key: "rotated-secret" } });
   });
 
-  it("rejects OAuth credentials until refresh rotation has atomic persistence", async () => {
+  it("accepts referenced OAuth credentials and atomically persists refresh rotation", async () => {
     const { path } = await fixture({
       "openai-codex": { type: "oauth", access: "old-access", refresh: "refresh-secret", expires: 1 },
     });
     const store = new ReadOnlyPiCredentialStore(path);
-    await expect(store.read("openai-codex")).rejects.toThrow("requires atomic writable persistence");
+    await expect(store.read("openai-codex")).resolves.toMatchObject({ type: "oauth", access: "old-access" });
+    await store.modify("openai-codex", async (current) => ({
+      ...(current as { type: "oauth"; access: string; refresh: string; expires: number }),
+      access: "new-access",
+      refresh: "new-refresh",
+      expires: 2,
+    }));
+    expect(JSON.parse(await readFile(path, "utf8"))["openai-codex"]).toMatchObject({
+      type: "oauth",
+      access: "new-access",
+      refresh: "new-refresh",
+      expires: 2,
+    });
   });
 
   it("fails closed on permissive files and symbolic links without repairing them", async () => {

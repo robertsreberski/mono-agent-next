@@ -28,7 +28,7 @@ afterEach(async () => {
 });
 
 describe("RuntimePiSessionManager", () => {
-  it("uses a fresh native session for every attempt without retaining in-memory sessions", async () => {
+  it("uses a fresh native session for every attempt", async () => {
     const manager = new RuntimePiSessionManager({ cwd: process.cwd(), namespace: "test" });
     const ids: string[] = [];
 
@@ -49,6 +49,34 @@ describe("RuntimePiSessionManager", () => {
     }
 
     expect(new Set(ids).size).toBe(2);
+    await manager.stop();
+  });
+
+  it("forks a completed native session for atomic resume", async () => {
+    const manager = new RuntimePiSessionManager({ cwd: process.cwd(), namespace: "test" });
+    let firstId = "";
+    await manager.withAttempt(
+      { conversationId: "conversation", modelKey: "provider/model", turnId: "one", signal: new AbortController().signal },
+      async ({ id, session }) => {
+        firstId = id;
+        await session.appendMessage({ role: "user", content: "remember me", timestamp: Date.now() });
+        return { completed: true, value: undefined };
+      },
+    );
+    await manager.withAttempt(
+      {
+        conversationId: "conversation",
+        modelKey: "provider/model",
+        turnId: "two",
+        signal: new AbortController().signal,
+        resumeSessionId: firstId,
+      },
+      async ({ id, session }) => {
+        expect(id).not.toBe(firstId);
+        expect((await session.getEntries()).some((entry) => entry.type === "message")).toBe(true);
+        return { completed: true, value: undefined };
+      },
+    );
     await manager.stop();
   });
 

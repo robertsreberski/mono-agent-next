@@ -3,6 +3,7 @@
   "version": "0.15.0",
   "description": "Authenticated HTTP webhook channel for mono-agent.",
   "type": "module",
+  "sideEffects": false,
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
@@ -30,7 +31,7 @@
     "packageName": "@mono-agent/channel-webhook",
     "apiVersion": 1,
     "kind": "channel",
-    "responsibility": "Accepts authenticated HTTP invocations and submits normalized inbound turns."
+    "responsibility": "Serves bounded authenticated webhook ingress and explicit proactive webhook delivery."
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

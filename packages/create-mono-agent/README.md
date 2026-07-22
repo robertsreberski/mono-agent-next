@@ -1,7 +1,8 @@
 # create-mono-agent
 
-The unscoped npm-init package for creating a minimal mono-agent project. It also
-ships the `mono-agent` bin so global installs retain one natural command name.
+The GPL-3.0-only npm-init package for transactionally creating minimal,
+personal, and multi-runtime mono-agent projects. It also ships the `mono-agent`
+bin so global installs retain one natural command name.
 
 ## Category
 
@@ -10,7 +11,7 @@ ships the `mono-agent` bin so global installs retain one natural command name.
 
 Category: `app`
 Tier: `alias`
-Catalog responsibility: Transactionally scaffolds the exact minimal v1 dependency closure and delegates non-init commands to @mono-agent/cli.
+Catalog responsibility: Transactionally scaffolds minimal, Personal, and multi-runtime v1 projects and delegates to the CLI.
 
 <!-- package-metadata:end -->
 
@@ -18,16 +19,21 @@ Project tooling (`tier: alias` in the first-party package catalog).
 
 ## Responsibility
 
-Create one no-clobber project directory containing the exact minimal runtime
-closure, strict agent config, local composed schema, instructions, and a
-names-only environment example. Outside `init` and `setup`, the `mono-agent` bin
+Create one no-clobber project directory containing an exact template dependency
+closure, strict agent config, bootstrap schema, agent instructions, and a
+names-only environment example. `minimal` is the default; `personal` and
+`multi-runtime` are explicit. Outside `init` and `setup`, the `mono-agent` bin
 delegates to `@mono-agent/cli`.
 
 ## Install / Usage
 
 ```bash
-# No dependency installation or lifecycle scripts by default.
+# No dependency installation or lifecycle scripts by default; minimal is used.
 npm create mono-agent@0.15.0 my-agent
+
+# Select another deterministic template.
+npm create mono-agent@0.15.0 personal-agent -- --template personal
+npm create mono-agent@0.15.0 multi-agent -- --template multi-runtime
 
 # Installation is an explicit side effect.
 npm create mono-agent@0.15.0 my-agent -- --install --package-manager npm
@@ -40,22 +46,35 @@ mono-agent validate --config ./my-agent/mono-agent.config.json
 
 Explicit installation supports pnpm and npm. Yarn is intentionally unavailable
 until Core can validate its lockfile as part of the module-loading boundary.
-The generated project uses `openai:gpt-5.6-sol` with the runtime's owner-private
-`.secrets/pi/auth.json` API-key store and documents its exact setup. Provider
-credentials never fall back to ambient process variables. `.env.example` names
-only `WEBHOOK_API_KEY` for inbound authentication and never contains a value.
+All templates use `openai-codex:gpt-5.6-sol` through Pi's owner-private
+`.secrets/pi/auth.json` store. The scaffolder never creates that store, `.env`,
+or any credential-bearing file. `.env.example` contains only the exact names
+referenced through `$env`, with every value blank.
 
-The target must be absent or an existing empty real directory. Symlinks and
-non-empty targets fail closed. Files are prepared in a private sibling staging
-directory and published as one directory rename.
+| Template | Selected agent-process modules | Purpose |
+| --- | --- | --- |
+| `minimal` | Pi runtime and loopback webhook | Smallest runnable five-package closure; default. |
+| `personal` | Pi; Telegram, webhook, OpenAI API, operator; local memory/state; cron; OTLP | Sanitized Personal Agent process using current module schemas. Products remain separate. |
+| `multi-runtime` | Pi, native Claude SDK, and loopback webhook | Focused same-family/cross-runtime fallback example. |
+
+The checked-in bootstrap schema validates the generated seed. After installing,
+`npm run schema` or `pnpm run schema` composes the complete schema from the exact
+installed modules and atomically replaces that bootstrap file.
+
+The target must be absent or an existing empty real directory. Symlinks,
+non-directories, non-empty targets, duplicate scaffold owners, unsafe package
+names, and unknown templates fail closed. Files are prepared in a private
+sibling staging directory and published only after the full template and any
+explicit installation succeed.
 
 ## Architecture
 
 ### Data flow
 
 ```text
-create-mono-agent argv -> validate target -> private stage -> optional install
-                      -> atomic publish -> runnable project
+create-mono-agent argv -> validate template/target -> private stage
+                      -> render exact dependency/config matrix
+                      -> optional install -> publish runnable project
 
 mono-agent init/setup -> same scaffolder
 mono-agent other      -> @mono-agent/cli runCli
@@ -66,7 +85,7 @@ mono-agent other      -> @mono-agent/cli runCli
 | Module | Purpose |
 | --- | --- |
 | `src/scaffold.ts` | Transaction, no-clobber checks, optional installer, and file publication. |
-| `src/templates.ts` | Deterministic minimal config, schema, manifest, and text files. |
+| `src/templates.ts` | Deterministic three-template config, schema, manifest, instructions, and secret-name files. |
 | `src/cli.ts` | npm-create/init routing and argument validation. |
 | `src/bin/create-mono-agent.ts` | Unambiguous npm-create entry point. |
 | `src/bin/mono-agent.ts` | Global CLI/init entry point. |
@@ -77,9 +96,11 @@ mono-agent other      -> @mono-agent/cli runCli
 
 | Export | Use |
 | --- | --- |
-| `scaffoldAgent(options)` | Create a minimal project programmatically. |
+| `scaffoldAgent(options)` | Transactionally create one selected project template. |
 | `runCreateMonoAgentCli(argv, io?, options?)` | Exercise create/init/delegation without spawning a process. |
-| `renderMinimalProject(options)` | Produce deterministic schema-derived files for review/testing. |
+| `renderProject(options)` | Render any template; defaults to `minimal`. |
+| `renderMinimalProject`, `renderPersonalProject`, `renderMultiRuntimeProject` | Explicit deterministic renderers. |
+| `PROJECT_TEMPLATES`, `ProjectTemplate` | Closed template identifiers for programmatic callers. |
 
 <!-- public-api-inventory:start -->
 <!-- Generated by scripts/generate-public-api-docs.mjs. Do not edit by hand. -->
@@ -92,12 +113,20 @@ Every symbol exported by each public code entrypoint is listed below.
 CreateMonoAgentCliOptions
 InstallPackageManager
 MinimalProjectOptions
+PROJECT_TEMPLATES
 PackageInstaller
+ProjectIdentityOptions
+ProjectTemplate
+ProjectTemplateOptions
 RenderedProjectFile
 ScaffoldAgentOptions
 ScaffoldError
 ScaffoldResult
+isProjectTemplate
 renderMinimalProject
+renderMultiRuntimeProject
+renderPersonalProject
+renderProject
 runCreateMonoAgentCli
 scaffoldAgent
 ```
@@ -106,20 +135,24 @@ scaffoldAgent
 
 ## Dependency Boundary
 
-Depends only on `@mono-agent/cli`. The scaffolded project, not this tool, owns
-the exact five-package runtime closure: module-sdk, core, cli, runtime-pi, and
-channel-webhook at one lockstep version.
+The tool depends only on `@mono-agent/cli`. The scaffolded project, not this
+tool, directly owns `module-sdk`, `core`, `cli`, and every package named by its
+selected `$use` entries at one lockstep version. Unselected modules and separate
+products never enter that dependency graph.
 
 ## What This Package Does Not Own
 
-It does not run an agent, authenticate a provider, retain secrets, invent a
-wizard state machine, mutate an existing project, silently install packages, or
-join the scaffolded runtime dependency graph.
+It does not run an agent, authenticate a provider, initialize memory's durable
+first-run marker, retain secrets, invent a wizard state machine, mutate existing
+project data, silently install packages, install standalone products, or join
+the scaffolded runtime dependency graph.
 
 ## Related Documentation
 
 - [V1 architecture](../../docs/reference/v1-architecture.md)
 - [Minimal agent fixture](../../refactor/mono-agent-v1-prd.md#62-minimal-agent)
+- [Sanitized Personal Agent fixture](../../refactor/mono-agent-v1-prd.md#63-sanitized-personal-agent-migration-fixture)
+- [Multi-runtime addition](../../refactor/mono-agent-v1-prd.md#64-multi-runtime-addition)
 
 ## Verification
 
@@ -127,4 +160,10 @@ join the scaffolded runtime dependency graph.
 pnpm --filter create-mono-agent run build
 pnpm --filter create-mono-agent run typecheck
 pnpm --filter create-mono-agent run test
+npm pack --dry-run ./packages/create-mono-agent
 ```
+
+Focused tests prove the full template/dependency matrix, names-only secret
+references, current module field shapes, deterministic bootstrap files,
+no-overwrite behavior, concurrent ownership, rollback after installer failure,
+CLI template selection, and delegation of non-scaffold commands.

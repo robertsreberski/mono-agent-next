@@ -18,7 +18,7 @@ const docsInputSchema = z.object({
   action: z.enum(["search", "read"]).describe("Use search to find sections, then read to expand an exact target."),
   query: z.string().min(3).max(500).optional().describe("Required for action=search: natural-language question or exact mono-agent config, package, environment, or CLI identifier."),
   limit: z.number().int().min(1).max(8).optional().describe("For action=search: maximum distinct sections (default 5)."),
-  scope: z.enum(["all", "composer", "docs"]).optional().describe("For action=search: all sources (default), authoritative composer references, or public documentation."),
+  scope: z.enum(["all", "docs"]).optional().describe("For action=search: the version-matched public documentation corpus."),
   target: z.string().min(1).max(2_000).optional().describe("Required for action=read: use a readTarget, previousTarget, nextTarget, logical corpus path, docs route, or canonical docs URL."),
 }).strict();
 const internalLinkSchema = z.object({
@@ -30,7 +30,7 @@ const navigationArgumentsSchema = z.object({
   action: z.enum(["search", "read"]),
   query: z.string().optional(),
   limit: z.number().int().optional(),
-  scope: z.enum(["all", "composer", "docs"]).optional(),
+  scope: z.enum(["all", "docs"]).optional(),
   target: z.string().optional(),
 });
 const navigationActionSchema = z.object({
@@ -46,7 +46,7 @@ const searchHitSchema = z.object({
   rank: z.number().int().positive(),
   chunkId: z.string(),
   readTarget: z.string(),
-  source: z.enum(["composer", "docs"]),
+  source: z.literal("docs"),
   path: z.string(),
   title: z.string(),
   headingPath: z.array(z.string()),
@@ -70,10 +70,10 @@ const docsOutputSchema = z.object({
   action: z.enum(["search", "read"]),
   retrievalMode: z.literal("hybrid").optional(),
   query: z.string().optional(),
-  scope: z.enum(["all", "composer", "docs"]).optional(),
+  scope: z.enum(["all", "docs"]).optional(),
   results: z.array(searchHitSchema).optional(),
   target: z.string().optional(),
-  source: z.enum(["composer", "docs"]).optional(),
+  source: z.literal("docs").optional(),
   path: z.string().optional(),
   title: z.string().optional(),
   headingPath: z.array(z.string()).optional(),
@@ -99,7 +99,7 @@ export function createMonoAgentDocsMcpServer(): McpServer {
         "First call {\"action\":\"search\",\"query\":\"...\"}; search returns 2-3k Markdown excerpts as a map.",
         "Then call {\"action\":\"read\",\"target\":\"<readTarget>\"} for an anchored window up to 10k characters.",
         "Follow internalLinks with action=read and continue long documents with the exact previousTarget/nextTarget actions in navigation.",
-        "All retrieval and link resolution is offline. Prefer scope=composer for configuration and capability questions.",
+        "All retrieval and link resolution is offline and restricted to the version-matched v1 documentation corpus.",
       ].join(" "),
       inputSchema: docsInputSchema,
       outputSchema: docsOutputSchema,

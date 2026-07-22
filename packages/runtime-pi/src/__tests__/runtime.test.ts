@@ -113,10 +113,10 @@ describe("Pi-native runtime module", () => {
     const first = await runtime.runTurn(request("one"), firstContext.context);
     expect(first.status).toBe("completed");
     expect(first.message?.content).toContainEqual({ type: "text", text: "first" });
-    expect(first.session).toBeUndefined();
+    expect(first.session).toMatchObject({ provider: "pi", model: "faux:faux-model", runtimeInstanceId: "test-runtime" });
     expect(firstContext.events.some((event) => event.type === "text-delta")).toBe(true);
     expect(firstContext.events.some((event) => event.type === "usage")).toBe(true);
-    expect(firstContext.events.some((event) => event.type === "session")).toBe(false);
+    expect(firstContext.events.some((event) => event.type === "session")).toBe(true);
 
     const secondContext = turnContext();
     const second = await runtime.runTurn(request("two", {
@@ -126,9 +126,10 @@ describe("Pi-native runtime module", () => {
         { role: "assistant", content: [{ type: "text", text: "first" }] },
         { role: "user", content: [{ type: "text", text: "two" }] },
       ],
+      session: first.session!,
     }), secondContext.context);
     expect(second.message?.content).toContainEqual({ type: "text", text: "continued" });
-    expect(second.session).toBeUndefined();
+    expect(second.session?.id).not.toBe(first.session?.id);
     await stop(runtime);
   });
 
@@ -197,7 +198,7 @@ describe("Pi-native runtime module", () => {
     expect(await runtime.validateModel?.("bad-reference", abortSignal())).toMatchObject({ supported: false });
     expect(await runtime.validateModel?.("faux:faux-model", abortSignal())).toMatchObject({
       supported: true,
-      capabilities: { attachments: false, approvals: false, sandbox: false, sessions: false },
+      capabilities: { attachments: false, approvals: false, sandbox: false, sessions: true, liveInput: true },
     });
     await expect(runtime.runTurn(request("bad model", { model: "faux:missing" }), turnContext().context))
       .rejects.toMatchObject({ code: "MODEL_INVALID" });
@@ -381,7 +382,7 @@ describe("local OpenAI-compatible provider", () => {
       message: { content: [{ type: "text", text: "fixture ok" }] },
       metadata: { provider: "fixture", model: "fixture-model" },
     });
-    expect(result.session).toBeUndefined();
+    expect(result.session).toMatchObject({ provider: "pi", model: "fixture:fixture-model" });
     expect(events.filter((event) => event.type === "text-delta").map((event) => event.delta).join(""))
       .toBe("fixture ok");
     await stop(runtime);

@@ -20,7 +20,8 @@ Core infrastructure.
 ## Responsibility
 
 Own strict configuration, direct-dependency module loading, runtime routing,
-turn admission, project MCP clients, health, drain, and shutdown.
+turn admission, bounded skill disclosure, project MCP clients, health, drain,
+and shutdown.
 
 ## Install / Usage
 
@@ -93,8 +94,8 @@ the validated runtime and channel instances and routes normalized requests.
 | `config.ts` | Strict core envelope and selected-slot discovery. |
 | `module-loader.ts` | Dependency, lockfile, manifest, kind, and API checks. |
 | `schema.ts` | Exact schema composition and redacted explanation. |
-| `mcp.ts` | Ordinary project stdio and HTTP MCP clients. |
-| `host.ts` | Admission, serialized turns, routing, lifecycle, and health. |
+| `mcp.ts` | Ordinary project stdio and HTTP MCP clients plus Core tool identity. |
+| `host.ts` | Admission, serialized turns, bounded skill disclosure, routing, lifecycle, and health. |
 
 ## Public API
 
@@ -118,16 +119,24 @@ Every symbol exported by each public code entrypoint is listed below.
 
 ```text
 AgentAdmissionError
+AgentAskAnswer
+AgentAskAnswerStatus
 AgentConfig
 AgentConfigError
 AgentConfigExplanation
 AgentConfigIssue
+AgentConfigView
+AgentConversationReplay
+AgentConversationSummary
 AgentHealth
 AgentHost
 AgentHostOptions
 AgentHostStartInfo
 AgentInspection
+AgentLiveInput
+AgentLiveInputStatus
 AgentLoadOptions
+AgentModuleCommandResult
 AgentModuleError
 AgentPolicyConfig
 AgentResponse

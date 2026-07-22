@@ -11,7 +11,7 @@ package translates command arguments and exit codes into those APIs.
 
 Category: `app`
 Tier: `core`
-Catalog responsibility: Provides thin validation, inspection, authoring, and foreground-run frontends over the core public API.
+Catalog responsibility: Provides thin validation, inspection, module-command, authoring, and foreground-run frontends over the core public API.
 
 <!-- package-metadata:end -->
 

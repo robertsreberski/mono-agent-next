@@ -17,6 +17,7 @@ import {
 import { FIXTURE_CAPABILITIES } from "../testing.js";
 
 const roots: string[] = [];
+const OPERATOR_REGISTRY_DETAILS_SCHEMA = "mono-agent.operator-registry-details.v1";
 
 async function temporaryRegistry(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "mono-agent-operator-"));
@@ -36,6 +37,36 @@ function descriptor(overrides: Partial<OperatorRegistryDescriptor> = {}): Operat
     startedAt: "2026-01-02T03:04:05.000Z",
     heartbeatAt: "2026-01-02T03:04:10.000Z",
     capabilities: FIXTURE_CAPABILITIES,
+    ...overrides,
+  };
+}
+
+function operatorRegistryDetails(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema: OPERATOR_REGISTRY_DETAILS_SCHEMA,
+    agent: { id: "presence-agent", label: "Presence Agent" },
+    operator: {
+      endpoint: "http://127.0.0.1:8765/operator",
+      tokenEnvironment: "PRESENCE_OPERATOR_TOKEN",
+    },
+    process: { pid: 314, startedAt: "2026-01-02T03:04:05.000Z" },
+    capabilities: FIXTURE_CAPABILITIES,
+    ...overrides,
+  };
+}
+
+function statePresence(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema: "mono-agent.state-presence.v1",
+    sourceId: "presence-agent",
+    sourceLabel: "Presence Agent",
+    instanceId: "presence-instance",
+    pid: 999,
+    stateRoot: "/owner-private/state",
+    status: "ready",
+    startedAt: "2026-01-02T02:00:00.000Z",
+    heartbeatAt: "2026-01-02T03:04:20.000Z",
+    details: { operatorRegistry: operatorRegistryDetails() },
     ...overrides,
   };
 }
@@ -78,6 +109,70 @@ describe("operator directory", () => {
     const [entry] = await discoverOperators({ registryDirectories: [registry], now: Date.parse("2026-01-02T03:05:00.000Z"), staleAfterMs: 10_000 });
     expect(entry?.stale).toBe(true);
     expect(() => new OperatorDirectory([entry!]).select()).toThrow("no live operator");
+  });
+
+  it("normalizes an active state-local presence using the exact operator process identity", async () => {
+    const registry = await temporaryRegistry();
+    const path = await writeDescriptor(registry, "presence.json", statePresence({ status: "degraded" }));
+
+    const entries = await discoverOperators({
+      registryDirectories: [registry],
+      now: Date.parse("2026-01-02T03:04:30.000Z"),
+      staleAfterMs: 15_000,
+    });
+
+    expect(entries).toEqual([{
+      id: "presence-agent",
+      label: "Presence Agent",
+      endpoint: "http://127.0.0.1:8765/operator",
+      tokenEnvironment: "PRESENCE_OPERATOR_TOKEN",
+      pid: 314,
+      startedAt: "2026-01-02T03:04:05.000Z",
+      heartbeatAt: "2026-01-02T03:04:20.000Z",
+      stale: false,
+      sourcePath: path,
+      capabilities: FIXTURE_CAPABILITIES,
+    }]);
+  });
+
+  it("skips recognized non-serving lifecycle states and active sources without an operator", async () => {
+    const registry = await temporaryRegistry();
+    await writeDescriptor(registry, "01-starting.json", statePresence({
+      status: "starting",
+      details: { operatorRegistry: operatorRegistryDetails() },
+    }));
+    await writeDescriptor(registry, "02-stopping.json", statePresence({ status: "stopping" }));
+    await writeDescriptor(registry, "03-stopped.json", statePresence({ status: "stopped" }));
+    await writeDescriptor(registry, "04-ready-without-operator.json", statePresence({
+      status: "ready",
+      details: { state: "available" },
+    }));
+    await writeDescriptor(registry, "05-degraded-without-operator.json", statePresence({
+      status: "degraded",
+      details: { reason: "operator intentionally disabled" },
+    }));
+
+    await expect(discoverOperators({ registryDirectories: [registry] })).resolves.toEqual([]);
+  });
+
+  it("fails closed on malformed state envelopes and malformed active operator details", async () => {
+    const malformedEnvelope = await temporaryRegistry();
+    await writeDescriptor(malformedEnvelope, "presence.json", statePresence({ unexpected: true }));
+    await expect(discoverOperators({ registryDirectories: [malformedEnvelope] })).rejects.toMatchObject({
+      code: "INVALID_REGISTRY",
+      cause: { message: expect.stringContaining("unknown field") },
+    });
+
+    const malformedOperator = await temporaryRegistry();
+    const missingCapabilities = operatorRegistryDetails();
+    delete missingCapabilities.capabilities;
+    await writeDescriptor(malformedOperator, "presence.json", statePresence({
+      details: { operatorRegistry: missingCapabilities },
+    }));
+    await expect(discoverOperators({ registryDirectories: [malformedOperator] })).rejects.toMatchObject({
+      code: "INVALID_REGISTRY",
+      cause: { message: expect.stringContaining("capabilities is required") },
+    });
   });
 
   it("rejects permissive files and symlink entries without repairing them", async () => {

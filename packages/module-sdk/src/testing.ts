@@ -1,5 +1,6 @@
 import {
   MODULE_API_VERSION,
+  MODULE_SCHEMA_SLOT_REFERENCE,
   OPEN_MODULE_KINDS,
   type Channel,
   type ChannelModuleDefinition,
@@ -11,6 +12,7 @@ import {
   type OpenModuleDefinition,
   type Runtime,
   type RuntimeModuleDefinition,
+  readCrossSlotReference,
 } from "./index.js";
 
 const RESERVED_DIRECTIVES = new Set(["$schema", "$use", "$env"]);
@@ -98,7 +100,7 @@ export function assertMemoryModuleCompliance(
 
 export function assertRuntimeInstanceCompliance(value: unknown): asserts value is Runtime {
   const instance = assertModuleInstance(value, "runtime instance");
-  assertBooleanCapabilities(instance.capabilities, [
+  const capabilities = assertBooleanCapabilities(instance.capabilities, [
     "tools",
     "mcp",
     "attachments",
@@ -107,21 +109,28 @@ export function assertRuntimeInstanceCompliance(value: unknown): asserts value i
     "sandbox",
     "sessions",
   ], "runtime capabilities");
+  if (capabilities.liveInput !== undefined && typeof capabilities.liveInput !== "boolean") {
+    fail("runtime capabilities.liveInput must be a boolean when present");
+  }
   if (typeof instance.runTurn !== "function") fail("runtime instance runTurn must be a function");
   assertOptionalFunction(instance.validateModel, "runtime instance validateModel");
 }
 
 export function assertChannelInstanceCompliance(value: unknown): asserts value is Channel {
   const instance = assertModuleInstance(value, "channel instance");
-  assertBooleanCapabilities(instance.capabilities, [
+  const capabilities = assertBooleanCapabilities(instance.capabilities, [
     "attachments",
     "liveInput",
     "askUser",
     "proactive",
     "runtimeControl",
     "verbatim",
+    "cancellation",
   ], "channel capabilities");
   assertOptionalFunction(instance.deliver, "channel instance deliver");
+  if (capabilities.proactive === true && typeof instance.deliver !== "function") {
+    fail("proactive channel instance deliver must be a function");
+  }
 }
 
 export function assertMemoryInstanceCompliance(value: unknown): asserts value is Memory {
@@ -147,6 +156,7 @@ export function assertSchemaCompliance(value: unknown): asserts value is ModuleS
   const jsonSchema = requireRecord(schema.jsonSchema, "schema.jsonSchema");
   if (typeof schema.parse !== "function") fail("schema.parse must be a function");
   assertNoReservedDirectiveProperties(jsonSchema);
+  assertSchemaAnnotations(jsonSchema);
 }
 
 function assertModuleInstance(value: unknown, label: string): Record<string, unknown> {
@@ -181,10 +191,36 @@ function assertCapabilities(value: unknown): void {
   }
 }
 
-function assertBooleanCapabilities(value: unknown, names: readonly string[], label: string): void {
+function assertBooleanCapabilities(
+  value: unknown,
+  names: readonly string[],
+  label: string,
+): Record<string, unknown> {
   const capabilities = requireRecord(value, label);
   for (const name of names) {
     if (typeof capabilities[name] !== "boolean") fail(`${label}.${name} must be a boolean`);
+  }
+  return capabilities;
+}
+
+function assertSchemaAnnotations(jsonSchema: Record<string, unknown>): void {
+  const visited = new Set<object>();
+  const pending: unknown[] = [jsonSchema];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === null || typeof current !== "object" || visited.has(current)) continue;
+    visited.add(current);
+    if (Array.isArray(current)) {
+      pending.push(...current);
+      continue;
+    }
+    const record = current as Record<string, unknown>;
+    if (MODULE_SCHEMA_SLOT_REFERENCE in record) {
+      if (record.type !== "string" || readCrossSlotReference(record) === undefined) {
+        fail("module schema has an invalid cross-slot reference annotation");
+      }
+    }
+    pending.push(...Object.values(record));
   }
 }
 

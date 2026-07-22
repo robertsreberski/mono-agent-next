@@ -12,7 +12,11 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, parse, resolve } from "node:path";
 
-import { renderMinimalProject } from "./templates.js";
+import {
+  isProjectTemplate,
+  renderProject,
+  type ProjectTemplate,
+} from "./templates.js";
 
 export type InstallPackageManager = "npm" | "pnpm";
 
@@ -25,6 +29,8 @@ export interface ScaffoldAgentOptions {
   targetDirectory: string;
   cwd?: string;
   projectName?: string;
+  displayName?: string;
+  template?: ProjectTemplate;
   install?: boolean;
   packageManager?: InstallPackageManager;
   installer?: PackageInstaller;
@@ -33,6 +39,7 @@ export interface ScaffoldAgentOptions {
 export interface ScaffoldResult {
   directory: string;
   projectName: string;
+  template: ProjectTemplate;
   installed: boolean;
   packageManager?: InstallPackageManager;
   files: readonly string[];
@@ -50,10 +57,13 @@ export async function scaffoldAgent(options: ScaffoldAgentOptions): Promise<Scaf
   }
 
   const parent = dirname(target);
-  await mkdir(parent, { recursive: true, mode: 0o700 });
-
   const projectName = options.projectName ?? normalizeProjectName(basename(target));
   assertPackageName(projectName);
+  const template = options.template ?? "minimal";
+  if (!isProjectTemplate(template)) {
+    throw new ScaffoldError(`Unknown project template: ${String(template)}`);
+  }
+  await mkdir(parent, { recursive: true, mode: 0o700 });
 
   const lockPath = join(parent, `.${basename(target)}.mono-agent-scaffold.lock`);
   try {
@@ -69,7 +79,11 @@ export async function scaffoldAgent(options: ScaffoldAgentOptions): Promise<Scaf
   try {
     await assertTargetAbsentOrEmpty(target);
     stagePath = await mkdtemp(join(parent, `.${basename(target)}.mono-agent-stage-`));
-    const files = renderMinimalProject({ projectName });
+    const files = renderProject({
+      projectName,
+      template,
+      ...(options.displayName === undefined ? {} : { displayName: options.displayName }),
+    });
     await writeRenderedProject(stagePath, files);
 
     if (options.install === true) {
@@ -83,6 +97,7 @@ export async function scaffoldAgent(options: ScaffoldAgentOptions): Promise<Scaf
     return {
       directory: target,
       projectName,
+      template,
       installed: options.install === true,
       ...(options.install === true ? { packageManager: options.packageManager ?? "pnpm" } : {}),
       files: files.map((file) => file.path),
@@ -99,7 +114,7 @@ export async function scaffoldAgent(options: ScaffoldAgentOptions): Promise<Scaf
 
 async function writeRenderedProject(
   stagePath: string,
-  files: ReturnType<typeof renderMinimalProject>,
+  files: ReturnType<typeof renderProject>,
 ): Promise<void> {
   const directoryPaths = new Set(files.map((file) => dirname(file.path)).filter((path) => path !== "."));
   for (const relativePath of [...directoryPaths].sort()) {

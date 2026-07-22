@@ -1,0 +1,49 @@
+{
+  "name": "@mono-agent/trigger-cron",
+  "version": "0.15.0",
+  "description": "Deterministic Markdown-backed cron trigger module for mono-agent.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
+    "directory": "packages/trigger-cron"
+  },
+  "private": false,
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "mono-agent": {
+    "packageName": "@mono-agent/trigger-cron",
+    "apiVersion": 1,
+    "kind": "trigger",
+    "responsibility": "Discovers scheduled Markdown jobs and emits deterministic idempotent trigger events."
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mono-agent/module-sdk": "workspace:0.15.0",
+    "cron-parser": "^5.5.0",
+    "yaml": "^2.9.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  }
+}

@@ -20,7 +20,7 @@ export interface DocsCorpusUnit {
 
 export interface DocsCorpusDocument {
   readonly id: string;
-  readonly source: "composer" | "docs";
+  readonly source: "docs";
   readonly path: string;
   readonly title: string;
   readonly route?: string;
@@ -33,7 +33,7 @@ export interface DocsCorpusDocument {
 export interface DocsCorpusChunk {
   readonly id: string;
   readonly documentId: string;
-  readonly source: "composer" | "docs";
+  readonly source: "docs";
   readonly path: string;
   readonly title: string;
   readonly headingPath: readonly string[];
@@ -198,7 +198,7 @@ function parseDocuments(raw: string): readonly DocsCorpusDocument[] {
     if (!isObject(candidate)) throw new Error(`Documentation corpus document ${index} is invalid.`);
     const markdownLength = typeof candidate.markdown === "string" ? candidate.markdown.length : -1;
     if (!isSha256(candidate.id)
-      || (candidate.source !== "composer" && candidate.source !== "docs")
+      || candidate.source !== "docs"
       || typeof candidate.path !== "string"
       || typeof candidate.title !== "string"
       || (candidate.route !== undefined && typeof candidate.route !== "string")
@@ -221,7 +221,7 @@ function parseChunks(raw: string): readonly DocsCorpusChunk[] {
     if (!isObject(candidate)
       || !isSha256(candidate.id)
       || !isSha256(candidate.documentId)
-      || (candidate.source !== "composer" && candidate.source !== "docs")
+      || candidate.source !== "docs"
       || typeof candidate.path !== "string"
       || typeof candidate.title !== "string"
       || !Array.isArray(candidate.headingPath)

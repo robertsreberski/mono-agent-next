@@ -7,5 +7,18 @@ export type {
   ScaffoldAgentOptions,
   ScaffoldResult,
 } from "./scaffold.js";
-export { renderMinimalProject } from "./templates.js";
-export type { MinimalProjectOptions, RenderedProjectFile } from "./templates.js";
+export {
+  PROJECT_TEMPLATES,
+  isProjectTemplate,
+  renderMinimalProject,
+  renderMultiRuntimeProject,
+  renderPersonalProject,
+  renderProject,
+} from "./templates.js";
+export type {
+  MinimalProjectOptions,
+  ProjectIdentityOptions,
+  ProjectTemplate,
+  ProjectTemplateOptions,
+  RenderedProjectFile,
+} from "./templates.js";

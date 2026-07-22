@@ -1,0 +1,326 @@
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { lstat, realpath } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
+
+import type { ModuleHealth, ModuleHealthContext, ModuleStopContext } from "@mono-agent/module-sdk";
+import type { Sandbox, SandboxCommand, SandboxResult } from "@mono-agent/module-sdk/internal";
+
+import { parseSandboxSrtConfig, type SandboxSrtConfig } from "./config.js";
+import { SandboxSrtError } from "./errors.js";
+import {
+  resolveTrustedExecutable,
+  resolveTrustedSettings,
+  verifyTrustedExecutable,
+  verifyTrustedSettings,
+  type TrustedFile,
+} from "./security.js";
+
+export interface OpenSandboxSrtOptions {
+  readonly config: unknown;
+}
+
+interface ActiveChild {
+  readonly child: ChildProcessWithoutNullStreams;
+  readonly done: Promise<void>;
+}
+
+export class SandboxSrt implements Sandbox {
+  readonly config: SandboxSrtConfig;
+  readonly executable: TrustedFile;
+  readonly settings: TrustedFile;
+
+  readonly #active = new Set<ActiveChild>();
+  #closed = false;
+  #stopPromise: Promise<void> | undefined;
+
+  private constructor(config: SandboxSrtConfig, executable: TrustedFile, settings: TrustedFile) {
+    this.config = config;
+    this.executable = executable;
+    this.settings = settings;
+  }
+
+  static async open(options: OpenSandboxSrtOptions): Promise<SandboxSrt> {
+    const config = parseSandboxSrtConfig(options.config);
+    const [executable, settings] = await Promise.all([
+      resolveTrustedExecutable(config.executable),
+      resolveTrustedSettings(config.settings),
+    ]);
+    return new SandboxSrt(config, executable, settings);
+  }
+
+  async execute(command: SandboxCommand): Promise<SandboxResult> {
+    this.#assertOpen();
+    throwIfAborted(command.signal);
+    const prepared = await this.#prepare(command);
+    this.#assertOpen();
+    await this.#verifySelection();
+    this.#assertOpen();
+    throwIfAborted(command.signal);
+
+    const child = spawn(
+      this.executable.path,
+      ["--settings", this.settings.path, prepared.command, ...prepared.arguments],
+      {
+        cwd: prepared.workingDirectory,
+        env: prepared.environment,
+        shell: false,
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+        detached: process.platform !== "win32",
+      },
+    );
+    let resolveDone: (() => void) | undefined;
+    const done = new Promise<void>((resolveDonePromise) => {
+      resolveDone = resolveDonePromise;
+    });
+    const active = { child, done };
+    this.#active.add(active);
+    try {
+      const result = await collectChild(child, command.signal, prepared.timeoutMs, this.config.limits.maxOutputBytes, prepared.stdin);
+      await this.#verifySelection();
+      return result;
+    } finally {
+      this.#active.delete(active);
+      resolveDone?.();
+    }
+  }
+
+  async health(context: ModuleHealthContext): Promise<ModuleHealth> {
+    if (this.#closed) return health("unhealthy", "SRT sandbox is closed.");
+    try {
+      throwIfAborted(context.signal);
+      await this.#verifySelection();
+      return health("healthy", "Integrity-pinned SRT executable and settings are ready.");
+    } catch {
+      return health("unhealthy", "SRT executable or settings integrity could not be proven.");
+    }
+  }
+
+  async stop(_context?: ModuleStopContext): Promise<void> {
+    this.#stopPromise ??= this.#stopInternal();
+    await this.#stopPromise;
+  }
+
+  async #stopInternal(): Promise<void> {
+    this.#closed = true;
+    const active = [...this.#active];
+    for (const { child } of active) terminate(child, "SIGTERM");
+    const killTimers = active.map(({ child }) => {
+      const timer = setTimeout(() => terminate(child, "SIGKILL"), 100);
+      timer.unref();
+      return timer;
+    });
+    try {
+      await Promise.allSettled(active.map(({ done }) => done));
+    } finally {
+      for (const timer of killTimers) clearTimeout(timer);
+    }
+  }
+
+  async #verifySelection(): Promise<void> {
+    await Promise.all([
+      verifyTrustedExecutable(this.executable),
+      verifyTrustedSettings(this.settings),
+    ]);
+  }
+
+  #assertOpen(): void {
+    if (this.#closed) throw new SandboxSrtError("closed", "SRT sandbox is closed.");
+  }
+
+  async #prepare(command: SandboxCommand): Promise<{
+    readonly command: string;
+    readonly arguments: readonly string[];
+    readonly workingDirectory: string;
+    readonly environment: Readonly<Record<string, string>>;
+    readonly timeoutMs: number;
+    readonly stdin: Uint8Array | undefined;
+  }> {
+    if (typeof command !== "object" || command === null) invalid("Sandbox command must be an object.");
+    if (!isAbsolute(command.command) || command.command.includes("\0")) invalid("Sandbox command must be an absolute path without NUL bytes.");
+    if (!Array.isArray(command.arguments) || command.arguments.length > this.config.limits.maxArguments) {
+      invalid(`Sandbox arguments exceed the configured count of ${this.config.limits.maxArguments}.`);
+    }
+    let argumentBytes = Buffer.byteLength(command.command, "utf8");
+    for (const argument of command.arguments) {
+      if (typeof argument !== "string" || argument.includes("\0")) invalid("Sandbox arguments must be strings without NUL bytes.");
+      argumentBytes += Buffer.byteLength(argument, "utf8");
+    }
+    if (argumentBytes > this.config.limits.maxArgumentBytes) invalid("Sandbox arguments exceed their configured byte bound.");
+    if (!isAbsolute(command.workingDirectory) || command.workingDirectory.includes("\0")) {
+      invalid("Sandbox workingDirectory must be an absolute path without NUL bytes.");
+    }
+    const workingDirectory = resolve(command.workingDirectory);
+    const [canonicalDirectory, directoryStat] = await Promise.all([
+      realpath(workingDirectory).catch(() => invalid("Sandbox workingDirectory is absent or inaccessible.")),
+      lstat(workingDirectory).catch(() => invalid("Sandbox workingDirectory is absent or inaccessible.")),
+    ]);
+    if (canonicalDirectory !== workingDirectory || !directoryStat.isDirectory() || directoryStat.isSymbolicLink()) {
+      invalid("Sandbox workingDirectory must be a canonical non-symlink directory.");
+    }
+    const timeoutMs = command.timeoutMs ?? this.config.limits.defaultTimeoutMs;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > this.config.limits.maxTimeoutMs) {
+      invalid(`Sandbox timeoutMs must be from 1 through ${this.config.limits.maxTimeoutMs}.`);
+    }
+    if (command.stdin !== undefined && (!(command.stdin instanceof Uint8Array)
+      || command.stdin.byteLength > this.config.limits.maxInputBytes)) {
+      invalid("Sandbox stdin exceeds its configured byte bound.");
+    }
+    const environment = buildEnvironment(command.environment, this.config);
+    return Object.freeze({
+      command: command.command,
+      arguments: Object.freeze([...command.arguments]),
+      workingDirectory,
+      environment,
+      timeoutMs,
+      stdin: command.stdin,
+    });
+  }
+}
+
+export async function openSandboxSrt(options: OpenSandboxSrtOptions): Promise<SandboxSrt> {
+  return await SandboxSrt.open(options);
+}
+
+function buildEnvironment(
+  supplied: Readonly<Record<string, string>> | undefined,
+  config: SandboxSrtConfig,
+): Readonly<Record<string, string>> {
+  const result: Record<string, string> = {};
+  for (const name of config.environment.inherit) {
+    const value = process.env[name];
+    if (value !== undefined) result[name] = value;
+  }
+  if (supplied !== undefined) {
+    if (supplied === null || typeof supplied !== "object" || Array.isArray(supplied)
+      || (Object.getPrototypeOf(supplied) !== Object.prototype && Object.getPrototypeOf(supplied) !== null)) {
+      invalid("Sandbox environment must be a plain object.");
+    }
+    const allowed = new Set(config.environment.allow);
+    for (const name of Object.keys(supplied).sort()) {
+      if (!allowed.has(name)) invalid(`Sandbox environment variable ${JSON.stringify(name)} is not allowlisted.`);
+      const descriptor = Object.getOwnPropertyDescriptor(supplied, name);
+      if (descriptor === undefined || !("value" in descriptor)) invalid("Sandbox environment must contain only data properties.");
+      const value = descriptor.value as unknown;
+      if (typeof value !== "string" || value.includes("\0")) invalid("Sandbox environment values must be strings without NUL bytes.");
+      result[name] = value;
+    }
+  }
+  const names = Object.keys(result);
+  if (names.length > config.limits.maxEnvironmentVariables) invalid("Sandbox environment exceeds its configured variable count.");
+  const bytes = names.reduce((total, name) => total + Buffer.byteLength(name, "utf8") + Buffer.byteLength(result[name]!, "utf8") + 2, 0);
+  if (bytes > config.limits.maxEnvironmentBytes) invalid("Sandbox environment exceeds its configured byte bound.");
+  return Object.freeze(result);
+}
+
+async function collectChild(
+  child: ChildProcessWithoutNullStreams,
+  signal: AbortSignal,
+  timeoutMs: number,
+  maxOutputBytes: number,
+  stdin: Uint8Array | undefined,
+): Promise<SandboxResult> {
+  return await new Promise<SandboxResult>((resolvePromise, rejectPromise) => {
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let outputBytes = 0;
+    let timedOut = false;
+    let failure: unknown;
+    let killTimer: NodeJS.Timeout | undefined;
+    let settled = false;
+
+    const forceKill = (): void => {
+      terminate(child, "SIGKILL");
+    };
+    const beginTermination = (): void => {
+      terminate(child, "SIGTERM");
+      killTimer ??= setTimeout(forceKill, 100);
+      killTimer.unref();
+    };
+    const onAbort = (): void => {
+      failure ??= signal.reason instanceof Error
+        ? signal.reason
+        : new DOMException("The operation was aborted", "AbortError");
+      beginTermination();
+    };
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      beginTermination();
+    }, timeoutMs);
+    timeout.unref();
+
+    const collect = (target: Buffer[], chunk: Buffer): void => {
+      if (failure !== undefined) return;
+      outputBytes += chunk.byteLength;
+      if (outputBytes > maxOutputBytes) {
+        failure = new SandboxSrtError("output_limit_exceeded", `Sandbox output exceeded ${maxOutputBytes} bytes.`);
+        beginTermination();
+        return;
+      }
+      target.push(Buffer.from(chunk));
+    };
+    child.stdout.on("data", (chunk: Buffer) => collect(stdout, chunk));
+    child.stderr.on("data", (chunk: Buffer) => collect(stderr, chunk));
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    child.once("error", (error) => {
+      failure ??= new SandboxSrtError("execution_failed", "SRT process could not be started.", { cause: error });
+    });
+    child.once("close", (exitCode, exitSignal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      signal.removeEventListener("abort", onAbort);
+      if (failure !== undefined) {
+        rejectPromise(failure);
+        return;
+      }
+      resolvePromise(Object.freeze({
+        exitCode,
+        ...(exitSignal === null ? {} : { signal: exitSignal }),
+        stdout: Uint8Array.from(Buffer.concat(stdout)),
+        stderr: Uint8Array.from(Buffer.concat(stderr)),
+        timedOut,
+      }));
+    });
+    child.stdin.on("error", () => {
+      // A workload may exit without reading stdin; its process result remains authoritative.
+    });
+    if (stdin === undefined) {
+      child.stdin.end();
+    } else {
+      child.stdin.end(Buffer.from(stdin));
+    }
+  });
+}
+
+function terminate(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (process.platform !== "win32" && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to the direct child when the process group has already gone away.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Process termination is best effort; the close event settles the operation.
+  }
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError");
+}
+
+function invalid(message: string): never {
+  throw new SandboxSrtError("invalid_command", message);
+}
+
+function health(status: "healthy" | "unhealthy", summary: string): ModuleHealth {
+  return Object.freeze({ status, checkedAt: new Date().toISOString(), summary });
+}

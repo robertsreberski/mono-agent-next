@@ -2,6 +2,7 @@ import {
   composeAgentConfigSchema,
   createAgentHost,
   explainAgentConfig,
+  inspectAgent,
   validateAgentConfig,
 } from "@mono-agent/core";
 import { randomUUID } from "node:crypto";
@@ -36,6 +37,13 @@ interface ParsedOptions {
   json: boolean;
   write: boolean;
   path?: string;
+}
+
+interface ParsedModuleCommandOptions {
+  readonly configPath: string;
+  readonly module: string;
+  readonly command: string;
+  readonly input?: unknown;
 }
 
 class UsageError extends Error {}
@@ -84,6 +92,21 @@ export async function runCli(argv: readonly string[], io: CliIo = {}): Promise<n
         positional: true,
       });
       return await runExplain(options, resolvedIo);
+    }
+
+    if (argv[0] === "inspect") {
+      const options = parseOptions(argv.slice(1), resolvedIo.cwd, {
+        json: true,
+        write: false,
+        positional: false,
+      });
+      const inspection = await inspectAgent(options.configPath);
+      resolvedIo.stdout(`${stringifyJson(inspection, options.json ? undefined : 2)}\n`);
+      return 0;
+    }
+
+    if (argv[0] === "module" && argv[1] === "command") {
+      return await runModuleCommand(parseModuleCommandOptions(argv.slice(2), resolvedIo.cwd), resolvedIo);
     }
 
     if (argv[0] === "start") {
@@ -191,6 +214,69 @@ async function runStart(options: ParsedOptions, io: ResolvedCliIo): Promise<numb
     if (failures.length > 1) throw new AggregateError(failures, "Agent drain and stop both failed");
   });
   return 0;
+}
+
+async function runModuleCommand(options: ParsedModuleCommandOptions, io: ResolvedCliIo): Promise<number> {
+  const host = await createAgentHost(options.configPath);
+  try {
+    const result = await host.runModuleCommand(options.module, options.command, options.input);
+    io.stdout(`${stringifyJson({ ok: true, ...result })}\n`);
+    return 0;
+  } finally {
+    await host.stop();
+  }
+}
+
+function parseModuleCommandOptions(argv: readonly string[], cwd: string): ParsedModuleCommandOptions {
+  let configPath: string | undefined;
+  let module: string | undefined;
+  let command: string | undefined;
+  let input: unknown;
+  let inputSeen = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!;
+    const next = argv[index + 1];
+    if (argument === "--config" || argument === "-c") {
+      if (configPath !== undefined || next === undefined || next.startsWith("-")) {
+        throw new UsageError("--config requires one path");
+      }
+      configPath = isAbsolute(next) ? next : resolve(cwd, next);
+      index += 1;
+      continue;
+    }
+    if (argument === "--module") {
+      if (module !== undefined || next === undefined || next.startsWith("-")) {
+        throw new UsageError("--module requires one instance id");
+      }
+      module = next;
+      index += 1;
+      continue;
+    }
+    if (argument === "--name") {
+      if (command !== undefined || next === undefined || next.startsWith("-")) {
+        throw new UsageError("--name requires one command name");
+      }
+      command = next;
+      index += 1;
+      continue;
+    }
+    if (argument === "--input-json") {
+      if (inputSeen || next === undefined) throw new UsageError("--input-json requires one JSON value");
+      try {
+        input = JSON.parse(next) as unknown;
+      } catch {
+        throw new UsageError("--input-json must be valid JSON");
+      }
+      inputSeen = true;
+      index += 1;
+      continue;
+    }
+    throw new UsageError(`Unknown module command option: ${argument}`);
+  }
+  if (configPath === undefined) throw new UsageError("--config is required");
+  if (module === undefined) throw new UsageError("--module is required");
+  if (command === undefined) throw new UsageError("--name is required");
+  return { configPath, module, command, ...(inputSeen ? { input } : {}) };
 }
 
 function parseOptions(
@@ -355,6 +441,8 @@ function usage(): string {
     "  mono-agent validate --config <file> [--json]",
     "  mono-agent config schema --config <file> [--write]",
     "  mono-agent config explain --config <file> [path] [--json]",
+    "  mono-agent inspect --config <file> [--json]",
+    "  mono-agent module command --config <file> --module <id> --name <command> [--input-json <json>]",
     "  mono-agent start --config <file>",
     "  mono-agent --version",
     "",

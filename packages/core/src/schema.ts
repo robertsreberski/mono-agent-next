@@ -68,7 +68,7 @@ export async function composeAgentConfigSchema(
       skills: objectSchema(
         {
           roots: { type: "array", items: nonEmptyStringSchema() },
-          load: { enum: ["all", "selected"] },
+          load: { const: "all" },
           disclosure: { enum: ["full", "index"] },
           maxBytes: { type: "integer", minimum: 1 },
         },
@@ -182,24 +182,64 @@ function selectedModuleSchema(module: LoadedAgentModule): JsonSchema {
   const leaf = materializeEnvironmentSchema(
     structuredClone(module.definition.schema.jsonSchema) as Record<string, unknown>,
   );
-  if (leaf.type === "object" || isRecord(leaf.properties)) {
-    const properties = isRecord(leaf.properties) ? leaf.properties : {};
-    const required = Array.isArray(leaf.required) ? leaf.required.filter((entry): entry is string => typeof entry === "string") : [];
-    return {
-      ...leaf,
-      type: "object",
-      properties: { $use: { const: module.packageName }, ...properties },
-      required: [...new Set(["$use", ...required])],
-      additionalProperties: leaf.additionalProperties ?? false,
-    };
-  }
+  const selected = addModuleSelectionToRootSchema(leaf, module.packageName);
+  if (isObjectShapedSchema(selected)) return selected;
   return {
     type: "object",
     properties: { $use: { const: module.packageName } },
     required: ["$use"],
-    allOf: [leaf],
+    allOf: [selected],
     unevaluatedProperties: false,
   };
+}
+
+function addModuleSelectionToRootSchema(
+  schema: JsonSchema,
+  packageName: string,
+  hoistStrictness = false,
+): JsonSchema {
+  const selected: Record<string, unknown> = { ...schema };
+  const hasComposition = ["allOf", "anyOf", "oneOf"].some((keyword) =>
+    Array.isArray(selected[keyword]) && selected[keyword].length > 0);
+
+  for (const keyword of ["allOf", "anyOf", "oneOf"] as const) {
+    if (!Array.isArray(selected[keyword])) continue;
+    const hoistBranchStrictness = hoistStrictness || keyword === "allOf";
+    selected[keyword] = selected[keyword].map((entry) =>
+      isRecord(entry)
+        ? addModuleSelectionToRootSchema(entry, packageName, hoistBranchStrictness)
+        : entry);
+  }
+
+  if (!isObjectShapedSchema(selected)) return selected;
+  const properties = isRecord(selected.properties) ? selected.properties : {};
+  const required = Array.isArray(selected.required)
+    ? selected.required.filter((entry): entry is string => typeof entry === "string")
+    : [];
+  selected.type = "object";
+  selected.properties = { $use: { const: packageName }, ...properties };
+  selected.required = [...new Set(["$use", ...required])];
+
+  if (hoistStrictness) {
+    if (selected.additionalProperties === false) delete selected.additionalProperties;
+    if (selected.unevaluatedProperties === false) delete selected.unevaluatedProperties;
+  } else if (hasComposition) {
+    if (selected.additionalProperties === false) delete selected.additionalProperties;
+    if (selected.additionalProperties === undefined && selected.unevaluatedProperties === undefined) {
+      selected.unevaluatedProperties = false;
+    }
+  } else if (selected.additionalProperties === undefined) {
+    selected.additionalProperties = false;
+  }
+  return selected;
+}
+
+function isObjectShapedSchema(schema: JsonSchema): boolean {
+  return schema.type === "object"
+    || isRecord(schema.properties)
+    || Array.isArray(schema.required)
+    || Object.hasOwn(schema, "additionalProperties")
+    || Object.hasOwn(schema, "unevaluatedProperties");
 }
 
 function materializeEnvironmentSchema(schema: JsonSchema): JsonSchema {
@@ -215,6 +255,15 @@ function materializeEnvironmentSchema(schema: JsonSchema): JsonSchema {
     );
   }
   if (isRecord(clean.items)) clean.items = materializeEnvironmentSchema(clean.items);
+  if (isRecord(clean.additionalProperties)) {
+    clean.additionalProperties = materializeEnvironmentSchema(clean.additionalProperties);
+  }
+  for (const keyword of ["allOf", "anyOf", "oneOf"] as const) {
+    if (Array.isArray(clean[keyword])) {
+      clean[keyword] = clean[keyword].map((entry) =>
+        isRecord(entry) ? materializeEnvironmentSchema(entry) : entry);
+    }
+  }
   if (!isEnvEligibleSchema(schema)) return clean;
   const environmentReference = objectSchema(
     { $env: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]*$" } },

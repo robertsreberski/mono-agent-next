@@ -9,7 +9,7 @@ Run mono-agent turns through Pi's native model registry and `AgentHarness`.
 
 Category: `runtime`
 Tier: `core`
-Catalog responsibility: Runs Pi-native provider turns as isolated native attempts behind the typed runtime contract.
+Catalog responsibility: Runs Pi-native provider turns as isolated typed runtime attempts with native session linkage.
 
 <!-- package-metadata:end -->
 
@@ -17,9 +17,9 @@ Runtime module.
 
 ## Responsibility
 
-Own Pi model resolution, API-key credentials, isolated native provider attempts,
-runtime request execution, and translation between Pi events and the mono-agent
-runtime slot.
+Own Pi model resolution, atomically persisted API-key/OAuth credentials,
+isolated native provider attempts, resumable session forks, live steering, and
+translation between Pi events and the mono-agent runtime slot.
 
 ## Install / Usage
 
@@ -57,11 +57,11 @@ When `models` is omitted, the runtime discovers the catalog from the bounded
 `GET /v1/models` endpoint on first use. An explicit `models` array remains
 available for providers that do not expose that endpoint.
 
-The auth file must be an owner-private regular file. API-key credentials are
-supported. OAuth credentials fail closed in this slice because safe refresh
-requires atomic writable persistence; that store lands with the later session
-reservation vertical rather than risking in-memory-only token rotation.
-For example, the default OpenAI route reads this ignored, mode-`0600` file:
+The auth file must be an owner-private regular file. API-key and OAuth
+credentials are supported. OAuth refresh rotation uses a serialized
+read-modify-write, an owner-private lock, and an atomic same-directory rename;
+tokens are never accepted as inline module fields. For example, the default
+OpenAI route reads this ignored, mode-`0600` file:
 
 ```json
 {
@@ -88,21 +88,22 @@ policy and `sandbox.mode: "off"` for this slice.
 2. The runtime resolves the `provider:model` route through Pi's built-in model
    registry or an explicitly configured local provider.
 3. A fresh native Pi `AgentHarness` attempt is seeded from Core's canonical
-   messages and delegates tool calls back through the runtime-slot context.
-4. Failed, cancelled, and incomplete native attempts are deleted. An explicitly
-   configured sessions root retains completed attempts only as audit artifacts;
-   they are never reopened or used as opaque continuation state.
-5. Pi events are normalized into module-sdk events; only the settled assistant
-   response and usage cross back into Core.
+   messages, or an explicitly linked native session is forked for continuation.
+4. Failed, cancelled, and incomplete forks are deleted while the caller's prior
+   session remains immutable. Only a completed fork becomes the next opaque
+   continuation point.
+5. Pi text, thinking, tools, usage, compaction, live steering, and session
+   linkage are normalized into module-sdk contracts.
 
 ### Package structure
 
 | Source | Responsibility |
 | --- | --- |
 | `config.ts` | Strict runtime configuration schema and validation. |
-| `credentials.ts` | Owner-private API-key loading and explicit OAuth rejection. |
+| `credentials.ts` | Owner-private API-key/OAuth loading and atomic refresh rotation. |
 | `models.ts` | Built-in models plus bounded, redirect-safe local-provider discovery. |
-| `runtime.ts` | Native harness lifecycle, fresh-attempt isolation, events, tools, and settlement. |
+| `sessions.ts` | Atomic fresh/forked native attempt reservations. |
+| `runtime.ts` | Native harness lifecycle, sessions, live input, events, tools, and settlement. |
 | `index.ts` | The typed `monoAgentModule` definition. |
 
 ## Public API

@@ -1,12 +1,12 @@
 {
   "name": "@mono-agent/docs-mcp",
   "version": "0.15.0",
-  "description": "Offline search and guided reading over version-matched mono-agent documentation and composer references through MCP.",
+  "description": "Offline search and guided reading over version-matched mono-agent v1 documentation through MCP.",
   "type": "module",
   "license": "GPL-3.0-only",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/robertsreberski/mono-agent.git",
+    "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
     "directory": "extras/docs-mcp"
   },
   "private": false,

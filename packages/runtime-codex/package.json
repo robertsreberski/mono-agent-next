@@ -1,0 +1,32 @@
+{
+  "name": "@mono-agent/runtime-codex",
+  "version": "0.15.0",
+  "description": "Codex app-server runtime module for mono-agent v1.",
+  "type": "module",
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
+    "directory": "packages/runtime-codex"
+  },
+  "keywords": ["ai", "agents", "mono-agent", "runtime", "codex"],
+  "mono-agent": {
+    "packageName": "@mono-agent/runtime-codex",
+    "apiVersion": 1,
+    "kind": "runtime",
+    "responsibility": "Runs isolated turns through the Codex app-server JSONL protocol."
+  },
+  "private": false,
+  "engines": { "node": ">=22.19.0" },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": { "@mono-agent/module-sdk": "workspace:0.15.0" },
+  "publishConfig": { "access": "public" }
+}

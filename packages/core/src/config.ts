@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 
 import { AgentConfigError, type AgentConfigIssue, errorMessage } from "./errors.js";
-import { loadSelectedModules } from "./module-loader.js";
+import { loadSelectedModules, validateLoadedModuleReferences } from "./module-loader.js";
 import type {
   AgentConfig,
   AgentLoadOptions,
@@ -72,6 +72,10 @@ export async function loadAgentConfig(
     throw new AgentConfigError(`Selected module validation failed: ${absoluteConfigPath}`, [
       { path: "$", message: errorMessage(error), code: "module_load" },
     ]);
+  }
+  const referenceIssues = validateLoadedModuleReferences(modules);
+  if (referenceIssues.length > 0) {
+    throw new AgentConfigError(`Selected module references are invalid: ${absoluteConfigPath}`, referenceIssues);
   }
 
   const paths = resolveAgentPaths(raw, configDirectory);
@@ -227,7 +231,7 @@ function validateSession(value: unknown, issues: AgentConfigIssue[]): void {
   expectEnum(value.mode, ["continuous", "per-message"], "session.mode", issues);
   if (value.idleTimeoutMs !== undefined) expectPositiveInteger(value.idleTimeoutMs, "session.idleTimeoutMs", issues);
   if (value.rollover !== undefined) expectEnum(value.rollover, ["none", "daily"], "session.rollover", issues);
-  if (value.timezone !== undefined) expectNonEmptyString(value.timezone, "session.timezone", issues);
+  if (value.timezone !== undefined) expectIanaTimeZone(value.timezone, "session.timezone", issues);
   if (value.isolateProactiveRuns !== undefined) expectBoolean(value.isolateProactiveRuns, "session.isolateProactiveRuns", issues);
 }
 
@@ -239,7 +243,7 @@ function validateContext(value: unknown, issues: AgentConfigIssue[]): void {
     if (expectRecord(value.skills, "context.skills", issues)) {
       rejectUnknown(value.skills, new Set(["roots", "load", "disclosure", "maxBytes"]), "context.skills", issues);
       expectStringArray(value.skills.roots, "context.skills.roots", issues);
-      if (value.skills.load !== undefined) expectEnum(value.skills.load, ["all", "selected"], "context.skills.load", issues);
+      if (value.skills.load !== undefined) expectEnum(value.skills.load, ["all"], "context.skills.load", issues);
       if (value.skills.disclosure !== undefined) {
         expectEnum(value.skills.disclosure, ["full", "index"], "context.skills.disclosure", issues);
       }
@@ -392,6 +396,16 @@ function expectPositiveInteger(value: unknown, path: string, issues: AgentConfig
 
 function expectBoolean(value: unknown, path: string, issues: AgentConfigIssue[]): void {
   if (typeof value !== "boolean") issue(issues, path, "must be a boolean", "type");
+}
+
+function expectIanaTimeZone(value: unknown, path: string, issues: AgentConfigIssue[]): void {
+  if (!expectNonEmptyString(value, path, issues)) return;
+  try {
+    if (value.startsWith("+") || value.startsWith("-")) throw new RangeError("offset time zone");
+    new Intl.DateTimeFormat("en", { timeZone: value });
+  } catch {
+    issue(issues, path, "must be a valid IANA time zone", "timezone");
+  }
 }
 
 function issue(issues: AgentConfigIssue[], path: string, message: string, code: string): void {

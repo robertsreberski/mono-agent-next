@@ -11,7 +11,6 @@ export const DEFAULT_PACKAGE_LICENSE = REQUIRED_LICENSE;
 export const CANONICAL_GPL3_SHA256 = "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986";
 export const CANONICAL_APACHE2_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4";
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const canonicalLicensePaths = ["LICENSE", "packages/agent-runtime/LICENSE"];
 
 export async function checkLicenseConsistency(options = {}) {
   const repoRoot = resolve(options.repoRoot ?? defaultRepoRoot);
@@ -29,6 +28,13 @@ export async function checkLicenseConsistency(options = {}) {
     expectedLicense: REQUIRED_LICENSE,
     issues,
   });
+  await checkCanonicalLicense(
+    join(repoRoot, "LICENSE"),
+    "LICENSE",
+    "GPL-3.0",
+    CANONICAL_GPL3_SHA256,
+    issues,
+  );
 
   for (const entry of publishable) {
     const relativePath = `${packageRelativePath(entry)}/package.json`;
@@ -44,24 +50,13 @@ export async function checkLicenseConsistency(options = {}) {
       expectedLicense,
       issues,
     });
-    if (expectedLicense === "Apache-2.0") {
-      const licensePath = `${packageRelativePath(entry)}/LICENSE`;
-      await checkCanonicalLicense(
-        join(repoRoot, licensePath),
-        licensePath,
-        "Apache-2.0",
-        CANONICAL_APACHE2_SHA256,
-        issues,
-      );
-    }
-  }
-
-  for (const relativePath of canonicalLicensePaths) {
+    const licensePath = `${packageRelativePath(entry)}/LICENSE`;
+    const apache = expectedLicense === "Apache-2.0";
     await checkCanonicalLicense(
-      join(repoRoot, relativePath),
-      relativePath,
-      "GPL-3.0",
-      CANONICAL_GPL3_SHA256,
+      join(repoRoot, licensePath),
+      licensePath,
+      apache ? "Apache-2.0" : "GPL-3.0",
+      apache ? CANONICAL_APACHE2_SHA256 : CANONICAL_GPL3_SHA256,
       issues,
     );
   }

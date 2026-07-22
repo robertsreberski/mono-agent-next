@@ -44,20 +44,28 @@ async function main() {
     const config = monoAgentModule.schema.parse({
       listen: { host: "127.0.0.1", port: 0 },
       auth: { token: OPERATOR_TOKEN },
-      label: AGENT_LABEL,
     });
+    const operatorIdentity = {
+      agent: { id: AGENT_ID, label: AGENT_LABEL },
+      process: { pid: process.pid },
+      defaults: { runtime: "smoke", model: "smoke:model" },
+      configPath: join(temporaryRoot, "mono-agent.config.json"),
+      projectRoot: temporaryRoot,
+    };
     operatorChannel = await monoAgentModule.create({
       instanceId: AGENT_ID,
       config,
-      provenance: {},
+      provenance: {
+        "/auth/token": { source: "environment", environmentName: OPERATOR_TOKEN_ENV },
+      },
       configDirectory: temporaryRoot,
       workspaceDirectory: temporaryRoot,
       dataDirectory: temporaryRoot,
       logger: noopLogger(),
       host: {
-        grantedCapabilities: new Set(),
-        getCapability() {
-          return undefined;
+        grantedCapabilities: new Set(["operator.identity.v1"]),
+        getCapability(name) {
+          return name === "operator.identity.v1" ? operatorIdentity : undefined;
         },
         async dispatch(request, reply) {
           dispatched.push(request);
