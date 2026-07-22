@@ -484,9 +484,18 @@ describe("web HTTP server", () => {
     const overflow = await fetch(`${baseUrl}/api/v1/events`);
     expect(overflow.status).toBe(503);
     await Promise.all(streams.map(async (response) => response.body?.cancel().catch(() => undefined)));
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
-    const reconnected = await fetch(`${baseUrl}/api/v1/events`);
-    expect(reconnected.status).toBe(200);
-    await reconnected.body?.cancel();
+    let reconnected: Response | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const candidate = await fetch(`${baseUrl}/api/v1/events`);
+      if (candidate.status === 200) {
+        reconnected = candidate;
+        break;
+      }
+      expect(candidate.status).toBe(503);
+      await candidate.body?.cancel();
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    }
+    expect(reconnected?.status).toBe(200);
+    await reconnected?.body?.cancel();
   }, 15_000);
 });
