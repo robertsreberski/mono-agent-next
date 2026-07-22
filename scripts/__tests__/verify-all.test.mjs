@@ -640,6 +640,10 @@ describe("verify-all", () => {
       "        if: ${{ matrix.node-version == '22.19.0' }}",
       "        run: pnpm run check:dependency-vulnerabilities",
     ].join("\n");
+    const bundledWebConsoleInstall = [
+      "      - name: Install bundled web console dependencies",
+      "        run: pnpm --dir packages/web/webapp install --frozen-lockfile",
+    ].join("\n");
     const releaseTag = [
       "      - name: Derive release smoke tag",
       "        id: release-smoke",
@@ -668,8 +672,8 @@ describe("verify-all", () => {
       ),
       replaceExactly(
         source,
-        `${install}\n\n${dependencyVulnerabilities}\n\n${secrets}`,
-        `${secrets}\n\n${dependencyVulnerabilities}\n\n${install}`,
+        `${install}\n\n${dependencyVulnerabilities}\n\n${bundledWebConsoleInstall}\n\n${secrets}`,
+        `${secrets}\n\n${bundledWebConsoleInstall}\n\n${dependencyVulnerabilities}\n\n${install}`,
       ),
       replaceExactly(
         source,
@@ -1050,6 +1054,10 @@ const CI_RUN_STEP_CONTRACTS = Object.freeze([
     args: ["run", "check:node"],
   }),
   setupRunContract("dependency install", "pnpm install --frozen-lockfile"),
+  setupRunContract(
+    "bundled web console dependency install",
+    "pnpm --dir packages/web/webapp install --frozen-lockfile",
+  ),
   gateRunContract(literalScript([
     "docker run --rm \\",
     "  -v \"$PWD:/repo\" \\",

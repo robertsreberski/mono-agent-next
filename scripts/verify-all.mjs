@@ -39,6 +39,11 @@ export const VERIFY_GATE_DELTA = Object.freeze({
       reason: "CI installs the frozen workspace after proving the Node floor; local verify:all uses the caller's installed workspace.",
     }),
     Object.freeze({
+      key: "bundled web console dependency install",
+      after: "dependency install",
+      reason: "CI installs the bundled web console's isolated frozen graph before its license gate; local verify:all uses the caller's installed webapp workspace.",
+    }),
+    Object.freeze({
       key: "release-tag derivation",
       after: "check:consumer-docs-consistency",
       reason: "CI exports the manifest-derived smoke tag for later steps; local verify:all reads that manifest value in-process.",
