@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { closeSync, constants, fchmodSync, mkdirSync, openSync } from "node:fs";
 import { dirname } from "node:path";
 
 import BetterSqlite3, { type Database } from "better-sqlite3";
@@ -45,6 +45,7 @@ export class MemoryDbCore {
     const vecDim = options.dim ?? DEFAULT_VEC_DIM;
     if (options.readOnly !== true && options.path !== ":memory:") {
       mkdirSync(dirname(options.path), { recursive: true });
+      precreateOwnerOnlyDatabase(options.path);
     }
     this.db = new BetterSqlite3(options.path, options.readOnly === true
       ? { readonly: true, fileMustExist: true }
@@ -725,6 +726,35 @@ export class MemoryDbCore {
       createdAt: str(row.created_at),
       ...(row.updated_at != null && { updatedAt: str(row.updated_at) }),
     };
+  }
+}
+
+/**
+ * Give SQLite a private inode when it needs to initialize a new on-disk store.
+ *
+ * SQLite otherwise creates the database with its process-default 0666 mode, so
+ * a common 0022 umask makes memory contents group/world-readable. The exclusive
+ * descriptor is the only inode we chmod: an existing path (including one that
+ * appeared concurrently) is left untouched for SQLite's normal reopen path.
+ */
+function precreateOwnerOnlyDatabase(path: string): void {
+  let fd: number;
+  try {
+    fd = openSync(
+      path,
+      constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return;
+    throw error;
+  }
+  try {
+    // A restrictive ambient umask may remove owner bits. Pin the exact mode via
+    // the exclusively-created descriptor without ever chmodding by path.
+    fchmodSync(fd, 0o600);
+  } finally {
+    closeSync(fd);
   }
 }
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import BetterSqlite3 from "better-sqlite3";
@@ -35,6 +35,40 @@ describe("openMemoryDb", () => {
     expect(existsSync(parent)).toBe(true);
     expect(existsSync(path)).toBe(true);
     db.close();
+  });
+
+  it("creates a new SQLite family owner-only under a permissive umask", () => {
+    const previousUmask = process.umask(0o022);
+    let root: string | undefined;
+    try {
+      root = mkdtempSync(join(tmpdir(), "memstore-private-mode-"));
+      const path = join(root, "memory.db");
+      const db = openMemoryDb({ path, embeddings: fakeEmbeddings, dim: 8 });
+      try {
+        expect(lstatSync(path).mode & 0o777).toBe(0o600);
+        expect(lstatSync(`${path}-wal`).mode & 0o777).toBe(0o600);
+        expect(lstatSync(`${path}-shm`).mode & 0o777).toBe(0o600);
+      } finally {
+        db.close();
+      }
+    } finally {
+      process.umask(previousUmask);
+      if (root !== undefined) rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not chmod an existing database path", () => {
+    const root = mkdtempSync(join(tmpdir(), "memstore-existing-mode-"));
+    const path = join(root, "memory.db");
+    writeFileSync(path, "", { mode: 0o640 });
+    chmodSync(path, 0o640);
+    try {
+      const db = openMemoryDb({ path, embeddings: fakeEmbeddings, dim: 8 });
+      db.close();
+      expect(lstatSync(path).mode & 0o777).toBe(0o640);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("does not create a missing parent directory for a read-only open", () => {

@@ -926,6 +926,10 @@ async function managedFixture(options: {
       db.close();
     }
   }
+  // This fixture models the adoption command's documented stopped-store
+  // precondition explicitly rather than inheriting the test runner's umask.
+  // Store creation has its own permissive-umask regression in open.test.ts.
+  chmodSync(active, 0o600);
   return { root, active };
 }
 
