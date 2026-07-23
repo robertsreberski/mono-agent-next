@@ -7,8 +7,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const core = vi.hoisted(() => ({
   composeAgentConfigSchema: vi.fn(),
   createAgentHost: vi.fn(),
+  diagnoseAgent: vi.fn(),
   explainAgentConfig: vi.fn(),
   inspectAgent: vi.fn(),
+  runAgentModuleCommand: vi.fn(),
   validateAgentConfig: vi.fn(),
 }));
 
@@ -28,6 +30,7 @@ beforeEach(() => {
   core.composeAgentConfigSchema.mockResolvedValue({ type: "object", additionalProperties: false });
   core.explainAgentConfig.mockResolvedValue({ path: "routing.primary", source: "config" });
   core.inspectAgent.mockResolvedValue({ agent: { id: "fixture" }, modules: [] });
+  core.diagnoseAgent.mockResolvedValue([]);
 });
 
 afterEach(async () => {
@@ -39,6 +42,33 @@ describe("runCli", () => {
     const output = captureOutput();
     await expect(runCli(["validate"], output.io)).resolves.toBe(2);
     expect(output.stderr.join("")).toContain("--config is required");
+  });
+
+  it("preserves strict option, inline-config, positional, and JSON-value parsing", async () => {
+    const inline = captureOutput("/agent");
+    await expect(runCli(["validate", "--config=config.json", "--json"], inline.io)).resolves.toBe(0);
+    expect(core.validateAgentConfig).toHaveBeenLastCalledWith("/agent/config.json");
+
+    for (const [argv, message] of [
+      [["validate", "-c", "/a", "--config", "/b"], "--config may be supplied only once"],
+      [["config", "schema", "-c", "/a", "--json"], "--json is not valid here"],
+      [["config", "explain", "-c", "/a", "routing", "extra"], "Unexpected argument: extra"],
+      [["module", "command", "-c", "/a", "extra"], "Unknown module command option: extra"],
+      [["memory", "memory-local:audit", "--name", "memory-local:retry", "-c", "/a"],
+        "--name requires one command name"],
+    ] as const) {
+      const output = captureOutput();
+      await expect(runCli(argv, output.io)).resolves.toBe(2);
+      expect(output.stderr.join("")).toContain(message);
+    }
+
+    core.runAgentModuleCommand.mockResolvedValue({ module: "cron", command: "cron:test", value: -1 });
+    const negative = captureOutput();
+    await expect(runCli([
+      "module", "command", "-c", "/a", "--module", "cron",
+      "--name", "cron:test", "--input-json", "-1",
+    ], negative.io)).resolves.toBe(0);
+    expect(core.runAgentModuleCommand).toHaveBeenCalledWith("/a", "cron", "cron:test", -1);
   });
 
   it("validates relative to the supplied working directory and emits JSON", async () => {
@@ -62,6 +92,54 @@ describe("runCli", () => {
 
     await expect(runCli(["validate", "--config", "/agent/config.json"], output.io)).resolves.toBe(1);
     expect(output.stderr.join("")).toContain("channels.inbound.apiKey: inline secrets are forbidden");
+  });
+
+  it("runs selected-module diagnostics after validation and returns a stable doctor result", async () => {
+    core.diagnoseAgent.mockResolvedValue([{
+      kind: "runtime",
+      instanceId: "primary",
+      diagnostics: [{ code: "runtime.ready", severity: "info", message: "ready" }],
+    }]);
+    const output = captureOutput();
+
+    await expect(runCli(["doctor", "--config", "/agent/config.json", "--json"], output.io)).resolves.toBe(0);
+
+    expect(core.diagnoseAgent).toHaveBeenCalledWith(expect.objectContaining({ immutable: true }), true);
+    expect(core.createAgentHost).not.toHaveBeenCalled();
+    expect(JSON.parse(output.stdout.join(""))).toEqual({
+      ok: true,
+      configPath: "/agent/config.json",
+      issues: [],
+      diagnostics: [{
+        kind: "runtime",
+        instanceId: "primary",
+        diagnostics: [{ code: "runtime.ready", severity: "info", message: "ready" }],
+      }],
+    });
+  });
+
+  it("maps validation and selected-module diagnostic errors to doctor exit 1", async () => {
+    core.validateAgentConfig.mockResolvedValueOnce({
+      ok: false,
+      issues: [{ path: "memory", message: "invalid memory config" }],
+    });
+    const invalid = captureOutput();
+    await expect(runCli(["doctor", "--config", "/agent/config.json", "--json"], invalid.io)).resolves.toBe(1);
+    expect(JSON.parse(invalid.stdout.join(""))).toMatchObject({
+      ok: false,
+      diagnostics: [],
+      issues: [{ path: "memory", message: "invalid memory config" }],
+    });
+    expect(core.createAgentHost).not.toHaveBeenCalled();
+
+    core.diagnoseAgent.mockResolvedValue([{
+      kind: "memory",
+      instanceId: "memory",
+      diagnostics: [{ code: "memory.unavailable", severity: "error", message: "unavailable" }],
+    }]);
+    const unhealthy = captureOutput();
+    await expect(runCli(["doctor", "-c", "/agent/config.json", "--json"], unhealthy.io)).resolves.toBe(1);
+    expect(JSON.parse(unhealthy.stdout.join(""))).toMatchObject({ ok: false });
   });
 
   it("prints exactly one started event and drains before stopping on SIGTERM", async () => {
@@ -95,7 +173,8 @@ describe("runCli", () => {
     signals.emit("SIGTERM");
 
     await expect(result).resolves.toBe(0);
-    expect(calls).toEqual(["start", "drain", "stop"]);
+    expect(calls).toEqual(["drain", "stop"]);
+    expect(host.start).not.toHaveBeenCalled();
     expect(core.createAgentHost).toHaveBeenCalledWith({
       configPath: "/agent/config.json",
       immutable: true,
@@ -131,7 +210,7 @@ describe("runCli", () => {
       signalSource: signals,
     });
 
-    await vi.waitFor(() => expect(host.start).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(output.stdout).toHaveLength(1));
     signals.emit("SIGTERM");
     await expect(result).resolves.toBe(0);
     expect(core.createAgentHost).toHaveBeenCalledWith(loaded);
@@ -219,9 +298,11 @@ describe("runCli", () => {
       entries: [{
         path: "channels.inbound.apiKey",
         owner: "@mono-agent/channel-webhook",
-        source: "env",
+        schemaPointer: "/properties/channels/additionalProperties/properties/apiKey",
+        source: "environment",
         env: "WEBHOOK_API_KEY",
         redacted: true,
+        remediation: "Set WEBHOOK_API_KEY in the process environment.",
       }],
     });
     const output = captureOutput();
@@ -237,7 +318,13 @@ describe("runCli", () => {
     expect(core.explainAgentConfig).toHaveBeenCalledWith("/agent/config.json");
     expect(output.stdout.join("")).not.toContain("secret-value");
     expect(JSON.parse(output.stdout.join(""))).toMatchObject({
-      entries: [{ env: "WEBHOOK_API_KEY", redacted: true }],
+      entries: [{
+        schemaPointer: "/properties/channels/additionalProperties/properties/apiKey",
+        source: "environment",
+        env: "WEBHOOK_API_KEY",
+        redacted: true,
+        remediation: "Set WEBHOOK_API_KEY in the process environment.",
+      }],
     });
   });
 
@@ -247,11 +334,11 @@ describe("runCli", () => {
     expect(core.inspectAgent).toHaveBeenCalledWith("/agent/config.json");
     expect(JSON.parse(inspectOutput.stdout.join(""))).toMatchObject({ agent: { id: "fixture" } });
 
-    const host = {
-      runModuleCommand: vi.fn(async () => ({ module: "cron", command: "cron:invoke", value: { accepted: true } })),
-      stop: vi.fn(async () => undefined),
-    };
-    core.createAgentHost.mockResolvedValue(host);
+    core.runAgentModuleCommand.mockResolvedValue({
+      module: "cron",
+      command: "cron:invoke",
+      value: { accepted: true },
+    });
     const commandOutput = captureOutput();
     await expect(runCli([
       "module", "command",
@@ -260,8 +347,86 @@ describe("runCli", () => {
       "--name", "cron:invoke",
       "--input-json", '{"jobId":"daily"}',
     ], commandOutput.io)).resolves.toBe(0);
-    expect(host.runModuleCommand).toHaveBeenCalledWith("cron", "cron:invoke", { jobId: "daily" });
-    expect(host.stop).toHaveBeenCalledOnce();
+    expect(core.runAgentModuleCommand).toHaveBeenCalledWith(
+      "/agent/config.json",
+      "cron",
+      "cron:invoke",
+      { jobId: "daily" },
+    );
+  });
+
+  it("routes named maintenance and auth commands only to the configured slot", async () => {
+    const loaded = {
+      immutable: true,
+      modules: [
+        { slot: "runtime", instanceId: "primary" },
+        { slot: "memory", instanceId: "memory" },
+        { slot: "state", instanceId: "state" },
+      ],
+    };
+    core.validateAgentConfig.mockResolvedValue({ ok: true, issues: [], loaded });
+    core.runAgentModuleCommand.mockImplementation(
+      async (_config: unknown, module: string, command: string) => ({ module, command }),
+    );
+
+    const memory = captureOutput();
+    await expect(runCli([
+      "memory", "memory-local:audit", "--config", "/agent/config.json",
+    ], memory.io)).resolves.toBe(0);
+    expect(core.runAgentModuleCommand).toHaveBeenLastCalledWith(
+      loaded,
+      "memory",
+      "memory-local:audit",
+      undefined,
+    );
+    expect(JSON.parse(memory.stdout.join(""))).toMatchObject({
+      ok: true,
+      route: "memory",
+      module: "memory",
+      command: "memory-local:audit",
+    });
+
+    const auth = captureOutput();
+    await expect(runCli([
+      "auth", "--config", "/agent/config.json", "--module", "primary",
+      "--name", "pi:auth", "--input-json", '{"provider":"openai"}',
+    ], auth.io)).resolves.toBe(0);
+    expect(core.runAgentModuleCommand).toHaveBeenLastCalledWith(
+      loaded,
+      "primary",
+      "pi:auth",
+      { provider: "openai" },
+    );
+    expect(core.createAgentHost).not.toHaveBeenCalled();
+  });
+
+  it("reports absent and wrong-slot named command routes precisely without starting", async () => {
+    core.validateAgentConfig.mockResolvedValue({
+      ok: true,
+      issues: [],
+      loaded: {
+        modules: [
+          { slot: "state", instanceId: "state" },
+          { slot: "memory", instanceId: "shared" },
+        ],
+      },
+    });
+
+    const absent = captureOutput();
+    await expect(runCli([
+      "sandbox", "sandbox-srt:status", "--config", "/agent/config.json",
+    ], absent.io)).resolves.toBe(1);
+    expect(absent.stderr.join("")).toContain("No sandbox module is configured; sandbox is unavailable");
+
+    const wrong = captureOutput();
+    await expect(runCli([
+      "auth", "pi:auth", "--config", "/agent/config.json", "--module", "shared",
+    ], wrong.io)).resolves.toBe(1);
+    expect(wrong.stderr.join("")).toContain(
+      'Selected module "shared" is configured in the memory slot; auth requires runtime',
+    );
+    expect(core.createAgentHost).not.toHaveBeenCalled();
+    expect(core.runAgentModuleCommand).not.toHaveBeenCalled();
   });
 });
 

@@ -15,6 +15,8 @@ import {
   ExecutionStore,
   admissionStateKey,
   artifactIntentStateKey,
+  conversationChunkPrefix,
+  conversationChunkStateKey,
   conversationStateKey,
   describeExecutionArtifact,
   deliveryStateKey,
@@ -22,6 +24,7 @@ import {
   runEventStateKey,
   runHistoryStateKey,
   runStateKey,
+  retentionCheckpointStateKey,
   sessionStateKey,
   type ExecutionArtifactDescriptor,
   type ExecutionRecord,
@@ -33,7 +36,7 @@ import {
   parseCanonicalTranscript,
   parseInteractionEvidence,
   type CanonicalTranscript,
-} from "./transcript.js";
+} from "./execution-transcript.js";
 import type {
   AgentInteractionEvidence,
   AgentRunAttemptEvidence,
@@ -42,7 +45,7 @@ import type {
   AgentRunRecord,
   AgentRunStatus,
   AgentRunSummary,
-} from "./types.js";
+} from "./execution-types.js";
 
 const DEFAULT_STALE_AFTER_MS = 30 * 60_000;
 const MIN_STALE_AFTER_MS = 1_000;
@@ -56,12 +59,20 @@ const RUN_CONTENT_ARTIFACT_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 const ARTIFACT_RECONCILIATION_DEFAULT_LIMIT = 50;
 const ARTIFACT_RECONCILIATION_MAX_LIMIT = 200;
 const ARTIFACT_CLEANUP_TIMEOUT_MS = 5_000;
+const CONVERSATION_PAGE_SIZE = 100;
+const RETENTION_SCAN_PAGE_SIZE = 1_000;
+const RETENTION_REFERENCE_SCAN_MAX_RECORDS = 100_000;
 const FINGERPRINT_MAX_ITEMS = 20_000;
 const FINGERPRINT_MAX_BYTES = 16 * 1024 * 1024;
 const IDENTIFIER_MAX_BYTES = 4_096;
 const CODE_MAX_BYTES = 512;
 const SESSION_METADATA_MAX_ITEMS = 10_000;
 const SESSION_METADATA_MAX_BYTES = 64 * 1024;
+const CONVERSATION_TEXT_MAX_BYTES = 1024 * 1024;
+const CONVERSATION_TITLE_MAX_BYTES = 64 * 1024;
+const TRANSCRIPT_CHUNK_MAX_BYTES = 256 * 1024;
+const TRANSCRIPT_CHUNK_MAX_ITEMS = 256;
+const TRANSCRIPT_MAX_BYTES = TRANSCRIPT_CHUNK_MAX_BYTES * TRANSCRIPT_CHUNK_MAX_ITEMS;
 const INTERNAL_ARTIFACT_SLOT_PREFIX = "@core/";
 const TRANSCRIPT_ARTIFACT_SLOT = `${INTERNAL_ARTIFACT_SLOT_PREFIX}transcript`;
 const RESPONSE_ARTIFACT_SLOT = `${INTERNAL_ARTIFACT_SLOT_PREFIX}response`;
@@ -109,9 +120,51 @@ interface ConversationRecord {
   readonly kind: "mono-agent.conversation";
   readonly conversationId: string;
   readonly revision: number;
-  readonly transcriptRef: ArtifactRef;
+  readonly inlineTranscript?: CanonicalTranscript;
+  readonly transcriptChunks?: TranscriptChunkManifest;
+  readonly transcriptRef?: ArtifactRef;
   readonly entryCount: number;
+  readonly createdAt?: string;
   readonly updatedAt: string;
+  readonly title?: string;
+  readonly metadata?: JsonObject;
+}
+
+interface TranscriptChunkDescriptor {
+  readonly key: string;
+  readonly digest: string;
+  readonly sizeBytes: number;
+}
+
+interface TranscriptChunkManifest {
+  readonly schemaVersion: 1;
+  readonly kind: "mono-agent.canonical-transcript-chunks";
+  readonly encoding: "utf8-json";
+  readonly digest: string;
+  readonly sizeBytes: number;
+  readonly chunks: readonly TranscriptChunkDescriptor[];
+}
+
+interface LoadedConversationTranscript {
+  readonly transcript: CanonicalTranscript;
+  readonly chunks: readonly ExecutionRecord<Uint8Array>[];
+}
+
+interface ChunkedCanonicalTranscript {
+  readonly manifest: TranscriptChunkManifest;
+  readonly chunks: readonly {
+    readonly descriptor: TranscriptChunkDescriptor;
+    readonly bytes: Uint8Array;
+  }[];
+}
+
+interface ConversationView {
+  readonly conversationId: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly transcript: CanonicalTranscript;
+  readonly title?: string;
+  readonly metadata?: JsonObject;
 }
 
 interface ProviderSessionRecord {
@@ -163,6 +216,18 @@ interface DeliveryRecord {
   readonly leaseExpiresAt?: string;
   readonly messageId?: string;
   readonly code?: string;
+}
+
+interface RunRetentionCheckpoint {
+  readonly schemaVersion: 1;
+  readonly kind: "mono-agent.run-retention-checkpoint";
+  readonly runId: string;
+  readonly historyKey: string;
+  readonly requestId: string;
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly artifacts: readonly ArtifactRef[];
+  readonly createdAt: string;
 }
 
 export interface RunAdmissionInput {
@@ -249,6 +314,31 @@ export interface DurableRunJournalOptions {
   readonly staleAfterMs?: number;
   readonly createRunId?: () => string;
   readonly createDeliveryToken?: () => string;
+  readonly releaseArtifact?: (
+    ref: ArtifactRef,
+    signal: AbortSignal,
+  ) => Promise<boolean>;
+}
+
+export interface ExecutionMaintenanceInput {
+  readonly cutoffAt: string;
+  readonly dryRun?: boolean;
+  readonly limit?: number;
+  readonly signal: AbortSignal;
+}
+
+export interface ExecutionMaintenanceResult {
+  readonly terminalRunCandidates: number;
+  readonly terminalRunsRemoved: number;
+  readonly runEventsRemoved: number;
+  readonly terminalAdmissionsRemoved: number;
+  readonly terminalDeliveryCandidates: number;
+  readonly terminalDeliveriesRemoved: number;
+  readonly staleSessionCandidates: number;
+  readonly staleSessionsRemoved: number;
+  readonly publishedArtifactsReleased: number;
+  readonly pendingCheckpoints: number;
+  readonly truncated: boolean;
 }
 
 export interface ReconcileArtifactPublicationsInput {
@@ -271,6 +361,9 @@ export class DurableRunJournal {
   readonly #staleAfterMs: number;
   readonly #createRunId: () => string;
   readonly #createDeliveryToken: () => string;
+  readonly #releaseArtifact:
+    | ((ref: ArtifactRef, signal: AbortSignal) => Promise<boolean>)
+    | undefined;
 
   constructor(store: ExecutionStore, options: DurableRunJournalOptions = {}) {
     this.#store = store;
@@ -281,6 +374,7 @@ export class DurableRunJournal {
     );
     this.#createRunId = options.createRunId ?? randomUUID;
     this.#createDeliveryToken = options.createDeliveryToken ?? randomUUID;
+    this.#releaseArtifact = options.releaseArtifact;
   }
 
   async admit(input: RunAdmissionInput): Promise<RunAdmissionResult> {
@@ -618,6 +712,7 @@ export class DurableRunJournal {
     let transcript: CanonicalTranscript | undefined;
     let transcriptBytes: Uint8Array | undefined;
     let conversation: ExecutionRecord<ConversationRecord> | undefined;
+    let conversationChunks: readonly ExecutionRecord<Uint8Array>[] = [];
     if (input.transcript !== undefined) {
       transcript = parseCanonicalTranscript(input.transcript);
       if (transcript.conversationId !== storedRun.value.summary.conversationId) {
@@ -633,14 +728,12 @@ export class DurableRunJournal {
         throw new Error("settled transcript revision is not the next canonical revision");
       }
       if (conversation !== undefined) {
-        const previousBytes = await this.#store.readArtifact(
-          conversation.value.transcriptRef,
+        const loaded = await this.#loadConversationTranscriptState(
+          conversation.value,
           input.signal,
         );
-        const previous = decodeCanonicalTranscript(
-          previousBytes,
-          transcript.conversationId,
-        );
+        const previous = loaded.transcript;
+        conversationChunks = loaded.chunks;
         if (
           previous.revision !== conversation.value.revision
           || previous.entries.length !== conversation.value.entryCount
@@ -846,7 +939,16 @@ export class DurableRunJournal {
             revision: transcript.revision,
             transcriptRef,
             entryCount: transcript.entries.length,
+            ...(conversation?.value.createdAt === undefined
+              ? {}
+              : { createdAt: conversation.value.createdAt }),
             updatedAt: now,
+            ...(conversation?.value.title === undefined
+              ? {}
+              : { title: conversation.value.title }),
+            ...(conversation?.value.metadata === undefined
+              ? {}
+              : { metadata: conversation.value.metadata }),
           });
     const summary = freezeSummary({
       ...storedRun.value.summary,
@@ -932,6 +1034,10 @@ export class DurableRunJournal {
               key: providerSessionKey,
               expectedVersion: providerSession?.version ?? null,
             }]),
+        ...conversationChunks.map((chunk) => ({
+          key: chunk.key,
+          expectedVersion: chunk.version,
+        })),
       ],
       signal: input.signal,
     });
@@ -962,8 +1068,7 @@ export class DurableRunJournal {
       signal,
     );
     if (record === undefined) return undefined;
-    const encoded = await this.#store.readArtifact(record.value.transcriptRef, signal);
-    const transcript = decodeCanonicalTranscript(encoded, normalizedId);
+    const transcript = await this.#loadConversationTranscript(record.value, signal);
     if (
       transcript.revision !== record.value.revision
       || transcript.entries.length !== record.value.entryCount
@@ -971,6 +1076,235 @@ export class DurableRunJournal {
       throw new Error("canonical transcript pointer does not match its artifact");
     }
     return transcript;
+  }
+
+  async openConversation(
+    input: {
+      readonly title?: string;
+      readonly initialText?: string;
+      readonly metadata?: JsonObject;
+    },
+    signal: AbortSignal,
+  ): Promise<ConversationView> {
+    const source = ownDataRecord(
+      input,
+      "open conversation",
+      ["title", "initialText", "metadata"],
+    );
+    const title = source.title === undefined
+      ? undefined
+      : boundedText(
+        source.title,
+        "open conversation.title",
+        CONVERSATION_TITLE_MAX_BYTES,
+        true,
+      );
+    const initialText = source.initialText === undefined
+      ? undefined
+      : boundedText(
+        source.initialText,
+        "open conversation.initialText",
+        CONVERSATION_TEXT_MAX_BYTES,
+        true,
+      );
+    const metadata = source.metadata === undefined
+      ? undefined
+      : parseSessionMetadata(source.metadata, "open conversation.metadata");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const conversationId = `proactive:${randomUUID()}`;
+      const createdAt = canonicalNow(this.#clock);
+      const transcript = parseCanonicalTranscript({
+        schemaVersion: 1,
+        kind: "mono-agent.canonical-transcript",
+        conversationId,
+        revision: 1,
+        entries: initialText === undefined || initialText.length === 0
+          ? []
+          : [{
+              kind: "verbatim",
+              entryId: `${conversationId}:initial`,
+              runId: `${conversationId}:open`,
+              requestId: `${conversationId}:open`,
+              conversationId,
+              recordedAt: createdAt,
+              role: "assistant",
+              text: initialText,
+            }],
+      });
+      const chunked = chunkCanonicalTranscript(transcript);
+      const value: ConversationRecord = Object.freeze({
+        schemaVersion: 1,
+        kind: "mono-agent.conversation",
+        conversationId,
+        revision: transcript.revision,
+        transcriptChunks: chunked.manifest,
+        entryCount: transcript.entries.length,
+        createdAt,
+        updatedAt: createdAt,
+        ...(title === undefined ? {} : { title }),
+        ...(metadata === undefined ? {} : { metadata }),
+      });
+      const result = await this.#store.transaction({
+        puts: [{
+          key: conversationStateKey(conversationId),
+          expectedVersion: null,
+          value,
+        }],
+        bytePuts: chunked.chunks.map((chunk) => ({
+          key: chunk.descriptor.key,
+          expectedVersion: null,
+          value: chunk.bytes,
+        })),
+        signal,
+      });
+      if (result.status === "applied") {
+        return Object.freeze({
+          conversationId,
+          createdAt,
+          updatedAt: createdAt,
+          transcript,
+          ...(title === undefined ? {} : { title }),
+          ...(metadata === undefined ? {} : { metadata }),
+        });
+      }
+    }
+    throw new Error("proactive conversation identity did not converge");
+  }
+
+  async loadConversation(
+    conversationId: string,
+    signal: AbortSignal,
+  ): Promise<ConversationView | undefined> {
+    const normalizedId = boundedIdentifier(conversationId, "conversationId");
+    const record = await this.#store.read(
+      conversationStateKey(normalizedId),
+      parseConversationRecord,
+      signal,
+    );
+    if (record === undefined) return undefined;
+    const transcript = await this.#loadConversationTranscript(record.value, signal);
+    const createdAt = record.value.createdAt
+      ?? transcript.entries[0]?.recordedAt
+      ?? record.value.updatedAt;
+    return Object.freeze({
+      conversationId: normalizedId,
+      createdAt,
+      updatedAt: record.value.updatedAt,
+      transcript,
+      ...(record.value.title === undefined ? {} : { title: record.value.title }),
+      ...(record.value.metadata === undefined
+        ? {}
+        : { metadata: record.value.metadata }),
+    });
+  }
+
+  async listConversations(
+    cursor: string | undefined,
+    signal: AbortSignal,
+  ): Promise<{
+    readonly conversations: readonly Omit<ConversationView, "transcript">[];
+    readonly nextCursor?: string;
+  }> {
+    const page = await this.#store.scan(
+      EXECUTION_STATE_PREFIXES.conversations,
+      cursor,
+      CONVERSATION_PAGE_SIZE,
+      parseConversationRecord,
+      signal,
+    );
+    return Object.freeze({
+      conversations: Object.freeze(page.records.map(({ value }) => Object.freeze({
+        conversationId: value.conversationId,
+        createdAt: value.createdAt ?? value.updatedAt,
+        updatedAt: value.updatedAt,
+        ...(value.title === undefined ? {} : { title: value.title }),
+        ...(value.metadata === undefined ? {} : { metadata: value.metadata }),
+      }))),
+      ...(page.cursor === undefined ? {} : { nextCursor: page.cursor }),
+    });
+  }
+
+  async #loadConversationTranscript(
+    record: ConversationRecord,
+    signal: AbortSignal,
+  ): Promise<CanonicalTranscript> {
+    return (await this.#loadConversationTranscriptState(record, signal)).transcript;
+  }
+
+  async #loadConversationTranscriptState(
+    record: ConversationRecord,
+    signal: AbortSignal,
+  ): Promise<LoadedConversationTranscript> {
+    const loaded = record.inlineTranscript !== undefined
+      ? Object.freeze({
+          transcript: record.inlineTranscript,
+          chunks: Object.freeze([]),
+        })
+      : record.transcriptChunks !== undefined
+        ? await this.#loadChunkedTranscript(
+            record.conversationId,
+            record.transcriptChunks,
+            signal,
+          )
+        : Object.freeze({
+            transcript: decodeCanonicalTranscript(
+              await this.#store.readArtifact(record.transcriptRef!, signal),
+              record.conversationId,
+            ),
+            chunks: Object.freeze([]),
+          });
+    const transcript = loaded.transcript;
+    if (
+      transcript.revision !== record.revision
+      || transcript.entries.length !== record.entryCount
+    ) {
+      throw new Error("canonical transcript pointer does not match its record");
+    }
+    return loaded;
+  }
+
+  async #loadChunkedTranscript(
+    conversationId: string,
+    manifest: TranscriptChunkManifest,
+    signal: AbortSignal,
+  ): Promise<LoadedConversationTranscript> {
+    const chunks: ExecutionRecord<Uint8Array>[] = [];
+    let totalBytes = 0;
+    for (const descriptor of manifest.chunks) {
+      const chunk = await this.#store.readBytes(descriptor.key, signal);
+      if (chunk === undefined) {
+        throw new Error("canonical transcript chunk is missing");
+      }
+      const digest = createHash("sha256").update(chunk.value).digest("hex");
+      if (
+        chunk.value.byteLength !== descriptor.sizeBytes
+        || digest !== descriptor.digest
+      ) {
+        throw new Error("canonical transcript chunk does not match its manifest");
+      }
+      totalBytes += chunk.value.byteLength;
+      if (!Number.isSafeInteger(totalBytes) || totalBytes > TRANSCRIPT_MAX_BYTES) {
+        throw new Error("canonical transcript chunks exceed their byte bound");
+      }
+      chunks.push(chunk);
+    }
+    if (totalBytes !== manifest.sizeBytes) {
+      throw new Error("canonical transcript chunks do not match their declared size");
+    }
+    const encoded = new Uint8Array(totalBytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      encoded.set(chunk.value, offset);
+      offset += chunk.value.byteLength;
+    }
+    const digest = createHash("sha256").update(encoded).digest("hex");
+    if (digest !== manifest.digest) {
+      throw new Error("canonical transcript chunks do not match their content authority");
+    }
+    return Object.freeze({
+      transcript: decodeCanonicalTranscript(encoded, conversationId),
+      chunks: Object.freeze(chunks),
+    });
   }
 
   async loadSession(
@@ -1075,6 +1409,12 @@ export class DurableRunJournal {
       signal,
     );
     if (stored === undefined) return undefined;
+    const retention = await this.#store.read(
+      retentionCheckpointStateKey(normalizedRunId),
+      parseRunRetentionCheckpoint,
+      signal,
+    );
+    if (retention !== undefined) return undefined;
     const events = await this.#readEvents(stored.value, signal);
     let transcript: CanonicalTranscript | undefined;
     if (stored.value.transcriptRef !== undefined) {
@@ -1107,6 +1447,12 @@ export class DurableRunJournal {
     );
     const runs: AgentRunSummary[] = [];
     for (const history of page.records) {
+      const retention = await this.#store.read(
+        retentionCheckpointStateKey(history.value.runId),
+        parseRunRetentionCheckpoint,
+        signal,
+      );
+      if (retention !== undefined) continue;
       const stored = await this.#store.read(
         runStateKey(history.value.runId),
         parseStoredRunRecord,
@@ -1363,6 +1709,473 @@ export class DurableRunJournal {
       skippedActive,
       ...(page.cursor === undefined ? {} : { nextCursor: page.cursor }),
     });
+  }
+
+  /**
+   * Bounded, restart-safe retirement of execution-owned state.
+   *
+   * A terminal run first receives a durable checkpoint. Event pages can then
+   * be removed across multiple passes; the final run/history/admission delete
+   * is atomic. The checkpoint remains until every published artifact named by
+   * the retired owners is either still referenced elsewhere or has completed
+   * state-local's private v2 release protocol.
+   */
+  async maintainExecution(
+    input: ExecutionMaintenanceInput,
+  ): Promise<ExecutionMaintenanceResult> {
+    const cutoffAt = canonicalTimestamp(input.cutoffAt, "execution maintenance.cutoffAt");
+    const dryRun = input.dryRun ?? false;
+    if (typeof dryRun !== "boolean") {
+      throw new TypeError("execution maintenance.dryRun must be a boolean");
+    }
+    const limit = boundedInteger(
+      input.limit ?? RETENTION_SCAN_PAGE_SIZE,
+      "execution maintenance.limit",
+      1,
+      RETENTION_SCAN_PAGE_SIZE,
+    );
+    let budget = limit;
+    let terminalRunsRemoved = 0;
+    let runEventsRemoved = 0;
+    let terminalAdmissionsRemoved = 0;
+    let staleSessionsRemoved = 0;
+    let publishedArtifactsReleased = 0;
+    let truncated = false;
+
+    const checkpoints = await this.#scanAll(
+      EXECUTION_STATE_PREFIXES.retentionCheckpoints,
+      parseRunRetentionCheckpoint,
+      input.signal,
+    );
+    truncated ||= checkpoints.truncated;
+    if (!dryRun) {
+      for (const checkpoint of checkpoints.records) {
+        if (budget < 1) {
+          truncated = true;
+          break;
+        }
+        const resumed = await this.#resumeRunRetention(
+          checkpoint,
+          budget,
+          input.signal,
+        );
+        budget -= resumed.mutations;
+        terminalRunsRemoved += resumed.runRemoved;
+        runEventsRemoved += resumed.eventsRemoved;
+        terminalAdmissionsRemoved += resumed.admissionRemoved;
+        publishedArtifactsReleased += resumed.artifactsReleased;
+        truncated ||= resumed.pending;
+      }
+    }
+
+    const histories = await this.#scanAll(
+      EXECUTION_STATE_PREFIXES.runHistory,
+      parseRunHistoryRecord,
+      input.signal,
+    );
+    truncated ||= histories.truncated;
+    const terminalCandidates: {
+      readonly history: ExecutionRecord<RunHistoryRecord>;
+      readonly run: ExecutionRecord<StoredRunRecord>;
+      readonly admission: ExecutionRecord<AdmissionRecord> | undefined;
+    }[] = [];
+    for (const history of histories.records) {
+      const run = await this.#store.read(
+        runStateKey(history.value.runId),
+        parseStoredRunRecord,
+        input.signal,
+      );
+      if (run === undefined) {
+        // A checkpoint owns any partially retired history row. An uncheckpointed
+        // dangling index is corruption, not deletion authority.
+        const checkpoint = await this.#store.read(
+          retentionCheckpointStateKey(history.value.runId),
+          parseRunRetentionCheckpoint,
+          input.signal,
+        );
+        if (checkpoint === undefined) {
+          throw new Error("run history index points to missing uncheckpointed run state");
+        }
+        continue;
+      }
+      const endedAt = run.value.summary.endedAt;
+      if (
+        run.value.summary.status === "running"
+        || endedAt === undefined
+        || endedAt > cutoffAt
+      ) {
+        continue;
+      }
+      if (run.value.summary.startedAt !== history.value.startedAt) {
+        throw new Error("run retention history authority is mismatched");
+      }
+      const admission = await this.#store.read(
+        admissionStateKey(run.value.summary.requestId),
+        parseAdmissionRecord,
+        input.signal,
+      );
+      if (
+        admission !== undefined
+        && (
+          admission.value.runId !== run.value.summary.runId
+          || admission.value.conversationId !== run.value.summary.conversationId
+          || admission.value.status === "running"
+        )
+      ) {
+        throw new Error("terminal run retention admission authority is mismatched");
+      }
+      terminalCandidates.push({ history, run, admission });
+    }
+
+    if (!dryRun) {
+      for (const candidate of terminalCandidates) {
+        if (budget < 1) {
+          truncated = true;
+          break;
+        }
+        const key = retentionCheckpointStateKey(candidate.run.value.summary.runId);
+        const existing = await this.#store.read(
+          key,
+          parseRunRetentionCheckpoint,
+          input.signal,
+        );
+        if (existing !== undefined) continue;
+        const artifacts = uniqueArtifactRefs([
+          candidate.run.value.transcriptRef,
+          candidate.admission?.value.responseRef,
+        ]);
+        const checkpoint: RunRetentionCheckpoint = Object.freeze({
+          schemaVersion: 1,
+          kind: "mono-agent.run-retention-checkpoint",
+          runId: candidate.run.value.summary.runId,
+          historyKey: candidate.history.key,
+          requestId: candidate.run.value.summary.requestId,
+          startedAt: candidate.run.value.summary.startedAt,
+          endedAt: candidate.run.value.summary.endedAt!,
+          artifacts,
+          createdAt: canonicalNow(this.#clock),
+        });
+        const claimed = await this.#store.transaction({
+          puts: [{ key, expectedVersion: null, value: checkpoint }],
+          signal: input.signal,
+        });
+        if (claimed.status === "applied") budget -= 1;
+      }
+    }
+
+    const sessions = await this.#scanAll(
+      EXECUTION_STATE_PREFIXES.sessions,
+      parseProviderSessionRecord,
+      input.signal,
+    );
+    truncated ||= sessions.truncated;
+    const staleSessions = sessions.records.filter(({ value }) =>
+      value.updatedAt <= cutoffAt);
+    if (!dryRun && budget > 0 && staleSessions.length > 0) {
+      const selected = staleSessions.slice(0, budget);
+      const deleted = await this.#store.transaction({
+        deletes: selected.map((record) => ({
+          key: record.key,
+          expectedVersion: record.version,
+        })),
+        signal: input.signal,
+      });
+      if (deleted.status === "conflict") {
+        throw new Error("stale session retention lost an atomic state race");
+      }
+      staleSessionsRemoved = deleted.deletedKeys.length;
+      budget -= deleted.deletedKeys.length;
+      if (selected.length < staleSessions.length) truncated = true;
+    } else if (!dryRun && staleSessions.length > 0) {
+      truncated = true;
+    }
+
+    const remainingCheckpoints = await this.#scanAll(
+      EXECUTION_STATE_PREFIXES.retentionCheckpoints,
+      parseRunRetentionCheckpoint,
+      input.signal,
+    );
+    truncated ||= remainingCheckpoints.truncated;
+    return Object.freeze({
+      terminalRunCandidates: terminalCandidates.length,
+      terminalRunsRemoved,
+      runEventsRemoved,
+      terminalAdmissionsRemoved,
+      // Delivered and unknown receipts are permanent idempotency authority.
+      // A time-based pass must never turn either outcome back into `send`.
+      terminalDeliveryCandidates: 0,
+      terminalDeliveriesRemoved: 0,
+      staleSessionCandidates: staleSessions.length,
+      staleSessionsRemoved,
+      publishedArtifactsReleased,
+      pendingCheckpoints: remainingCheckpoints.records.length,
+      truncated,
+    });
+  }
+
+  async #resumeRunRetention(
+    checkpoint: ExecutionRecord<RunRetentionCheckpoint>,
+    budget: number,
+    signal: AbortSignal,
+  ): Promise<{
+    readonly mutations: number;
+    readonly runRemoved: number;
+    readonly eventsRemoved: number;
+    readonly admissionRemoved: number;
+    readonly artifactsReleased: number;
+    readonly pending: boolean;
+  }> {
+    const value = checkpoint.value;
+    const run = await this.#store.read(
+      runStateKey(value.runId),
+      parseStoredRunRecord,
+      signal,
+    );
+    if (
+      run !== undefined
+      && (
+        run.value.summary.status === "running"
+        || run.value.summary.requestId !== value.requestId
+        || run.value.summary.startedAt !== value.startedAt
+        || run.value.summary.endedAt !== value.endedAt
+      )
+    ) {
+      throw new Error("run retention checkpoint no longer matches its terminal run");
+    }
+
+    const events = await this.#scanAll(
+      runEventPrefix(value.runId),
+      parseStoredRunEvent,
+      signal,
+      RUN_MAX_EVENTS,
+    );
+    if (events.records.length > 0) {
+      const selected = events.records.slice(0, Math.min(budget, RETENTION_SCAN_PAGE_SIZE));
+      if (selected.length === 0) {
+        return {
+          mutations: 0,
+          runRemoved: 0,
+          eventsRemoved: 0,
+          admissionRemoved: 0,
+          artifactsReleased: 0,
+          pending: true,
+        };
+      }
+      const deleted = await this.#store.transaction({
+        deletes: selected.map((event) => ({
+          key: event.key,
+          expectedVersion: event.version,
+        })),
+        signal,
+      });
+      if (deleted.status === "conflict") {
+        throw new Error("run event retention lost an atomic state race");
+      }
+      return {
+        mutations: deleted.deletedKeys.length,
+        runRemoved: 0,
+        eventsRemoved: deleted.deletedKeys.length,
+        admissionRemoved: 0,
+        artifactsReleased: 0,
+        pending: true,
+      };
+    }
+
+    const history = await this.#store.read(
+      value.historyKey,
+      parseRunHistoryRecord,
+      signal,
+    );
+    if (
+      history !== undefined
+      && (
+        history.value.runId !== value.runId
+        || history.value.startedAt !== value.startedAt
+      )
+    ) {
+      throw new Error("run retention checkpoint history authority is mismatched");
+    }
+    const admission = await this.#store.read(
+      admissionStateKey(value.requestId),
+      parseAdmissionRecord,
+      signal,
+    );
+    if (
+      admission !== undefined
+      && (
+        admission.value.runId !== value.runId
+        || admission.value.status === "running"
+      )
+    ) {
+      throw new Error("run retention checkpoint admission authority is mismatched");
+    }
+    const owners = [
+      ...(run === undefined ? [] : [run]),
+      ...(history === undefined ? [] : [history]),
+      ...(admission === undefined ? [] : [admission]),
+    ];
+    if (owners.length > 0) {
+      if (owners.length > budget) {
+        return {
+          mutations: 0,
+          runRemoved: 0,
+          eventsRemoved: 0,
+          admissionRemoved: 0,
+          artifactsReleased: 0,
+          pending: true,
+        };
+      }
+      const deleted = await this.#store.transaction({
+        deletes: owners.map((owner) => ({
+          key: owner.key,
+          expectedVersion: owner.version,
+        })),
+        signal,
+      });
+      if (deleted.status === "conflict") {
+        throw new Error("terminal run retention lost an atomic state race");
+      }
+      return {
+        mutations: deleted.deletedKeys.length,
+        runRemoved: run === undefined ? 0 : 1,
+        eventsRemoved: 0,
+        admissionRemoved: admission === undefined ? 0 : 1,
+        artifactsReleased: 0,
+        pending: true,
+      };
+    }
+
+    let artifactsReleased = 0;
+    let referencedArtifact = false;
+    for (const artifact of value.artifacts) {
+      if (await this.#artifactIsReferenced(artifact, signal)) {
+        referencedArtifact = true;
+        continue;
+      }
+      if (this.#releaseArtifact !== undefined) {
+        if (await this.#releaseArtifact(artifact, signal)) {
+          artifactsReleased += 1;
+        }
+      }
+    }
+    if (referencedArtifact) {
+      return {
+        mutations: 0,
+        runRemoved: 0,
+        eventsRemoved: 0,
+        admissionRemoved: 0,
+        artifactsReleased,
+        pending: true,
+      };
+    }
+    if (budget < 1) {
+      return {
+        mutations: 0,
+        runRemoved: 0,
+        eventsRemoved: 0,
+        admissionRemoved: 0,
+        artifactsReleased,
+        pending: true,
+      };
+    }
+    const removedCheckpoint = await this.#store.transaction({
+      deletes: [{
+        key: checkpoint.key,
+        expectedVersion: checkpoint.version,
+      }],
+      signal,
+    });
+    if (removedCheckpoint.status === "conflict") {
+      throw new Error("run retention checkpoint cleanup lost an atomic state race");
+    }
+    return {
+      mutations: removedCheckpoint.deletedKeys.length,
+      runRemoved: 0,
+      eventsRemoved: 0,
+      admissionRemoved: 0,
+      artifactsReleased,
+      pending: false,
+    };
+  }
+
+  async #artifactIsReferenced(
+    artifact: ArtifactRef,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const conversations = await this.#scanAll(
+      EXECUTION_STATE_PREFIXES.conversations,
+      parseConversationRecord,
+      signal,
+    );
+    if (conversations.truncated) return true;
+    if (conversations.records.some(({ value }) =>
+      sameArtifactRef(value.transcriptRef, artifact))) return true;
+
+    const runs = await this.#scanAll(
+      `${EXECUTION_STATE_PREFIXES.runs}records/`,
+      parseStoredRunRecord,
+      signal,
+    );
+    if (runs.truncated) return true;
+    if (runs.records.some(({ value }) =>
+      sameArtifactRef(value.transcriptRef, artifact))) return true;
+
+    const admissions = await this.#scanAll(
+      EXECUTION_STATE_PREFIXES.admissions,
+      parseAdmissionRecord,
+      signal,
+    );
+    if (admissions.truncated) return true;
+    if (admissions.records.some(({ value }) =>
+      sameArtifactRef(value.responseRef, artifact))) return true;
+
+    const intents = await this.#scanAll(
+      EXECUTION_STATE_PREFIXES.artifactIntents,
+      parseArtifactPublicationIntentRecord,
+      signal,
+    );
+    if (intents.truncated) return true;
+    return intents.records.some(({ value }) =>
+      [...value.artifacts, ...value.cleanupArtifacts].some((candidate) =>
+        candidate.sha256 === artifact.sha256
+        && candidate.sizeBytes === artifact.sizeBytes));
+  }
+
+  async #scanAll<T>(
+    prefix: string,
+    parser: (value: unknown) => T,
+    signal: AbortSignal,
+    maximumRecords = RETENTION_REFERENCE_SCAN_MAX_RECORDS,
+  ): Promise<{
+    readonly records: readonly ExecutionRecord<T>[];
+    readonly truncated: boolean;
+  }> {
+    const records: ExecutionRecord<T>[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    while (records.length < maximumRecords) {
+      const remaining = maximumRecords - records.length;
+      const page = await this.#store.scan(
+        prefix,
+        cursor,
+        Math.min(RETENTION_SCAN_PAGE_SIZE, remaining),
+        parser,
+        signal,
+      );
+      records.push(...page.records);
+      if (page.cursor === undefined) {
+        return { records: Object.freeze(records), truncated: false };
+      }
+      if (seenCursors.has(page.cursor)) {
+        throw new Error("execution retention scan cursor did not advance");
+      }
+      seenCursors.add(page.cursor);
+      cursor = page.cursor;
+    }
+    return {
+      records: Object.freeze(records),
+      truncated: cursor !== undefined,
+    };
   }
 
   async #bestEffortAbandonArtifactPublication(
@@ -2115,36 +2928,240 @@ function parseConversationRecord(value: unknown): ConversationRecord {
       "kind",
       "conversationId",
       "revision",
+      "inlineTranscript",
+      "transcriptChunks",
       "transcriptRef",
       "entryCount",
+      "createdAt",
       "updatedAt",
+      "title",
+      "metadata",
     ],
   );
   if (input.schemaVersion !== 1 || input.kind !== "mono-agent.conversation") {
     throw new TypeError("conversation record has an unsupported schema");
   }
+  const conversationId = boundedIdentifier(
+    input.conversationId,
+    "conversation record.conversationId",
+  );
+  const inlineTranscript = input.inlineTranscript === undefined
+    ? undefined
+    : parseCanonicalTranscript(input.inlineTranscript);
+  const transcriptChunks = input.transcriptChunks === undefined
+    ? undefined
+    : parseTranscriptChunkManifest(
+        input.transcriptChunks,
+        conversationId,
+      );
+  const transcriptRef = input.transcriptRef === undefined
+    ? undefined
+    : parseArtifactRef(input.transcriptRef);
+  if (
+    Number(inlineTranscript !== undefined)
+      + Number(transcriptChunks !== undefined)
+      + Number(transcriptRef !== undefined)
+    !== 1
+  ) {
+    throw new TypeError(
+      "conversation record must carry exactly one transcript representation",
+    );
+  }
+  if (
+    inlineTranscript !== undefined
+    && inlineTranscript.conversationId !== conversationId
+  ) {
+    throw new TypeError("inline transcript conversation identity does not match");
+  }
+  const revision = boundedInteger(
+    input.revision,
+    "conversation record.revision",
+    1,
+    Number.MAX_SAFE_INTEGER,
+  );
+  const entryCount = boundedInteger(
+    input.entryCount,
+    "conversation record.entryCount",
+    0,
+    50_000,
+  );
+  if (
+    inlineTranscript !== undefined
+    && (
+      inlineTranscript.revision !== revision
+      || inlineTranscript.entries.length !== entryCount
+    )
+  ) {
+    throw new TypeError("inline transcript does not match its conversation record");
+  }
+  const title = input.title === undefined
+    ? undefined
+    : boundedText(
+      input.title,
+      "conversation record.title",
+      CONVERSATION_TITLE_MAX_BYTES,
+      true,
+    );
+  const metadata = input.metadata === undefined
+    ? undefined
+    : parseSessionMetadata(input.metadata, "conversation record.metadata");
+  const createdAt = input.createdAt === undefined
+    ? undefined
+    : canonicalTimestamp(input.createdAt, "conversation record.createdAt");
+  const updatedAt = canonicalTimestamp(
+    input.updatedAt,
+    "conversation record.updatedAt",
+  );
+  if (createdAt !== undefined && createdAt > updatedAt) {
+    throw new TypeError("conversation record timestamps are non-monotonic");
+  }
   return Object.freeze({
     schemaVersion: 1,
     kind: "mono-agent.conversation",
-    conversationId: boundedIdentifier(
-      input.conversationId,
-      "conversation record.conversationId",
-    ),
-    revision: boundedInteger(
-      input.revision,
-      "conversation record.revision",
-      1,
-      Number.MAX_SAFE_INTEGER,
-    ),
-    transcriptRef: parseArtifactRef(input.transcriptRef),
-    entryCount: boundedInteger(
-      input.entryCount,
-      "conversation record.entryCount",
-      0,
-      50_000,
-    ),
-    updatedAt: canonicalTimestamp(input.updatedAt, "conversation record.updatedAt"),
+    conversationId,
+    revision,
+    ...(inlineTranscript === undefined ? {} : { inlineTranscript }),
+    ...(transcriptChunks === undefined ? {} : { transcriptChunks }),
+    ...(transcriptRef === undefined ? {} : { transcriptRef }),
+    entryCount,
+    ...(createdAt === undefined ? {} : { createdAt }),
+    updatedAt,
+    ...(title === undefined ? {} : { title }),
+    ...(metadata === undefined ? {} : { metadata }),
   });
+}
+
+function chunkCanonicalTranscript(
+  transcript: CanonicalTranscript,
+): ChunkedCanonicalTranscript {
+  const parsed = parseCanonicalTranscript(transcript);
+  const encoded = encodeCanonicalTranscript(parsed);
+  if (encoded.byteLength < 1 || encoded.byteLength > TRANSCRIPT_MAX_BYTES) {
+    throw new RangeError("canonical transcript is outside its chunked byte bound");
+  }
+  const chunks: {
+    readonly descriptor: TranscriptChunkDescriptor;
+    readonly bytes: Uint8Array;
+  }[] = [];
+  for (
+    let offset = 0;
+    offset < encoded.byteLength;
+    offset += TRANSCRIPT_CHUNK_MAX_BYTES
+  ) {
+    if (chunks.length >= TRANSCRIPT_CHUNK_MAX_ITEMS) {
+      throw new RangeError("canonical transcript exceeds its chunk count");
+    }
+    const bytes = encoded.slice(
+      offset,
+      Math.min(offset + TRANSCRIPT_CHUNK_MAX_BYTES, encoded.byteLength),
+    );
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    const descriptor = Object.freeze({
+      key: conversationChunkStateKey(
+        parsed.conversationId,
+        chunks.length,
+        digest,
+      ),
+      digest,
+      sizeBytes: bytes.byteLength,
+    });
+    chunks.push(Object.freeze({ descriptor, bytes }));
+  }
+  const manifest = Object.freeze({
+    schemaVersion: 1,
+    kind: "mono-agent.canonical-transcript-chunks",
+    encoding: "utf8-json",
+    digest: createHash("sha256").update(encoded).digest("hex"),
+    sizeBytes: encoded.byteLength,
+    chunks: Object.freeze(chunks.map((chunk) => chunk.descriptor)),
+  } as const satisfies TranscriptChunkManifest);
+  return Object.freeze({
+    manifest,
+    chunks: Object.freeze(chunks),
+  });
+}
+
+function parseTranscriptChunkManifest(
+  value: unknown,
+  conversationId: string,
+): TranscriptChunkManifest {
+  const input = ownDataRecord(
+    value,
+    "conversation transcript chunks",
+    ["schemaVersion", "kind", "encoding", "digest", "sizeBytes", "chunks"],
+  );
+  if (
+    input.schemaVersion !== 1
+    || input.kind !== "mono-agent.canonical-transcript-chunks"
+    || input.encoding !== "utf8-json"
+  ) {
+    throw new TypeError("conversation transcript chunks have an unsupported schema");
+  }
+  const digest = transcriptChunkDigest(
+    input.digest,
+    "conversation transcript chunks.digest",
+  );
+  const sizeBytes = boundedInteger(
+    input.sizeBytes,
+    "conversation transcript chunks.sizeBytes",
+    1,
+    TRANSCRIPT_MAX_BYTES,
+  );
+  const rawChunks = denseOwnDataArray(
+    input.chunks,
+    "conversation transcript chunks.chunks",
+    TRANSCRIPT_CHUNK_MAX_ITEMS,
+  );
+  if (rawChunks.length === 0) {
+    throw new TypeError("conversation transcript chunks must not be empty");
+  }
+  let describedBytes = 0;
+  const prefix = conversationChunkPrefix(conversationId);
+  const chunks = rawChunks.map((value, index): TranscriptChunkDescriptor => {
+    const path = `conversation transcript chunks.chunks.${String(index)}`;
+    const chunk = ownDataRecord(value, path, ["key", "digest", "sizeBytes"]);
+    const chunkDigest = transcriptChunkDigest(chunk.digest, `${path}.digest`);
+    const key = boundedText(chunk.key, `${path}.key`, 4_096, false);
+    if (
+      !key.startsWith(prefix)
+      || key !== conversationChunkStateKey(conversationId, index, chunkDigest)
+    ) {
+      throw new TypeError(`${path}.key does not match its conversation authority`);
+    }
+    const chunkBytes = boundedInteger(
+      chunk.sizeBytes,
+      `${path}.sizeBytes`,
+      1,
+      TRANSCRIPT_CHUNK_MAX_BYTES,
+    );
+    describedBytes += chunkBytes;
+    if (!Number.isSafeInteger(describedBytes) || describedBytes > TRANSCRIPT_MAX_BYTES) {
+      throw new RangeError("conversation transcript chunks exceed their byte bound");
+    }
+    return Object.freeze({
+      key,
+      digest: chunkDigest,
+      sizeBytes: chunkBytes,
+    });
+  });
+  if (describedBytes !== sizeBytes) {
+    throw new TypeError("conversation transcript chunks do not match their declared size");
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: "mono-agent.canonical-transcript-chunks",
+    encoding: "utf8-json",
+    digest,
+    sizeBytes,
+    chunks: Object.freeze(chunks),
+  });
+}
+
+function transcriptChunkDigest(value: unknown, path: string): string {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw new TypeError(`${path} must be a lowercase SHA-256 digest`);
+  }
+  return value;
 }
 
 function parseProviderSessionRecord(value: unknown): ProviderSessionRecord {
@@ -2462,6 +3479,74 @@ function parseDeliveryRecord(value: unknown): DeliveryRecord {
   });
 }
 
+function parseRunRetentionCheckpoint(value: unknown): RunRetentionCheckpoint {
+  const input = ownDataRecord(
+    value,
+    "run retention checkpoint",
+    [
+      "schemaVersion",
+      "kind",
+      "runId",
+      "historyKey",
+      "requestId",
+      "startedAt",
+      "endedAt",
+      "artifacts",
+      "createdAt",
+    ],
+  );
+  if (
+    input.schemaVersion !== 1
+    || input.kind !== "mono-agent.run-retention-checkpoint"
+  ) {
+    throw new TypeError("run retention checkpoint has an unsupported schema");
+  }
+  const runId = boundedIdentifier(input.runId, "run retention checkpoint.runId");
+  const requestId = boundedIdentifier(
+    input.requestId,
+    "run retention checkpoint.requestId",
+  );
+  const startedAt = canonicalTimestamp(
+    input.startedAt,
+    "run retention checkpoint.startedAt",
+  );
+  const endedAt = canonicalTimestamp(
+    input.endedAt,
+    "run retention checkpoint.endedAt",
+  );
+  if (endedAt < startedAt) {
+    throw new TypeError("run retention checkpoint timestamps are non-monotonic");
+  }
+  const historyKey = boundedIdentifier(
+    input.historyKey,
+    "run retention checkpoint.historyKey",
+  );
+  if (historyKey !== runHistoryStateKey(startedAt, runId)) {
+    throw new TypeError("run retention checkpoint history key is mismatched");
+  }
+  const artifacts = uniqueArtifactRefs(
+    denseOwnDataArray(
+      input.artifacts,
+      "run retention checkpoint.artifacts",
+      RUN_ARTIFACT_MAX_ITEMS,
+    ).map((artifact) => parseArtifactRef(artifact)),
+  );
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: "mono-agent.run-retention-checkpoint",
+    runId,
+    historyKey,
+    requestId,
+    startedAt,
+    endedAt,
+    artifacts,
+    createdAt: canonicalTimestamp(
+      input.createdAt,
+      "run retention checkpoint.createdAt",
+    ),
+  });
+}
+
 function parseRunSummary(value: unknown): AgentRunSummary {
   const input = ownDataRecord(
     value,
@@ -2743,6 +3828,37 @@ function sameAttempt(
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function uniqueArtifactRefs(
+  values: readonly (ArtifactRef | undefined)[],
+): readonly ArtifactRef[] {
+  const unique = new Map<string, ArtifactRef>();
+  for (const value of values) {
+    if (value === undefined) continue;
+    const ref = parseArtifactRef(value);
+    const existing = unique.get(ref.sha256);
+    if (
+      existing !== undefined
+      && (
+        existing.sizeBytes !== ref.sizeBytes
+        || existing.id !== ref.id
+      )
+    ) {
+      throw new Error("one artifact digest has inconsistent durable authority");
+    }
+    unique.set(ref.sha256, ref);
+  }
+  return Object.freeze([...unique.values()]);
+}
+
+function sameArtifactRef(
+  left: ArtifactRef | undefined,
+  right: ArtifactRef,
+): boolean {
+  return left !== undefined
+    && left.sha256 === right.sha256
+    && left.sizeBytes === right.sizeBytes;
+}
+
 function sameArtifactPublicationDescriptor(
   left: ArtifactPublicationDescriptor,
   right: ArtifactPublicationDescriptor,
@@ -2885,6 +4001,23 @@ function boundedIdentifier(value: unknown, path: string): string {
     || Buffer.byteLength(value, "utf8") > IDENTIFIER_MAX_BYTES
   ) {
     throw new TypeError(`${path} must be a bounded non-empty string`);
+  }
+  return value;
+}
+
+function boundedText(
+  value: unknown,
+  path: string,
+  maximumBytes: number,
+  allowEmpty: boolean,
+): string {
+  if (
+    typeof value !== "string"
+    || (!allowEmpty && value.trim().length === 0)
+    || value.includes("\0")
+    || Buffer.byteLength(value, "utf8") > maximumBytes
+  ) {
+    throw new TypeError(`${path} must be a bounded ${allowEmpty ? "" : "non-empty "}string`);
   }
   return value;
 }

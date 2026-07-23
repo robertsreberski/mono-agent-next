@@ -1,5 +1,6 @@
 import { defineRuntimeModule } from "@mono-agent/module-sdk";
 
+import { claudeAuthCommands } from "./auth-command.js";
 import { parseRuntimeClaudeConfig, runtimeClaudeJsonSchema, type RuntimeClaudeConfig } from "./config.js";
 import { validateClaudeModel } from "./model.js";
 import { createRuntimeClaude } from "./runtime.js";
@@ -19,11 +20,12 @@ export const monoAgentModule = defineRuntimeModule({
   schema: { jsonSchema: runtimeClaudeJsonSchema, parse: parseRuntimeClaudeConfig },
   validateModel: validateClaudeModel,
   create(context) {
-    return createRuntimeClaude({
+    const runtime = createRuntimeClaude({
       config: context.config,
       instanceId: context.instanceId,
       workspaceDirectory: context.workspaceDirectory,
     });
+    return { ...runtime, commands: claudeAuthCommands(context.config) };
   },
 });
 

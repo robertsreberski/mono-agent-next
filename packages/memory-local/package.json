@@ -43,10 +43,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --maxWorkers=1"
   },
   "dependencies": {
-    "@mono-agent/module-sdk": "workspace:0.15.0"
+    "@mono-agent/module-sdk": "workspace:0.15.0",
+    "sqlite-vec": "0.1.9"
   },
   "publishConfig": {
     "access": "public"

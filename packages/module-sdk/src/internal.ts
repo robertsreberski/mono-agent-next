@@ -5,7 +5,6 @@
  * promise. A reserved slot moves to the package root only after promotion by a
  * later architecture decision and a public compliance suite.
  */
-
 import type {
   ArtifactRef,
   Awaitable,
@@ -18,114 +17,77 @@ import type {
   ModuleManifest,
   ModuleSchema,
 } from "./index.js";
-
 export const RESERVED_MODULE_KINDS = ["state", "trigger", "exporter", "sandbox"] as const;
-
 export type ReservedModuleKind = (typeof RESERVED_MODULE_KINDS)[number];
-
+interface Signaled { readonly signal: AbortSignal }
+interface Keyed { readonly key: string }
+interface CursorPage { readonly cursor?: string; readonly limit: number }
+interface CursorResult { readonly cursor?: string }
+interface VersionPrecondition extends Keyed {
+  readonly expectedVersion: string | null;
+}
 /** Same wire shape as a public manifest, but with a reserved capability kind. */
 export interface ReservedModuleManifest<K extends ReservedModuleKind = ReservedModuleKind>
   extends Omit<ModuleManifest, "kind"> {
   readonly apiVersion: ModuleApiVersion;
   readonly kind: K;
 }
-
 export interface StateRecord {
   readonly key: string;
   readonly value: Uint8Array;
   readonly version: string;
   readonly updatedAt: string;
 }
-
-export interface StateReadRequest {
-  readonly key: string;
-  readonly signal: AbortSignal;
-}
-
-export interface StateWriteRequest {
-  readonly key: string;
+export interface StateReadRequest extends Keyed, Signaled {}
+export interface StateWriteRequest extends Keyed, Signaled {
   readonly value: Uint8Array;
   readonly expectedVersion?: string;
-  readonly signal: AbortSignal;
 }
-
-export interface StateDeleteRequest {
-  readonly key: string;
+export interface StateDeleteRequest extends Keyed, Signaled {
   readonly expectedVersion?: string;
-  readonly signal: AbortSignal;
 }
-
-export interface StateListRequest {
+export interface StateListRequest extends CursorPage, Signaled {
   readonly prefix?: string;
-  readonly cursor?: string;
-  readonly limit: number;
-  readonly signal: AbortSignal;
 }
-
-export interface StateListResult {
+export interface StateListResult extends CursorResult {
   readonly records: readonly StateRecord[];
-  readonly cursor?: string;
 }
-
-export interface StateWriteResult {
-  readonly version: string;
-  readonly updatedAt: string;
-}
-
-export interface StateCompareAndSwapRequest {
-  readonly key: string;
+export interface StateWriteResult { readonly version: string; readonly updatedAt: string }
+export interface StateCompareAndSwapRequest extends Keyed, Signaled {
   /** `null` means the key must not exist. */
   readonly expectedVersion: string | null;
   readonly value: Uint8Array;
-  readonly signal: AbortSignal;
 }
-
 export type StateCompareAndSwapResult =
   | { readonly status: "applied"; readonly record: StateRecord }
   | { readonly status: "conflict"; readonly currentVersion?: string };
-
 /**
  * A read-only precondition evaluated against the transaction's initial
  * snapshot. `null` requires the key to be absent; a version requires an exact
  * match.
  */
-export interface StateTransactionCheck {
-  readonly key: string;
-  readonly expectedVersion: string | null;
-}
-
+export interface StateTransactionCheck extends VersionPrecondition {}
 /**
  * An atomic write. Transaction mutations deliberately have no unconditional
  * form: callers must state whether they expect absence or one exact version.
  */
-export interface StateTransactionPut {
-  readonly key: string;
-  readonly expectedVersion: string | null;
+export interface StateTransactionPut extends VersionPrecondition {
   readonly value: Uint8Array;
 }
-
 /**
  * An atomic delete. `null` asserts absence and therefore applies as a no-op;
  * a version removes only that exact record.
  */
-export interface StateTransactionDelete {
-  readonly key: string;
-  readonly expectedVersion: string | null;
-}
-
-export interface StateTransactionRequest {
+export interface StateTransactionDelete extends VersionPrecondition {}
+export interface StateTransactionRequest extends Signaled {
   readonly checks: readonly StateTransactionCheck[];
   readonly puts: readonly StateTransactionPut[];
   readonly deletes: readonly StateTransactionDelete[];
-  readonly signal: AbortSignal;
 }
-
-export interface StateTransactionConflict {
-  readonly key: string;
+export interface StateTransactionConflict extends Keyed {
   /** Omitted when the conflicting key does not exist. */
   readonly currentVersion?: string;
 }
-
 export type StateTransactionResult =
   | {
       readonly status: "applied";
@@ -139,24 +101,17 @@ export type StateTransactionResult =
       /** Every failed precondition, in checks/puts/deletes request order. */
       readonly conflicts: readonly StateTransactionConflict[];
     };
-
 /**
  * Forward prefix scan. Its opaque cursor binds the exact prefix and last
  * returned key rather than an offset or store generation, so callers can
  * continue across intervening commits without repeating earlier keys.
  */
-export interface StateScanRequest {
+export interface StateScanRequest extends CursorPage, Signaled {
   readonly prefix: string;
-  readonly cursor?: string;
-  readonly limit: number;
-  readonly signal: AbortSignal;
 }
-
-export interface StateScanResult {
+export interface StateScanResult extends CursorResult {
   readonly records: readonly StateRecord[];
-  readonly cursor?: string;
 }
-
 export interface StatePresenceRecord {
   readonly presenceId: string;
   readonly agentId: string;
@@ -165,61 +120,52 @@ export interface StatePresenceRecord {
   readonly expiresAt: string;
   readonly metadata?: JsonObject;
 }
-
-export interface StatePresenceUpsertRequest {
+export interface StatePresenceUpsertRequest extends Signaled {
   readonly presence: StatePresenceRecord;
-  readonly signal: AbortSignal;
 }
-
-export interface StatePresenceRemoveRequest {
+export interface StatePresenceRemoveRequest extends Signaled {
   readonly presenceId: string;
   readonly instanceId: string;
-  readonly signal: AbortSignal;
 }
-
-export interface StatePresenceListRequest {
+export interface StatePresenceListRequest extends Signaled {
   readonly agentId?: string;
   readonly includeExpired?: boolean;
-  readonly signal: AbortSignal;
 }
-
 export type StateHostPresenceStatus = "starting" | "ready" | "degraded" | "stopping" | "stopped";
-
-export interface StateHostPresenceRequest {
+export interface StateHostPresenceRequest extends Signaled {
   readonly status: StateHostPresenceStatus;
   readonly details?: JsonObject;
-  readonly signal: AbortSignal;
 }
-
-export interface StatePutArtifactRequest {
+export interface StatePutArtifactRequest extends Signaled {
   readonly data: Uint8Array;
   readonly mediaType: string;
   readonly fileName?: string;
-  readonly signal: AbortSignal;
 }
-
-export interface StateReadArtifactRequest {
+export interface StateReadArtifactRequest extends Signaled {
   readonly ref: ArtifactRef;
   readonly maxBytes: number;
-  readonly signal: AbortSignal;
 }
-
-export interface StateDeleteArtifactRequest {
+export interface StateDeleteArtifactRequest extends Signaled {
   readonly ref: ArtifactRef;
-  readonly signal: AbortSignal;
 }
-
-export interface StateListArtifactsRequest {
-  readonly cursor?: string;
-  readonly limit: number;
-  readonly signal: AbortSignal;
-}
-
-export interface StateListArtifactsResult {
+export interface StateListArtifactsRequest extends CursorPage, Signaled {}
+export interface StateListArtifactsResult extends CursorResult {
   readonly artifacts: readonly ArtifactRef[];
-  readonly cursor?: string;
 }
-
+/**
+ * Opaque first-party execution protocol owned by the selected state module.
+ *
+ * Domain inputs and outputs deliberately remain `unknown`: durable transcript,
+ * run, admission, session, delivery, and artifact-intent schemas are private to
+ * the state implementation rather than becoming Module SDK contracts.
+ */
+export interface StateExecutionRequest extends Signaled {
+  readonly operation: string;
+  readonly input?: unknown;
+}
+export interface StateExecution {
+  perform(request: StateExecutionRequest): Promise<unknown>;
+}
 export interface StateStore extends ModuleInstance {
   read(request: StateReadRequest): Promise<StateRecord | undefined>;
   write(request: StateWriteRequest): Promise<StateWriteResult>;
@@ -238,17 +184,11 @@ export interface StateStore extends ModuleInstance {
   readArtifact?(request: StateReadArtifactRequest): Promise<Uint8Array>;
   deleteArtifact?(request: StateDeleteArtifactRequest): Promise<boolean>;
   listArtifacts?(request: StateListArtifactsRequest): Promise<StateListArtifactsResult>;
+  /** Optional first-party durable execution recorder; its protocol is owner-private. */
+  readonly execution?: StateExecution;
 }
-
 export type StateHost = ModuleHost;
 export type StateModuleCreateContext<TConfig> = ModuleCreateContext<TConfig, StateHost>;
-
-export interface StateModuleDefinition<TConfig = unknown, TInstance extends StateStore = StateStore> {
-  readonly manifest: ReservedModuleManifest<"state">;
-  readonly schema: ModuleSchema<TConfig>;
-  create(context: StateModuleCreateContext<TConfig>): Awaitable<TInstance>;
-}
-
 export interface TriggerEvent {
   readonly id: string;
   readonly triggerInstanceId: string;
@@ -259,68 +199,38 @@ export interface TriggerEvent {
   readonly deliveryChannel?: string;
   readonly metadata?: JsonObject;
 }
-
 export interface TriggerReceipt {
   readonly status: "accepted" | "rejected";
   readonly runId?: string;
   readonly reason?: string;
 }
-
 export interface TriggerHost extends ModuleHost {
   emit(event: TriggerEvent, signal: AbortSignal): Promise<TriggerReceipt>;
 }
-
 export interface Trigger extends ModuleInstance {}
-
 export type TriggerModuleCreateContext<TConfig> = ModuleCreateContext<TConfig, TriggerHost>;
-
-export interface TriggerModuleDefinition<TConfig = unknown, TInstance extends Trigger = Trigger> {
-  readonly manifest: ReservedModuleManifest<"trigger">;
-  readonly schema: ModuleSchema<TConfig>;
-  create(context: TriggerModuleCreateContext<TConfig>): Awaitable<TInstance>;
-}
-
 export interface ExportRecord {
   readonly name: string;
   readonly timestamp: string;
   readonly attributes: JsonObject;
   readonly body?: JsonValue;
 }
-
-export interface ExportBatch {
-  readonly records: readonly ExportRecord[];
-  readonly signal: AbortSignal;
-}
-
-export interface ExportResult {
-  readonly accepted: number;
-  readonly rejected: number;
-}
-
+export interface ExportBatch extends Signaled { readonly records: readonly ExportRecord[] }
+export interface ExportResult { readonly accepted: number; readonly rejected: number }
 export interface Exporter extends ModuleInstance {
   export(batch: ExportBatch): Promise<ExportResult>;
   flush(signal: AbortSignal): Promise<void>;
 }
-
 export type ExporterHost = ModuleHost;
 export type ExporterModuleCreateContext<TConfig> = ModuleCreateContext<TConfig, ExporterHost>;
-
-export interface ExporterModuleDefinition<TConfig = unknown, TInstance extends Exporter = Exporter> {
-  readonly manifest: ReservedModuleManifest<"exporter">;
-  readonly schema: ModuleSchema<TConfig>;
-  create(context: ExporterModuleCreateContext<TConfig>): Awaitable<TInstance>;
-}
-
-export interface SandboxCommand {
+export interface SandboxCommand extends Signaled {
   readonly command: string;
   readonly arguments: readonly string[];
   readonly workingDirectory: string;
   readonly environment?: Readonly<Record<string, string>>;
   readonly stdin?: Uint8Array;
   readonly timeoutMs?: number;
-  readonly signal: AbortSignal;
 }
-
 export interface SandboxResult {
   readonly exitCode: number | null;
   readonly signal?: string;
@@ -328,50 +238,46 @@ export interface SandboxResult {
   readonly stderr: Uint8Array;
   readonly timedOut: boolean;
 }
-
 export interface Sandbox extends ModuleInstance {
   execute(command: SandboxCommand): Promise<SandboxResult>;
 }
-
 export type SandboxHost = ModuleHost;
 export type SandboxModuleCreateContext<TConfig> = ModuleCreateContext<TConfig, SandboxHost>;
-
-export interface SandboxModuleDefinition<TConfig = unknown, TInstance extends Sandbox = Sandbox> {
-  readonly manifest: ReservedModuleManifest<"sandbox">;
+interface ReservedModuleDefinitionBase<
+  K extends ReservedModuleKind,
+  TConfig,
+  TInstance extends ModuleInstance,
+  THost extends ModuleHost,
+> {
+  readonly manifest: ReservedModuleManifest<K>;
   readonly schema: ModuleSchema<TConfig>;
-  create(context: SandboxModuleCreateContext<TConfig>): Awaitable<TInstance>;
+  create(context: ModuleCreateContext<TConfig, THost>): Awaitable<TInstance>;
 }
-
+export interface StateModuleDefinition<TConfig = unknown, TInstance extends StateStore = StateStore>
+  extends ReservedModuleDefinitionBase<"state", TConfig, TInstance, StateHost> {}
+export interface TriggerModuleDefinition<TConfig = unknown, TInstance extends Trigger = Trigger>
+  extends ReservedModuleDefinitionBase<"trigger", TConfig, TInstance, TriggerHost> {}
+export interface ExporterModuleDefinition<TConfig = unknown, TInstance extends Exporter = Exporter>
+  extends ReservedModuleDefinitionBase<"exporter", TConfig, TInstance, ExporterHost> {}
+export interface SandboxModuleDefinition<TConfig = unknown, TInstance extends Sandbox = Sandbox>
+  extends ReservedModuleDefinitionBase<"sandbox", TConfig, TInstance, SandboxHost> {}
 export type ReservedModuleDefinition =
   | StateModuleDefinition
   | TriggerModuleDefinition
   | ExporterModuleDefinition
   | SandboxModuleDefinition;
-
 export function defineStateModule<TConfig, TInstance extends StateStore>(
   definition: StateModuleDefinition<TConfig, TInstance>,
-): StateModuleDefinition<TConfig, TInstance> {
-  return freezeReservedDefinition(definition);
-}
-
+): StateModuleDefinition<TConfig, TInstance> { return freezeReservedDefinition(definition) }
 export function defineTriggerModule<TConfig, TInstance extends Trigger>(
   definition: TriggerModuleDefinition<TConfig, TInstance>,
-): TriggerModuleDefinition<TConfig, TInstance> {
-  return freezeReservedDefinition(definition);
-}
-
+): TriggerModuleDefinition<TConfig, TInstance> { return freezeReservedDefinition(definition) }
 export function defineExporterModule<TConfig, TInstance extends Exporter>(
   definition: ExporterModuleDefinition<TConfig, TInstance>,
-): ExporterModuleDefinition<TConfig, TInstance> {
-  return freezeReservedDefinition(definition);
-}
-
+): ExporterModuleDefinition<TConfig, TInstance> { return freezeReservedDefinition(definition) }
 export function defineSandboxModule<TConfig, TInstance extends Sandbox>(
   definition: SandboxModuleDefinition<TConfig, TInstance>,
-): SandboxModuleDefinition<TConfig, TInstance> {
-  return freezeReservedDefinition(definition);
-}
-
+): SandboxModuleDefinition<TConfig, TInstance> { return freezeReservedDefinition(definition) }
 function freezeReservedDefinition<
   T extends { readonly manifest: ReservedModuleManifest; readonly schema: ModuleSchema<unknown> },
 >(definition: T): T {

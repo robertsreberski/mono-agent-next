@@ -13,6 +13,10 @@ import {
 import { StateLocalConfigError } from "./config.js";
 import { StateLocalError, type StateLocalErrorCode } from "./errors.js";
 import type {
+  StateLocalMaintenanceRequest,
+  StateLocalMaintenanceResult,
+} from "./maintenance.js";
+import type {
   StatePresenceDescriptor,
   StatePresenceStatus,
   StatePresenceUpdate,
@@ -45,6 +49,8 @@ export const monoAgentModule = defineStateModule({
       "state.scan",
       "state.presence",
       "state.artifacts",
+      "state.maintenance",
+      "state.execution",
     ],
   },
   schema: stateLocalConfigSchema,
@@ -77,6 +83,8 @@ export type {
   StateLocalDiscoveryConfig,
   StateLocalRunsConfig,
   StateLocalErrorCode,
+  StateLocalMaintenanceRequest,
+  StateLocalMaintenanceResult,
   StateLocalStoreHooks,
   StateLocalStoreOpenOptions,
   StatePresenceDescriptor,

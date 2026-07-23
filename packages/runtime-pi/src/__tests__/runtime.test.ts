@@ -217,6 +217,78 @@ describe("Pi-native runtime module", () => {
     await stop(runtime);
   });
 
+  it("uses a terminating schema-constrained Pi tool for structured output", async () => {
+    const { runtime, faux } = fauxRuntime();
+    let maxTokens: number | undefined;
+    const providerAttempt = vi.fn((_providerContext, _streamOptions, _state, model) => {
+      maxTokens = model.maxTokens;
+      return fauxAssistantMessage([
+        fauxToolCall("mono_agent_structured_output", {
+          records: [{ text: "A durable fact." }],
+        }, { id: "structured-1" }),
+      ]);
+    });
+    faux.setResponses([providerAttempt]);
+    const executeTool = vi.fn<RuntimeTurnContext["executeTool"]>();
+    const { context, events } = turnContext(executeTool, { omitApproval: true });
+    await start(runtime);
+
+    const result = await runtime.runTurn(request("extract memory", {
+      options: {
+        maxOutputTokens: 321,
+        responseSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["records"],
+          properties: {
+            records: {
+              type: "array",
+              items: {
+                type: "object",
+                additionalProperties: false,
+                required: ["text"],
+                properties: { text: { type: "string" } },
+              },
+            },
+          },
+        },
+      },
+    }), context);
+
+    expect(result).toMatchObject({
+      status: "completed",
+      structuredOutput: { records: [{ text: "A durable fact." }] },
+    });
+    expect(providerAttempt).toHaveBeenCalledTimes(1);
+    expect(maxTokens).toBe(321);
+    expect(executeTool).not.toHaveBeenCalled();
+    expect(events.some((event) =>
+      (event.type === "tool-call" && event.call.name === "mono_agent_structured_output")
+      || (event.type === "tool-result" && event.result.callId === "structured-1"))).toBe(false);
+    await stop(runtime);
+  });
+
+  it("fails closed when a structured-output turn does not submit the schema tool", async () => {
+    const { runtime, faux } = fauxRuntime();
+    faux.setResponses([fauxAssistantMessage([fauxText("loose JSON is not accepted")])]);
+    await start(runtime);
+
+    await expect(runtime.runTurn(request("extract memory", {
+      options: {
+        responseSchema: {
+          type: "object",
+          required: ["records"],
+          properties: { records: { type: "array" } },
+        },
+      },
+    }), turnContext(undefined, { omitApproval: true }).context)).rejects.toMatchObject({
+      code: "PROVIDER_FAILED",
+      message: "Pi completed without the required structured output.",
+      retryable: false,
+    });
+    await stop(runtime);
+  });
+
   it("advertises and executes the governed run-scoped NodeRepl through Pi", async () => {
     const { runtime, faux } = fauxRuntime();
     faux.setResponses([
@@ -622,7 +694,12 @@ describe("Pi-native runtime module", () => {
     const { runtime, faux } = fauxRuntime();
     const providerAttempt = vi.fn(() => fauxAssistantMessage("unused"));
     faux.setResponses([providerAttempt]);
-    expect(runtime.capabilities).toMatchObject({ approvals: true, sandbox: false });
+    expect(runtime.capabilities).toMatchObject({
+      approvals: true,
+      sandbox: false,
+      structuredOutput: true,
+      maxOutputTokens: true,
+    });
     await expect(runtime.runTurn(request("not started"), turnContext().context))
       .rejects.toMatchObject({ code: "RUNTIME_NOT_RUNNING" });
     await start(runtime);
@@ -631,7 +708,15 @@ describe("Pi-native runtime module", () => {
       .toMatchObject({ supported: false });
     expect(await runtime.preflightModel?.({ model: "faux:faux-model", signal: abortSignal() })).toMatchObject({
       supported: true,
-      capabilities: { attachments: false, approvals: true, sandbox: false, sessions: true, liveInput: true },
+      capabilities: {
+        attachments: false,
+        approvals: true,
+        sandbox: false,
+        sessions: true,
+        liveInput: true,
+        structuredOutput: true,
+        maxOutputTokens: true,
+      },
       nativeTools: [{
         id: "NodeRepl",
         displayName: "Node REPL",

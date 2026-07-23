@@ -2,7 +2,6 @@ import { createRequire } from "node:module";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
-import { isProxy } from "node:util/types";
 
 import {
   isEnvEligibleSchema,
@@ -18,15 +17,15 @@ import {
 import { parse as parseYaml } from "yaml";
 
 import { AgentConfigError, AgentModuleError, errorMessage } from "./errors.js";
+import { snapshotBoundedValue } from "./bounded-value.js";
 import type { ModuleSelection } from "./config.js";
-import type { GenericModuleDefinition, LoadedAgentModule, ModuleKind } from "./types.js";
+import type { GenericModuleDefinition, LoadedAgentModule } from "./types.js";
 import type { AgentConfigIssue } from "./errors.js";
 
 const moduleConfigs = new WeakMap<LoadedAgentModule, unknown>();
 const MODULE_CONFIG_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 const MODULE_CONFIG_SNAPSHOT_MAX_DEPTH = 64;
 const MODULE_CONFIG_SNAPSHOT_MAX_ITEMS = 50_000;
-const UNSAFE_CONFIG_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 export function moduleConfigFor(module: LoadedAgentModule): unknown {
   if (!moduleConfigs.has(module)) throw new AgentModuleError(`Parsed config is unavailable for ${module.packageName}`);
@@ -38,9 +37,9 @@ export function validateLoadedModuleReferences(
 ): readonly AgentConfigIssue[] {
   const issues: AgentConfigIssue[] = [];
   for (const module of modules) {
-    visitModuleReferences(
+    visitModuleReferencesFromSchemas(
       moduleConfigFor(module),
-      module.definition.schema.jsonSchema,
+      [module.definition.schema.jsonSchema],
       module.configPath,
       modules,
       issues,
@@ -104,7 +103,10 @@ async function readProjectLock(projectRoot: string): Promise<ProjectLock> {
           if (!isRecord(entries) || !Object.hasOwn(entries, packageName)) return false;
           const locked = entries[packageName];
           const resolved = isRecord(locked) ? locked.version : locked;
-          return typeof resolved !== "string" || !isConcreteLockVersion(resolved) || lockVersionMatches(resolved, installedVersion);
+          return typeof resolved !== "string"
+            || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?:\([^)]*\))?$/u.test(resolved)
+            || resolved === installedVersion
+            || resolved.startsWith(`${installedVersion}(`);
         });
       },
     };
@@ -150,11 +152,12 @@ async function preflightModule(
   lock: ProjectLock,
 ): Promise<PreflightedModule> {
   const packageName = selection.selected.$use;
-  const dependencySpec = directDependencySpec(projectManifest, packageName);
+  const dependencySpec = projectManifest.dependencies?.[packageName]
+    ?? projectManifest.optionalDependencies?.[packageName];
   if (dependencySpec === undefined) {
     throw moduleIssue(selection, `${packageName} must be a direct project dependency`);
   }
-  if (isForbiddenDependencySpec(dependencySpec)) {
+  if (/^(?:npm:|file:|link:|portal:|patch:|git(?:\+|:)|https?:|github:|\.\.?\/|\/)/u.test(dependencySpec)) {
     throw moduleIssue(selection, `${packageName} uses forbidden dependency spec ${JSON.stringify(dependencySpec)}`);
   }
   const projectRequire = createRequire(projectManifestPath);
@@ -275,9 +278,9 @@ async function importAndValidateModule(
   const inline: Record<string, unknown> = { ...preflight.selection.selected };
   delete inline.$use;
   const resolvedEnvironmentValues = new Set<string>();
-  const resolvedInline = resolveEnvironmentDirectives(
+  const resolvedInline = resolveEnvironmentDirectivesFromSchemas(
     inline,
-    definition.schema.jsonSchema,
+    [[definition.schema.jsonSchema]],
     environment,
     preflight.selection.configPath,
     resolvedEnvironmentValues,
@@ -306,198 +309,20 @@ async function importAndValidateModule(
   return loaded;
 }
 
-interface ModuleConfigSnapshotState {
-  readonly active: Set<object>;
-  readonly copies: WeakMap<object, object>;
-  bytes: number;
-  items: number;
-}
-
 function snapshotModuleConfig(value: unknown, path: string): unknown {
-  return snapshotModuleConfigValue(
-    value,
+  return snapshotBoundedValue(value, {
     path,
-    0,
-    {
-      active: new Set(),
-      copies: new WeakMap(),
-      bytes: 0,
-      items: 0,
-    },
-  );
-}
-
-function snapshotModuleConfigValue(
-  value: unknown,
-  path: string,
-  depth: number,
-  state: ModuleConfigSnapshotState,
-): unknown {
-  addModuleConfigItem(state, path);
-  if (value === undefined || value === null || typeof value === "boolean") {
-    chargeModuleConfigBytes(state, 8, path);
-    return value;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new TypeError(`${path} must contain only finite numbers`);
-    }
-    chargeModuleConfigBytes(state, 16, path);
-    return value;
-  }
-  if (typeof value === "string") {
-    chargeModuleConfigBytes(state, Buffer.byteLength(value, "utf8"), path);
-    return value;
-  }
-  if (typeof value !== "object") {
-    throw new TypeError(`${path} must contain only plain config values`);
-  }
-  if (isProxy(value)) {
-    throw new TypeError(`${path} must not contain a Proxy`);
-  }
-  if (depth >= MODULE_CONFIG_SNAPSHOT_MAX_DEPTH) {
-    throw new TypeError(
-      `${path} exceeds the ${String(MODULE_CONFIG_SNAPSHOT_MAX_DEPTH)}-level depth boundary`,
-    );
-  }
-  if (state.active.has(value)) {
-    throw new TypeError(`${path} must not contain cycles`);
-  }
-  const prior = state.copies.get(value);
-  if (prior !== undefined) return prior;
-
-  const prototype = Object.getPrototypeOf(value);
-  if (Array.isArray(value)) {
-    if (prototype !== Array.prototype) {
-      throw new TypeError(`${path} must use the ordinary Array prototype`);
-    }
-    return snapshotModuleConfigArray(value, path, depth, state);
-  }
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new TypeError(`${path} must be a plain object`);
-  }
-  return snapshotModuleConfigRecord(
-    value as Record<string, unknown>,
-    prototype,
-    path,
-    depth,
-    state,
-  );
-}
-
-function snapshotModuleConfigArray(
-  value: readonly unknown[],
-  path: string,
-  depth: number,
-  state: ModuleConfigSnapshotState,
-): readonly unknown[] {
-  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
-  const length = lengthDescriptor?.value;
-  if (!Number.isSafeInteger(length) || length < 0) {
-    throw new TypeError(`${path}.length must be a non-negative safe integer data property`);
-  }
-  if (length > MODULE_CONFIG_SNAPSHOT_MAX_ITEMS) {
-    throw new TypeError(
-      `${path} exceeds the ${String(MODULE_CONFIG_SNAPSHOT_MAX_ITEMS)}-item boundary`,
-    );
-  }
-  const allowed = new Set(["length"]);
-  for (let index = 0; index < length; index += 1) allowed.add(String(index));
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string" || !allowed.has(key)) {
-      throw new TypeError(`${path} contains a non-index array property`);
-    }
-  }
-
-  const output: unknown[] = [];
-  state.copies.set(value, output);
-  state.active.add(value);
-  try {
-    for (let index = 0; index < length; index += 1) {
-      const indexPath = `${path}[${String(index)}]`;
-      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-      if (descriptor === undefined) {
-        throw new TypeError(`${indexPath} is required`);
-      }
-      if (!("value" in descriptor) || !descriptor.enumerable) {
-        throw new TypeError(`${indexPath} must be an enumerable data property`);
-      }
-      output.push(snapshotModuleConfigValue(descriptor.value, indexPath, depth + 1, state));
-    }
-  } finally {
-    state.active.delete(value);
-  }
-  return Object.freeze(output);
-}
-
-function snapshotModuleConfigRecord(
-  value: Record<string, unknown>,
-  prototype: object | null,
-  path: string,
-  depth: number,
-  state: ModuleConfigSnapshotState,
-): Readonly<Record<string, unknown>> {
-  const output = Object.create(prototype) as Record<string, unknown>;
-  state.copies.set(value, output);
-  state.active.add(value);
-  try {
-    const keys = Reflect.ownKeys(value);
-    if (keys.length > MODULE_CONFIG_SNAPSHOT_MAX_ITEMS) {
-      throw new TypeError(
-        `${path} exceeds the ${String(MODULE_CONFIG_SNAPSHOT_MAX_ITEMS)}-property boundary`,
-      );
-    }
-    for (const key of keys) {
-      if (typeof key !== "string") {
-        throw new TypeError(`${path} must not contain symbol properties`);
-      }
-      if (UNSAFE_CONFIG_KEYS.has(key)) {
-        throw new TypeError(`${path} contains unsafe property ${JSON.stringify(key)}`);
-      }
-      chargeModuleConfigBytes(state, Buffer.byteLength(key, "utf8"), path);
-      const propertyPath = `${path}.${key}`;
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
-        throw new TypeError(`${propertyPath} must be an enumerable data property`);
-      }
-      Object.defineProperty(output, key, {
-        configurable: true,
-        enumerable: true,
-        value: snapshotModuleConfigValue(
-          descriptor.value,
-          propertyPath,
-          depth + 1,
-          state,
-        ),
-        writable: true,
-      });
-    }
-  } finally {
-    state.active.delete(value);
-  }
-  return Object.freeze(output);
-}
-
-function addModuleConfigItem(state: ModuleConfigSnapshotState, path: string): void {
-  state.items += 1;
-  if (state.items > MODULE_CONFIG_SNAPSHOT_MAX_ITEMS) {
-    throw new TypeError(
-      `${path} exceeds the ${String(MODULE_CONFIG_SNAPSHOT_MAX_ITEMS)}-item boundary`,
-    );
-  }
-}
-
-function chargeModuleConfigBytes(
-  state: ModuleConfigSnapshotState,
-  bytes: number,
-  path: string,
-): void {
-  state.bytes += bytes;
-  if (state.bytes > MODULE_CONFIG_SNAPSHOT_MAX_BYTES) {
-    throw new TypeError(
-      `${path} exceeds the ${String(MODULE_CONFIG_SNAPSHOT_MAX_BYTES)}-byte boundary`,
-    );
-  }
+    maxBytes: MODULE_CONFIG_SNAPSHOT_MAX_BYTES,
+    maxDepth: MODULE_CONFIG_SNAPSHOT_MAX_DEPTH,
+    maxItems: MODULE_CONFIG_SNAPSHOT_MAX_ITEMS,
+    label: "config",
+    allowUndefined: true,
+    freeze: true,
+    preserveAliases: true,
+    preserveObjectPrototype: true,
+    requireEnumerable: true,
+    requireOrdinaryArrays: true,
+  }).value;
 }
 
 function isModuleDefinition(value: unknown): value is GenericModuleDefinition {
@@ -524,7 +349,11 @@ function assertLoadedModuleDefinitionCompliance(
     if (!isModuleDefinition(value)) {
       throw new TypeError("monoAgentModule does not satisfy the module definition contract");
     }
-    if (isOpenModuleKind(preflight.selection.slot)) {
+    if (
+      preflight.selection.slot === "runtime"
+      || preflight.selection.slot === "channel"
+      || preflight.selection.slot === "memory"
+    ) {
       assertModuleDefinitionCompliance(value, {
         expectedKind: preflight.selection.slot,
         expectedPackageName: preflight.packageName,
@@ -534,6 +363,7 @@ function assertLoadedModuleDefinitionCompliance(
       assertReservedModuleManifestCompliance(value);
       assertSchemaCompliance(value.schema);
     }
+    assertSecurityAnnotationReachability(value.schema.jsonSchema);
   } catch (error) {
     throw moduleIssue(
       preflight.selection,
@@ -543,8 +373,34 @@ function assertLoadedModuleDefinitionCompliance(
   }
 }
 
-function isOpenModuleKind(kind: ModuleKind): kind is "runtime" | "channel" | "memory" {
-  return kind === "runtime" || kind === "channel" || kind === "memory";
+function assertSecurityAnnotationReachability(root: JsonSchema): void {
+  const seen = new Set<object>();
+  const visit = (schema: JsonSchema): void => {
+    if (seen.has(schema)) return;
+    seen.add(schema);
+    if (["$ref", "$dynamicRef", "$recursiveRef"].some((key) => Object.hasOwn(schema, key)))
+      throw new TypeError("module security schemas may not use unresolved references");
+    for (const [key, value] of Object.entries(schema)) {
+      if (key === "properties" && isRecord(value)) {
+        for (const child of Object.values(value)) if (isRecord(child)) visit(child);
+      } else if (["items", "additionalProperties", "not", "if", "then", "else"].includes(key)
+        && isRecord(value)) visit(value);
+      else if (["allOf", "anyOf", "oneOf"].includes(key) && Array.isArray(value)) {
+        for (const child of value) if (isRecord(child)) visit(child);
+      } else if (!KNOWN_SCHEMA_KEYS.has(key) && containsSecurityAnnotation(value)) {
+        throw new TypeError(`module security annotations under unsupported schema keyword ${key}`);
+      }
+    }
+  };
+  visit(root);
+}
+
+function containsSecurityAnnotation(value: unknown, seen = new Set<object>()): boolean {
+  if (!isRecord(value) && !Array.isArray(value)) return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (isRecord(value) && (isSecretSchema(value) || isEnvEligibleSchema(value))) return true;
+  return Object.values(value).some((child) => containsSecurityAnnotation(child, seen));
 }
 
 function assertReservedModuleManifestCompliance(definition: GenericModuleDefinition): void {
@@ -564,32 +420,17 @@ function assertReservedModuleManifestCompliance(definition: GenericModuleDefinit
   }
 }
 
-function resolveEnvironmentDirectives(
-  value: unknown,
-  schema: JsonSchema,
-  environment: Readonly<Record<string, string | undefined>>,
-  path: string,
-  resolvedEnvironmentValues: Set<string>,
-): unknown {
-  return resolveEnvironmentDirectivesFromSchemas(
-    value,
-    [schema],
-    environment,
-    path,
-    resolvedEnvironmentValues,
-  );
-}
-
 function resolveEnvironmentDirectivesFromSchemas(
   value: unknown,
-  schemas: readonly JsonSchema[],
+  options: SchemaOptions,
   environment: Readonly<Record<string, string | undefined>>,
   path: string,
   resolvedEnvironmentValues: Set<string>,
 ): unknown {
-  const activeSchemas = applicableSchemas(schemas, value);
+  const activeOptions = applicableSchemaOptions(options, value);
+  const activeSchemas = activeOptions.flat();
   if (isEnvironmentReference(value)) {
-    if (!activeSchemas.some(isEnvEligibleSchema)) {
+    if (!activeOptions.every((schemas) => schemas.some(isEnvEligibleSchema))) {
       throw new AgentConfigError("Environment directive is not allowed", [{
         path,
         message: "$env may appear only at a module schema path marked env-eligible",
@@ -624,10 +465,9 @@ function resolveEnvironmentDirectivesFromSchemas(
     }]);
   }
   if (Array.isArray(value)) {
-    const items = childSchemasForItems(activeSchemas);
     return value.map((entry, index) => resolveEnvironmentDirectivesFromSchemas(
       entry,
-      items,
+      activeOptions.map(childSchemasForItems),
       environment,
       `${path}.${index}`,
       resolvedEnvironmentValues,
@@ -638,23 +478,13 @@ function resolveEnvironmentDirectivesFromSchemas(
   for (const [key, entry] of Object.entries(value)) {
     output[key] = resolveEnvironmentDirectivesFromSchemas(
       entry,
-      childSchemasForProperty(activeSchemas, key),
+      activeOptions.map((schemas) => childSchemasForProperty(schemas, key)),
       environment,
       `${path}.${key}`,
       resolvedEnvironmentValues,
     );
   }
   return output;
-}
-
-function visitModuleReferences(
-  value: unknown,
-  schema: JsonSchema,
-  path: string,
-  modules: readonly LoadedAgentModule[],
-  issues: AgentConfigIssue[],
-): void {
-  visitModuleReferencesFromSchemas(value, [schema], path, modules, issues);
 }
 
 function visitModuleReferencesFromSchemas(
@@ -706,67 +536,351 @@ function applicableSchemas(schemas: readonly JsonSchema[], value: unknown): read
     const allOf = schemaArray(schema.allOf);
     for (const branch of allOf) visit(branch);
     const oneOf = schemaArray(schema.oneOf);
-    const matchingOneOf = oneOf.filter((branch) => schemaBranchMatches(branch, value));
-    if (matchingOneOf.length === 1) visit(matchingOneOf[0]!);
-    const anyOf = schemaArray(schema.anyOf).filter((branch) => schemaBranchMatches(branch, value));
+    const oneOfStatuses = oneOf.map((branch) => schemaBranchApplicability(branch, value));
+    const possibleOneOf = oneOf.filter((_, index) => oneOfStatuses[index] !== "no");
+    for (const branch of possibleOneOf) visit(branch);
+    const anyOf = schemaArray(schema.anyOf).filter((branch) =>
+      schemaBranchApplicability(branch, value) !== "no");
     for (const branch of anyOf) visit(branch);
+    if (schema.if !== undefined) {
+      const status = schemaConditionApplicability(schema.if, value);
+      if (status !== "no" && isRecord(schema.then)) visit(schema.then);
+      if (status !== "match" && isRecord(schema.else)) visit(schema.else);
+    }
   };
   for (const schema of schemas) visit(schema);
   return output;
 }
 
-function schemaBranchMatches(schema: JsonSchema, value: unknown): boolean {
-  if (Object.hasOwn(schema, "const") && !Object.is(schema.const, value)) return false;
-  if (Array.isArray(schema.enum) && !schema.enum.some((entry) => Object.is(entry, value))) return false;
-  if (!schemaTypeMatches(schema.type, value)) return false;
-  if (!isRecord(value) || isEnvironmentReference(value)) return true;
-  const required = Array.isArray(schema.required)
-    ? schema.required.filter((entry): entry is string => typeof entry === "string")
-    : [];
-  if (required.some((key) => !Object.hasOwn(value, key))) return false;
-  const properties = isRecord(schema.properties) ? schema.properties : {};
-  if (schema.additionalProperties === false
-    && Object.keys(value).some((key) => !Object.hasOwn(properties, key))) return false;
-  for (const [key, child] of Object.entries(properties)) {
-    if (!Object.hasOwn(value, key) || !isRecord(child)) continue;
-    if (!schemaBranchMatches(child, value[key])) return false;
-  }
-  const oneOf = schemaArray(schema.oneOf);
-  if (oneOf.length > 0 && oneOf.filter((branch) => schemaBranchMatches(branch, value)).length !== 1) return false;
-  const anyOf = schemaArray(schema.anyOf);
-  if (anyOf.length > 0 && !anyOf.some((branch) => schemaBranchMatches(branch, value))) return false;
-  return schemaArray(schema.allOf).every((branch) => schemaBranchMatches(branch, value));
+export type SchemaApplicability = "match" | "no" | "unknown";
+type SchemaOptions = readonly (readonly JsonSchema[])[];
+const MAX_SCHEMA_OPTIONS = 256;
+const MAX_SCHEMAS_PER_OPTION = 4_096;
+
+export function schemaConditionApplicability(
+  schema: unknown,
+  value: unknown,
+  acceptMaterializedEnvironment = false,
+): SchemaApplicability {
+  return schema === true ? "match" : schema === false ? "no" : isRecord(schema)
+    ? schemaBranchApplicability(schema, value, acceptMaterializedEnvironment) : "unknown";
 }
 
-function schemaTypeMatches(type: unknown, value: unknown): boolean {
-  if (Array.isArray(type)) {
-    const types = type.filter((entry): entry is string => typeof entry === "string");
-    return types.length > 0 && types.some((entry) => schemaTypeMatches(entry, value));
+function applicableSchemaOptions(options: SchemaOptions, value: unknown): SchemaOptions {
+  return options.flatMap((schemas) => {
+    let output: JsonSchema[][] = [[]];
+    for (const schema of schemas) output = crossSchemaOptions(output, schemaExpansionOptions(schema, value));
+    return output;
+  });
+}
+
+function schemaExpansionOptions(
+  schema: JsonSchema,
+  value: unknown,
+  seen: ReadonlySet<JsonSchema> = new Set(),
+): readonly JsonSchema[][] {
+  if (seen.has(schema)) return [[schema]];
+  const nextSeen = new Set(seen).add(schema);
+  let output: JsonSchema[][] = [[schema]];
+  for (const branch of schemaArray(schema.allOf))
+    output = crossSchemaOptions(output, schemaExpansionOptions(branch, value, nextSeen));
+  for (const keyword of ["oneOf", "anyOf"] as const) {
+    const branches = schemaArray(schema[keyword]).filter((branch) =>
+      schemaBranchApplicability(branch, value) !== "no");
+    if (branches.length > 0) output = crossSchemaOptions(
+      output,
+      boundedExpansionChoices(branches, value, nextSeen),
+    );
   }
-  if (typeof type !== "string") return true;
-  if (isEnvironmentReference(value)) return type === "string";
+  if (schema.if !== undefined) {
+    const status = schemaConditionApplicability(schema.if, value);
+    const candidates = status === "match" ? [schema.then] : status === "no"
+      ? [schema.else] : [schema.then, schema.else];
+    const choices = candidates.map((branch) =>
+      isRecord(branch) ? schemaExpansionOptions(branch, value, nextSeen) : [[]]).flat();
+    output = crossSchemaOptions(output, choices);
+  }
+  return output;
+}
+
+function boundedExpansionChoices(
+  branches: readonly JsonSchema[],
+  value: unknown,
+  seen: ReadonlySet<JsonSchema>,
+): JsonSchema[][] {
+  const output: JsonSchema[][] = [];
+  for (const branch of branches)
+    for (const option of schemaExpansionOptions(branch, value, seen)) {
+      if (output.length >= MAX_SCHEMA_OPTIONS)
+        throw new AgentModuleError("Module schema applicability exceeds the bounded complexity limit");
+      output.push(option);
+    }
+  return output;
+}
+
+function crossSchemaOptions(
+  left: readonly (readonly JsonSchema[])[],
+  right: readonly (readonly JsonSchema[])[],
+): JsonSchema[][] {
+  if (left.length * right.length > MAX_SCHEMA_OPTIONS
+    || left.some((first) => right.some((second) =>
+      first.length + second.length > MAX_SCHEMAS_PER_OPTION))) {
+    throw new AgentModuleError("Module schema applicability exceeds the bounded complexity limit");
+  }
+  return left.flatMap((first) => right.map((second) => [...first, ...second]));
+}
+
+const KNOWN_SCHEMA_KEYS = new Set([
+  "$schema", "$id", "$anchor", "$comment", "title", "description", "default", "examples",
+  "deprecated", "readOnly", "writeOnly", "type", "const", "enum", "pattern", "minLength",
+  "maxLength", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+  "minItems", "maxItems", "minProperties", "maxProperties", "required", "properties",
+  "additionalProperties", "items", "allOf", "anyOf", "oneOf", "not", "if", "then", "else",
+  "x-mono-agent-env-eligible", "x-mono-agent-secret", "x-mono-agent-slot-reference",
+]);
+
+export function schemaBranchApplicability(
+  schema: JsonSchema,
+  value: unknown,
+  acceptMaterializedEnvironment = false,
+): SchemaApplicability {
+  const materializedValue = acceptMaterializedEnvironment && typeof value === "string"
+    ? materializedEnvironmentValueSchema(schema) : undefined;
+  if (materializedValue !== undefined)
+    return schemaBranchApplicability(materializedValue, value, acceptMaterializedEnvironment);
+  if (
+    acceptMaterializedEnvironment
+    && typeof value === "string"
+    && isMaterializedEnvironmentReferenceSchema(schema)
+  ) return "match";
+  let result: SchemaApplicability = Object.keys(schema).some((key) => !KNOWN_SCHEMA_KEYS.has(key))
+    ? "unknown" : "match";
+  const typeStatus = schemaTypeApplicability(schema.type, value);
+  if (typeStatus === "no") return "no";
+  if (typeStatus === "unknown") result = "unknown";
+  if (!acceptMaterializedEnvironment && isEnvironmentReference(value)) return "unknown";
+  if (Object.hasOwn(schema, "const")) {
+    const equal = jsonSchemaEqual(schema.const, value);
+    if (equal === false) return "no";
+    if (equal === undefined) result = "unknown";
+  }
+  if (schema.enum !== undefined) {
+    if (!Array.isArray(schema.enum)) result = "unknown";
+    else {
+      const equalities = schema.enum.map((entry) => jsonSchemaEqual(entry, value));
+      if (!equalities.includes(true)) {
+        if (!equalities.includes(undefined)) return "no";
+        result = "unknown";
+      }
+    }
+  }
+  if (typeof value === "string") {
+    const length = [...value].length;
+    if (numericKeywordFails(schema, "minLength", length, (actual, limit) => actual < limit)
+      || numericKeywordFails(schema, "maxLength", length, (actual, limit) => actual > limit)) return "no";
+    if (schema.pattern !== undefined) {
+      if (typeof schema.pattern !== "string") result = "unknown";
+      else {
+        const matches = boundedPatternMatches(schema.pattern, value);
+        if (matches === false) return "no";
+        if (matches === undefined) result = "unknown";
+      }
+    }
+  }
+  if (typeof value === "number") {
+    if (numericKeywordFails(schema, "minimum", value, (actual, limit) => actual < limit)
+      || numericKeywordFails(schema, "maximum", value, (actual, limit) => actual > limit)
+      || numericKeywordFails(schema, "exclusiveMinimum", value, (actual, limit) => actual <= limit)
+      || numericKeywordFails(schema, "exclusiveMaximum", value, (actual, limit) => actual >= limit)) return "no";
+  }
+  const items = schema.items;
+  if (Array.isArray(value)) {
+    if (numericKeywordFails(schema, "minItems", value.length, (actual, limit) => actual < limit)
+      || numericKeywordFails(schema, "maxItems", value.length, (actual, limit) => actual > limit)) return "no";
+    if (isRecord(items) && !Object.hasOwn(schema, "prefixItems")) for (const entry of value) {
+      const child = schemaBranchApplicability(items, entry, acceptMaterializedEnvironment);
+      if (child === "no") return "no";
+      if (child === "unknown") result = "unknown";
+    }
+  }
+  if (isRecord(value)) {
+    if (numericKeywordFails(schema, "minProperties", Object.keys(value).length, (actual, limit) => actual < limit)
+      || numericKeywordFails(schema, "maxProperties", Object.keys(value).length, (actual, limit) => actual > limit)) return "no";
+    const required = Array.isArray(schema.required)
+      ? schema.required.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    if (required.some((key) =>
+      !(acceptMaterializedEnvironment && key === "$use") && !Object.hasOwn(value, key))) return "no";
+    if (schema.required !== undefined
+      && (!Array.isArray(schema.required) || required.length !== schema.required.length)) result = "unknown";
+    const validProperties = schema.properties === undefined || isRecord(schema.properties);
+    if (!validProperties) result = "unknown";
+    const properties = isRecord(schema.properties) ? schema.properties : {};
+    if (schema.additionalProperties === false
+      && Object.keys(value).some((key) => !Object.hasOwn(properties, key))) {
+      if (validProperties && !Object.hasOwn(schema, "patternProperties")) return "no";
+      result = "unknown";
+    }
+    for (const [key, child] of Object.entries(properties)) {
+      if (!Object.hasOwn(value, key) || !isRecord(child)) continue;
+      const applicability = schemaBranchApplicability(child, value[key], acceptMaterializedEnvironment);
+      if (applicability === "no") return "no";
+      if (applicability === "unknown") result = "unknown";
+    }
+  }
+  const oneOf = schemaArray(schema.oneOf);
+  if (oneOf.length > 0) {
+    const statuses = oneOf.map((branch) =>
+      schemaBranchApplicability(branch, value, acceptMaterializedEnvironment));
+    const matches = statuses.filter((status) => status === "match").length;
+    if (matches > 1 || (matches === 0 && !statuses.includes("unknown"))) return "no";
+    if (statuses.includes("unknown")) result = "unknown";
+  }
+  const anyOf = schemaArray(schema.anyOf);
+  if (anyOf.length > 0) {
+    const statuses = anyOf.map((branch) =>
+      schemaBranchApplicability(branch, value, acceptMaterializedEnvironment));
+    if (!statuses.includes("match") && !statuses.includes("unknown")) return "no";
+    if (!statuses.includes("match")) result = "unknown";
+  }
+  for (const branch of schemaArray(schema.allOf)) {
+    const status = schemaBranchApplicability(branch, value, acceptMaterializedEnvironment);
+    if (status === "no") return "no";
+    if (status === "unknown") result = "unknown";
+  }
+  if (isRecord(schema.not)) {
+    const status = schemaBranchApplicability(schema.not, value, acceptMaterializedEnvironment);
+    if (status === "match") return "no";
+    if (status === "unknown") result = "unknown";
+  }
+  if (schema.if !== undefined) {
+    const condition = schemaConditionApplicability(schema.if, value, acceptMaterializedEnvironment);
+    if (condition === "unknown") {
+      const outcomes = [schema.then, schema.else].map((branch) =>
+        branch === undefined ? "match"
+          : schemaConditionApplicability(branch, value, acceptMaterializedEnvironment));
+      if (outcomes.every((outcome) => outcome === "no")) return "no";
+      if (!outcomes.every((outcome) => outcome === "match")) result = "unknown";
+    } else {
+      const selected = condition === "match" ? schema.then : condition === "no" ? schema.else : undefined;
+      if (selected !== undefined) {
+        const outcome = schemaConditionApplicability(selected, value, acceptMaterializedEnvironment);
+        if (outcome === "no") return "no";
+        if (outcome === "unknown") result = "unknown";
+      }
+    }
+  }
+  return result;
+}
+
+function numericKeywordFails(
+  schema: JsonSchema,
+  key: string,
+  actual: number,
+  fails: (actual: number, limit: number) => boolean,
+): boolean {
+  const limit = schema[key];
+  return typeof limit === "number" && Number.isFinite(limit) && fails(actual, limit);
+}
+
+function boundedPatternMatches(pattern: string, value: string): boolean | undefined {
+  if (pattern.length > 256 || value.length > 512) return undefined;
+  const anchoredStart = pattern.startsWith("^");
+  let body = anchoredStart ? pattern.slice(1) : pattern;
+  const anchoredEnd = body.endsWith("$") && !isEscaped(body, body.length - 1);
+  if (anchoredEnd) body = body.slice(0, -1);
+  let literal = "";
+  for (let index = 0; index < body.length; index += 1) {
+    const character = body[index]!;
+    if (character === "\\") {
+      const escaped = body[index += 1];
+      if (escaped === undefined || !".*+?()[]{}|^$/\\".includes(escaped)) return undefined;
+      literal += escaped;
+    } else {
+      if (".*+?()[]{}|^$".includes(character)) return undefined;
+      literal += character;
+    }
+  }
+  return anchoredStart && anchoredEnd ? value === literal
+    : anchoredStart ? value.startsWith(literal)
+      : anchoredEnd ? value.endsWith(literal) : value.includes(literal);
+}
+
+function isEscaped(value: string, index: number): boolean {
+  let slashes = 0;
+  while (index > 0 && value[index - 1] === "\\") { slashes += 1; index -= 1; }
+  return slashes % 2 === 1;
+}
+
+function jsonSchemaEqual(left: unknown, right: unknown, depth = 0): boolean | undefined {
+  if (left === right) return true;
+  if (depth >= 64) return undefined;
+  if (typeof left !== "object" || left === null
+    || typeof right !== "object" || right === null) return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    const equalities = left.map((entry, index) => jsonSchemaEqual(entry, right[index], depth + 1));
+    return equalities.includes(false) ? false : equalities.includes(undefined) ? undefined : true;
+  }
+  if (!isRecord(left) || !isRecord(right)) return undefined;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  if (leftKeys.length !== rightKeys.length
+    || leftKeys.some((key, index) => key !== rightKeys[index])) return false;
+  const equalities = leftKeys.map((key) => jsonSchemaEqual(left[key], right[key], depth + 1));
+  return equalities.includes(false) ? false : equalities.includes(undefined) ? undefined : true;
+}
+
+function schemaTypeApplicability(type: unknown, value: unknown): SchemaApplicability {
+  if (type === undefined) return "match";
+  if (Array.isArray(type)) {
+    const statuses = type.map((entry) => schemaTypeApplicability(entry, value));
+    return statuses.includes("unknown") ? "unknown" : statuses.includes("match") ? "match" : "no";
+  }
+  if (typeof type !== "string") return "unknown";
+  if (isEnvironmentReference(value)) return type === "string" ? "match" : "no";
   switch (type) {
     case "null":
-      return value === null;
+      return value === null ? "match" : "no";
     case "boolean":
-      return typeof value === "boolean";
+      return typeof value === "boolean" ? "match" : "no";
     case "string":
-      return typeof value === "string";
+      return typeof value === "string" ? "match" : "no";
     case "number":
-      return typeof value === "number" && Number.isFinite(value);
+      return typeof value === "number" && Number.isFinite(value) ? "match" : "no";
     case "integer":
-      return typeof value === "number" && Number.isInteger(value);
+      return typeof value === "number" && Number.isInteger(value) ? "match" : "no";
     case "array":
-      return Array.isArray(value);
+      return Array.isArray(value) ? "match" : "no";
     case "object":
-      return isRecord(value);
+      return isRecord(value) ? "match" : "no";
     default:
-      return false;
+      return "unknown";
   }
 }
 
 function schemaArray(value: unknown): readonly JsonSchema[] {
   return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+function isMaterializedEnvironmentReferenceSchema(schema: JsonSchema): boolean {
+  const properties = isRecord(schema.properties) ? schema.properties : {};
+  const variable = properties.$env;
+  return schema.type === "object"
+    && schema.additionalProperties === false
+    && Array.isArray(schema.required)
+    && schema.required.length === 1
+    && schema.required[0] === "$env"
+    && Object.keys(properties).length === 1
+    && isRecord(variable)
+    && variable.type === "string"
+    && variable.pattern === "^[A-Za-z_][A-Za-z0-9_]*$";
+}
+
+function materializedEnvironmentValueSchema(schema: JsonSchema): JsonSchema | undefined {
+  const variants = schemaArray(schema.oneOf);
+  return Object.keys(schema).length === 1 && variants.length === 2
+    && isMaterializedEnvironmentReferenceSchema(variants[1]!) ? variants[0] : undefined;
 }
 
 function childSchemasForProperty(schemas: readonly JsonSchema[], key: string): readonly JsonSchema[] {
@@ -827,14 +941,6 @@ function moduleIssue(selection: ModuleSelection, message: string, cause?: unknow
   });
 }
 
-function directDependencySpec(manifest: PackageManifest, packageName: string): string | undefined {
-  return manifest.dependencies?.[packageName] ?? manifest.optionalDependencies?.[packageName];
-}
-
-function isForbiddenDependencySpec(spec: string): boolean {
-  return /^(?:npm:|file:|link:|portal:|patch:|git(?:\+|:)|https?:|github:|\.\.?\/|\/)/u.test(spec);
-}
-
 async function findPackageRoot(projectRequire: NodeJS.Require, expectedName: string): Promise<string> {
   const searchPaths = projectRequire.resolve.paths(expectedName) ?? [];
   for (const nodeModules of searchPaths) {
@@ -847,14 +953,6 @@ async function findPackageRoot(projectRequire: NodeJS.Require, expectedName: str
     }
   }
   throw new AgentModuleError(`Could not locate installed package root for ${expectedName}`);
-}
-
-function isConcreteLockVersion(value: string): boolean {
-  return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?:\([^)]*\))?$/u.test(value);
-}
-
-function lockVersionMatches(locked: string, installedVersion: string): boolean {
-  return locked === installedVersion || locked.startsWith(`${installedVersion}(`);
 }
 
 async function readJson<T>(path: string, label: string): Promise<T> {

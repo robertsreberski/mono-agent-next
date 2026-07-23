@@ -2,156 +2,71 @@ import { createHash, randomUUID } from "node:crypto";
 import type { BigIntStats, Dirent } from "node:fs";
 import { lstat, opendir } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { gunzipSync, gzipSync } from "node:zlib";
 
 import {
-  DEFAULT_APPROVAL_TIMEOUT_MS,
-  HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE,
-  RUNTIME_SESSION_UNAVAILABLE_CODE,
-  parseApprovalDecision,
-  parseApprovalRequest,
-  parseArtifactRef,
-  parseAskUserRequest,
-  parseAskUserAnswer,
-  snapshotRuntimeTurnError,
-  type ArtifactRef,
-  type ApprovalDecision,
-  type ApprovalRequest,
-  type AskUserAnswer,
-  type AskUserRequest,
-  type Channel,
-  type ChannelAttachment,
-  type ChannelCapabilities,
-  type ChannelConversationListRequest,
-  type ChannelConversationListResult,
-  type ChannelDeliveryResult,
-  type ChannelHost,
-  type ChannelInboundRequest,
-  type ChannelModuleDefinition,
-  type ChannelOpenConversationRequest,
-  type ChannelOpenConversationResult,
-  type ChannelOutboundMessage,
-  type ChannelReplySink,
-  type ChannelReplayRequest,
-  type ChannelReplayResult,
-  type ChannelTurnResult,
-  type ConfigProvenanceMap,
-  type JsonObject,
-  type JsonValue,
-  type Memory,
-  type MemoryHost,
-  type MemoryModuleDefinition,
-  type MemoryRecord,
-  type MemoryRuntimeCaptureRequest,
-  type MemoryRuntimeCaptureResult,
-  type ModuleHost,
-  type ModuleHealth,
-  type ModuleInstance,
-  type ModuleLogger,
-  type Runtime,
-  type RuntimeLiveInputHandler,
-  type RuntimeModuleDefinition,
-  type RuntimeNativeToolDescriptor,
-  type RuntimeSession,
-  type RuntimeTurnErrorSnapshot,
-  type RuntimeToolCall,
-  type RuntimeToolResult,
-  type RuntimeTurnEvent,
-  type RuntimeTurnResult,
-  type TurnMessage,
+  DEFAULT_APPROVAL_TIMEOUT_MS, HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE,
+  RUNTIME_SESSION_UNAVAILABLE_CODE, parseApprovalDecision, parseApprovalRequest,
+  parseArtifactRef, parseAskUserRequest, parseAskUserAnswer, snapshotRuntimeTurnError,
+  type ArtifactRef, type ApprovalDecision, type ApprovalRequest, type AskUserAnswer,
+  type AskUserRequest, type Channel, type ChannelAttachment, type ChannelCapabilities,
+  type ChannelConversationListRequest, type ChannelConversationListResult,
+  type ChannelDeliveryResult, type ChannelHost, type ChannelInboundRequest,
+  type ChannelModuleDefinition, type ChannelOpenConversationRequest,
+  type ChannelOpenConversationResult, type ChannelOutboundMessage, type ChannelReplySink,
+  type ChannelReplayRequest, type ChannelReplayResult, type ChannelTurnResult,
+  type ConfigProvenanceMap, type JsonObject, type JsonValue, type Memory, type MemoryHost,
+  type MemoryModuleDefinition, type MemoryRecord, type MemoryRuntimeCaptureRequest,
+  type MemoryRuntimeCaptureResult, type ModuleDiagnostic, type ModuleHost, type ModuleHealth,
+  type ModuleInstance, type ModuleLogger, type Runtime, type RuntimeLiveInputHandler,
+  type RuntimeModuleDefinition, type RuntimeNativeToolDescriptor, type RuntimeSession,
+  type RuntimeTurnErrorSnapshot, type RuntimeToolCall, type RuntimeToolResult,
+  type RuntimeTurnEvent, type RuntimeTurnResult, type TurnMessage,
 } from "@mono-agent/module-sdk";
 import type {
-  Exporter,
-  ReservedModuleDefinition,
-  Sandbox,
-  StateStore,
-  TriggerEvent,
-  TriggerHost,
+  Exporter, ReservedModuleDefinition, Sandbox, StateStore, TriggerEvent, TriggerHost,
   TriggerReceipt,
 } from "@mono-agent/module-sdk/internal";
 import {
-  assertChannelInstanceCompliance,
-  assertMemoryInstanceCompliance,
-  assertRuntimeInstanceCompliance,
+  assertChannelInstanceCompliance, assertMemoryInstanceCompliance, assertRuntimeInstanceCompliance,
 } from "@mono-agent/module-sdk/testing";
 
 import { ensureLoadedAgentConfig, environmentFor } from "./config.js";
 import { cloneIntrinsicUint8Array } from "./binary.js";
 import {
-  AgentAdmissionError,
-  AgentConfigError,
-  AgentModuleError,
-  RunExecutionError,
-  errorMessage,
+  assertOwnKeys,
+  denseOwnDataArray as boundedOwnDataArray,
+  ownDataRecord as boundedOwnDataRecord,
+  snapshotBoundedValue,
+} from "./bounded-value.js";
+import {
+  AgentAdmissionError, AgentConfigError, AgentModuleError, RunExecutionError, errorMessage,
 } from "./errors.js";
 import { escalateMessageEffort } from "./effort.js";
 import {
-  connectProjectMcpTools,
-  type ConnectedMcpTools,
-  type CoreRuntimeTool,
+  connectProjectMcpTools, type ConnectedMcpTools, type CoreRuntimeTool,
 } from "./mcp.js";
-import {
-  decodeAuthorityText,
-  readAuthorityFile,
-} from "./authority-read.js";
+import { decodeAuthorityText, readAuthorityFile } from "./authority-read.js";
 import { moduleConfigFor } from "./module-loader.js";
+import { nativeToolAllowed, runtimeNativeToolPolicyIssue } from "./native-tool-policy.js";
+import { normalizeToolResult, type ToolResultArtifactSink } from "./tool-result-normalizer.js";
 import {
-  nativeToolAllowed,
-  runtimeNativeToolPolicyIssue,
-} from "./native-tool-policy.js";
+  StateExecutionClient, type DurableFingerprint, type CanonicalTranscript,
+} from "./state-execution-client.js";
+import { RUN_HISTORY_TOOL_NAME, createRunHistoryTool } from "./run-history-tool.js";
 import {
-  normalizeToolResult,
-  type ToolResultArtifactSink,
-} from "./tool-result-normalizer.js";
-import { ExecutionStore } from "./execution-store.js";
-import {
-  DurableRunJournal,
-  createDurableFingerprint,
-  type DurableFingerprint,
-} from "./run-journal.js";
-import {
-  appendCanonicalTranscript,
-  type CanonicalTranscript,
-} from "./transcript.js";
-import {
-  assertRuntimeTurnEventBoundaryHealthy,
-  createRuntimeTurnEventBoundary,
-  normalizeChannelCapabilities,
-  normalizeRuntimeCapabilities,
-  normalizeRuntimeModelValidation,
-  normalizeRuntimeToolCall,
-  normalizeRuntimeTurnEvent,
+  assertRuntimeTurnEventBoundaryHealthy, createRuntimeTurnEventBoundary,
+  normalizeChannelCapabilities, normalizeRuntimeCapabilities, normalizeModuleDiagnostic,
+  normalizeRuntimeModelValidation, normalizeRuntimeToolCall, normalizeRuntimeTurnEvent,
   normalizeRuntimeTurnResult,
 } from "./runtime-result-normalizer.js";
 import type {
-  AgentHealth,
-  AgentHost,
-  AgentHostOptions,
-  AgentHostStartInfo,
-  AgentAskAnswer,
-  AgentAskAnswerStatus,
-  AgentApprovalAnswer,
-  AgentApprovalAnswerStatus,
-  AgentConfigView,
-  AgentConversationReplay,
-  AgentConversationSummary,
-  AgentLiveInput,
-  AgentLiveInputStatus,
-  AgentModuleCommandResult,
-  AgentResponse,
-  AgentResponseMessage,
-  AgentInteractionEvidence,
-  AgentRunAttemptEvidence,
-  AgentRunHistoryPage,
-  AgentRunRecord,
-  AgentRunSummary,
-  AgentSubmitInput,
-  AgentTranscriptContentPart,
-  AgentTranscriptEntry,
-  LoadedAgentConfig,
-  LoadedAgentModule,
-  ModuleKind,
-  RuntimeRoute,
+  AgentHealth, AgentHost, AgentHostOptions, AgentHostStartInfo, AgentAskAnswer,
+  AgentAskAnswerStatus, AgentApprovalAnswer, AgentApprovalAnswerStatus, AgentConfigView,
+  AgentConversationReplay, AgentConversationSummary, AgentLiveInput, AgentLiveInputStatus,
+  AgentModuleCommandResult, AgentModuleDiagnostics, AgentResponse, AgentResponseMessage,
+  AgentInteractionEvidence, AgentRunAttemptEvidence, AgentRunHistoryPage, AgentRunRecord,
+  AgentSubmitInput, AgentTranscriptContentPart, AgentTranscriptEntry, LoadedAgentConfig,
+  LoadedAgentModule, ModuleKind, RuntimeRoute,
 } from "./types.js";
 
 const DEFAULT_MAX_CONCURRENT_TURNS = 4;
@@ -168,13 +83,14 @@ const SUBMIT_SNAPSHOT_MAX_ITEMS = 20_000;
 const SUBMIT_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024;
 const SUBMIT_SNAPSHOT_MAX_DEPTH = 64;
 const CACHED_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
-const PERSISTED_CONVERSATION_INLINE_BYTES = 512 * 1024;
-const PERSISTED_CONVERSATION_CHUNK_BYTES = 256 * 1024;
-const MAX_PERSISTED_CONVERSATION_BYTES = 64 * 1024 * 1024;
-const MAX_PERSISTED_CONVERSATION_CHUNKS = 256;
-const TRIGGER_CLAIM_LEASE_MS = 30 * 60_000;
+const MAX_TRANSCRIPT_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MODULE_OUTPUT_MAX_BYTES = 1024 * 1024;
+const MODULE_OUTPUT_MAX_ITEMS = 10_000;
+const MODULE_OUTPUT_MAX_DEPTH = 32;
+const MODULE_DIAGNOSTIC_MAX_ITEMS = 100;
 const MAX_CONFIGURED_SKILLS = 256;
 const MAX_SKILL_ROOT_ENTRIES = 1_024;
+const PROACTIVE_SUPPRESSION_SENTINEL = "NOTHING_TO_REPORT";
 
 type SessionDisposition = "retain" | "isolate" | "evict";
 
@@ -215,34 +131,6 @@ interface TranscriptArtifactDraft {
 
 type TranscriptContentDraft = AgentTranscriptContentPart | TranscriptArtifactDraft;
 
-interface PersistedConversation {
-  readonly schemaVersion: 1;
-  readonly conversationId: string;
-  readonly messages: readonly TurnMessage[];
-  readonly sessions: Readonly<Record<string, RuntimeSession>>;
-  readonly sessionUpdatedAt?: Readonly<Record<string, string>>;
-  readonly updatedAt: string;
-  readonly title?: string;
-  readonly metadata?: JsonObject;
-}
-
-interface PersistedConversationChunk {
-  readonly key: string;
-  readonly digest: string;
-  readonly sizeBytes: number;
-}
-
-interface PersistedConversationManifest {
-  readonly schemaVersion: 2;
-  readonly kind: "mono-agent.conversation-chunks.v1";
-  readonly conversationId: string;
-  readonly encoding: "gzip-json";
-  readonly uncompressedBytes: number;
-  readonly compressedBytes: number;
-  readonly digest: string;
-  readonly chunks: readonly PersistedConversationChunk[];
-}
-
 interface LoadedInstructions {
   readonly text: string;
   readonly tools: readonly CoreRuntimeTool[];
@@ -258,6 +146,27 @@ export async function createAgentHost(
   const host = new AgentHostImplementation(loaded, options);
   await host.start();
   return host;
+}
+
+export async function runAgentModuleCommand(
+  config: string | LoadedAgentConfig,
+  moduleInstanceId: string,
+  commandName: string,
+  input?: unknown,
+  options: AgentHostOptions = {},
+): Promise<AgentModuleCommandResult> {
+  const loaded = await ensureLoadedAgentConfig(config, options);
+  return new AgentHostImplementation(loaded, options)
+    .runModuleCommand(moduleInstanceId, commandName, input);
+}
+
+export async function diagnoseAgent(
+  config: string | LoadedAgentConfig,
+  verbose = false,
+  options: AgentHostOptions = {},
+): Promise<readonly AgentModuleDiagnostics[]> {
+  const loaded = await ensureLoadedAgentConfig(config, options);
+  return new AgentHostImplementation(loaded, options).diagnostics(verbose);
 }
 
 class AgentHostImplementation implements AgentHost {
@@ -276,7 +185,6 @@ class AgentHostImplementation implements AgentHost {
   readonly #sessions = new Map<string, RuntimeSession>();
   readonly #sessionUpdatedAt = new Map<string, string>();
   readonly #loadedConversations = new Set<string>();
-  readonly #stateVersions = new Map<string, string>();
   readonly #conversationUpdatedAt = new Map<string, string>();
   readonly #conversationTitles = new Map<string, string>();
   readonly #conversationMetadata = new Map<string, JsonObject>();
@@ -293,15 +201,13 @@ class AgentHostImplementation implements AgentHost {
     readonly promise: Promise<ChannelDeliveryResult>;
   }>();
   readonly #transcripts = new Map<string, CanonicalTranscript>();
-  readonly #volatileRuns = new Map<string, AgentRunRecord>();
   readonly #idleWaiters = new Set<() => void>();
   readonly #semaphore: Semaphore;
   readonly #redactionValues: readonly string[];
   #mcp: ConnectedMcpTools = { tools: [], async close() {} };
   #memory: Memory | undefined;
   #stateStore: StateStore | undefined;
-  #executionStore: ExecutionStore | undefined;
-  #runJournal: DurableRunJournal | undefined;
+  #execution: StateExecutionClient | undefined;
   #sandbox: Sandbox | undefined;
   #instructions = "";
   #instructionTools: readonly CoreRuntimeTool[] = [];
@@ -520,32 +426,17 @@ class AgentHostImplementation implements AgentHost {
   }
 
   async conversations(): Promise<readonly AgentConversationSummary[]> {
-    if (this.#runJournal !== undefined) {
+    if (this.#execution !== undefined) {
       let cursor: string | undefined;
       let seen = 0;
       do {
-        const page = await this.#runJournal.listRuns(cursor, this.#hostAbort.signal);
-        for (const run of page.runs) {
-          await this.#loadConversation(run.conversationId, this.#hostAbort.signal);
+        const page = await this.#execution.listConversations(cursor, this.#hostAbort.signal);
+        for (const conversation of page.conversations) {
+          this.#commitConversationMetadata(conversation);
           seen += 1;
-          if (seen > 10_000) throw new RangeError("conversation discovery exceeds its run bound");
+          if (seen > 10_000) throw new RangeError("conversation discovery exceeds its bound");
         }
         cursor = page.nextCursor;
-      } while (cursor !== undefined);
-    } else if (this.#stateStore !== undefined) {
-      let cursor: string | undefined;
-      do {
-        const page = await this.#stateStore.list({
-          prefix: "core/conversations/",
-          ...(cursor === undefined ? {} : { cursor }),
-          limit: 100,
-          signal: this.#hostAbort.signal,
-        });
-        for (const record of page.records) {
-          const conversationId = conversationIdFromStateKey(record.key);
-          if (conversationId !== undefined) await this.#loadConversation(conversationId, this.#hostAbort.signal);
-        }
-        cursor = page.cursor;
       } while (cursor !== undefined);
     }
     const ids = new Set<string>([
@@ -579,27 +470,11 @@ class AgentHostImplementation implements AgentHost {
   }
 
   async listRuns(cursor?: string): Promise<AgentRunHistoryPage> {
-    if (this.#runJournal !== undefined) {
-      return this.#runJournal.listRuns(cursor, this.#hostAbort.signal);
+    if (this.#execution !== undefined) {
+      return this.#execution.listRuns(cursor, this.#hostAbort.signal);
     }
-    const ordered = [...this.#volatileRuns.values()]
-      .map((record) => record.summary)
-      .sort((left, right) =>
-        right.startedAt.localeCompare(left.startedAt)
-        || right.runId.localeCompare(left.runId));
-    let start = 0;
-    if (cursor !== undefined) {
-      const index = ordered.findIndex((summary) => summary.runId === cursor);
-      if (index < 0) throw new TypeError("run-history cursor is invalid");
-      start = index + 1;
-    }
-    const runs = ordered.slice(start, start + 50);
-    return immutableClone({
-      runs,
-      ...(start + runs.length >= ordered.length || runs.length === 0
-        ? {}
-        : { nextCursor: runs[runs.length - 1]!.runId }),
-    });
+    if (cursor !== undefined) throw new TypeError("run-history cursor is unavailable without state");
+    return { runs: [] };
   }
 
   async readRun(runId: string): Promise<AgentRunRecord | undefined> {
@@ -607,11 +482,10 @@ class AgentHostImplementation implements AgentHost {
       throw new TypeError("runId must be non-empty");
     }
     assertBoundedText(runId, "runId", 512);
-    if (this.#runJournal !== undefined) {
-      return this.#runJournal.readRun(runId, this.#hostAbort.signal);
+    if (this.#execution !== undefined) {
+      return this.#execution.readRun(runId, this.#hostAbort.signal);
     }
-    const record = this.#volatileRuns.get(runId);
-    return record === undefined ? undefined : immutableClone(record);
+    return undefined;
   }
 
   async configView(): Promise<AgentConfigView> {
@@ -669,9 +543,9 @@ class AgentHostImplementation implements AgentHost {
     fingerprint: DurableFingerprint,
   ): Promise<ChannelDeliveryResult> {
     const signal = this.#hostAbort.signal;
-    const intent = this.#runJournal === undefined
+    const intent = this.#execution === undefined
       ? undefined
-      : await this.#runJournal.prepareDelivery({
+      : await this.#execution.prepareDelivery({
           idempotencyKey: message.idempotencyKey,
           fingerprint,
           channelInstanceId,
@@ -707,7 +581,7 @@ class AgentHostImplementation implements AgentHost {
       result = await channel.deliver!(message, signal);
     } catch (error) {
       if (intent?.status === "send") {
-        await this.#runJournal!.settleDelivery({
+        await this.#execution!.settleDelivery({
           idempotencyKey: message.idempotencyKey,
           fingerprint,
           attempt: intent.attempt,
@@ -725,7 +599,7 @@ class AgentHostImplementation implements AgentHost {
     }
     if (result.idempotencyKey !== message.idempotencyKey) {
       if (intent?.status === "send") {
-        await this.#runJournal!.settleDelivery({
+        await this.#execution!.settleDelivery({
           idempotencyKey: message.idempotencyKey,
           fingerprint,
           attempt: intent.attempt,
@@ -757,7 +631,7 @@ class AgentHostImplementation implements AgentHost {
             code: result.diagnostic?.code ?? "channel-delivery-unknown",
           };
     try {
-      await this.#runJournal!.settleDelivery({
+      await this.#execution!.settleDelivery({
         idempotencyKey: message.idempotencyKey,
         fingerprint,
         attempt: intent.attempt,
@@ -775,21 +649,204 @@ class AgentHostImplementation implements AgentHost {
     return immutableClone(result);
   }
 
-  async runModuleCommand(
-    moduleInstanceId: string,
-    commandName: string,
-    input?: unknown,
-  ): Promise<AgentModuleCommandResult> {
+  async runModuleCommand(moduleInstanceId: string, commandName: string, input?: unknown): Promise<AgentModuleCommandResult> {
     const running = this.#running.find((candidate) => candidate.loaded.instanceId === moduleInstanceId);
-    if (running === undefined) throw new Error(`Module ${moduleInstanceId} is not running`);
-    const command = running.instance.commands?.find((candidate) => candidate.name === commandName);
-    if (command === undefined) throw new Error(`Module ${moduleInstanceId} does not expose command ${commandName}`);
-    const value = await command.run(input, { signal: this.#hostAbort.signal, logger: NULL_LOGGER });
+    if (running !== undefined) {
+      try { return await this.#invokeModuleCommand(running.loaded, running.instance, commandName, input); }
+      catch (error) { throw this.#moduleCommandError(error, running.loaded, commandName, "run"); }
+    }
+    const loaded = this.config.modules.find((candidate) => candidate.instanceId === moduleInstanceId);
+    if (loaded === undefined) throw new Error(`Module ${moduleInstanceId} is not selected`);
+    let instance: ModuleInstance | undefined;
+    try {
+      instance = await withTimeoutSignal(
+        (signal) => this.#createInstance(loaded, signal),
+        this.#options.lifecycleTimeoutMs, this.#hostAbort.signal, `${loaded.instanceId} command create`,
+      );
+      if (instance === undefined) throw new Error(`${loaded.instanceId} command create returned undefined`);
+    } catch (error) { throw this.#moduleCommandError(error, loaded, commandName, "create"); }
+    let result: AgentModuleCommandResult | undefined;
+    let runFailure: unknown; let runFailed = false;
+    try { result = await this.#invokeModuleCommand(loaded, instance, commandName, input); }
+    catch (error) { runFailure = error; runFailed = true; }
+    let stopFailure: unknown; let stopFailed = false;
+    if (instance.stop !== undefined) {
+      try {
+        await withTimeoutSignal(
+          (signal) => instance.stop?.({ signal, reason: "shutdown" }),
+          this.#options.lifecycleTimeoutMs, undefined, `${loaded.instanceId} command stop`,
+        );
+      } catch (error) { stopFailure = error; stopFailed = true; }
+    }
+    if (runFailed && stopFailed) {
+      throw this.#moduleCommandError(
+        new AggregateError(
+          [runFailure, stopFailure],
+          `Command failed: ${inspectModuleFailure(runFailure)}; cleanup failed: ${inspectModuleFailure(stopFailure)}`,
+        ),
+        loaded, commandName, "run_and_stop",
+      );
+    }
+    if (runFailed) throw this.#moduleCommandError(runFailure, loaded, commandName, "run");
+    if (stopFailed) throw this.#moduleCommandError(stopFailure, loaded, commandName, "stop");
+    return result!;
+  }
+
+  async #invokeModuleCommand(
+    loaded: LoadedAgentModule, instance: ModuleInstance, commandName: string, input?: unknown,
+  ): Promise<AgentModuleCommandResult> {
+    const command = instance.commands?.find((candidate) => candidate.name === commandName);
+    if (command === undefined) throw new Error(`Module ${loaded.instanceId} does not expose command ${commandName}`);
+    const value = await withTimeoutSignal(
+      (signal) => command.run(input, { signal, logger: NULL_LOGGER }),
+      this.#options.lifecycleTimeoutMs, this.#hostAbort.signal, `${loaded.instanceId} command ${commandName}`,
+    );
     return {
-      module: moduleInstanceId,
+      module: loaded.instanceId,
       command: commandName,
-      ...(value === undefined ? {} : { value }),
+      ...(value === undefined
+        ? {}
+        : { value: normalizeModuleJson(value, "module command result", (text) => this.#redact(text)) }),
     };
+  }
+
+  async diagnostics(verbose = false): Promise<readonly AgentModuleDiagnostics[]> {
+    if (typeof verbose !== "boolean") throw new TypeError("diagnostics verbose must be boolean");
+    if (this.#running.length > 0) {
+      return Promise.all(this.#running.map(({ loaded, instance }) =>
+        this.#diagnoseModule(loaded, instance, verbose)));
+    }
+    const results: AgentModuleDiagnostics[] = [];
+    for (const loaded of [...this.config.modules]
+      .sort((left, right) => left.instanceId.localeCompare(right.instanceId))) {
+      let instance: ModuleInstance;
+      try {
+        const created = await withTimeoutSignal(
+          (signal) => this.#createInstance(loaded, signal),
+          this.#options.lifecycleTimeoutMs,
+          this.#hostAbort.signal,
+          `${loaded.instanceId} diagnostics create`,
+        );
+        if (created === undefined) throw new Error(`${loaded.instanceId} diagnostics create returned undefined`);
+        instance = created;
+      } catch (error) {
+        results.push(this.#diagnosticFailure(loaded, "module_diagnostics_create_failed", error));
+        continue;
+      }
+      let result = await this.#diagnoseModule(loaded, instance, verbose);
+      if (instance.stop !== undefined) {
+        try {
+          await withTimeoutSignal(
+            (signal) => instance.stop?.({ signal, reason: "shutdown" }),
+            this.#options.lifecycleTimeoutMs,
+            undefined,
+            `${loaded.instanceId} diagnostics stop`,
+          );
+        } catch (error) {
+          result = {
+            ...result,
+            diagnostics: [...result.diagnostics, this.#diagnostic(
+              "module_diagnostics_stop_failed",
+              error,
+            )],
+          };
+        }
+      }
+      results.push(result);
+    }
+    return Object.freeze(results);
+  }
+
+  async #diagnoseModule(loaded: LoadedAgentModule, instance: ModuleInstance, verbose: boolean): Promise<AgentModuleDiagnostics> {
+    if (loaded.slot === "state") {
+      try {
+        const execution = (instance as StateStore).execution;
+        if (execution === undefined) throw new Error(`${loaded.instanceId} does not expose the required state execution capability`);
+        await withTimeoutSignal(
+          (signal) => new StateExecutionClient(execution).assertCompatible(signal),
+          this.#options.lifecycleTimeoutMs,
+          this.#hostAbort.signal,
+          `${loaded.instanceId} state execution protocol`,
+        );
+      } catch (error) {
+        return this.#diagnosticFailure(loaded, "state_execution_protocol_incompatible", error);
+      }
+    }
+    if (instance.diagnostics === undefined) {
+      if (instance.health !== undefined && ["memory", "state", "sandbox", "exporter"].includes(loaded.slot)) {
+        try {
+          const raw = await withTimeoutSignal(
+            (signal) => instance.health?.({ signal }),
+            this.#options.lifecycleTimeoutMs,
+            this.#hostAbort.signal,
+            `${loaded.instanceId} diagnostic health`,
+          );
+          const health = normalizeModuleHealth(
+            raw,
+            `${loaded.instanceId} diagnostic health`,
+            (text) => this.#redact(text),
+          );
+          if (health.status !== "healthy") {
+            return this.#diagnosticResult(loaded, [Object.freeze({
+                code: `module_health_${health.status}`,
+                severity: health.status === "unhealthy" ? "error" : "warning",
+                message: health.summary ?? `Module health is ${health.status}`,
+            })]);
+          }
+        } catch (error) {
+          return this.#diagnosticFailure(loaded, "module_diagnostic_health_failed", error);
+        }
+      }
+      return this.#diagnosticResult(loaded, []);
+    }
+    try {
+      const raw = await withTimeoutSignal(
+        (signal) => instance.diagnostics?.({ signal, verbose }),
+        this.#options.lifecycleTimeoutMs,
+        this.#hostAbort.signal,
+        `${loaded.instanceId} diagnostics`,
+      );
+      const values = boundedOwnDataArray(
+        raw,
+        `${loaded.instanceId} diagnostics`,
+        MODULE_DIAGNOSTIC_MAX_ITEMS,
+        true,
+        true,
+      );
+      const diagnostics = values.map((value, index) => {
+        const diagnostic = normalizeModuleDiagnostic(
+          value,
+          `${loaded.instanceId} diagnostics[${String(index)}]`,
+        );
+        return Object.freeze({
+          ...diagnostic,
+          message: this.#redact(diagnostic.message),
+          ...(diagnostic.hint === undefined ? {} : { hint: this.#redact(diagnostic.hint) }),
+        });
+      });
+      return this.#diagnosticResult(loaded, diagnostics);
+    } catch (error) {
+      return this.#diagnosticFailure(loaded, "module_diagnostics_failed", error);
+    }
+  }
+
+  #diagnosticFailure(loaded: LoadedAgentModule, code: string, error: unknown): AgentModuleDiagnostics {
+    return this.#diagnosticResult(loaded, [this.#diagnostic(code, error)]);
+  }
+
+  #diagnosticResult(loaded: LoadedAgentModule, diagnostics: readonly ModuleDiagnostic[]): AgentModuleDiagnostics {
+    return Object.freeze({
+      kind: loaded.slot, instanceId: loaded.instanceId,
+      diagnostics: Object.freeze(diagnostics),
+    });
+  }
+
+  #diagnostic(code: string, error: unknown): ModuleDiagnostic {
+    return Object.freeze({
+      code,
+      severity: "error",
+      message: boundedUtf8(this.#redact(errorMessage(error)), 4_096),
+    });
   }
 
   #admit(input: AgentSubmitInput): void {
@@ -828,15 +885,25 @@ class AgentHostImplementation implements AgentHost {
         continue;
       }
       try {
-        const health = await withTimeoutSignal(
+        const rawHealth = await withTimeoutSignal(
           (signal) => running.instance.health?.({ signal }),
           this.#options.lifecycleTimeoutMs,
           this.#hostAbort.signal,
           `${running.loaded.instanceId} health`,
         );
-        const status = health?.status ?? "unknown";
+        const health = normalizeModuleHealth(
+          rawHealth,
+          `${running.loaded.instanceId} health`,
+          (text) => this.#redact(text),
+        );
+        const status = health.status;
         if (status !== "healthy") degraded = true;
-        modules.push({ kind: running.loaded.slot, instanceId: running.loaded.instanceId, status, detail: health });
+        modules.push({
+          kind: running.loaded.slot,
+          instanceId: running.loaded.instanceId,
+          status,
+          detail: health as unknown as JsonObject,
+        });
       } catch (error) {
         degraded = true;
         modules.push({
@@ -894,6 +961,13 @@ class AgentHostImplementation implements AgentHost {
             code: "tool_name_conflict",
           }]);
         }
+      }
+      if (this.#mcp.tools.some((tool) => tool.name === RUN_HISTORY_TOOL_NAME)) {
+        throw new AgentConfigError(`Project MCP tool conflicts with reserved Core tool ${RUN_HISTORY_TOOL_NAME}`, [{
+          path: "context.mcp.configPath",
+          message: `${RUN_HISTORY_TOOL_NAME} is reserved by Core run-history disclosure`,
+          code: "tool_name_conflict",
+        }]);
       }
       await this.#startKind("channel");
       this.#startInfo = {
@@ -961,6 +1035,19 @@ class AgentHostImplementation implements AgentHost {
       if (kind === "state") this.#stateStore = instance as StateStore;
       if (kind === "sandbox") this.#sandbox = instance as Sandbox;
       if (kind === "exporter") this.#exporterInstances.set(module.instanceId, instance as Exporter);
+      if (kind === "state") {
+        if (this.#stateStore?.execution === undefined) {
+          throw new Error(`${module.instanceId} does not expose the required state execution capability`);
+        }
+        const execution = new StateExecutionClient(this.#stateStore.execution);
+        await withTimeoutSignal(
+          (signal) => execution.assertCompatible(signal),
+          this.#options.lifecycleTimeoutMs,
+          this.#hostAbort.signal,
+          `${module.instanceId} state execution protocol`,
+        );
+        this.#execution = execution;
+      }
       if (instance.start !== undefined) {
         await withTimeoutSignal(
           (signal) => instance.start?.({ signal }),
@@ -968,14 +1055,6 @@ class AgentHostImplementation implements AgentHost {
           this.#hostAbort.signal,
           `${module.instanceId} start`,
         );
-      }
-      if (
-        kind === "state"
-        && this.#stateStore?.putArtifact !== undefined
-        && this.#stateStore.readArtifact !== undefined
-      ) {
-        this.#executionStore = new ExecutionStore(this.#stateStore);
-        this.#runJournal = new DurableRunJournal(this.#executionStore);
       }
     }
   }
@@ -1109,10 +1188,7 @@ class AgentHostImplementation implements AgentHost {
       },
     };
     if (module.slot === "trigger") {
-      return {
-        ...base,
-        emit: (event: TriggerEvent, signal: AbortSignal) => this.#emitTrigger(event, signal),
-      };
+      return { ...base, emit: (event: TriggerEvent, signal: AbortSignal) => this.#emitTrigger(event, signal) };
     }
     if (module.slot === "memory") {
       const grant = capabilityValues.get(HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE);
@@ -1124,8 +1200,7 @@ class AgentHostImplementation implements AgentHost {
     if (module.slot !== "channel") return base;
     return {
       ...base,
-      dispatch: async (request, reply) =>
-        this.#dispatchChannel(module.instanceId, request, reply),
+      dispatch: async (request, reply) => this.#dispatchChannel(module.instanceId, request, reply),
       cancel: async (request) => {
         throwIfAborted(request.signal);
         return { status: await this.cancel(request.conversationId, request.reason) ? "accepted" : "idle" };
@@ -1134,9 +1209,7 @@ class AgentHostImplementation implements AgentHost {
         throwIfAborted(input.signal);
         return {
           status: await this.offerLiveInput(input.conversationId, {
-            id: input.id,
-            text: input.text,
-            receivedAt: input.receivedAt,
+            id: input.id, text: input.text, receivedAt: input.receivedAt,
           }, input.signal),
         };
       },
@@ -1150,18 +1223,13 @@ class AgentHostImplementation implements AgentHost {
       },
       listConversations: (request) => this.#listChannelConversations(request),
       readReplay: (request) => this.#readChannelReplay(request),
-      readConfig: async (signal) => {
-        throwIfAborted(signal);
-        return toJsonValue(this.config.raw);
-      },
+      readConfig: async (signal) => { throwIfAborted(signal); return toJsonValue(this.config.raw); },
       readHealth: (signal) => this.#readChannelHealth(signal),
       openConversation: (request) => this.#openConversation(request),
     };
   }
 
-  async #listChannelConversations(
-    request: ChannelConversationListRequest,
-  ): Promise<ChannelConversationListResult> {
+  async #listChannelConversations(request: ChannelConversationListRequest): Promise<ChannelConversationListResult> {
     throwIfAborted(request.signal);
     const limit = boundedPageLimit(request.limit);
     const offset = decodePageCursor(request.cursor);
@@ -1208,11 +1276,7 @@ class AgentHostImplementation implements AgentHost {
           : "unhealthy",
       checkedAt: new Date().toISOString(),
       summary: `${health.active} active, ${health.pending} pending`,
-      details: {
-        accepting: health.accepting,
-        active: health.active,
-        pending: health.pending,
-      },
+      details: { accepting: health.accepting, active: health.active, pending: health.pending },
     };
   }
 
@@ -1221,6 +1285,15 @@ class AgentHostImplementation implements AgentHost {
     const signal = AbortSignal.any([this.#hostAbort.signal, request.signal]);
     if (request.title !== undefined) assertBoundedText(request.title, "title", DEFAULT_MESSAGE_BYTES);
     if (request.initialText !== undefined) assertBoundedText(request.initialText, "initialText", DEFAULT_MESSAGE_BYTES);
+    if (this.#execution !== undefined) {
+      const conversation = await this.#execution.openConversation({
+        ...(request.title === undefined ? {} : { title: request.title }),
+        ...(request.initialText === undefined ? {} : { initialText: request.initialText }),
+        ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
+      }, signal);
+      await this.#commitConversationView(conversation, signal);
+      return { conversationId: conversation.conversationId, createdAt: conversation.createdAt };
+    }
     const conversationId = `proactive:${randomUUID()}`;
     const createdAt = new Date().toISOString();
     const messages: readonly TurnMessage[] = request.initialText === undefined || request.initialText.length === 0
@@ -1231,18 +1304,28 @@ class AgentHostImplementation implements AgentHost {
           content: [{ type: "text", text: request.initialText }],
           createdAt,
         }];
-    const snapshot = immutableConversationSnapshot({
-      schemaVersion: 1,
+    this.#history.set(conversationId, immutableClone(messages));
+    const initialEntries: readonly AgentTranscriptEntry[] =
+      request.initialText === undefined || request.initialText.length === 0
+        ? []
+        : [Object.freeze({
+            kind: "verbatim", entryId: `${conversationId}:initial`,
+            runId: `${conversationId}:open`, requestId: `${conversationId}:open`,
+            conversationId, recordedAt: createdAt, role: "assistant", text: request.initialText,
+          })];
+    const transcript: CanonicalTranscript = Object.freeze({
+      schemaVersion: 1, kind: "mono-agent.canonical-transcript",
+      conversationId, revision: 1, entries: Object.freeze(initialEntries),
+    });
+    this.#transcripts.set(conversationId, transcript);
+    this.#commitConversationMetadata({
       conversationId,
-      messages,
-      sessions: {},
-      sessionUpdatedAt: {},
+      createdAt,
       updatedAt: createdAt,
       ...(request.title === undefined ? {} : { title: request.title }),
       ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
     });
-    const version = await this.#persistConversationSnapshot(snapshot, signal);
-    this.#commitConversationSnapshot(snapshot, version);
+    this.#loadedConversations.add(conversationId);
     return { conversationId, createdAt };
   }
 
@@ -1303,6 +1386,7 @@ class AgentHostImplementation implements AgentHost {
     emit: (event: RuntimeTurnEvent) => Promise<void>,
     emitAsk?: (request: AskUserRequest) => Promise<void>,
     emitApproval?: (request: ApprovalRequest) => Promise<void>,
+    observeAdmission?: (replayed: boolean) => void,
   ): Promise<AgentResponse> {
     const fingerprint = submissionFingerprint(input);
     const existing = this.#inflightRequests.get(input.requestId!);
@@ -1325,6 +1409,7 @@ class AgentHostImplementation implements AgentHost {
       emit,
       emitAsk,
       emitApproval,
+      observeAdmission,
     );
     const tracked = running.finally(() => {
       const current = this.#inflightRequests.get(input.requestId!);
@@ -1340,6 +1425,7 @@ class AgentHostImplementation implements AgentHost {
     emit: (event: RuntimeTurnEvent) => Promise<void>,
     emitAsk?: (request: AskUserRequest) => Promise<void>,
     emitApproval?: (request: ApprovalRequest) => Promise<void>,
+    observeAdmission?: (replayed: boolean) => void,
   ): Promise<AgentResponse> {
     let releaseConversation: (() => void) | undefined;
     let current: Promise<void> | undefined;
@@ -1358,6 +1444,7 @@ class AgentHostImplementation implements AgentHost {
       const releaseSlot = await this.#semaphore.acquire(admissionSignal);
       try {
         const admission = await this.#admitRun(input, fingerprint, admissionSignal);
+        observeAdmission?.(admission.replayed);
         if (admission.response !== undefined) return admission.response;
         const controller = new AbortController();
         const active: ActiveTurn = {
@@ -1394,7 +1481,7 @@ class AgentHostImplementation implements AgentHost {
                 status: classified.status,
                 failureCode: classified.failureCode,
                 signal: settlementSignal,
-              });
+              }).catch(() => undefined);
               throw classified;
             }
             if (signal.aborted || isAbort(error)) {
@@ -1481,16 +1568,22 @@ class AgentHostImplementation implements AgentHost {
     }
   }
 
-  #nextTranscript(
+  async #nextTranscript(
     conversationId: string,
     entries: readonly AgentTranscriptEntry[],
-  ): CanonicalTranscript {
-    const transcript = appendCanonicalTranscript(
-      this.#transcripts.get(conversationId),
+    signal: AbortSignal,
+  ): Promise<CanonicalTranscript> {
+    const current = this.#transcripts.get(conversationId);
+    if (this.#execution !== undefined) {
+      return this.#execution.appendTranscript(current, conversationId, entries, signal);
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      kind: "mono-agent.canonical-transcript",
       conversationId,
-      entries,
-    );
-    return transcript;
+      revision: (current?.revision ?? 0) + 1,
+      entries: Object.freeze([...(current?.entries ?? []), ...entries]),
+    });
   }
 
   async #persistRunSettlement(options: {
@@ -1505,8 +1598,8 @@ class AgentHostImplementation implements AgentHost {
     readonly failureCode?: string;
     readonly signal: AbortSignal;
   }): Promise<void> {
-    if (this.#runJournal !== undefined) {
-      await this.#runJournal.settle({
+    if (this.#execution !== undefined) {
+      await this.#execution.settle({
         runId: options.runId,
         requestId: options.input.requestId!,
         status: options.status,
@@ -1533,38 +1626,6 @@ class AgentHostImplementation implements AgentHost {
         ...(options.failureCode === undefined ? {} : { failureCode: options.failureCode }),
         signal: options.signal,
       });
-    } else {
-      const current = this.#volatileRuns.get(options.runId);
-      if (current === undefined) throw new Error(`volatile run ${options.runId} is missing`);
-      const recordedAt = new Date().toISOString();
-      const summary: AgentRunSummary = Object.freeze({
-        ...current.summary,
-        status: options.status,
-        updatedAt: recordedAt,
-        endedAt: recordedAt,
-        ...(options.transcript === undefined
-          ? {}
-          : { transcriptRevision: `r${String(options.transcript.revision)}:volatile` }),
-        ...(options.failureCode === undefined ? {} : { failureCode: options.failureCode }),
-      });
-      const event = Object.freeze({
-        type: "settled",
-        runId: options.runId,
-        sequence: current.events.length,
-        recordedAt,
-        status: options.status,
-        ...(summary.transcriptRevision === undefined
-          ? {}
-          : { transcriptRevision: summary.transcriptRevision }),
-        ...(options.failureCode === undefined ? {} : { failureCode: options.failureCode }),
-      } as const);
-      this.#volatileRuns.set(options.runId, Object.freeze({
-        summary,
-        events: Object.freeze([...current.events, event]),
-        transcript: Object.freeze(
-          options.transcript?.entries.filter((entry) => entry.runId === options.runId) ?? [],
-        ),
-      }));
     }
     if (options.transcript !== undefined) {
       this.#transcripts.set(options.input.conversationId, options.transcript);
@@ -1576,34 +1637,10 @@ class AgentHostImplementation implements AgentHost {
     evidence: AgentRunAttemptEvidence,
     signal: AbortSignal,
   ): Promise<void> {
-    if (this.#runJournal !== undefined) {
-      await this.#runJournal.recordAttempt(runId, evidence, signal);
+    if (this.#execution !== undefined) {
+      await this.#execution.recordAttempt(runId, evidence, signal);
       return;
     }
-    const current = this.#volatileRuns.get(runId);
-    if (current === undefined) throw new Error(`volatile run ${runId} is missing`);
-    const attempts = [...current.summary.attempts];
-    if (attempts[evidence.attempt - 1] === undefined) attempts.push(evidence);
-    else attempts[evidence.attempt - 1] = evidence;
-    const recordedAt = new Date().toISOString();
-    this.#volatileRuns.set(runId, Object.freeze({
-      summary: Object.freeze({
-        ...current.summary,
-        updatedAt: recordedAt,
-        attempts: Object.freeze(attempts),
-      }),
-      events: Object.freeze([
-        ...current.events,
-        Object.freeze({
-          type: "attempt",
-          runId,
-          sequence: current.events.length,
-          recordedAt,
-          attempt: evidence,
-        }),
-      ]),
-      transcript: current.transcript,
-    }));
   }
 
   async #recordRunInteraction(
@@ -1611,27 +1648,10 @@ class AgentHostImplementation implements AgentHost {
     evidence: AgentInteractionEvidence,
     signal: AbortSignal,
   ): Promise<void> {
-    if (this.#runJournal !== undefined) {
-      await this.#runJournal.recordInteraction(runId, evidence, signal);
+    if (this.#execution !== undefined) {
+      await this.#execution.recordInteraction(runId, evidence, signal);
       return;
     }
-    const current = this.#volatileRuns.get(runId);
-    if (current === undefined) throw new Error(`volatile run ${runId} is missing`);
-    const recordedAt = new Date().toISOString();
-    this.#volatileRuns.set(runId, Object.freeze({
-      summary: Object.freeze({ ...current.summary, updatedAt: recordedAt }),
-      events: Object.freeze([
-        ...current.events,
-        Object.freeze({
-          type: "interaction",
-          runId,
-          sequence: current.events.length,
-          recordedAt,
-          evidence,
-        }),
-      ]),
-      transcript: current.transcript,
-    }));
   }
 
   async #appendInteractionEvidence(
@@ -1661,38 +1681,17 @@ class AgentHostImplementation implements AgentHost {
     input: AgentSubmitInput,
     fingerprint: DurableFingerprint,
     signal: AbortSignal,
-  ): Promise<{ readonly runId: string; readonly response?: AgentResponse }> {
-    if (this.#runJournal === undefined) {
-      const runId = randomUUID();
-      const recordedAt = new Date().toISOString();
-      const summary: AgentRunSummary = Object.freeze({
-        runId,
-        requestId: input.requestId!,
-        conversationId: input.conversationId,
-        status: "running",
-        startedAt: recordedAt,
-        updatedAt: recordedAt,
-        attempts: Object.freeze([]),
-      });
-      this.#volatileRuns.set(runId, Object.freeze({
-        summary,
-        events: Object.freeze([Object.freeze({
-          type: "admitted",
-          runId,
-          sequence: 0,
-          recordedAt,
-        })]),
-        transcript: Object.freeze([]),
-      }));
-      return { runId };
+  ): Promise<{ readonly runId: string; readonly replayed: boolean; readonly response?: AgentResponse }> {
+    if (this.#execution === undefined) {
+      return { runId: randomUUID(), replayed: false };
     }
-    const admission = await this.#runJournal.admit({
+    const admission = await this.#execution.admit({
       requestId: input.requestId!,
       conversationId: input.conversationId,
       fingerprint,
       signal,
     });
-    if (admission.status === "accepted") return { runId: admission.summary.runId };
+    if (admission.status === "accepted") return { runId: admission.summary.runId, replayed: false };
     if (admission.status === "cached") {
       if (admission.responseRef === undefined) {
         if (
@@ -1717,9 +1716,10 @@ class AgentHostImplementation implements AgentHost {
           { requestId: input.requestId!, runId: admission.summary.runId },
         );
       }
-      const bytes = await this.#runJournal.readCachedResponse(admission.responseRef, signal);
+      const bytes = await this.#execution.readCachedResponse(admission.responseRef, signal);
       return {
         runId: admission.summary.runId,
+        replayed: true,
         response: decodeCachedAgentResponse(
           bytes,
           input.requestId!,
@@ -1755,8 +1755,21 @@ class AgentHostImplementation implements AgentHost {
     await this.#loadConversation(input.conversationId, signal);
     const recalled = await this.#recallMemory(input, signal);
     const routes = routeCandidates(this.config, input);
+    const runHistoryTool = this.#execution === undefined
+      ? []
+      : [createRunHistoryTool({
+          reader: {
+            listRuns: (cursor, toolSignal) =>
+              this.#execution!.listRuns(cursor, toolSignal),
+            readRun: (runId, toolSignal) =>
+              this.#execution!.readRun(runId, toolSignal),
+          },
+          conversationId: input.conversationId,
+          currentRunId: active.id,
+          signal,
+        })];
     const tools = filterTools(
-      [...this.#instructionTools, ...this.#mcp.tools],
+      [...this.#instructionTools, ...runHistoryTool, ...this.#mcp.tools],
       this.config,
       input,
       this.#mcp.ambiguousAliases ?? [],
@@ -1780,19 +1793,18 @@ class AgentHostImplementation implements AgentHost {
         runtimeInstanceId: route.runtime,
         model: route.model,
       } as const;
+      const rejectRoute = async (code: string, message: string): Promise<void> => {
+        errors.push(new Error(message));
+        await this.#recordRunAttempt(active.id, {
+          attempt: attemptNumber, route: attemptRoute, status: "ineligible",
+          startedAt: attemptStartedAt, endedAt: new Date().toISOString(), code,
+        }, signal);
+      };
       if (signal.aborted) throw abortError();
       const runtime = this.#runtimeInstances.get(route.runtime);
       const runtimeCapabilities = this.#runtimeCapabilities.get(route.runtime);
       if (runtime === undefined || runtimeCapabilities === undefined) {
-        errors.push(new Error(`Runtime ${route.runtime} is not started`));
-        await this.#recordRunAttempt(active.id, {
-          attempt: attemptNumber,
-          route: attemptRoute,
-          status: "ineligible",
-          startedAt: attemptStartedAt,
-          endedAt: new Date().toISOString(),
-          code: "runtime-not-started",
-        }, signal);
+        await rejectRoute("runtime-not-started", `Runtime ${route.runtime} is not started`);
         continue;
       }
       active.runtime = runtime;
@@ -1808,15 +1820,7 @@ class AgentHostImplementation implements AgentHost {
           `${route.runtime}:${route.model} model validation result`,
         );
         if (!validation.supported) {
-          errors.push(new Error(`${route.runtime} does not support model ${route.model}`));
-          await this.#recordRunAttempt(active.id, {
-            attempt: attemptNumber,
-            route: attemptRoute,
-            status: "ineligible",
-            startedAt: attemptStartedAt,
-            endedAt: new Date().toISOString(),
-            code: "unsupported-model",
-          }, signal);
+          await rejectRoute("unsupported-model", `${route.runtime} does not support model ${route.model}`);
           continue;
         }
         routeCapabilities = validation.capabilities ?? routeCapabilities;
@@ -1831,15 +1835,8 @@ class AgentHostImplementation implements AgentHost {
         hasInteractionHandler,
       });
       if (nativeToolIssue !== undefined) {
-        errors.push(new Error(`${route.runtime}:${route.model} is ineligible: ${nativeToolIssue}`));
-        await this.#recordRunAttempt(active.id, {
-          attempt: attemptNumber,
-          route: attemptRoute,
-          status: "ineligible",
-          startedAt: attemptStartedAt,
-          endedAt: new Date().toISOString(),
-          code: "native-tool-policy-ineligible",
-        }, signal);
+        await rejectRoute("native-tool-policy-ineligible",
+          `${route.runtime}:${route.model} is ineligible: ${nativeToolIssue}`);
         continue;
       }
       const eligibility = runtimeEligibility(
@@ -1850,15 +1847,8 @@ class AgentHostImplementation implements AgentHost {
         hasInteractionHandler,
       );
       if (eligibility !== undefined) {
-        errors.push(new Error(`${route.runtime}:${route.model} is ineligible: ${eligibility}`));
-        await this.#recordRunAttempt(active.id, {
-          attempt: attemptNumber,
-          route: attemptRoute,
-          status: "ineligible",
-          startedAt: attemptStartedAt,
-          endedAt: new Date().toISOString(),
-          code: "capability-ineligible",
-        }, signal);
+        await rejectRoute("capability-ineligible",
+          `${route.runtime}:${route.model} is ineligible: ${eligibility}`);
         continue;
       }
       active.sessionsSupported = routeCapabilities.sessions;
@@ -2532,7 +2522,7 @@ class AgentHostImplementation implements AgentHost {
       updatedAt,
       signal,
     );
-    const transcript = this.#nextTranscript(input.conversationId, entries);
+    const transcript = await this.#nextTranscript(input.conversationId, entries, signal);
     const message = settledResult.message === undefined
       ? undefined
       : cacheableAssistantMessage(settledResult.message);
@@ -2558,17 +2548,6 @@ class AgentHostImplementation implements AgentHost {
       ...(settledResult.metadata === undefined ? {} : { metadata: settledResult.metadata }),
     } satisfies AgentResponse);
     try {
-      if (this.#runJournal === undefined) {
-        await this.#persistLegacyConversation(
-          input,
-          settledResult,
-          active,
-          route,
-          sessionDisposition,
-          updatedAt,
-          signal,
-        );
-      }
       await this.#persistRunSettlement({
         input,
         runId: active.id,
@@ -2639,7 +2618,7 @@ class AgentHostImplementation implements AgentHost {
       updatedAt,
       signal,
     );
-    const transcript = this.#nextTranscript(input.conversationId, entries);
+    const transcript = await this.#nextTranscript(input.conversationId, entries, signal);
     const response = immutableClone({
       requestId: input.requestId!,
       runId: active.id,
@@ -2650,17 +2629,6 @@ class AgentHostImplementation implements AgentHost {
       text: "",
       output: { status: "cancelled" },
     } satisfies AgentResponse);
-    if (this.#runJournal === undefined) {
-      await this.#persistLegacyConversation(
-        input,
-        { status: "cancelled" },
-        active,
-        route,
-        sessionDisposition,
-        updatedAt,
-        signal,
-      );
-    }
     await this.#persistRunSettlement({
       input,
       runId: active.id,
@@ -2747,8 +2715,8 @@ class AgentHostImplementation implements AgentHost {
       }
     }
     const references = new Map<string, ArtifactRef>();
-    if (artifacts.length > 0 && this.#runJournal !== undefined) {
-      const staged = await this.#runJournal.stageRunArtifacts({
+    if (artifacts.length > 0 && this.#execution !== undefined) {
+      const staged = await this.#execution.stageRunArtifacts({
         runId: active.id,
         requestId: input.requestId!,
         artifacts,
@@ -2810,7 +2778,7 @@ class AgentHostImplementation implements AgentHost {
     updatedAt: string,
     signal: AbortSignal,
   ): Promise<void> {
-    if (this.#runJournal !== undefined) {
+    if (this.#execution !== undefined) {
       const appended = await turnMessagesFromTranscript({
         schemaVersion: 1,
         kind: "mono-agent.canonical-transcript",
@@ -2820,6 +2788,25 @@ class AgentHostImplementation implements AgentHost {
       }, this.#stateStore, signal);
       const history = this.#history.get(input.conversationId) ?? [];
       this.#history.set(input.conversationId, immutableClone([...history, ...appended]));
+      this.#loadedConversations.add(input.conversationId);
+    } else {
+      const history = this.#history.get(input.conversationId) ?? [];
+      const user: TurnMessage = {
+        role: "user",
+        content: [
+          { type: "text", text: input.text },
+          ...(input.attachments ?? []).map((attachment) => ({
+            type: "attachment" as const,
+            attachment,
+          })),
+        ],
+        createdAt: updatedAt,
+      };
+      this.#history.set(input.conversationId, immutableClone([
+        ...history,
+        user,
+        ...(result.message === undefined ? [] : [result.message]),
+      ]));
       this.#loadedConversations.add(input.conversationId);
     }
     this.#conversationUpdatedAt.set(input.conversationId, updatedAt);
@@ -2839,266 +2826,52 @@ class AgentHostImplementation implements AgentHost {
     }
   }
 
-  async #persistLegacyConversation(
-    input: AgentSubmitInput,
-    result: RuntimeTurnResult,
-    active: ActiveTurn,
-    route: RuntimeRoute,
-    sessionDisposition: SessionDisposition,
-    updatedAt: string,
-    signal: AbortSignal,
-  ): Promise<void> {
-    const history = this.#history.get(input.conversationId) ?? [];
-    const interactionMessages = await turnMessagesFromTranscript({
-      schemaVersion: 1,
-      kind: "mono-agent.canonical-transcript",
-      conversationId: input.conversationId,
-      revision: 1,
-      entries: active.transcriptEntries,
-    }, undefined, signal);
-    const messages = immutableClone([
-      ...history,
-      {
-        id: `${active.id}:user`,
-        role: "user",
-        content: [
-          { type: "text", text: input.text },
-          ...attachmentParts(input.attachments ?? []),
-        ],
-        createdAt: active.startedAt,
-      },
-      ...interactionMessages,
-      ...(result.message === undefined
-        ? []
-        : [{
-            ...result.message,
-            id: result.message.id ?? `${active.id}:assistant`,
-            createdAt: result.message.createdAt ?? updatedAt,
-          }]),
-    ] satisfies readonly TurnMessage[]);
-    const sessions = this.#sessionsForConversation(input.conversationId);
-    const sessionUpdatedAt = this.#sessionTimesForConversation(input.conversationId);
-    const persistedRouteKey = runtimeSessionRouteKey(route);
-    if (
-      sessionDisposition === "evict"
-      || (
-        sessionDisposition === "retain"
-        && result.usage?.sessionEvicted === true
-      )
-    ) {
-      delete sessions[persistedRouteKey];
-      delete sessionUpdatedAt[persistedRouteKey];
-    } else if (sessionDisposition === "retain" && result.session !== undefined) {
-      sessions[persistedRouteKey] = immutableClone(result.session);
-      sessionUpdatedAt[persistedRouteKey] = updatedAt;
-    }
-    const title = this.#conversationTitles.get(input.conversationId);
-    const metadata = this.#conversationMetadata.get(input.conversationId);
-    const snapshot = immutableConversationSnapshot({
-      schemaVersion: 1,
-      conversationId: input.conversationId,
-      messages,
-      sessions,
-      sessionUpdatedAt,
-      updatedAt,
-      ...(title === undefined ? {} : { title }),
-      ...(metadata === undefined ? {} : { metadata }),
-    });
-    const version = await this.#persistConversationSnapshot(snapshot, signal);
-    this.#commitConversationSnapshot(snapshot, version);
-  }
-
   async #loadConversation(conversationId: string, signal: AbortSignal): Promise<void> {
     if (this.#loadedConversations.has(conversationId)) return;
-    if (this.#runJournal !== undefined) {
-      const transcript = await this.#runJournal.loadTranscript(conversationId, signal);
-      if (transcript !== undefined) {
-        this.#transcripts.set(conversationId, transcript);
-        const messages = await turnMessagesFromTranscript(
-          transcript,
-          this.#stateStore,
-          signal,
-        );
-        this.#history.set(conversationId, messages);
-        const updatedAt = transcript.entries[transcript.entries.length - 1]?.recordedAt;
-        if (updatedAt !== undefined) this.#conversationUpdatedAt.set(conversationId, updatedAt);
-      }
+    if (this.#execution === undefined) {
       this.#loadedConversations.add(conversationId);
       return;
     }
-    if (this.#stateStore === undefined) {
+    const conversation = await this.#execution.loadConversation(conversationId, signal);
+    if (conversation === undefined) {
       this.#loadedConversations.add(conversationId);
       return;
     }
-    const record = await this.#stateStore.read({ key: conversationStateKey(conversationId), signal });
-    if (record === undefined) {
-      this.#loadedConversations.add(conversationId);
-      return;
-    }
-    const snapshot = await this.#decodeConversationRecord(record.value, conversationId, signal);
-    this.#commitConversationSnapshot(snapshot, record.version);
+    await this.#commitConversationView(conversation, signal);
   }
 
-  async #persistConversationSnapshot(
-    snapshot: PersistedConversation,
+  async #commitConversationView(
+    conversation: {
+      readonly conversationId: string;
+      readonly createdAt: string;
+      readonly updatedAt: string;
+      readonly transcript: CanonicalTranscript;
+      readonly title?: string;
+      readonly metadata?: JsonObject;
+    },
     signal: AbortSignal,
-  ): Promise<string | undefined> {
-    if (this.#stateStore === undefined) return undefined;
-    const conversationId = snapshot.conversationId;
-    const expectedVersion = this.#stateVersions.get(conversationId);
-    const key = conversationStateKey(conversationId);
-    const value = await this.#encodeConversationRecord(snapshot, signal);
-    if (expectedVersion === undefined) {
-      const claimed = await this.#stateStore.compareAndSwap({ key, expectedVersion: null, value, signal });
-      if (claimed.status === "conflict") {
-        throw new Error(`Conversation ${conversationId} was concurrently created by another host`);
-      }
-      return claimed.record.version;
-    }
-    const written = await this.#stateStore.write({ key, value, expectedVersion, signal });
-    return written.version;
+  ): Promise<void> {
+    this.#transcripts.set(conversation.conversationId, conversation.transcript);
+    this.#history.set(
+      conversation.conversationId,
+      await turnMessagesFromTranscript(conversation.transcript, this.#stateStore, signal),
+    );
+    this.#commitConversationMetadata(conversation);
+    this.#loadedConversations.add(conversation.conversationId);
   }
 
-  async #encodeConversationRecord(snapshot: PersistedConversation, signal: AbortSignal): Promise<Uint8Array> {
-    const encoded = encodePersistedValue(snapshot);
-    if (encoded.byteLength > MAX_PERSISTED_CONVERSATION_BYTES * 2) {
-      throw new RangeError(`Conversation ${snapshot.conversationId} exceeds the durable transcript bound`);
-    }
-    if (encoded.byteLength <= PERSISTED_CONVERSATION_INLINE_BYTES) return encoded;
-    const compressed = new Uint8Array(gzipSync(encoded));
-    if (compressed.byteLength > MAX_PERSISTED_CONVERSATION_BYTES) {
-      throw new RangeError(`Conversation ${snapshot.conversationId} exceeds the durable transcript bound`);
-    }
-    const chunks: PersistedConversationChunk[] = [];
-    const conversationDigest = createHash("sha256").update(snapshot.conversationId).digest("hex");
-    for (let offset = 0; offset < compressed.byteLength; offset += PERSISTED_CONVERSATION_CHUNK_BYTES) {
-      if (chunks.length >= MAX_PERSISTED_CONVERSATION_CHUNKS) {
-        throw new RangeError(`Conversation ${snapshot.conversationId} requires too many durable transcript chunks`);
-      }
-      const bytes = compressed.slice(offset, Math.min(offset + PERSISTED_CONVERSATION_CHUNK_BYTES, compressed.byteLength));
-      const digest = createHash("sha256").update(bytes).digest("hex");
-      const key = `core/conversation-chunks/${conversationDigest}/${digest}`;
-      const claimed = await this.#stateStore!.compareAndSwap({ key, expectedVersion: null, value: bytes, signal });
-      if (claimed.status === "conflict") {
-        const existing = await this.#stateStore!.read({ key, signal });
-        if (existing === undefined
-          || existing.value.byteLength !== bytes.byteLength
-          || createHash("sha256").update(existing.value).digest("hex") !== digest) {
-          throw new Error(`Conversation chunk ${digest} failed its content-addressed integrity check`);
-        }
-      }
-      chunks.push({ key, digest, sizeBytes: bytes.byteLength });
-    }
-    const manifest: PersistedConversationManifest = {
-      schemaVersion: 2,
-      kind: "mono-agent.conversation-chunks.v1",
-      conversationId: snapshot.conversationId,
-      encoding: "gzip-json",
-      uncompressedBytes: encoded.byteLength,
-      compressedBytes: compressed.byteLength,
-      digest: createHash("sha256").update(compressed).digest("hex"),
-      chunks,
-    };
-    const value = encodePersistedValue(manifest);
-    if (value.byteLength > PERSISTED_CONVERSATION_INLINE_BYTES) {
-      throw new RangeError(`Conversation ${snapshot.conversationId} chunk manifest exceeds its bound`);
-    }
-    return value;
-  }
-
-  async #decodeConversationRecord(
-    value: Uint8Array,
-    conversationId: string,
-    signal: AbortSignal,
-  ): Promise<PersistedConversation> {
-    const candidate = decodePersistedJson(value, `Persisted conversation ${conversationId}`);
-    if (!isPersistedConversationManifest(candidate, conversationId)) {
-      return decodePersistedConversation(value, conversationId);
-    }
-    if (this.#stateStore === undefined) throw new Error(`Persisted conversation ${conversationId} requires state chunks`);
-    const parts: Uint8Array[] = [];
-    let total = 0;
-    for (const chunk of candidate.chunks) {
-      const record = await this.#stateStore.read({ key: chunk.key, signal });
-      if (record === undefined
-        || record.value.byteLength !== chunk.sizeBytes
-        || createHash("sha256").update(record.value).digest("hex") !== chunk.digest) {
-        throw new Error(`Persisted conversation ${conversationId} has a missing or corrupt chunk`);
-      }
-      total += record.value.byteLength;
-      if (total > MAX_PERSISTED_CONVERSATION_BYTES) {
-        throw new Error(`Persisted conversation ${conversationId} exceeds its compressed bound`);
-      }
-      parts.push(record.value);
-    }
-    if (total !== candidate.compressedBytes) {
-      throw new Error(`Persisted conversation ${conversationId} has an invalid compressed length`);
-    }
-    const compressed = new Uint8Array(total);
-    let offset = 0;
-    for (const part of parts) {
-      compressed.set(part, offset);
-      offset += part.byteLength;
-    }
-    if (createHash("sha256").update(compressed).digest("hex") !== candidate.digest) {
-      throw new Error(`Persisted conversation ${conversationId} failed its manifest integrity check`);
-    }
-    let decoded: Uint8Array;
-    try {
-      decoded = new Uint8Array(gunzipSync(compressed, {
-        maxOutputLength: MAX_PERSISTED_CONVERSATION_BYTES * 2,
-      }));
-    } catch (error) {
-      throw new Error(`Persisted conversation ${conversationId} has invalid compressed data`, { cause: error });
-    }
-    if (decoded.byteLength !== candidate.uncompressedBytes
-      || decoded.byteLength > MAX_PERSISTED_CONVERSATION_BYTES * 2) {
-      throw new Error(`Persisted conversation ${conversationId} has an invalid uncompressed length`);
-    }
-    return decodePersistedConversation(decoded, conversationId);
-  }
-
-  #commitConversationSnapshot(snapshot: PersistedConversation, version: string | undefined): void {
-    const conversationId = snapshot.conversationId;
-    const suffix = runtimeSessionConversationSuffix(conversationId);
-    this.#history.set(conversationId, immutableClone(snapshot.messages));
-    for (const key of [...this.#sessions.keys()]) {
-      if (key.endsWith(suffix)) this.#sessions.delete(key);
-    }
-    for (const key of [...this.#sessionUpdatedAt.keys()]) {
-      if (key.endsWith(suffix)) this.#sessionUpdatedAt.delete(key);
-    }
-    for (const [routeKey, session] of Object.entries(snapshot.sessions)) {
-      const key = `${routeKey}${suffix}`;
-      this.#sessions.set(key, immutableClone(session));
-      const updatedAt = snapshot.sessionUpdatedAt?.[routeKey] ?? snapshot.updatedAt;
-      this.#sessionUpdatedAt.set(key, updatedAt);
-    }
-    if (version !== undefined) this.#stateVersions.set(conversationId, version);
-    this.#conversationUpdatedAt.set(conversationId, snapshot.updatedAt);
-    if (snapshot.title === undefined) this.#conversationTitles.delete(conversationId);
-    else this.#conversationTitles.set(conversationId, snapshot.title);
-    if (snapshot.metadata === undefined) this.#conversationMetadata.delete(conversationId);
-    else this.#conversationMetadata.set(conversationId, immutableClone(snapshot.metadata));
-    this.#loadedConversations.add(conversationId);
-  }
-
-  #sessionsForConversation(conversationId: string): Record<string, RuntimeSession> {
-    const sessions: Record<string, RuntimeSession> = Object.create(null) as Record<string, RuntimeSession>;
-    const suffix = runtimeSessionConversationSuffix(conversationId);
-    for (const [key, session] of this.#sessions) {
-      if (key.endsWith(suffix)) sessions[key.slice(0, -suffix.length)] = immutableClone(session);
-    }
-    return sessions;
-  }
-
-  #sessionTimesForConversation(conversationId: string): Record<string, string> {
-    const timestamps: Record<string, string> = Object.create(null) as Record<string, string>;
-    const suffix = runtimeSessionConversationSuffix(conversationId);
-    for (const [key, timestamp] of this.#sessionUpdatedAt) {
-      if (key.endsWith(suffix)) timestamps[key.slice(0, -suffix.length)] = timestamp;
-    }
-    return timestamps;
+  #commitConversationMetadata(conversation: {
+    readonly conversationId: string;
+    readonly createdAt: string;
+    readonly updatedAt: string;
+    readonly title?: string;
+    readonly metadata?: JsonObject;
+  }): void {
+    this.#conversationUpdatedAt.set(conversation.conversationId, conversation.updatedAt);
+    if (conversation.title === undefined) this.#conversationTitles.delete(conversation.conversationId);
+    else this.#conversationTitles.set(conversation.conversationId, conversation.title);
+    if (conversation.metadata === undefined) this.#conversationMetadata.delete(conversation.conversationId);
+    else this.#conversationMetadata.set(conversation.conversationId, immutableClone(conversation.metadata));
   }
 
   async #sessionForRequest(
@@ -3128,8 +2901,8 @@ class AgentHostImplementation implements AgentHost {
     sessionKey: string,
     signal: AbortSignal,
   ): Promise<void> {
-    if (!this.#sessions.has(sessionKey) && this.#runJournal !== undefined) {
-      const durable = await this.#runJournal.loadSession(
+    if (!this.#sessions.has(sessionKey) && this.#execution !== undefined) {
+      const durable = await this.#execution.loadSession(
         input.conversationId,
         { runtimeInstanceId: route.runtime, model: route.model },
         signal,
@@ -3153,11 +2926,11 @@ class AgentHostImplementation implements AgentHost {
     this.#sessions.delete(sessionKey);
     this.#sessionUpdatedAt.delete(sessionKey);
     if (
-      this.#runJournal !== undefined
+      this.#execution !== undefined
       && staleSession !== undefined
       && staleUpdatedAt !== undefined
     ) {
-      await this.#runJournal.evictSession(
+      await this.#execution.evictSession(
         input.conversationId,
         { runtimeInstanceId: route.runtime, model: route.model },
         { sessionId: staleSession.id, updatedAt: staleUpdatedAt },
@@ -3261,43 +3034,13 @@ class AgentHostImplementation implements AgentHost {
 
   async #emitTrigger(event: TriggerEvent, signal: AbortSignal): Promise<TriggerReceipt> {
     const combined = AbortSignal.any([this.#hostAbort.signal, signal]);
-    const claimKey = triggerStateKey(event.id);
     if (this.#triggerClaims.has(event.id)) return { status: "rejected", reason: "duplicate trigger event" };
-    let claimVersion: string | undefined;
-    if (this.#stateStore !== undefined) {
-      const startedAt = new Date().toISOString();
-      const claimValue = encodePersistedValue({
-        status: "started",
-        event,
-        startedAt,
-        leaseExpiresAt: new Date(Date.parse(startedAt) + TRIGGER_CLAIM_LEASE_MS).toISOString(),
-      });
-      let claimed = await this.#stateStore.compareAndSwap({
-        key: claimKey,
-        expectedVersion: null,
-        value: claimValue,
-        signal: combined,
-      });
-      if (claimed.status === "conflict") {
-        const existing = await this.#stateStore.read({ key: claimKey, signal: combined });
-        if (existing === undefined || !isReclaimableTriggerClaim(existing.value, Date.parse(startedAt))) {
-          return { status: "rejected", reason: "duplicate trigger event" };
-        }
-        claimed = await this.#stateStore.compareAndSwap({
-          key: claimKey,
-          expectedVersion: existing.version,
-          value: claimValue,
-          signal: combined,
-        });
-        if (claimed.status === "conflict") return { status: "rejected", reason: "duplicate trigger event" };
-      }
-      claimVersion = claimed.record.version;
-    }
     this.#triggerClaims.add(event.id);
     const conversationId = `trigger:${event.triggerInstanceId}:${event.id}`;
     let delivery: ChannelDeliveryResult | undefined;
+    let replayed = false;
     try {
-      const response = await this.submit({
+      const response = await this.#submitRequest(normalizeSubmitInput({
         requestId: event.id,
         conversationId,
         text: event.prompt,
@@ -3310,9 +3053,19 @@ class AgentHostImplementation implements AgentHost {
           triggerInstanceId: event.triggerInstanceId,
           ...(event.metadata ?? {}),
         },
-      });
+      }), async () => {}, undefined, undefined, (value) => { replayed = value; });
       if (response.status !== "completed") {
         throw new Error(`Trigger turn ended with ${response.status}`);
+      }
+      if (replayed && event.deliveryChannel === undefined) {
+        this.#triggerClaims.delete(event.id);
+        return { status: "rejected", reason: "duplicate trigger event" };
+      }
+      if (response.text === PROACTIVE_SUPPRESSION_SENTINEL) {
+        this.#triggerClaims.delete(event.id);
+        return replayed
+          ? { status: "rejected", reason: "duplicate trigger event" }
+          : { status: "accepted", runId: response.runId };
       }
       if (event.deliveryChannel !== undefined) {
         const destination = typeof event.metadata?.destination === "string"
@@ -3327,39 +3080,21 @@ class AgentHostImplementation implements AgentHost {
         if (delivery.status !== "delivered" && delivery.status !== "duplicate") {
           throw new Error(`Trigger delivery ended with ${delivery.status}`);
         }
+        if (replayed && delivery.status === "duplicate") {
+          this.#triggerClaims.delete(event.id);
+          return { status: "rejected", reason: "duplicate trigger event" };
+        }
       }
-      if (this.#stateStore !== undefined) {
-        await this.#stateStore.write({
-          key: claimKey,
-          value: encodePersistedValue({
-            status: "completed",
-            event,
-            response: { status: response.status, runtime: response.runtime, model: response.model },
-            ...(delivery === undefined ? {} : { delivery }),
-            finishedAt: new Date().toISOString(),
-          }),
-          ...(claimVersion === undefined ? {} : { expectedVersion: claimVersion }),
-          signal: combined,
-        });
-      }
-      return { status: "accepted", runId: conversationId };
+      this.#triggerClaims.delete(event.id);
+      return { status: "accepted", runId: response.runId };
     } catch (error) {
+      if (error instanceof AgentAdmissionError
+        && (error.code === "request_conflict" || error.code === "request_in_progress")) {
+        this.#triggerClaims.delete(event.id);
+        return { status: "rejected", reason: "duplicate trigger event" };
+      }
       const deliveryUnknown = delivery?.status === "unknown";
       if (!deliveryUnknown) this.#triggerClaims.delete(event.id);
-      if (this.#stateStore !== undefined) {
-        await this.#stateStore.write({
-          key: claimKey,
-          value: encodePersistedValue({
-            status: deliveryUnknown ? "delivery_unknown" : "failed",
-            eventId: event.id,
-            message: this.#redact(errorMessage(error)),
-            ...(delivery === undefined ? {} : { delivery }),
-            finishedAt: new Date().toISOString(),
-          }),
-          ...(claimVersion === undefined ? {} : { expectedVersion: claimVersion }),
-          signal: combined,
-        }).catch(() => undefined);
-      }
       return { status: "rejected", reason: this.#redact(errorMessage(error)) };
     }
   }
@@ -3367,25 +3102,51 @@ class AgentHostImplementation implements AgentHost {
   async #completeMemoryCapture(request: MemoryRuntimeCaptureRequest): Promise<MemoryRuntimeCaptureResult> {
     assertBoundedText(request.instructions, "memory capture instructions", DEFAULT_INSTRUCTION_BYTES);
     assertBoundedText(request.input, "memory capture input", DEFAULT_MESSAGE_BYTES);
+    assertRouteText(request.runtime, "memory capture runtime", 256);
+    assertRouteText(request.model, "memory capture model", 512);
     if (!Number.isSafeInteger(request.maxOutputTokens) || request.maxOutputTokens <= 0 || request.maxOutputTokens > 16_384) {
       throw new RangeError("memory capture maxOutputTokens must be between 1 and 16384");
     }
-    const runtime = this.#runtimeInstances.get(this.config.raw.routing.primary.runtime);
-    if (runtime === undefined) throw new Error("primary runtime is unavailable for memory capture");
-    const signal = AbortSignal.any([this.#hostAbort.signal, request.signal]);
+    if (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1 || request.timeoutMs > 3_600_000) {
+      throw new RangeError("memory capture timeoutMs must be between 1 and 3600000");
+    }
+    const runtime = this.#runtimeInstances.get(request.runtime);
+    const configuredCapabilities = this.#runtimeCapabilities.get(request.runtime);
+    if (runtime === undefined || configuredCapabilities === undefined) {
+      throw new Error(`memory capture runtime ${request.runtime} is unavailable`);
+    }
+    const timeout = AbortSignal.timeout(request.timeoutMs);
+    const signal = AbortSignal.any([this.#hostAbort.signal, request.signal, timeout]);
+    let routeCapabilities = configuredCapabilities;
+    if (runtime.preflightModel !== undefined || runtime.validateModel !== undefined) {
+      const rawValidation = runtime.preflightModel !== undefined
+        ? await runtime.preflightModel({ model: request.model, signal })
+        : await runtime.validateModel!(request.model, signal);
+      const validation = normalizeRuntimeModelValidation(
+        rawValidation,
+        `${request.runtime}:${request.model} memory capture model validation result`,
+      );
+      if (!validation.supported) {
+        throw new Error(`memory capture runtime ${request.runtime} does not support the selected model`);
+      }
+      routeCapabilities = validation.capabilities ?? routeCapabilities;
+    }
+    if (!routeCapabilities.structuredOutput) {
+      throw new Error("memory capture route does not support structured output");
+    }
     const eventBoundary = createRuntimeTurnEventBoundary();
     const captureConversationId = `memory-capture:${randomUUID()}`;
     const captureAuthority = {
       conversationId: captureConversationId,
       route: {
-        runtimeInstanceId: this.config.raw.routing.primary.runtime,
-        model: this.config.raw.routing.primary.model,
+        runtimeInstanceId: request.runtime,
+        model: request.model,
       },
     } as const;
     const rawResult = await runtime.runTurn({
       turnId: randomUUID(),
       conversationId: captureConversationId,
-      model: this.config.raw.routing.primary.model,
+      model: request.model,
       messages: [
         { role: "system", content: [{ type: "text", text: request.instructions }] },
         { role: "user", content: [{ type: "text", text: request.input }] },
@@ -3506,8 +3267,7 @@ class AgentHostImplementation implements AgentHost {
     this.#channelCapabilities.clear();
     this.#exporterInstances.clear();
     this.#memory = undefined;
-    this.#runJournal = undefined;
-    this.#executionStore = undefined;
+    this.#execution = undefined;
     this.#stateStore = undefined;
     this.#sandbox = undefined;
     return failures;
@@ -3542,11 +3302,26 @@ class AgentHostImplementation implements AgentHost {
     }
     if (error instanceof AgentModuleError) {
       return new AgentModuleError(message, {
-        ...(error.packageName === undefined ? {} : { packageName: error.packageName }),
-        ...(error.configPath === undefined ? {} : { configPath: error.configPath }),
+        ...(error.code === undefined ? {} : { code: this.#redact(error.code) }), ...(error.packageName === undefined ? {} : { packageName: this.#redact(error.packageName) }),
+        ...(error.configPath === undefined ? {} : { configPath: this.#redact(error.configPath) }), ...(error.moduleInstanceId === undefined ? {} : { moduleInstanceId: this.#redact(error.moduleInstanceId) }),
+        ...(error.commandName === undefined ? {} : { commandName: boundedUtf8(this.#redact(error.commandName), 512) }), ...(error.phase === undefined ? {} : { phase: error.phase }),
       });
     }
     return new Error(message);
+  }
+
+  #moduleCommandError(error: unknown, loaded: LoadedAgentModule, commandName: string,
+    phase: "create" | "run" | "stop" | "run_and_stop"): AgentModuleError {
+    const cause = sanitizeModuleCommandError(error, (value) => this.#redact(value));
+    const code = `module_command_${phase}_failed`;
+    return new AgentModuleError(boundedUtf8(
+      this.#redact(`${code}: ${loaded.instanceId} command ${commandName} ${phase.replaceAll("_", " ")} failed: ${cause.message}`),
+      4_096,
+    ), {
+      code,
+      packageName: this.#redact(loaded.packageName), configPath: this.#redact(loaded.configPath),
+      moduleInstanceId: this.#redact(loaded.instanceId), commandName: boundedUtf8(this.#redact(commandName), 512), phase, cause,
+    });
   }
 
   #safePublicCause(
@@ -3558,6 +3333,101 @@ class AgentHostImplementation implements AgentHost {
       4_096,
     ));
   }
+}
+
+function sanitizeModuleCommandError(error: unknown, redact: (value: string) => string, depth = 0): Error {
+  const message = boundedUtf8(redact(inspectModuleFailure(error)), 4_096);
+  const nestedCause = depth >= 4 ? undefined : ownDataProperty(error, "cause");
+  const options = nestedCause === undefined ? undefined
+    : { cause: sanitizeModuleCommandError(nestedCause, redact, depth + 1) };
+  const aggregateErrors = depth >= 4 ? undefined : ownDataProperty(error, "errors");
+  let sanitizedErrors: Error[] | undefined;
+  if (aggregateErrors !== undefined) {
+    try {
+      const entries = boundedOwnDataArray(aggregateErrors, "module command aggregate errors", 8, true, true);
+      sanitizedErrors = [];
+      for (let index = 0; index < entries.length; index += 1)
+        sanitizedErrors.push(sanitizeModuleCommandError(entries[index], redact, depth + 1));
+    } catch { sanitizedErrors = [new Error("Unsafe aggregate error details were omitted")]; }
+  }
+  const safe = sanitizedErrors === undefined
+    ? new Error(message, options) : new AggregateError(sanitizedErrors, message, options);
+  const code = ownDataProperty(error, "code");
+  if (typeof code === "string" && code.length > 0) {
+    Object.defineProperty(safe, "code", { value: boundedUtf8(redact(code), 128), enumerable: true });
+  }
+  return safe;
+}
+
+function inspectModuleFailure(error: unknown): string {
+  try { return errorMessage(error); }
+  catch { return "Module failure could not be inspected safely"; }
+}
+
+function ownDataProperty(value: unknown, key: string): unknown {
+  if ((typeof value !== "object" && typeof value !== "function") || value === null) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
+  } catch { return undefined; }
+}
+
+function normalizeModuleJson(
+  value: unknown,
+  path: string,
+  redact: (value: string) => string,
+): JsonValue {
+  const options = {
+    path,
+    maxBytes: MODULE_OUTPUT_MAX_BYTES,
+    maxItems: MODULE_OUTPUT_MAX_ITEMS,
+    maxDepth: MODULE_OUTPUT_MAX_DEPTH,
+    label: "JSON",
+    requireEnumerable: true,
+    requireOrdinaryArrays: true,
+  } as const;
+  const snapshot = snapshotBoundedValue<JsonValue>(value, options).value;
+  return snapshotBoundedValue<JsonValue>(redactJson(snapshot, redact), options).value;
+}
+
+function redactJson(value: JsonValue, redact: (value: string) => string): JsonValue {
+  if (typeof value === "string") return redact(value);
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((entry) => redactJson(entry, redact));
+  const output: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;
+  for (const [key, entry] of Object.entries(value)) output[redact(key)] = redactJson(entry, redact);
+  return output;
+}
+
+function normalizeModuleHealth(
+  value: unknown,
+  path: string,
+  redact: (value: string) => string,
+): ModuleHealth {
+  const input = ownDataRecord(
+    normalizeModuleJson(value, path, redact),
+    path,
+    ["status", "checkedAt", "summary", "details"],
+  );
+  if (!["healthy", "degraded", "unhealthy", "unknown"].includes(String(input.status))) {
+    throw new TypeError(`${path}.status is invalid`);
+  }
+  if (typeof input.checkedAt !== "string" || input.checkedAt.length === 0) {
+    throw new TypeError(`${path}.checkedAt must be non-empty`);
+  }
+  if (input.summary !== undefined && typeof input.summary !== "string") {
+    throw new TypeError(`${path}.summary must be text`);
+  }
+  if (input.details !== undefined
+    && (typeof input.details !== "object" || input.details === null || Array.isArray(input.details))) {
+    throw new TypeError(`${path}.details must be a JSON object`);
+  }
+  return {
+    status: input.status as ModuleHealth["status"],
+    checkedAt: input.checkedAt,
+    ...(input.summary === undefined ? {} : { summary: input.summary }),
+    ...(input.details === undefined ? {} : { details: input.details as JsonObject }),
+  };
 }
 
 function routeCandidates(config: LoadedAgentConfig, input: AgentSubmitInput): readonly RuntimeRoute[] {
@@ -3699,74 +3569,6 @@ function boundedUtf8(value: string, maxBytes: number): string {
   let end = Math.max(0, payloadBytes);
   while (end > 0 && (bytes[end] ?? 0) >> 6 === 0b10) end -= 1;
   return `${bytes.subarray(0, end).toString("utf8")}${suffix}`;
-}
-
-function isTurnMessage(value: unknown): value is TurnMessage {
-  return isRecord(value)
-    && (value.role === "system" || value.role === "user" || value.role === "assistant" || value.role === "tool")
-    && Array.isArray(value.content)
-    && value.content.every(isTurnContentPart)
-    && (value.id === undefined || typeof value.id === "string")
-    && (value.name === undefined || typeof value.name === "string")
-    && (value.createdAt === undefined || typeof value.createdAt === "string");
-}
-
-function isTurnContentPart(value: unknown): boolean {
-  if (!isRecord(value) || typeof value.type !== "string") return false;
-  if (value.type === "text") return typeof value.text === "string";
-  if (value.type === "image" || value.type === "file") {
-    return typeof value.mediaType === "string"
-      && (typeof value.data === "string" || value.data instanceof Uint8Array)
-      && (value.name === undefined || typeof value.name === "string");
-  }
-  if (value.type === "attachment") return isNormalizedAttachment(value.attachment);
-  if (value.type === "tool-call") {
-    return isRecord(value.call)
-      && typeof value.call.id === "string"
-      && typeof value.call.name === "string"
-      && isJsonValue(value.call.input);
-  }
-  if (value.type === "tool-result") {
-    return isRecord(value.result)
-      && typeof value.result.callId === "string"
-      && (value.result.isError === undefined || typeof value.result.isError === "boolean")
-      && Array.isArray(value.result.content)
-      && value.result.content.every(isRuntimeToolResultPart);
-  }
-  return false;
-}
-
-function isRuntimeToolResultPart(value: unknown): boolean {
-  if (!isRecord(value)) return false;
-  if (value.type === "text") return typeof value.text === "string";
-  if (value.type === "json") return isJsonValue(value.value);
-  if (value.type === "file") {
-    return typeof value.mediaType === "string"
-      && (typeof value.data === "string" || value.data instanceof Uint8Array)
-      && (value.name === undefined || typeof value.name === "string");
-  }
-  if (value.type === "artifact") {
-    try {
-      parseArtifactRef(value.ref);
-      return value.preview === undefined || typeof value.preview === "string";
-    } catch {
-      return false;
-    }
-  }
-  return false;
-}
-
-function isNormalizedAttachment(value: unknown): value is ChannelAttachment {
-  return isRecord(value)
-    && typeof value.id === "string"
-    && (value.kind === "image" || value.kind === "audio" || value.kind === "file")
-    && typeof value.name === "string"
-    && typeof value.mediaType === "string"
-    && Number.isSafeInteger(value.sizeBytes)
-    && typeof value.sizeBytes === "number"
-    && value.sizeBytes >= 0
-    && value.data instanceof Uint8Array
-    && value.data.byteLength === value.sizeBytes;
 }
 
 function textFromMessage(message: TurnMessage): string {
@@ -4211,7 +4013,7 @@ function turnBinaryData(value: Uint8Array | string, label: string): Uint8Array {
 }
 
 function submissionFingerprint(input: AgentSubmitInput): DurableFingerprint {
-  return createDurableFingerprint({
+  return durableFingerprint({
     schemaVersion: 1,
     kind: "mono-agent.submission-fingerprint",
     conversationId: input.conversationId,
@@ -4275,9 +4077,19 @@ function normalizeOutboundMessage(message: ChannelOutboundMessage): ChannelOutbo
   if (typeof input.replyToMessageId === "string") {
     assertBoundedText(input.replyToMessageId, "replyToMessageId", 4_096);
   }
-  if (input.metadata !== undefined) {
-    createDurableFingerprint({ metadata: input.metadata });
-    if (!isJsonObject(input.metadata)) {
+  const metadata = input.metadata === undefined
+    ? undefined
+    : snapshotBoundedValue(input.metadata, {
+        path: "outbound message metadata",
+        maxBytes: SUBMIT_SNAPSHOT_MAX_BYTES,
+        maxItems: SUBMIT_SNAPSHOT_MAX_ITEMS,
+        maxDepth: SUBMIT_SNAPSHOT_MAX_DEPTH,
+        label: "JSON",
+        freeze: true,
+        requireOrdinaryArrays: true,
+      }).value;
+  if (metadata !== undefined) {
+    if (!isJsonObject(metadata)) {
       throw new TypeError("outbound message metadata must be a JSON object");
     }
   }
@@ -4289,7 +4101,7 @@ function normalizeOutboundMessage(message: ChannelOutboundMessage): ChannelOutbo
       ? {}
       : { replyToMessageId: input.replyToMessageId as string }),
     idempotencyKey: input.idempotencyKey,
-    ...(input.metadata === undefined ? {} : { metadata: input.metadata as JsonObject }),
+    ...(metadata === undefined ? {} : { metadata }),
   });
 }
 
@@ -4297,7 +4109,7 @@ function deliveryFingerprint(
   channelInstanceId: string,
   message: ChannelOutboundMessage,
 ): DurableFingerprint {
-  return createDurableFingerprint({
+  return durableFingerprint({
     schemaVersion: 1,
     kind: "mono-agent.delivery-fingerprint",
     channelInstanceId,
@@ -4314,6 +4126,15 @@ function deliveryFingerprint(
     replyToMessageId: message.replyToMessageId ?? null,
     metadata: message.metadata ?? null,
   });
+}
+
+function durableFingerprint(value: unknown): DurableFingerprint {
+  const encoded = JSON.stringify(value, (_key, entry: unknown) => (
+    isRecord(entry)
+      ? Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left.localeCompare(right)))
+      : entry
+  ));
+  return `sha256:${createHash("sha256").update(encoded).digest("hex")}`;
 }
 
 function deliveryFailure(
@@ -4465,8 +4286,8 @@ function decodeCachedAgentResponse(
   });
 }
 
-function cacheableAssistantMessage(value: unknown): AgentResponseMessage {
-  if (!isTurnMessage(value) || value.role !== "assistant") {
+function cacheableAssistantMessage(value: TurnMessage): AgentResponseMessage {
+  if (value.role !== "assistant") {
     throw new TypeError("cached response message must be an assistant message");
   }
   const content = value.content
@@ -4587,7 +4408,7 @@ async function turnContentFromTranscriptPart(
   const ref: ArtifactRef = parseArtifactRef(part.ref);
   const data = await state.readArtifact({
     ref,
-    maxBytes: MAX_PERSISTED_CONVERSATION_BYTES,
+    maxBytes: MAX_TRANSCRIPT_ARTIFACT_BYTES,
     signal,
   });
   if (ref.mediaType.startsWith("image/")) {
@@ -4638,82 +4459,61 @@ function normalizeSubmitInput(input: AgentSubmitInput): AgentSubmitInput {
   input = ownDataRecord(
     input,
     "submission",
-    [
-      "requestId",
-      "conversationId",
-      "text",
-      "attachments",
-      "runtime",
-      "model",
-      "effort",
-      "maxTurns",
-      "maxOutputTokens",
-      "responseSchema",
-      "interactionHandler",
-      "signal",
-      "metadata",
-      "requiredCapabilities",
-      "toolPolicy",
-    ],
+    ["requestId", "conversationId", "text", "attachments", "runtime", "model",
+      "effort", "maxTurns", "maxOutputTokens", "responseSchema", "interactionHandler",
+      "signal", "metadata", "requiredCapabilities", "toolPolicy"],
   ) as unknown as AgentSubmitInput;
   const requestId = input.requestId ?? randomUUID();
-  if (typeof requestId !== "string" || requestId.trim().length === 0) {
-    throw new TypeError("requestId must be non-empty");
-  }
+  if (typeof requestId !== "string" || requestId.trim().length === 0) throw new TypeError("requestId must be non-empty");
   assertBoundedText(requestId, "requestId", 512);
   if (requestId.includes("\0")) throw new TypeError("requestId must not contain NUL");
-  if (typeof input.conversationId !== "string" || input.conversationId.trim().length === 0) {
-    throw new TypeError("conversationId must be non-empty");
-  }
+  if (typeof input.conversationId !== "string" || input.conversationId.trim().length === 0) throw new TypeError("conversationId must be non-empty");
   assertBoundedText(input.conversationId, "conversationId", 4_096);
-  if (input.conversationId.includes("\0")) {
-    throw new TypeError("conversationId must not contain NUL");
-  }
+  if (input.conversationId.includes("\0")) throw new TypeError("conversationId must not contain NUL");
   if (typeof input.text !== "string") throw new TypeError("text must be a string");
   assertBoundedText(input.text, "text", DEFAULT_MESSAGE_BYTES);
-  if (input.maxTurns !== undefined) {
-    boundedSubmitInteger(input.maxTurns, "maxTurns", 1, 10_000);
-  }
-  if (input.maxOutputTokens !== undefined) {
-    boundedSubmitInteger(input.maxOutputTokens, "maxOutputTokens", 1, 100_000_000);
-  }
-  const snapshotState = {
-    items: 0,
-    bytes: 0,
-    active: new Set<object>(),
-  };
-  const responseSchema = input.responseSchema === undefined
+  if (input.maxTurns !== undefined) boundedSubmitInteger(input.maxTurns, "maxTurns", 1, 10_000);
+  if (input.maxOutputTokens !== undefined) boundedSubmitInteger(input.maxOutputTokens, "maxOutputTokens", 1, 100_000_000);
+  const durable = snapshotBoundedValue<{
+    readonly responseSchema?: unknown; readonly metadata?: unknown;
+    readonly requiredCapabilities?: unknown; readonly toolPolicy?: unknown;
+  }>({
+    ...(input.responseSchema === undefined ? {} : { responseSchema: input.responseSchema }),
+    ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+    ...(input.requiredCapabilities === undefined ? {} : { requiredCapabilities: input.requiredCapabilities }),
+    ...(input.toolPolicy === undefined ? {} : { toolPolicy: input.toolPolicy }),
+  }, {
+    path: "submission durable fields",
+    maxBytes: SUBMIT_SNAPSHOT_MAX_BYTES,
+    maxItems: SUBMIT_SNAPSHOT_MAX_ITEMS,
+    maxDepth: SUBMIT_SNAPSHOT_MAX_DEPTH,
+    label: "submission durable fields",
+    cloneBytes: true,
+    freeze: true,
+    requireOrdinaryArrays: true,
+  }).value;
+  const responseSchema = durable.responseSchema === undefined
     ? undefined
-    : snapshotSubmitRecord(
-      input.responseSchema,
-      "responseSchema",
-      snapshotState,
-      false,
-    ) as NonNullable<AgentSubmitInput["responseSchema"]>;
+    : isJsonObject(durable.responseSchema)
+      ? durable.responseSchema as NonNullable<AgentSubmitInput["responseSchema"]>
+      : (() => { throw new TypeError("responseSchema must contain only JSON values"); })();
   if (responseSchema !== undefined) {
     const encoded = JSON.stringify(responseSchema);
-    if (Buffer.byteLength(encoded, "utf8") > 64 * 1024) {
-      throw new RangeError("responseSchema exceeds 65536 bytes");
-    }
+    if (Buffer.byteLength(encoded, "utf8") > 64 * 1024) throw new RangeError("responseSchema exceeds 65536 bytes");
   }
-  const metadata = input.metadata === undefined
+  const metadata = durable.metadata === undefined
     ? undefined
-    : snapshotSubmitRecord(
-      input.metadata,
-      "metadata",
-      snapshotState,
-      true,
-    );
-  const requiredCapabilities = input.requiredCapabilities === undefined
-    ? undefined
-    : snapshotSubmitStringList(
-      input.requiredCapabilities,
-      "requiredCapabilities",
-      snapshotState,
-    );
-  const toolPolicy = input.toolPolicy === undefined
-    ? undefined
-    : snapshotSubmitToolPolicy(input.toolPolicy, snapshotState);
+    : Object.freeze(boundedOwnDataRecord(durable.metadata, "metadata"));
+  const requiredCapabilities = durable.requiredCapabilities === undefined ? undefined
+    : submitStringList(durable.requiredCapabilities, "requiredCapabilities");
+  let toolPolicy: NonNullable<AgentSubmitInput["toolPolicy"]> | undefined;
+  if (durable.toolPolicy !== undefined) {
+    const policy = ownDataRecord(durable.toolPolicy, "toolPolicy", ["allow", "deny"]);
+    toolPolicy = Object.freeze({
+      ...(policy.allow === undefined ? {} : { allow: submitStringList(policy.allow, "toolPolicy.allow") }),
+      ...(policy.deny === undefined ? {} : { deny: submitStringList(policy.deny, "toolPolicy.deny") }),
+    });
+  }
   if (input.interactionHandler !== undefined
     && (typeof input.interactionHandler.askUser !== "function"
       || typeof input.interactionHandler.requestApproval !== "function")) {
@@ -4726,18 +4526,11 @@ function normalizeSubmitInput(input: AgentSubmitInput): AgentSubmitInput {
       throw new TypeError("signal must be an AbortSignal", { cause: error });
     }
   }
-  const attachments = denseOwnDataArray(
-    input.attachments ?? [],
-    "attachments",
-    DEFAULT_MAX_ATTACHMENTS,
-  );
+  const attachments = denseOwnDataArray(input.attachments ?? [], "attachments", DEFAULT_MAX_ATTACHMENTS);
   let totalBytes = 0;
   const normalized = attachments.map((value, index): ChannelAttachment => {
-    const attachment = ownDataRecord(
-      value,
-      `attachments.${String(index)}`,
-      ["id", "kind", "name", "mediaType", "sizeBytes", "data"],
-    );
+    const attachment = ownDataRecord(value, `attachments.${String(index)}`,
+      ["id", "kind", "name", "mediaType", "sizeBytes", "data"]);
     if (
       typeof attachment.id !== "string" || attachment.id.trim().length === 0
       || typeof attachment.name !== "string" || attachment.name.trim().length === 0
@@ -4754,20 +4547,12 @@ function normalizeSubmitInput(input: AgentSubmitInput): AgentSubmitInput {
       `attachments.${String(index)}.data`,
       Math.min(DEFAULT_ATTACHMENT_BYTES, DEFAULT_TOTAL_ATTACHMENT_BYTES - totalBytes),
     );
-    if (attachment.sizeBytes !== data.byteLength) {
-      throw new TypeError(`attachments.${index} sizeBytes does not match its byte data`);
-    }
+    if (attachment.sizeBytes !== data.byteLength) throw new TypeError(`attachments.${index} sizeBytes does not match its byte data`);
     totalBytes += data.byteLength;
-    if (totalBytes > DEFAULT_TOTAL_ATTACHMENT_BYTES) {
-      throw new RangeError(`attachments exceed ${DEFAULT_TOTAL_ATTACHMENT_BYTES} total bytes`);
-    }
+    if (totalBytes > DEFAULT_TOTAL_ATTACHMENT_BYTES) throw new RangeError(`attachments exceed ${DEFAULT_TOTAL_ATTACHMENT_BYTES} total bytes`);
     return Object.freeze({
-      id: attachment.id,
-      kind: attachment.kind,
-      name: attachment.name,
-      mediaType: attachment.mediaType,
-      sizeBytes: attachment.sizeBytes,
-      data,
+      id: attachment.id, kind: attachment.kind, name: attachment.name,
+      mediaType: attachment.mediaType, sizeBytes: attachment.sizeBytes, data,
     });
   });
   return Object.freeze({
@@ -4779,13 +4564,9 @@ function normalizeSubmitInput(input: AgentSubmitInput): AgentSubmitInput {
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.effort === undefined ? {} : { effort: input.effort }),
     ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }),
-    ...(input.maxOutputTokens === undefined
-      ? {}
-      : { maxOutputTokens: input.maxOutputTokens }),
+    ...(input.maxOutputTokens === undefined ? {} : { maxOutputTokens: input.maxOutputTokens }),
     ...(responseSchema === undefined ? {} : { responseSchema }),
-    ...(input.interactionHandler === undefined
-      ? {}
-      : { interactionHandler: input.interactionHandler }),
+    ...(input.interactionHandler === undefined ? {} : { interactionHandler: input.interactionHandler }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
     ...(metadata === undefined ? {} : { metadata }),
     ...(requiredCapabilities === undefined ? {} : { requiredCapabilities }),
@@ -4793,130 +4574,17 @@ function normalizeSubmitInput(input: AgentSubmitInput): AgentSubmitInput {
   });
 }
 
-function ownDataRecord(
-  value: unknown,
-  path: string,
-  allowed: readonly string[],
-): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new TypeError(`${path} must be a plain object`);
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new TypeError(`${path} must be a plain object`);
-  }
-  const allowedKeys = new Set(allowed);
-  const detached: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string" || !allowedKeys.has(key)) {
-      throw new TypeError(`${path} contains an unknown field`);
-    }
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined || !("value" in descriptor)) {
-      throw new TypeError(`${path}.${key} must be a data property`);
-    }
-    detached[key] = descriptor.value;
-  }
-  return detached;
+function ownDataRecord(value: unknown, path: string, allowed: readonly string[]): Record<string, unknown> {
+  const output = boundedOwnDataRecord(value, path);
+  assertOwnKeys(output, allowed, path);
+  return output;
 }
 
-function denseOwnDataArray(
-  value: unknown,
-  path: string,
-  maximum: number,
-): readonly unknown[] {
-  if (!Array.isArray(value)) throw new TypeError(`${path} must be an array`);
-  const length = value.length;
-  if (!Number.isSafeInteger(length) || length > maximum) {
-    throw new RangeError(`${path} exceeds the ${maximum} item limit`);
-  }
-  const allowed = new Set(["length"]);
-  for (let index = 0; index < length; index += 1) allowed.add(String(index));
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string" || !allowed.has(key)) {
-      throw new TypeError(`${path} contains an unknown array field`);
-    }
-  }
-  const detached: unknown[] = [];
-  for (let index = 0; index < length; index += 1) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-    if (descriptor === undefined) {
-      throw new TypeError(`${path}.${String(index)} is required`);
-    }
-    if (!("value" in descriptor)) {
-      throw new TypeError(`${path}.${String(index)} must be a data property`);
-    }
-    detached.push(descriptor.value);
-  }
-  return detached;
+function denseOwnDataArray(value: unknown, path: string, maximum: number): readonly unknown[] {
+  return boundedOwnDataArray(value, path, maximum);
 }
 
-interface SubmitSnapshotState {
-  items: number;
-  bytes: number;
-  readonly active: Set<object>;
-}
-
-function snapshotSubmitRecord(
-  value: unknown,
-  path: string,
-  state: SubmitSnapshotState,
-  allowBytes: boolean,
-): Readonly<Record<string, unknown>> {
-  const snapshot = snapshotSubmitValue(value, path, state, allowBytes, 0);
-  if (
-    typeof snapshot !== "object"
-    || snapshot === null
-    || Array.isArray(snapshot)
-    || snapshot instanceof Uint8Array
-  ) {
-    throw new TypeError(`${path} must be a plain object`);
-  }
-  return snapshot as Readonly<Record<string, unknown>>;
-}
-
-function snapshotSubmitStringList(
-  value: unknown,
-  path: string,
-  state: SubmitSnapshotState,
-): readonly string[] {
-  const snapshot = snapshotSubmitValue(value, path, state, false, 0);
-  const entries = denseOwnDataArray(snapshot, path, SUBMIT_SNAPSHOT_MAX_ITEMS);
-  return Object.freeze(entries.map((entry, index) => {
-    if (
-      typeof entry !== "string"
-      || entry.trim().length === 0
-      || entry.includes("\0")
-    ) {
-      throw new TypeError(`${path}.${String(index)} must be a non-empty string`);
-    }
-    assertBoundedText(entry, `${path}.${String(index)}`, 4_096);
-    return entry;
-  }));
-}
-
-function snapshotSubmitToolPolicy(
-  value: unknown,
-  state: SubmitSnapshotState,
-): NonNullable<AgentSubmitInput["toolPolicy"]> {
-  const snapshot = snapshotSubmitRecord(value, "toolPolicy", state, false);
-  const input = ownDataRecord(snapshot, "toolPolicy", ["allow", "deny"]);
-  const allow = input.allow === undefined
-    ? undefined
-    : validateSnapshottedSubmitStringList(input.allow, "toolPolicy.allow");
-  const deny = input.deny === undefined
-    ? undefined
-    : validateSnapshottedSubmitStringList(input.deny, "toolPolicy.deny");
-  return Object.freeze({
-    ...(allow === undefined ? {} : { allow }),
-    ...(deny === undefined ? {} : { deny }),
-  });
-}
-
-function validateSnapshottedSubmitStringList(
-  value: unknown,
-  path: string,
-): readonly string[] {
+function submitStringList(value: unknown, path: string): readonly string[] {
   const entries = denseOwnDataArray(value, path, SUBMIT_SNAPSHOT_MAX_ITEMS);
   for (const [index, entry] of entries.entries()) {
     if (
@@ -4929,97 +4597,6 @@ function validateSnapshottedSubmitStringList(
     assertBoundedText(entry, `${path}.${String(index)}`, 4_096);
   }
   return value as readonly string[];
-}
-
-function snapshotSubmitValue(
-  value: unknown,
-  path: string,
-  state: SubmitSnapshotState,
-  allowBytes: boolean,
-  depth: number,
-): unknown {
-  state.items += 1;
-  if (state.items > SUBMIT_SNAPSHOT_MAX_ITEMS) {
-    throw new RangeError(`submission durable fields exceed ${SUBMIT_SNAPSHOT_MAX_ITEMS} items`);
-  }
-  if (depth > SUBMIT_SNAPSHOT_MAX_DEPTH) {
-    throw new RangeError(`submission durable fields exceed depth ${SUBMIT_SNAPSHOT_MAX_DEPTH}`);
-  }
-  if (value === null || typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    chargeSubmitSnapshotBytes(state, Buffer.byteLength(value, "utf8"));
-    return value;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) {
-      throw new TypeError(`${path} must contain only finite numbers`);
-    }
-    return value;
-  }
-  if (value instanceof Uint8Array) {
-    if (!allowBytes) {
-      throw new TypeError(`${path} must contain only JSON values`);
-    }
-    const copy = cloneIntrinsicUint8Array(
-      value,
-      path,
-      SUBMIT_SNAPSHOT_MAX_BYTES - state.bytes,
-    );
-    chargeSubmitSnapshotBytes(state, copy.byteLength);
-    return copy;
-  }
-  if (typeof value !== "object" || value === null) {
-    throw new TypeError(`${path} must contain only JSON values${allowBytes ? " or bytes" : ""}`);
-  }
-  if (state.active.has(value)) {
-    throw new TypeError(`${path} must not contain cycles`);
-  }
-  state.active.add(value);
-  try {
-    if (Array.isArray(value)) {
-      const entries = denseOwnDataArray(value, path, SUBMIT_SNAPSHOT_MAX_ITEMS);
-      return Object.freeze(entries.map((entry, index) =>
-        snapshotSubmitValue(
-          entry,
-          `${path}.${String(index)}`,
-          state,
-          allowBytes,
-          depth + 1,
-        )));
-    }
-    const keys = Reflect.ownKeys(value);
-    if (keys.some((key) => typeof key !== "string")) {
-      throw new TypeError(`${path} must not contain symbol keys`);
-    }
-    const stringKeys = keys as string[];
-    const input = ownDataRecord(value, path, stringKeys);
-    const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-    for (const key of stringKeys) {
-      chargeSubmitSnapshotBytes(state, Buffer.byteLength(key, "utf8"));
-      output[key] = snapshotSubmitValue(
-        input[key],
-        `${path}.${key}`,
-        state,
-        allowBytes,
-        depth + 1,
-      );
-    }
-    return Object.freeze(output);
-  } finally {
-    state.active.delete(value);
-  }
-}
-
-function chargeSubmitSnapshotBytes(
-  state: SubmitSnapshotState,
-  bytes: number,
-): void {
-  state.bytes += bytes;
-  if (state.bytes > SUBMIT_SNAPSHOT_MAX_BYTES) {
-    throw new RangeError(
-      `submission durable fields exceed ${SUBMIT_SNAPSHOT_MAX_BYTES} bytes`,
-    );
-  }
 }
 
 function normalizeLiveInput(input: AgentLiveInput): AgentLiveInput {
@@ -5067,31 +4644,8 @@ function renderRecalledMemory(records: readonly MemoryRecord[]): string {
   return lines.join("\n");
 }
 
-function conversationStateKey(conversationId: string): string {
-  return `core/conversations/${Buffer.from(conversationId, "utf8").toString("base64url")}`;
-}
-
 function runtimeSessionRouteKey(route: RuntimeRoute): string {
   return Buffer.from(JSON.stringify([route.runtime, route.model]), "utf8").toString("base64url");
-}
-
-function runtimeRouteFromPersistedKey(key: string): RuntimeRoute | undefined {
-  try {
-    const value = JSON.parse(Buffer.from(key, "base64url").toString("utf8")) as unknown;
-    if (
-      !Array.isArray(value)
-      || value.length !== 2
-      || typeof value[0] !== "string"
-      || value[0].trim().length === 0
-      || typeof value[1] !== "string"
-      || value[1].trim().length === 0
-    ) {
-      return undefined;
-    }
-    return { runtime: value[0], model: value[1] };
-  } catch {
-    return undefined;
-  }
 }
 
 function runtimeSessionConversationSuffix(conversationId: string): string {
@@ -5102,102 +4656,11 @@ function runtimeSessionMapKey(route: RuntimeRoute, conversationId: string): stri
   return `${runtimeSessionRouteKey(route)}${runtimeSessionConversationSuffix(conversationId)}`;
 }
 
-function conversationIdFromStateKey(key: string): string | undefined {
-  const prefix = "core/conversations/";
-  if (!key.startsWith(prefix)) return undefined;
-  try {
-    const id = Buffer.from(key.slice(prefix.length), "base64url").toString("utf8");
-    return id.length === 0 ? undefined : id;
-  } catch {
-    return undefined;
-  }
-}
-
-function triggerStateKey(eventId: string): string {
-  return `core/triggers/${createHash("sha256").update(eventId).digest("hex")}`;
-}
-
-function isReclaimableTriggerClaim(value: Uint8Array, now: number): boolean {
-  let claim: unknown;
-  try {
-    claim = decodePersistedJson(value, "Trigger claim");
-  } catch {
-    return false;
-  }
-  if (!isRecord(claim)) return false;
-  if (claim.status === "failed") return true;
-  if (claim.status !== "started") return false;
-  const leaseExpiresAt = typeof claim.leaseExpiresAt === "string"
-    ? Date.parse(claim.leaseExpiresAt)
-    : typeof claim.startedAt === "string"
-      ? Date.parse(claim.startedAt) + TRIGGER_CLAIM_LEASE_MS
-      : Number.NaN;
-  return Number.isFinite(leaseExpiresAt) && leaseExpiresAt <= now;
-}
-
 function encodePersistedValue(value: unknown): Uint8Array {
   const source = JSON.stringify(value, (_key, entry: unknown) => entry instanceof Uint8Array
     ? { $monoAgentBytes: Buffer.from(entry).toString("base64") }
     : entry);
   return new TextEncoder().encode(source);
-}
-
-function decodePersistedConversation(value: Uint8Array, expectedId: string): PersistedConversation {
-  const parsed = decodePersistedJson(value, `Persisted conversation ${expectedId}`);
-  if (
-    !isRecord(parsed)
-    || parsed.schemaVersion !== 1
-    || parsed.conversationId !== expectedId
-    || !Array.isArray(parsed.messages)
-    || !parsed.messages.every(isTurnMessage)
-    || !isRecord(parsed.sessions)
-    || (parsed.sessionUpdatedAt !== undefined && !isTimestampRecord(parsed.sessionUpdatedAt))
-    || typeof parsed.updatedAt !== "string"
-    || (parsed.title !== undefined && typeof parsed.title !== "string")
-    || (parsed.metadata !== undefined && !isJsonObject(parsed.metadata))
-  ) {
-    throw new Error(`Persisted conversation ${expectedId} has an invalid schema`);
-  }
-  const sessions: Record<string, RuntimeSession> = {};
-  for (const [routeKey, session] of Object.entries(parsed.sessions)) {
-    const route = runtimeRouteFromPersistedKey(routeKey);
-    if (route === undefined) {
-      throw new Error(`Persisted conversation ${expectedId} has an invalid runtime session`);
-    }
-    let normalized: RuntimeSession | undefined;
-    try {
-      normalized = normalizeRuntimeTurnResult({
-        status: "cancelled",
-        session,
-      }, {
-        conversationId: expectedId,
-        route: {
-          runtimeInstanceId: route.runtime,
-          model: route.model,
-        },
-      }).session;
-    } catch (error) {
-      throw new Error(`Persisted conversation ${expectedId} has an invalid runtime session`, {
-        cause: error,
-      });
-    }
-    if (normalized === undefined) {
-      throw new Error(`Persisted conversation ${expectedId} has an invalid runtime session`);
-    }
-    sessions[routeKey] = immutableClone(normalized);
-  }
-  return immutableConversationSnapshot({
-    schemaVersion: 1,
-    conversationId: expectedId,
-    messages: immutableClone(parsed.messages as unknown as readonly TurnMessage[]),
-    sessions,
-    ...(parsed.sessionUpdatedAt === undefined
-      ? {}
-      : { sessionUpdatedAt: parsed.sessionUpdatedAt as Readonly<Record<string, string>> }),
-    updatedAt: parsed.updatedAt,
-    ...(parsed.title === undefined ? {} : { title: parsed.title }),
-    ...(parsed.metadata === undefined ? {} : { metadata: parsed.metadata }),
-  });
 }
 
 function decodePersistedJson(value: Uint8Array, label: string): unknown {
@@ -5213,49 +4676,6 @@ function decodePersistedJson(value: Uint8Array, label: string): unknown {
   }
 }
 
-function isPersistedConversationManifest(
-  value: unknown,
-  expectedId: string,
-): value is PersistedConversationManifest {
-  if (!isRecord(value)
-    || value.schemaVersion !== 2
-    || value.kind !== "mono-agent.conversation-chunks.v1"
-    || value.conversationId !== expectedId
-    || value.encoding !== "gzip-json"
-    || !Number.isSafeInteger(value.uncompressedBytes)
-    || typeof value.uncompressedBytes !== "number"
-    || value.uncompressedBytes < 1
-    || value.uncompressedBytes > MAX_PERSISTED_CONVERSATION_BYTES * 2
-    || !Number.isSafeInteger(value.compressedBytes)
-    || typeof value.compressedBytes !== "number"
-    || value.compressedBytes < 1
-    || value.compressedBytes > MAX_PERSISTED_CONVERSATION_BYTES
-    || typeof value.digest !== "string"
-    || !/^[a-f0-9]{64}$/u.test(value.digest)
-    || !Array.isArray(value.chunks)
-    || value.chunks.length < 1
-    || value.chunks.length > MAX_PERSISTED_CONVERSATION_CHUNKS) {
-    return false;
-  }
-  const prefix = `core/conversation-chunks/${createHash("sha256").update(expectedId).digest("hex")}/`;
-  return value.chunks.every((chunk) => (
-    isRecord(chunk)
-    && typeof chunk.key === "string"
-    && chunk.key.startsWith(prefix)
-    && typeof chunk.digest === "string"
-    && /^[a-f0-9]{64}$/u.test(chunk.digest)
-    && chunk.key === `${prefix}${chunk.digest}`
-    && Number.isSafeInteger(chunk.sizeBytes)
-    && typeof chunk.sizeBytes === "number"
-    && chunk.sizeBytes >= 1
-    && chunk.sizeBytes <= PERSISTED_CONVERSATION_CHUNK_BYTES
-  ));
-}
-
-function immutableConversationSnapshot(snapshot: PersistedConversation): PersistedConversation {
-  return immutableClone(snapshot);
-}
-
 function immutableClone<T>(value: T): T {
   return deepFreeze(structuredClone(value));
 }
@@ -5266,12 +4686,6 @@ function deepFreeze<T>(value: T, seen = new Set<object>()): T {
   seen.add(value);
   for (const child of Object.values(value)) deepFreeze(child, seen);
   return Object.freeze(value);
-}
-
-function isTimestampRecord(value: unknown): value is Readonly<Record<string, string>> {
-  return isRecord(value) && Object.values(value).every((entry) => (
-    typeof entry === "string" && Number.isFinite(Date.parse(entry))
-  ));
 }
 
 function isProactiveInput(input: AgentSubmitInput): boolean {
@@ -5383,6 +4797,13 @@ function stableReplayId(conversationId: string, index: number, message: TurnMess
 function assertBoundedText(value: string, name: string, maxBytes: number): void {
   const bytes = Buffer.byteLength(value, "utf8");
   if (bytes > maxBytes) throw new RangeError(`${name} exceeds ${maxBytes} bytes`);
+}
+
+function assertRouteText(value: string, name: string, maxBytes: number): void {
+  assertBoundedText(value, name, maxBytes);
+  if (value.length === 0 || value !== value.trim() || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new TypeError(`${name} must be a non-empty trimmed string without control characters`);
+  }
 }
 
 function isJsonObject(value: unknown): value is JsonObject {

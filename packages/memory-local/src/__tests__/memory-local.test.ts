@@ -31,15 +31,30 @@ afterEach(async () => {
 
 describe("memory-local", () => {
   it("strictly validates bounded configuration", () => {
-    expect(parseMemoryLocalConfig(undefined).capture.mode).toBe("direct");
+    expect(parseMemoryLocalConfig(undefined).capture.enabled).toBe(false);
     expect(() => parseMemoryLocalConfig({ unknown: true })).toThrow(/unknown field/u);
-    expect(() => parseMemoryLocalConfig({ limits: { maxRecords: 0 } })).toThrow(/maxRecords/u);
-    expect(() => parseMemoryLocalConfig({ capture: { mode: "implicit" } })).toThrow(/direct or runtime/u);
+    expect(() => parseMemoryLocalConfig({ maxBytes: 0 })).toThrow(/maxBytes/u);
+    expect(() => parseMemoryLocalConfig({ capture: { enabled: true } })).toThrow(/model/u);
+    expect(() => parseMemoryLocalConfig({
+      capture: {
+        enabled: true,
+        model: { runtime: "pi", model: "openai-codex:gpt-5.4-mini" },
+      },
+      embeddings: {
+        provider: "ollama",
+        endpoint: "http://example.com:11434",
+        model: "nomic-embed-text:v1.5",
+        dimensions: 768,
+      },
+    })).toThrow(/literal-loopback/u);
   });
 
   it("creates an owner-private permanent store and performs deterministic recall, capture, and forget", async () => {
     const { root, directory } = await fixture();
-    const memory = await openMemoryLocal(options(root, directory));
+    const memory = await openMemoryLocal({
+      ...options(root, directory, captureConfig()),
+      host: host(passthroughGrant()),
+    });
     try {
       const databasePath = join(directory, MEMORY_LOCAL_DATABASE_FILENAME);
       const markerPath = join(directory, MEMORY_LOCAL_MARKER_FILENAME);
@@ -57,20 +72,27 @@ describe("memory-local", () => {
       });
 
       const recalled = await memory.recall({ query: "alpha", limit: 3, conversationId: "thread-1", signal });
-      expect(recalled.records.map(({ id }) => id)).toEqual(["conversation", "later", "earlier"]);
-      expect(await memory.forget?.({ recordId: "earlier", signal })).toBe(true);
-      expect(await memory.forget?.({ recordId: "earlier", signal })).toBe(false);
-      expect((await memory.recall({ query: "status", limit: 3, signal })).records.map(({ id }) => id)).toEqual(["later"]);
+      expect(recalled.records.map(({ text }) => text)).toEqual([
+        "alpha note",
+        "project alpha status",
+        "project alpha status",
+      ]);
+      const earlier = recalled.records.find(({ createdAt }) => createdAt === "2026-07-22T12:00:00.000Z")!;
+      expect(await memory.forget?.({ recordId: earlier.id, signal })).toBe(true);
+      expect(await memory.forget?.({ recordId: earlier.id, signal })).toBe(false);
+      expect((await memory.recall({ query: "status", limit: 3, signal })).records.map(({ createdAt }) => createdAt))
+        .toEqual(["2026-07-23T12:00:00.000Z"]);
     } finally {
       await memory.stop();
     }
 
-    const reopened = await openMemoryLocal(options(root, directory));
+    const reopened = await openMemoryLocal({
+      ...options(root, directory, captureConfig()),
+      host: host(passthroughGrant()),
+    });
     try {
-      expect((await reopened.recall({ query: "alpha", limit: 3, signal })).records.map(({ id }) => id)).toEqual([
-        "later",
-        "conversation",
-      ]);
+      expect((await reopened.recall({ query: "alpha", limit: 3, signal })).records.map(({ text }) => text))
+        .toEqual(["alpha note", "project alpha status"]);
     } finally {
       await reopened.stop();
     }
@@ -78,7 +100,10 @@ describe("memory-local", () => {
 
   it("makes exact duplicates idempotent and conflicting ids atomic", async () => {
     const { root, directory } = await fixture();
-    const memory = await openMemoryLocal(options(root, directory));
+    const memory = await openMemoryLocal({
+      ...options(root, directory, captureConfig()),
+      host: host(passthroughGrant()),
+    });
     try {
       const first = record("stable", "first content", "2026-07-23T12:00:00.000Z");
       await memory.capture?.({ record: first, signal });
@@ -96,7 +121,7 @@ describe("memory-local", () => {
 
   it("requires an explicit host capability and bounds runtime-backed capture", async () => {
     const first = await fixture();
-    await expect(openMemoryLocal(options(first.root, first.directory, { capture: { mode: "runtime" } })))
+    await expect(openMemoryLocal(options(first.root, first.directory, captureConfig())))
       .rejects.toMatchObject({ code: "runtime_capture_unavailable" });
 
     const second = await fixture();
@@ -109,7 +134,7 @@ describe("memory-local", () => {
       },
     };
     const memory = await openMemoryLocal({
-      ...options(second.root, second.directory, { capture: { mode: "runtime", maxRecords: 2 } }),
+      ...options(second.root, second.directory, captureConfig()),
       host: host(grant),
     });
     try {
@@ -131,7 +156,7 @@ describe("memory-local", () => {
       },
     };
     const rejecting = await openMemoryLocal({
-      ...options(third.root, third.directory, { capture: { mode: "runtime", maxRecords: 1 } }),
+      ...options(third.root, third.directory, captureConfig()),
       host: host(invalid),
     });
     try {
@@ -288,5 +313,23 @@ function host(grant: MemoryRuntimeCaptureGrant): MemoryHost {
     grantedCapabilities: new Set([HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE]),
     getCapability<T = unknown>(_name: string): T | undefined { return undefined; },
     runtimeCapture: grant,
+  };
+}
+
+function captureConfig(): unknown {
+  return {
+    capture: {
+      enabled: true,
+      model: { runtime: "pi", model: "openai-codex:gpt-5.4-mini" },
+      timeoutMs: 5_000,
+    },
+  };
+}
+
+function passthroughGrant(): MemoryRuntimeCaptureGrant {
+  return {
+    async complete({ input }) {
+      return { text: "", structuredOutput: { records: [{ text: input }] } };
+    },
   };
 }

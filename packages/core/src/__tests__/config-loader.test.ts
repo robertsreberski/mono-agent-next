@@ -96,18 +96,18 @@ describe("strict config and module loading", () => {
     });
     expect(Object.isFrozen(loaded.mcp.mcpServers.first)).toBe(true);
     const explanation = await explainAgentConfig(loaded);
-    expect(explanation.entries).toContainEqual({
+    expect(explanation.entries).toContainEqual(expect.objectContaining({
       path: "routing.fallbacks",
       owner: "@mono-agent/core",
       source: "config",
       value: [],
-    });
-    expect(explanation.entries).toContainEqual({
+    }));
+    expect(explanation.entries).toContainEqual(expect.objectContaining({
       path: "policy.tools.allow",
       owner: "@mono-agent/core",
       source: "config",
       value: [],
-    });
+    }));
 
     const clone = { ...loaded };
     await expect(composeAgentConfigSchema(clone)).rejects.toMatchObject({
@@ -467,13 +467,13 @@ export const monoAgentModule = {};
     expect(JSON.stringify(loaded)).not.toContain(secret);
 
     const explanation = await explainAgentConfig(loaded);
-    expect(explanation.entries).toContainEqual({
+    expect(explanation.entries).toContainEqual(expect.objectContaining({
       path: "runtimes.main.apiKey",
       owner: runtime,
-      source: "env",
+      source: "environment",
       env: "FIXTURE_API_KEY",
       redacted: true,
-    });
+    }));
     expect(JSON.stringify(explanation)).not.toContain(secret);
 
     const schema = await composeAgentConfigSchema(loaded);
@@ -483,6 +483,151 @@ export const monoAgentModule = {};
       required: ["$env"],
       additionalProperties: false,
     });
+  });
+
+  it("explains schema-owned effective defaults and parsed module provenance without environment values", async () => {
+    let created = 0;
+    const apiSecret = "api-secret-must-not-escape";
+    const endpointSecret = "endpoint-value-must-not-escape";
+    const project = await fixture({
+      kind: "runtime",
+      schema: {
+        type: "object",
+        properties: {
+          mode: { type: "string" },
+          retries: { type: "integer", default: 3 },
+          endpoints: { type: "array", items: { type: "string" }, default: [] },
+          apiKey: {
+            type: "string",
+            "x-mono-agent-env-eligible": true,
+            "x-mono-agent-secret": true,
+          },
+          endpoint: {
+            type: "string",
+            "x-mono-agent-env-eligible": true,
+          },
+          endpointEcho: { type: "string" },
+          apiDigest: { type: "string" },
+        },
+        required: ["mode", "apiKey", "endpoint"],
+        additionalProperties: false,
+      },
+      controller: {
+        parse(input) {
+          if (!isRecord(input)) throw new TypeError("runtime config must be an object");
+          return {
+            mode: input.mode,
+            apiKey: input.apiKey,
+            endpoint: input.endpoint,
+            endpointEcho: `echo:${String(input.endpoint)}`,
+            apiDigest: Buffer.from(String(input.apiKey)).toString("base64"),
+            retries: 3,
+            endpoints: [],
+          };
+        },
+        create() {
+          created += 1;
+          return {};
+        },
+      },
+    });
+    const runtime = project.modules[0]!.name;
+    const config = minimalConfig(runtime, {
+      context: { skills: { roots: ["./skills"] } },
+    });
+    setMainRuntime(config, {
+      $use: runtime,
+      mode: "fast",
+      apiKey: { $env: "FIXTURE_API_KEY" },
+      endpoint: { $env: "FIXTURE_ENDPOINT" },
+    });
+    await project.writeConfig(config);
+
+    const loaded = await loadAgentConfig(project.configPath, {
+      environment: {
+        FIXTURE_API_KEY: apiSecret,
+        FIXTURE_ENDPOINT: endpointSecret,
+      },
+    });
+    const explanation = await explainAgentConfig(loaded);
+    const byPath = new Map(explanation.entries.map((entry) => [entry.path, entry]));
+
+    expect(created).toBe(0);
+    expect(explanation.entries.map((entry) => entry.path)).toEqual(
+      [...explanation.entries.map((entry) => entry.path)].sort(),
+    );
+    expect(byPath.get("policy.approvals.timeoutMs")).toEqual({
+      path: "policy.approvals.timeoutMs",
+      owner: "@mono-agent/core",
+      schemaPointer: "#/properties/policy/properties/approvals/properties/timeoutMs",
+      source: "default",
+      value: 60_000,
+      redacted: false,
+      remediation: "Set policy.approvals.timeoutMs in the config to override this default, then validate again.",
+    });
+    expect(byPath.get("session.mode")).toMatchObject({
+      owner: "@mono-agent/core",
+      schemaPointer: "#/properties/session/properties/mode",
+      source: "default",
+      value: "continuous",
+      redacted: false,
+    });
+    expect(byPath.get("context.skills.disclosure")).toMatchObject({
+      owner: "@mono-agent/core",
+      source: "default",
+      value: "index",
+      redacted: false,
+    });
+    expect(byPath.get("runtimes.main.mode")).toMatchObject({
+      owner: runtime,
+      schemaPointer: "#/properties/runtimes/properties/main/properties/mode",
+      source: "config",
+      value: "fast",
+      redacted: false,
+    });
+    expect(byPath.get("runtimes.main.retries")).toMatchObject({
+      owner: runtime,
+      schemaPointer: "#/properties/runtimes/properties/main/properties/retries",
+      source: "default",
+      value: 3,
+      redacted: false,
+    });
+    expect(byPath.get("runtimes.main.apiKey")).toEqual({
+      path: "runtimes.main.apiKey",
+      owner: runtime,
+      schemaPointer: "#/properties/runtimes/properties/main/properties/apiKey",
+      source: "environment",
+      env: "FIXTURE_API_KEY",
+      redacted: true,
+      remediation: "Set FIXTURE_API_KEY in the process environment, then validate again.",
+    });
+    expect(byPath.get("runtimes.main.endpoint")).toMatchObject({
+      source: "environment",
+      env: "FIXTURE_ENDPOINT",
+      redacted: true,
+    });
+    expect(byPath.get("runtimes.main.endpointEcho")).toMatchObject({
+      source: "environment",
+      env: "FIXTURE_ENDPOINT",
+      redacted: true,
+    });
+    expect(byPath.get("runtimes.main.apiDigest")).toMatchObject({
+      source: "environment",
+      redacted: true,
+    });
+    expect(explanation.entries.every((entry) =>
+      entry.schemaPointer.startsWith("#")
+      && entry.remediation.length <= 240
+      && ["config", "environment", "default"].includes(entry.source))).toBe(true);
+    expect(JSON.stringify(explanation)).not.toContain(apiSecret);
+    expect(JSON.stringify(explanation)).not.toContain(endpointSecret);
+    expect(JSON.stringify(explanation)).not.toContain(Buffer.from(apiSecret).toString("base64"));
+
+    const endpoints = byPath.get("runtimes.main.endpoints")?.value;
+    expect(endpoints).toEqual([]);
+    (endpoints as unknown[]).push("mutated");
+    const repeated = await explainAgentConfig(loaded);
+    expect(repeated.entries.find((entry) => entry.path === "runtimes.main.endpoints")?.value).toEqual([]);
   });
 
   it("redacts resolved environment values echoed by a module parser", async () => {
@@ -675,6 +820,173 @@ export const monoAgentModule = {};
     expect((await validateAgentConfig(project.configPath)).issues[0]?.code).toBe("inline_secret");
   });
 
+  it("explains the applicable oneOf and anyOf branches for overlapping effective values", async () => {
+    const tokenSchema = {
+      type: "string",
+      "x-mono-agent-env-eligible": true,
+      "x-mono-agent-secret": true,
+    };
+    const authBranch = (method: "oauth-token" | "api-key", audience: string) => ({
+      type: "object",
+      additionalProperties: false,
+      required: ["method", "token"],
+      properties: {
+        method: { const: method },
+        token: tokenSchema,
+        audience: {
+          type: "string",
+          default: audience,
+          ...(method === "api-key" ? { "x-mono-agent-secret": true } : {}),
+        },
+      },
+    });
+    const profileBranch = (method: "oauth-token" | "api-key", hint: string) => ({
+      type: "object",
+      additionalProperties: false,
+      required: ["method", "label"],
+      properties: {
+        method: { const: method },
+        label: { type: "string" },
+        hint: { type: "string", default: hint },
+      },
+    });
+    const sharedBranch = (secret: boolean) => ({
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        value: {
+          type: "string",
+          default: "raw-must-not-escape",
+          ...(secret ? { "x-mono-agent-secret": true } : {}),
+        },
+      },
+    });
+    const project = await fixture({
+      kind: "runtime",
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        required: ["auth", "profile", "shared"],
+        properties: {
+          auth: {
+            oneOf: [
+              authBranch("oauth-token", "oauth-audience"),
+              authBranch("api-key", "api-audience"),
+            ],
+          },
+          profile: {
+            anyOf: [
+              profileBranch("oauth-token", "oauth-hint"),
+              profileBranch("api-key", "api-hint"),
+            ],
+          },
+          shared: { anyOf: [sharedBranch(false), sharedBranch(true)] },
+        },
+      },
+      controller: {
+        parse(input) {
+          if (!isRecord(input) || !isRecord(input.auth)
+            || !isRecord(input.profile) || !isRecord(input.shared)) {
+            throw new TypeError("runtime config must contain auth, profile, and shared objects");
+          }
+          const method = input.auth.method;
+          return {
+            ...input,
+            auth: {
+              ...input.auth,
+              audience: method === "api-key" ? "api-audience" : "oauth-audience",
+            },
+            profile: {
+              ...input.profile,
+              hint: input.profile.method === "api-key" ? "api-hint" : "oauth-hint",
+            },
+            shared: { ...input.shared, value: "raw-must-not-escape" },
+          };
+        },
+        create: () => ({}),
+      },
+    });
+    const runtime = project.modules[0]!.name;
+    const config = minimalConfig(runtime);
+    setMainRuntime(config, {
+      $use: runtime,
+      auth: { method: "api-key", token: { $env: "CLAUDE_API_KEY" } },
+      profile: { method: "api-key", label: "production" },
+      shared: {},
+    });
+    await project.writeConfig(config);
+
+    const loaded = await loadAgentConfig(project.configPath, {
+      environment: { CLAUDE_API_KEY: "claude-api-secret" },
+    });
+    const explanation = await explainAgentConfig(loaded);
+    const byPath = new Map(
+      explanation.entries.map((entry) => [entry.path, entry]),
+    );
+    expect(JSON.stringify(explanation)).not.toContain("claude-api-secret");
+
+    expect(byPath.get("runtimes.main.auth.method")).toMatchObject({
+      schemaPointer: "#/properties/runtimes/properties/main/properties/auth/oneOf/1/properties/method",
+      source: "config",
+      value: "api-key",
+    });
+    expect(byPath.get("runtimes.main.auth.token")).toMatchObject({
+      schemaPointer: "#/properties/runtimes/properties/main/properties/auth/oneOf/1/properties/token",
+      source: "environment",
+      env: "CLAUDE_API_KEY",
+      redacted: true,
+    });
+    expect(byPath.get("runtimes.main.auth.audience")).toMatchObject({
+      schemaPointer: "#/properties/runtimes/properties/main/properties/auth/oneOf/1/properties/audience",
+      source: "default",
+      redacted: true,
+    });
+    expect(byPath.get("runtimes.main.auth.audience")?.value).toBeUndefined();
+    expect(byPath.get("runtimes.main.profile.hint")).toMatchObject({
+      schemaPointer: "#/properties/runtimes/properties/main/properties/profile/anyOf/1/properties/hint",
+      source: "default",
+      value: "api-hint",
+      redacted: false,
+    });
+    expect(byPath.get("runtimes.main.shared.value")).toMatchObject({
+      schemaPointer: "#/properties/runtimes/properties/main/properties/shared/anyOf/0/properties/value",
+      source: "default",
+      redacted: true,
+    });
+    expect(byPath.get("runtimes.main.shared.value")?.value).toBeUndefined();
+    expect(JSON.stringify(explanation)).not.toContain("raw-must-not-escape");
+
+    const oauthConfig = minimalConfig(runtime);
+    setMainRuntime(oauthConfig, {
+      $use: runtime,
+      auth: { method: "oauth-token", token: { $env: "CLAUDE_OAUTH_TOKEN" } },
+      profile: { method: "oauth-token", label: "interactive" },
+      shared: {},
+    });
+    await project.writeConfig(oauthConfig);
+    const oauthByPath = new Map(
+      (await explainAgentConfig(await loadAgentConfig(project.configPath, {
+        environment: { CLAUDE_OAUTH_TOKEN: "also-must-not-escape" },
+      }))).entries.map((entry) => [entry.path, entry]),
+    );
+    expect(oauthByPath.get("runtimes.main.auth.method")).toMatchObject({
+      schemaPointer: "#/properties/runtimes/properties/main/properties/auth/oneOf/0/properties/method",
+      value: "oauth-token",
+    });
+    expect(oauthByPath.get("runtimes.main.auth.audience")).toMatchObject({
+      schemaPointer: "#/properties/runtimes/properties/main/properties/auth/oneOf/0/properties/audience",
+      source: "default",
+      value: "oauth-audience",
+      redacted: false,
+    });
+    expect(oauthByPath.get("runtimes.main.profile.hint")).toMatchObject({
+      schemaPointer: "#/properties/runtimes/properties/main/properties/profile/anyOf/0/properties/hint",
+      source: "default",
+      value: "oauth-hint",
+      redacted: false,
+    });
+  });
+
   it("matches primitive oneOf and anyOf branches before applying env and secret annotations", async () => {
     const protectedString = {
       type: "string",
@@ -733,6 +1045,253 @@ export const monoAgentModule = {};
       environment: { TOKEN: "resolved-token", LABEL: "public-label" },
     });
     expect(result.issues[0]?.code).toBe("env_not_eligible");
+  });
+
+  it("uses pattern constraints to enforce and explain the selected secret branch", async () => {
+    const rawDefault = "pattern-default-must-not-escape";
+    const protectedToken = {
+      type: "string", default: rawDefault,
+      "x-mono-agent-env-eligible": true, "x-mono-agent-secret": true,
+    };
+    const project = await fixture({
+      kind: "runtime",
+      schema: {
+        type: "object", additionalProperties: false, required: ["auth"],
+        properties: {
+          auth: {
+            oneOf: [
+              {
+                type: "object", additionalProperties: false, required: ["mode"],
+                properties: {
+                  mode: { type: "string", pattern: "^public$", "x-mono-agent-env-eligible": true },
+                  token: { type: "string" },
+                },
+              },
+              {
+                type: "object", additionalProperties: false, required: ["mode"],
+                properties: {
+                  mode: { type: "string", pattern: "^secret$", "x-mono-agent-env-eligible": true },
+                  token: protectedToken,
+                },
+              },
+            ],
+          },
+        },
+      },
+      controller: {
+        parse(input) {
+          if (!isRecord(input) || !isRecord(input.auth)) throw new TypeError("auth required");
+          return { ...input, auth: { ...input.auth, token: input.auth.token ?? rawDefault } };
+        },
+        create: () => ({}),
+      },
+    });
+    const runtime = project.modules[0]!.name;
+    const inline = minimalConfig(runtime);
+    setMainRuntime(inline, { $use: runtime, auth: { mode: "secret", token: "inline-secret" } });
+    await project.writeConfig(inline);
+    expect((await validateAgentConfig(project.configPath)).issues[0]?.code).toBe("inline_secret");
+
+    const unresolvedBranch = minimalConfig(runtime);
+    setMainRuntime(unresolvedBranch, {
+      $use: runtime, auth: { mode: { $env: "PATTERN_MODE" }, token: "inline-secret" },
+    });
+    await project.writeConfig(unresolvedBranch);
+    expect((await validateAgentConfig(project.configPath, {
+      environment: { PATTERN_MODE: "secret" },
+    })).issues[0]?.code).toBe("inline_secret");
+
+    const env = minimalConfig(runtime);
+    setMainRuntime(env, { $use: runtime, auth: { mode: "secret", token: { $env: "PATTERN_TOKEN" } } });
+    await project.writeConfig(env);
+    const loaded = await loadAgentConfig(project.configPath, { environment: { PATTERN_TOKEN: "resolved-secret" } });
+    const envEntry = (await explainAgentConfig(loaded)).entries
+      .find((entry) => entry.path === "runtimes.main.auth.token");
+    expect(envEntry).toMatchObject({
+      schemaPointer: "#/properties/runtimes/properties/main/properties/auth/oneOf/1/properties/token",
+      source: "environment", env: "PATTERN_TOKEN", redacted: true,
+    });
+
+    const defaults = minimalConfig(runtime);
+    setMainRuntime(defaults, { $use: runtime, auth: { mode: "secret" } });
+    await project.writeConfig(defaults);
+    const explanation = await explainAgentConfig(await loadAgentConfig(project.configPath));
+    const defaultEntry = explanation.entries.find((entry) => entry.path === "runtimes.main.auth.token");
+    expect(defaultEntry).toMatchObject({
+      schemaPointer: "#/properties/runtimes/properties/main/properties/auth/oneOf/1/properties/token",
+      source: "default", redacted: true,
+    });
+    expect(JSON.stringify(explanation)).not.toContain(rawDefault);
+  });
+
+  it("uses structural JSON Schema const and enum equality for secret branches", async () => {
+    const selector = { kind: "secret" };
+    const scope = { level: "admin" };
+    const protectedToken = {
+      type: "string", "x-mono-agent-env-eligible": true, "x-mono-agent-secret": true,
+    };
+    const project = await fixture({
+      kind: "runtime",
+      schema: {
+        type: "object", additionalProperties: false, required: ["auth"],
+        properties: {
+          auth: {
+            oneOf: [
+              {
+                type: "object", additionalProperties: false, required: ["selector", "scope", "token"],
+                properties: {
+                  selector: { not: { const: selector } },
+                  scope: { type: "object" },
+                  token: { type: "string" },
+                },
+              },
+              {
+                type: "object", additionalProperties: false, required: ["selector", "scope", "token"],
+                properties: {
+                  selector: { const: selector },
+                  scope: { enum: [scope] },
+                  token: protectedToken,
+                },
+              },
+            ],
+          },
+        },
+      },
+      controller: { parse: (input) => input, create: () => ({}) },
+    });
+    const runtime = project.modules[0]!.name;
+    const inline = minimalConfig(runtime);
+    setMainRuntime(inline, {
+      $use: runtime, auth: { selector, scope, token: "structural-inline-secret" },
+    });
+    await project.writeConfig(inline);
+    expect((await validateAgentConfig(project.configPath)).issues[0]?.code).toBe("inline_secret");
+
+    const env = minimalConfig(runtime);
+    setMainRuntime(env, {
+      $use: runtime, auth: { selector, scope, token: { $env: "STRUCTURAL_TOKEN" } },
+    });
+    await project.writeConfig(env);
+    const loaded = await loadAgentConfig(project.configPath, {
+      environment: { STRUCTURAL_TOKEN: "structural-resolved-secret" },
+    });
+    const explanation = await explainAgentConfig(loaded);
+    expect(explanation.entries.find((entry) => entry.path === "runtimes.main.auth.token"))
+      .toMatchObject({
+        schemaPointer: "#/properties/runtimes/properties/main/properties/auth/oneOf/1/properties/token",
+        source: "environment", env: "STRUCTURAL_TOKEN", redacted: true,
+      });
+    expect(JSON.stringify(explanation)).not.toContain("structural-resolved-secret");
+  });
+
+  it("fails secure when an unknown keyword leaves a oneOf branch unresolved", async () => {
+    const rawDefault = "unknown-default-must-not-escape";
+    const branch = (secret: boolean) => ({
+      type: "object", additionalProperties: false, required: ["mode"],
+      ...(secret ? { futureValidationKeyword: true } : {}),
+      properties: {
+        mode: { const: "future" },
+        token: {
+          type: "string", default: secret ? rawDefault : "public-default",
+          ...(secret ? { "x-mono-agent-env-eligible": true, "x-mono-agent-secret": true } : {}),
+        },
+      },
+    });
+    const project = await fixture({
+      kind: "runtime",
+      schema: {
+        type: "object", additionalProperties: false, required: ["auth"],
+        properties: { auth: { oneOf: [branch(false), branch(true)] } },
+      },
+      controller: {
+        parse(input) {
+          if (!isRecord(input) || !isRecord(input.auth)) throw new TypeError("auth required");
+          return { ...input, auth: { ...input.auth, token: input.auth.token ?? rawDefault } };
+        },
+        create: () => ({}),
+      },
+    });
+    const runtime = project.modules[0]!.name;
+    const inline = minimalConfig(runtime);
+    setMainRuntime(inline, { $use: runtime, auth: { mode: "future", token: "inline-secret" } });
+    await project.writeConfig(inline);
+    expect((await validateAgentConfig(project.configPath)).issues[0]?.code).toBe("inline_secret");
+
+    const env = minimalConfig(runtime);
+    setMainRuntime(env, { $use: runtime, auth: { mode: "future", token: { $env: "FUTURE_TOKEN" } } });
+    await project.writeConfig(env);
+    expect((await validateAgentConfig(project.configPath, {
+      environment: { FUTURE_TOKEN: "resolved-secret" },
+    })).issues[0]?.code).toBe("env_not_eligible");
+
+    const defaults = minimalConfig(runtime);
+    setMainRuntime(defaults, { $use: runtime, auth: { mode: "future" } });
+    await project.writeConfig(defaults);
+    const explanation = await explainAgentConfig(await loadAgentConfig(project.configPath));
+    const entry = explanation.entries.find((item) => item.path === "runtimes.main.auth.token");
+    expect(entry).toMatchObject({ source: "default", redacted: true });
+    expect(entry?.schemaPointer).not.toContain("/oneOf/");
+    expect(JSON.stringify(explanation)).not.toContain(rawDefault);
+  });
+
+  it("enforces security annotations selected by boolean conditional schemas", async () => {
+    const protectedPayload = {
+      type: "string", "x-mono-agent-env-eligible": true, "x-mono-agent-secret": true,
+    };
+    const project = await fixture({
+      kind: "runtime",
+      schema: {
+        type: "object", additionalProperties: false, required: ["payload"],
+        properties: { payload: { type: "string" } },
+        if: true,
+        then: { properties: { payload: protectedPayload } },
+      },
+      controller: { parse: (input) => input, create: () => ({}) },
+    });
+    const runtime = project.modules[0]!.name;
+    const inline = minimalConfig(runtime);
+    setMainRuntime(inline, { $use: runtime, payload: "conditional-inline-secret" });
+    await project.writeConfig(inline);
+    expect((await validateAgentConfig(project.configPath)).issues[0]?.code).toBe("inline_secret");
+
+    const env = minimalConfig(runtime);
+    setMainRuntime(env, { $use: runtime, payload: { $env: "CONDITIONAL_SECRET" } });
+    await project.writeConfig(env);
+    const loaded = await loadAgentConfig(project.configPath, {
+      environment: { CONDITIONAL_SECRET: "conditional-resolved-secret" },
+    });
+    const explanation = await explainAgentConfig(loaded);
+    expect(explanation.entries.find((entry) => entry.path === "runtimes.main.payload"))
+      .toMatchObject({ source: "environment", env: "CONDITIONAL_SECRET", redacted: true });
+    expect(JSON.stringify(explanation)).not.toContain("conditional-resolved-secret");
+  });
+
+  it("rejects unresolved references and hidden security annotations under unsupported applicators", async () => {
+    const protectedLeaf = {
+      type: "string", "x-mono-agent-env-eligible": true, "x-mono-agent-secret": true,
+    };
+    for (const schema of [
+      {
+        type: "object",
+        $defs: { protectedLeaf },
+        properties: { payload: { $ref: "#/$defs/protectedLeaf" } },
+      },
+      {
+        type: "object",
+        dependentSchemas: { mode: { properties: { payload: protectedLeaf } } },
+      },
+    ]) {
+      const project = await fixture({
+        kind: "runtime", schema,
+        controller: { parse: (input) => input, create: () => ({}) },
+      });
+      const config = minimalConfig(project.modules[0]!.name);
+      setMainRuntime(config, {
+        $use: project.modules[0]!.name, mode: "secret", payload: "must-not-load",
+      });
+      await project.writeConfig(config);
+      await expect(loadAgentConfig(project.configPath)).rejects.toBeInstanceOf(AgentConfigError);
+    }
   });
 
   it("composes strict root oneOf and allOf schemas with a required module selector", async () => {

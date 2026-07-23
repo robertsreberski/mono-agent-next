@@ -19,6 +19,6 @@ export class OtlpExporterError extends Error {
 
 export function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) {
-    throw new OtlpExporterError("OTLP_ABORTED", "The OTLP operation was aborted.", signal.reason);
+    throw new OtlpExporterError("OTLP_ABORTED", "The OTLP operation was aborted.");
   }
 }

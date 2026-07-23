@@ -470,6 +470,8 @@ StateCompareAndSwapRequest
 StateCompareAndSwapResult
 StateDeleteArtifactRequest
 StateDeleteRequest
+StateExecution
+StateExecutionRequest
 StateHost
 StateHostPresenceRequest
 StateHostPresenceStatus

@@ -10,6 +10,7 @@ import {
   RUNTIME_RESULT_MAX_TOOL_RESULT_PARTS,
   createRuntimeTurnEventBoundary,
   normalizeChannelCapabilities,
+  normalizeModuleDiagnostic,
   normalizeRuntimeCapabilities,
   normalizeRuntimeModelValidation,
   normalizeRuntimeToolCall,
@@ -627,6 +628,40 @@ describe("runtime capability boundary", () => {
 });
 
 describe("runtime model validation boundary", () => {
+  it("normalizes standalone module diagnostics without invoking accessors", () => {
+    const path = ["module", "runtime"];
+    const normalized = normalizeModuleDiagnostic({
+      code: "runtime_unavailable",
+      severity: "warning",
+      message: "Runtime is temporarily unavailable",
+      path,
+    }, "module health diagnostic");
+
+    path[0] = "mutated";
+    expect(normalized).toEqual({
+      code: "runtime_unavailable",
+      severity: "warning",
+      message: "Runtime is temporarily unavailable",
+      path: ["module", "runtime"],
+    });
+
+    let reads = 0;
+    const hostile = Object.defineProperty({
+      code: "runtime_unavailable",
+      severity: "warning",
+      path: [],
+    }, "message", {
+      enumerable: true,
+      get() {
+        reads += 1;
+        return "unsafe";
+      },
+    });
+    expect(() => normalizeModuleDiagnostic(hostile))
+      .toThrow(/data property/u);
+    expect(reads).toBe(0);
+  });
+
   it("does not invoke accessors in the envelope or any normalized child", () => {
     const cases: readonly (() => {
       readonly value: unknown;

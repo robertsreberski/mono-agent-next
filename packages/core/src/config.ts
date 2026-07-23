@@ -1,10 +1,8 @@
 import { dirname, isAbsolute, resolve } from "node:path";
-
 import {
   type RuntimeModelValidation,
   type RuntimeModuleDefinition,
 } from "@mono-agent/module-sdk";
-
 import {
   AuthorityReadError,
   decodeAuthorityText,
@@ -31,7 +29,6 @@ import type {
   ResolvedAgentPaths,
   SelectedModuleConfig,
 } from "./types.js";
-
 const TOP_LEVEL_KEYS = new Set([
   "$schema",
   "configVersion",
@@ -47,12 +44,9 @@ const TOP_LEVEL_KEYS = new Set([
   "observability",
   "policy",
 ]);
-
 export const MAX_CONTEXT_BYTES = 1_000_000;
-
 const environments = new WeakMap<LoadedAgentConfig, Readonly<Record<string, string | undefined>>>();
 const validatedConfigs = new WeakSet<LoadedAgentConfig>();
-
 export async function loadAgentConfig(
   configPath: string,
   options: AgentLoadOptions = {},
@@ -71,7 +65,6 @@ export async function loadAgentConfig(
       { path: "$", message: errorMessage(error), code: "config_read" },
     ]);
   }
-
   let source: string;
   try {
     source = decodeAuthorityText(configSnapshot);
@@ -80,7 +73,6 @@ export async function loadAgentConfig(
       { path: "$", message: errorMessage(error), code: "invalid_utf8" },
     ]);
   }
-
   let candidate: unknown;
   try {
     candidate = JSON.parse(source) as unknown;
@@ -89,7 +81,6 @@ export async function loadAgentConfig(
       { path: "$", message: errorMessage(error), code: "invalid_json" },
     ]);
   }
-
   const issues = validateAgentEnvelope(candidate);
   if (issues.length > 0) {
     throw new AgentConfigError(`Agent config is invalid: ${absoluteConfigPath}`, issues);
@@ -116,7 +107,6 @@ export async function loadAgentConfig(
   if (routeIssues.length > 0) {
     throw new AgentConfigError(`Configured runtime routes are invalid: ${absoluteConfigPath}`, routeIssues);
   }
-
   const loaded: LoadedAgentConfig = deepFreeze({
     configPath: absoluteConfigPath,
     configDirectory,
@@ -134,7 +124,6 @@ export async function loadAgentConfig(
   environments.set(loaded, environment);
   return loaded;
 }
-
 function validateRuntimeRoutes(
   config: AgentConfig,
   modules: readonly LoadedAgentModule[],
@@ -198,13 +187,11 @@ function validateRuntimeRoutes(
   }
   return issues;
 }
-
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   return typeof value === "object"
     && value !== null
     && typeof Reflect.get(value, "then") === "function";
 }
-
 export async function validateAgentConfig(
   configPath: string,
   options: AgentLoadOptions = {},
@@ -219,15 +206,12 @@ export async function validateAgentConfig(
     };
   }
 }
-
 export function environmentFor(config: LoadedAgentConfig): Readonly<Record<string, string | undefined>> {
   return environments.get(config) ?? process.env;
 }
-
 export function isLoadedAgentConfig(value: unknown): value is LoadedAgentConfig {
   return isRecord(value) && validatedConfigs.has(value as unknown as LoadedAgentConfig);
 }
-
 export async function ensureLoadedAgentConfig(
   value: string | LoadedAgentConfig,
   options: AgentLoadOptions = {},
@@ -242,14 +226,12 @@ export async function ensureLoadedAgentConfig(
     },
   ]);
 }
-
 export interface ModuleSelection {
   readonly slot: ModuleKind;
   readonly instanceId: string;
   readonly configPath: string;
   readonly selected: SelectedModuleConfig;
 }
-
 export function collectModuleSelections(config: AgentConfig): readonly ModuleSelection[] {
   const selections: ModuleSelection[] = [];
   addMapSelections(selections, "runtime", "runtimes", config.runtimes);
@@ -263,7 +245,6 @@ export function collectModuleSelections(config: AgentConfig): readonly ModuleSel
   }
   return selections;
 }
-
 function addMapSelections(
   output: ModuleSelection[],
   slot: ModuleKind,
@@ -275,7 +256,6 @@ function addMapSelections(
     if (selected !== undefined) output.push({ slot, instanceId, configPath: `${prefix}.${instanceId}`, selected });
   }
 }
-
 function addSingletonSelection(
   output: ModuleSelection[],
   slot: ModuleKind,
@@ -284,14 +264,12 @@ function addSingletonSelection(
 ): void {
   output.push({ slot, instanceId: slot, configPath, selected });
 }
-
 export function validateAgentEnvelope(input: unknown): readonly AgentConfigIssue[] {
   const issues: AgentConfigIssue[] = [];
   if (!isRecord(input)) return [{ path: "$", message: "must be a JSON object", code: "type" }];
   rejectUnknown(input, TOP_LEVEL_KEYS, "$", issues);
   if (input.configVersion !== 1) issue(issues, "configVersion", "must be exactly 1", "version");
   if (input.$schema !== undefined) expectString(input.$schema, "$schema", issues);
-
   validateAgent(input.agent, issues);
   validateModuleMap(input.runtimes, "runtimes", issues, true);
   validateRouting(input.routing, input.runtimes, issues);
@@ -305,7 +283,6 @@ export function validateAgentEnvelope(input: unknown): readonly AgentConfigIssue
   validatePolicy(input.policy, issues);
   return issues;
 }
-
 function validateAgent(value: unknown, issues: AgentConfigIssue[]): void {
   if (!expectRecord(value, "agent", issues)) return;
   rejectUnknown(value, new Set(["id", "name", "instructions", "workspace"]), "agent", issues);
@@ -317,7 +294,6 @@ function validateAgent(value: unknown, issues: AgentConfigIssue[]): void {
     issue(issues, "agent.id", "must use lowercase letters, digits, dot, underscore, or hyphen", "format");
   }
 }
-
 function validateRouting(value: unknown, runtimes: unknown, issues: AgentConfigIssue[]): void {
   if (!expectRecord(value, "routing", issues)) return;
   rejectUnknown(value, new Set(["primary", "fallbacks", "effort"]), "routing", issues);
@@ -329,7 +305,6 @@ function validateRouting(value: unknown, runtimes: unknown, issues: AgentConfigI
   }
   if (value.effort !== undefined) expectNonEmptyString(value.effort, "routing.effort", issues);
 }
-
 function validateRoute(value: unknown, path: string, runtimes: unknown, issues: AgentConfigIssue[]): void {
   if (!expectRecord(value, path, issues)) return;
   rejectUnknown(value, new Set(["runtime", "model"]), path, issues);
@@ -339,7 +314,6 @@ function validateRoute(value: unknown, path: string, runtimes: unknown, issues: 
     issue(issues, `${path}.runtime`, `references unconfigured runtime ${JSON.stringify(value.runtime)}`, "reference");
   }
 }
-
 function validateSession(value: unknown, issues: AgentConfigIssue[]): void {
   if (value === undefined) return;
   if (!expectRecord(value, "session", issues)) return;
@@ -355,7 +329,6 @@ function validateSession(value: unknown, issues: AgentConfigIssue[]): void {
   if (value.timezone !== undefined) expectIanaTimeZone(value.timezone, "session.timezone", issues);
   if (value.isolateProactiveRuns !== undefined) expectBoolean(value.isolateProactiveRuns, "session.isolateProactiveRuns", issues);
 }
-
 function validateContext(value: unknown, issues: AgentConfigIssue[]): void {
   if (value === undefined) return;
   if (!expectRecord(value, "context", issues)) return;
@@ -388,14 +361,12 @@ function validateContext(value: unknown, issues: AgentConfigIssue[]): void {
     expectNonEmptyString(value.mcp.configPath, "context.mcp.configPath", issues);
   }
 }
-
 function validateObservability(value: unknown, issues: AgentConfigIssue[]): void {
   if (value === undefined) return;
   if (!expectRecord(value, "observability", issues)) return;
   rejectUnknown(value, new Set(["exporters"]), "observability", issues);
   validateModuleMap(value.exporters, "observability.exporters", issues, false);
 }
-
 function validatePolicy(value: unknown, issues: AgentConfigIssue[]): void {
   if (!expectRecord(value, "policy", issues)) return;
   rejectUnknown(value, new Set(["tools", "approvals", "sandbox"]), "policy", issues);
@@ -436,7 +407,6 @@ function validatePolicy(value: unknown, issues: AgentConfigIssue[]): void {
     validateSelectedModule(value.sandbox, "policy.sandbox", issues, true);
   }
 }
-
 function validateModuleMap(value: unknown, path: string, issues: AgentConfigIssue[], required: boolean): void {
   if (value === undefined) {
     if (required) issue(issues, path, "is required", "required");
@@ -450,7 +420,6 @@ function validateModuleMap(value: unknown, path: string, issues: AgentConfigIssu
     validateSelectedModule(selected, `${path}.${instanceId}`, issues, true);
   }
 }
-
 function validateSelectedModule(value: unknown, path: string, issues: AgentConfigIssue[], required: boolean): void {
   if (value === undefined) {
     if (required) issue(issues, path, "is required", "required");
@@ -467,13 +436,11 @@ function validateSelectedModule(value: unknown, path: string, issues: AgentConfi
     }
   }
 }
-
 export function isBarePackageName(value: string): boolean {
   if (value.length === 0 || value.length > 214 || value.includes("\\") || value.includes(":")) return false;
   if (value.startsWith(".") || value.startsWith("/") || value.includes("//")) return false;
   return /^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/u.test(value);
 }
-
 function resolveAgentPaths(config: AgentConfig, configDirectory: string): ResolvedAgentPaths {
   const fromConfig = (value: string): string => (isAbsolute(value) ? value : resolve(configDirectory, value));
   return {
@@ -486,7 +453,6 @@ function resolveAgentPaths(config: AgentConfig, configDirectory: string): Resolv
       : { mcpConfig: fromConfig(config.context.mcp.configPath) }),
   };
 }
-
 function rejectUnknown(
   value: Record<string, unknown>,
   allowed: ReadonlySet<string>,
@@ -497,29 +463,24 @@ function rejectUnknown(
     if (!allowed.has(key)) issue(issues, path === "$" ? key : `${path}.${key}`, "is not allowed", "unknown");
   }
 }
-
 function expectRecord(value: unknown, path: string, issues: AgentConfigIssue[]): value is Record<string, unknown> {
   if (isRecord(value)) return true;
   issue(issues, path, "must be an object", "type");
   return false;
 }
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-
 function expectString(value: unknown, path: string, issues: AgentConfigIssue[]): value is string {
   if (typeof value === "string") return true;
   issue(issues, path, "must be a string", "type");
   return false;
 }
-
 function expectNonEmptyString(value: unknown, path: string, issues: AgentConfigIssue[]): value is string {
   if (expectString(value, path, issues) && value.trim().length > 0) return true;
   if (typeof value === "string") issue(issues, path, "must not be empty", "format");
   return false;
 }
-
 function expectStringArray(value: unknown, path: string, issues: AgentConfigIssue[]): value is string[] {
   if (!Array.isArray(value)) {
     issue(issues, path, "must be an array", "type");
@@ -528,23 +489,19 @@ function expectStringArray(value: unknown, path: string, issues: AgentConfigIssu
   value.forEach((entry, index) => expectNonEmptyString(entry, `${path}.${index}`, issues));
   return true;
 }
-
 function expectEnum(value: unknown, values: readonly string[], path: string, issues: AgentConfigIssue[]): void {
   if (typeof value !== "string" || !values.includes(value)) {
     issue(issues, path, `must be one of ${values.map((entry) => JSON.stringify(entry)).join(", ")}`, "enum");
   }
 }
-
 function expectPositiveInteger(value: unknown, path: string, issues: AgentConfigIssue[]): void {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
     issue(issues, path, "must be a positive safe integer", "range");
   }
 }
-
 function expectBoolean(value: unknown, path: string, issues: AgentConfigIssue[]): void {
   if (typeof value !== "boolean") issue(issues, path, "must be a boolean", "type");
 }
-
 function expectIanaTimeZone(value: unknown, path: string, issues: AgentConfigIssue[]): void {
   if (!expectNonEmptyString(value, path, issues)) return;
   try {
@@ -554,11 +511,9 @@ function expectIanaTimeZone(value: unknown, path: string, issues: AgentConfigIss
     issue(issues, path, "must be a valid IANA time zone", "timezone");
   }
 }
-
 function issue(issues: AgentConfigIssue[], path: string, message: string, code: string): void {
   issues.push({ path, message, code });
 }
-
 function snapshotEnvironment(
   environment: Readonly<Record<string, string | undefined>>,
 ): Readonly<Record<string, string | undefined>> {
@@ -566,7 +521,6 @@ function snapshotEnvironment(
   for (const [name, value] of Object.entries(environment)) snapshot[name] = value;
   return Object.freeze(snapshot);
 }
-
 async function loadProjectMcpSnapshot(
   path: string | undefined,
   environment: Readonly<Record<string, string | undefined>>,
@@ -611,7 +565,6 @@ async function loadProjectMcpSnapshot(
     config: deepFreeze(parseProjectMcpConfig(candidate, environment, path)),
   };
 }
-
 function deepFreeze<T>(value: T): T {
   if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);

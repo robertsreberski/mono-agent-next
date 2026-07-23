@@ -87,7 +87,7 @@ function trustedTransportCode(error: unknown): string | undefined {
 export interface RuntimePiModelCapabilities {
   readonly tools: true;
   readonly attachments: boolean;
-  readonly structuredOutput: false;
+  readonly structuredOutput: true;
   readonly approvals: true;
   readonly sandbox: false;
   readonly thinkingLevels: readonly string[];
@@ -384,7 +384,7 @@ export function createRuntimePiModelRegistry(
       return {
         tools: true,
         attachments: model.input.includes("image"),
-        structuredOutput: false,
+        structuredOutput: true,
         approvals: true,
         sandbox: false,
         thinkingLevels: getSupportedThinkingLevels(model),

@@ -2,13 +2,10 @@ import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { link, lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
-
 const READ_CHUNK_BYTES = 64 * 1024;
-
 export const OWNER_PRIVATE_DIRECTORY_MODE = 0o700;
 export const OWNER_PRIVATE_FILE_MODE = 0o600;
 export const DEFAULT_OWNER_PRIVATE_READ_MAX_BYTES = 1_048_576;
-
 export type OwnerPrivatePathErrorCode =
   | "invalid_path"
   | "unsupported_platform"
@@ -22,7 +19,6 @@ export type OwnerPrivatePathErrorCode =
   | "version_conflict"
   | "too_large"
   | "io_failed";
-
 export interface OwnerPrivatePathIdentity {
   readonly path: string;
   readonly device: number;
@@ -32,13 +28,11 @@ export interface OwnerPrivatePathIdentity {
   readonly links: number;
   readonly size: number;
 }
-
 export class OwnerPrivatePathError extends Error {
   readonly code: OwnerPrivatePathErrorCode;
   readonly path: string;
   /** True only when an atomic rename committed before a later durability check failed. */
   readonly committed: boolean;
-
   constructor(options: {
     readonly code: OwnerPrivatePathErrorCode;
     readonly path: string;
@@ -54,20 +48,16 @@ export class OwnerPrivatePathError extends Error {
     this.committed = options.committed ?? false;
   }
 }
-
 export interface OwnerPrivateOperationOptions {
   readonly signal?: AbortSignal;
 }
-
 export interface ReadOwnerPrivateFileOptions extends OwnerPrivateOperationOptions {
   readonly maxBytes?: number;
 }
-
 export interface AtomicReplaceOwnerPrivateFileOptions extends OwnerPrivateOperationOptions {
   /** Undefined accepts either state; null requires absence; an identity is compare-and-swap. */
   readonly expected?: OwnerPrivatePathIdentity | null;
 }
-
 /** Create one directory level or validate an existing exact owner-private directory. */
 export async function ensureOwnerPrivateDirectory(
   path: string,
@@ -76,7 +66,6 @@ export async function ensureOwnerPrivateDirectory(
   const absolutePath = checkedAbsolutePath(path);
   throwIfAborted(options.signal);
   await inspectOwnerPrivateDirectory(dirname(absolutePath), options);
-
   let created = false;
   try {
     await mkdir(absolutePath, { mode: OWNER_PRIVATE_DIRECTORY_MODE });
@@ -84,7 +73,6 @@ export async function ensureOwnerPrivateDirectory(
   } catch (error) {
     if (!hasErrorCode(error, "EEXIST")) throw ioError(absolutePath, "Unable to create owner-private directory", error);
   }
-
   let handle: FileHandle | undefined;
   try {
     handle = await open(absolutePath, readOnlyNoFollowFlags(true));
@@ -99,21 +87,18 @@ export async function ensureOwnerPrivateDirectory(
     await handle?.close();
   }
 }
-
 export async function inspectOwnerPrivateDirectory(
   path: string,
   options: OwnerPrivateOperationOptions = {},
 ): Promise<OwnerPrivatePathIdentity> {
   return inspectPath(path, "directory", options.signal);
 }
-
 export async function inspectOwnerPrivateFile(
   path: string,
   options: OwnerPrivateOperationOptions = {},
 ): Promise<OwnerPrivatePathIdentity> {
   return inspectPath(path, "file", options.signal);
 }
-
 export async function readOwnerPrivateFile(
   path: string,
   options: ReadOwnerPrivateFileOptions = {},
@@ -127,7 +112,6 @@ export async function readOwnerPrivateFile(
   );
   throwIfAborted(options.signal);
   await inspectOwnerPrivateDirectory(dirname(absolutePath), options);
-
   let handle: FileHandle | undefined;
   try {
     handle = await open(absolutePath, readOnlyNoFollowFlags(false));
@@ -149,7 +133,6 @@ export async function readOwnerPrivateFile(
     await handle?.close();
   }
 }
-
 async function readAtMost(
   handle: FileHandle,
   path: string,
@@ -176,7 +159,6 @@ async function readAtMost(
   }
   return output;
 }
-
 export async function createOwnerPrivateFile(
   path: string,
   data: string | Uint8Array,
@@ -211,7 +193,6 @@ export async function createOwnerPrivateFile(
     await handle?.close();
   }
 }
-
 /**
  * Durably replace one file from a same-directory exclusive temporary file.
  * Existing targets are opened with O_NOFOLLOW and never path-chmodded.
@@ -227,7 +208,6 @@ export async function atomicReplaceOwnerPrivateFile(
   const parent = await inspectOwnerPrivateDirectory(parentPath, options);
   const current = await inspectOptionalOwnerPrivateFile(absolutePath, options.signal);
   assertExpectedIdentity(absolutePath, current, options.expected);
-
   const temporaryPath = resolve(parentPath, `.${basename(absolutePath)}.${randomUUID()}.tmp`);
   let temporary: OwnerPrivatePathIdentity | undefined;
   let committed = false;
@@ -286,7 +266,6 @@ export async function atomicReplaceOwnerPrivateFile(
     });
   }
 }
-
 async function inspectPath(
   path: string,
   type: "file" | "directory",
@@ -309,7 +288,6 @@ async function inspectPath(
     await handle?.close();
   }
 }
-
 async function inspectOptionalOwnerPrivateFile(
   path: string,
   signal: AbortSignal | undefined,
@@ -321,7 +299,6 @@ async function inspectOptionalOwnerPrivateFile(
     throw error;
   }
 }
-
 async function validateHandleIdentity(
   handle: FileHandle,
   path: string,
@@ -344,7 +321,6 @@ async function validateHandleIdentity(
   await assertPathMatches(identity, type);
   return identity;
 }
-
 async function assertPathMatches(
   identity: OwnerPrivatePathIdentity,
   type: "file" | "directory",
@@ -363,7 +339,6 @@ async function assertPathMatches(
     throw pathError("identity_changed", identity.path, `${type} path no longer names the opened object`);
   }
 }
-
 async function syncDirectory(identity: OwnerPrivatePathIdentity): Promise<void> {
   let handle: FileHandle | undefined;
   try {
@@ -375,7 +350,6 @@ async function syncDirectory(identity: OwnerPrivatePathIdentity): Promise<void> 
     await handle?.close();
   }
 }
-
 async function unlinkIfSameIdentity(identity: OwnerPrivatePathIdentity): Promise<void> {
   try {
     const current = await lstat(identity.path);
@@ -386,7 +360,6 @@ async function unlinkIfSameIdentity(identity: OwnerPrivatePathIdentity): Promise
     // Cleanup is best-effort and must never unlink an identity we did not create.
   }
 }
-
 function assertExpectedIdentity(
   path: string,
   current: OwnerPrivatePathIdentity | undefined,
@@ -401,7 +374,6 @@ function assertExpectedIdentity(
     throw pathError("version_conflict", path, "Atomic replacement target changed before commit");
   }
 }
-
 function identityFromStat(path: string, stat: Stats): OwnerPrivatePathIdentity {
   return Object.freeze({
     path,
@@ -413,11 +385,9 @@ function identityFromStat(path: string, stat: Stats): OwnerPrivatePathIdentity {
     size: stat.size,
   });
 }
-
 function sameIdentity(left: OwnerPrivatePathIdentity, right: OwnerPrivatePathIdentity): boolean {
   return left.device === right.device && left.inode === right.inode;
 }
-
 function sameFileSnapshot(left: OwnerPrivatePathIdentity, right: OwnerPrivatePathIdentity): boolean {
   return sameIdentity(left, right)
     && left.uid === right.uid
@@ -425,14 +395,12 @@ function sameFileSnapshot(left: OwnerPrivatePathIdentity, right: OwnerPrivatePat
     && left.links === right.links
     && left.size === right.size;
 }
-
 function currentUid(path: string): number {
   if (typeof process.getuid !== "function") {
     throw pathError("unsupported_platform", path, "Owner validation requires process.getuid()");
   }
   return process.getuid();
 }
-
 function readOnlyNoFollowFlags(directory: boolean): number {
   if (typeof constants.O_NOFOLLOW !== "number") {
     throw pathError("unsupported_platform", "<platform>", "O_NOFOLLOW is unavailable");
@@ -442,14 +410,12 @@ function readOnlyNoFollowFlags(directory: boolean): number {
   }
   return constants.O_RDONLY | constants.O_NOFOLLOW | (directory ? constants.O_DIRECTORY : 0);
 }
-
 function writeExclusiveNoFollowFlags(): number {
   if (typeof constants.O_NOFOLLOW !== "number") {
     throw pathError("unsupported_platform", "<platform>", "O_NOFOLLOW is unavailable");
   }
   return constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
 }
-
 function checkedAbsolutePath(path: string): string {
   if (path.length === 0 || path.includes("\0")) throw pathError("invalid_path", path, "Path must not be empty or contain NUL");
   const absolutePath = resolve(path);
@@ -458,23 +424,19 @@ function checkedAbsolutePath(path: string): string {
   }
   return absolutePath;
 }
-
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted !== true) return;
   throw signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError");
 }
-
 function boundedInteger(value: number, name: string, minimum: number, maximum: number): number {
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     throw new RangeError(`${name} must be an integer from ${minimum} through ${maximum}`);
   }
   return value;
 }
-
 function hasErrorCode(value: unknown, code: string): boolean {
   return value !== null && typeof value === "object" && Reflect.get(value, "code") === code;
 }
-
 function pathError(
   code: OwnerPrivatePathErrorCode,
   path: string,
@@ -483,7 +445,6 @@ function pathError(
 ): OwnerPrivatePathError {
   return new OwnerPrivatePathError({ code, path, message, ...(cause === undefined ? {} : { cause }) });
 }
-
 function ioError(path: string, message: string, cause: unknown): OwnerPrivatePathError {
   return pathError("io_failed", path, message, cause);
 }

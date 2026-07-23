@@ -1,12 +1,10 @@
 import { createHash } from "node:crypto";
-
 import {
   parseArtifactRef,
   type ArtifactRef,
   type JsonValue,
   type RuntimeToolResultPart,
 } from "@mono-agent/module-sdk";
-
 export const TOOL_RESULT_INLINE_MAX_BYTES = 256 * 1024;
 export const TOOL_RESULT_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024;
 export const TOOL_RESULT_PREVIEW_MAX_BYTES = 16 * 1024;
@@ -16,7 +14,6 @@ export const TOOL_RESULT_MAX_JSON_ITEMS = 10_000;
 export const TOOL_RESULT_ARTIFACT_MEDIA_TYPE =
   "application/vnd.mono-agent.tool-result+json";
 export const TOOL_RESULT_ARTIFACT_FILE_NAME = "tool-result.json";
-
 const JSON_STRING_CHUNK_CHARACTERS = 4_096;
 const BINARY_CHUNK_BYTES = 12_288;
 const FILE_NAME_MAX_BYTES = 255;
@@ -25,14 +22,12 @@ const NEVER_ABORTED_SIGNAL = new AbortController().signal;
 const UNSAFE_JSON_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const MEDIA_TYPE_PATTERN =
   /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/iu;
-
 export interface ToolResultArtifactWrite {
   readonly data: Uint8Array;
   readonly mediaType: typeof TOOL_RESULT_ARTIFACT_MEDIA_TYPE;
   readonly fileName: typeof TOOL_RESULT_ARTIFACT_FILE_NAME;
   readonly signal: AbortSignal;
 }
-
 /**
  * The sink must not resolve until the complete artifact is atomically durable.
  * A rejected write must leave no visible partial artifact.
@@ -40,12 +35,10 @@ export interface ToolResultArtifactWrite {
 export interface ToolResultArtifactSink {
   putArtifact(request: ToolResultArtifactWrite): Promise<ArtifactRef>;
 }
-
 export interface NormalizeToolResultOptions {
   readonly artifactSink?: ToolResultArtifactSink;
   readonly signal?: AbortSignal;
 }
-
 /**
  * A normalized tool envelope without the runtime-owned call id.
  */
@@ -53,25 +46,21 @@ export interface NormalizedToolResult {
   readonly isError: boolean;
   readonly content: readonly RuntimeToolResultPart[];
 }
-
 interface JsonNormalizationState {
   readonly active: Set<object>;
   items: number;
 }
-
 interface EncodedMeasurement {
   readonly complete: boolean;
   readonly preview: string;
   readonly sizeBytes: number;
 }
-
 class ToolResultBoundaryError extends Error {
   constructor(readonly publicMessage: string) {
     super(publicMessage);
     this.name = "ToolResultBoundaryError";
   }
 }
-
 /**
  * Normalize an arbitrary MCP result into the runtime-neutral tool-result
  * envelope. The canonical encoded envelope is kept inline only through
@@ -85,7 +74,6 @@ export async function normalizeToolResult(
 ): Promise<NormalizedToolResult> {
   const signal = options.signal ?? NEVER_ABORTED_SIGNAL;
   throwIfAborted(signal);
-
   let envelope: NormalizedToolResult;
   try {
     envelope = normalizeEnvelope(output);
@@ -97,7 +85,6 @@ export async function normalizeToolResult(
         : "Tool result could not be normalized within the safety boundary.",
     );
   }
-
   const measurement = measureEnvelope(envelope, signal);
   if (!measurement.complete) {
     return boundedFailure(
@@ -105,14 +92,12 @@ export async function normalizeToolResult(
     );
   }
   if (measurement.sizeBytes <= TOOL_RESULT_INLINE_MAX_BYTES) return envelope;
-
   const sink = options.artifactSink;
   if (sink === undefined) {
     return boundedFailure(
       `Tool result exceeds the ${String(TOOL_RESULT_INLINE_MAX_BYTES)}-byte inline limit and artifact persistence is unavailable.`,
     );
   }
-
   let data: Uint8Array;
   try {
     data = encodeEnvelope(envelope, measurement.sizeBytes, signal);
@@ -120,7 +105,6 @@ export async function normalizeToolResult(
     if (isAbortError(error)) throw error;
     return boundedFailure("Tool result could not be encoded within the safety boundary.");
   }
-
   const sha256 = `sha256:${createHash("sha256").update(data).digest("hex")}` as const;
   let ref: ArtifactRef;
   try {
@@ -145,7 +129,6 @@ export async function normalizeToolResult(
       `Tool result exceeds the ${String(TOOL_RESULT_INLINE_MAX_BYTES)}-byte inline limit and could not be persisted.`,
     );
   }
-
   const summary =
     `Tool result exceeded the ${String(TOOL_RESULT_INLINE_MAX_BYTES)}-byte inline limit; `
     + `the complete ${String(data.byteLength)}-byte envelope was stored as ${sha256}.`;
@@ -157,7 +140,6 @@ export async function normalizeToolResult(
     ],
   };
 }
-
 function normalizeEnvelope(output: unknown): NormalizedToolResult {
   const state: JsonNormalizationState = { active: new Set(), items: 0 };
   if (isRecord(output) && Array.isArray(output.content)) {
@@ -179,7 +161,6 @@ function normalizeEnvelope(output: unknown): NormalizedToolResult {
     content: [{ type: "json", value: normalizeJsonValue(output, state, 0) }],
   };
 }
-
 function normalizePart(
   part: unknown,
   state: JsonNormalizationState,
@@ -246,7 +227,6 @@ function normalizePart(
   }
   return { type: "json", value: normalizeJsonValue(part, state, 0) };
 }
-
 function normalizeJsonValue(
   value: unknown,
   state: JsonNormalizationState,
@@ -293,7 +273,6 @@ function normalizeJsonValue(
     state.active.delete(value);
   }
 }
-
 function addJsonItems(state: JsonNormalizationState, count: number): void {
   state.items += count;
   if (state.items > TOOL_RESULT_MAX_JSON_ITEMS) {
@@ -302,7 +281,6 @@ function addJsonItems(state: JsonNormalizationState, count: number): void {
     );
   }
 }
-
 function copyBoundedFileData(data: Uint8Array): Uint8Array {
   const encodedBytes = Math.ceil(data.byteLength / 3) * 4;
   if (encodedBytes > TOOL_RESULT_ARTIFACT_MAX_BYTES) {
@@ -312,7 +290,6 @@ function copyBoundedFileData(data: Uint8Array): Uint8Array {
   }
   return new Uint8Array(data);
 }
-
 function normalizeMediaType(value: string): string {
   const mediaType = value.trim().toLowerCase();
   if (
@@ -324,7 +301,6 @@ function normalizeMediaType(value: string): string {
   }
   return mediaType;
 }
-
 function normalizeFileName(value: unknown): string {
   if (
     typeof value !== "string"
@@ -340,7 +316,6 @@ function normalizeFileName(value: unknown): string {
   }
   return value;
 }
-
 function measureEnvelope(
   envelope: NormalizedToolResult,
   signal: AbortSignal,
@@ -349,7 +324,6 @@ function measureEnvelope(
   const previewChunks: Buffer[] = [];
   let previewBytes = 0;
   const previewPayloadLimit = TOOL_RESULT_PREVIEW_MAX_BYTES - 3;
-
   for (const chunk of encodeEnvelopeChunks(envelope)) {
     throwIfAborted(signal);
     const bytes = Buffer.from(chunk, "utf8");
@@ -376,7 +350,6 @@ function measureEnvelope(
     sizeBytes,
   };
 }
-
 function encodeEnvelope(
   envelope: NormalizedToolResult,
   sizeBytes: number,
@@ -395,7 +368,6 @@ function encodeEnvelope(
   }
   return encoded;
 }
-
 function* encodeEnvelopeChunks(
   envelope: NormalizedToolResult,
 ): Generator<string, void, undefined> {
@@ -408,7 +380,6 @@ function* encodeEnvelopeChunks(
   }
   yield "]}";
 }
-
 function* encodePartChunks(
   part: RuntimeToolResultPart,
 ): Generator<string, void, undefined> {
@@ -448,7 +419,6 @@ function* encodePartChunks(
   }
   yield "}";
 }
-
 function* encodeArtifactRefChunks(
   ref: ArtifactRef,
 ): Generator<string, void, undefined> {
@@ -464,7 +434,6 @@ function* encodeArtifactRefChunks(
   }
   yield "}";
 }
-
 function* encodeJsonValueChunks(
   value: JsonValue,
 ): Generator<string, void, undefined> {
@@ -502,7 +471,6 @@ function* encodeJsonValueChunks(
   }
   yield "}";
 }
-
 function* encodeJsonStringChunks(
   value: string,
 ): Generator<string, void, undefined> {
@@ -513,7 +481,6 @@ function* encodeJsonStringChunks(
   }
   yield '"';
 }
-
 function* encodeBase64Chunks(
   value: Uint8Array,
 ): Generator<string, void, undefined> {
@@ -524,7 +491,6 @@ function* encodeBase64Chunks(
   }
   yield '"';
 }
-
 function boundedPreview(chunks: readonly Buffer[], truncated = true): string {
   const suffix = truncated ? "..." : "";
   let preview = Buffer.concat(chunks).toString("utf8");
@@ -536,28 +502,23 @@ function boundedPreview(chunks: readonly Buffer[], truncated = true): string {
   }
   return `${preview}${suffix}`;
 }
-
 function boundedFailure(message: string): NormalizedToolResult {
   return {
     isError: true,
     content: [{ type: "text", text: message }],
   };
 }
-
 function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortError();
 }
-
 function abortError(): Error {
   const error = new Error("Tool result normalization aborted.");
   error.name = "AbortError";
   return error;
 }
-
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

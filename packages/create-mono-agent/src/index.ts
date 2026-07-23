@@ -8,6 +8,15 @@ export type {
   ScaffoldResult,
 } from "./scaffold.js";
 export {
+  COMPOSER_SKILL_TARGETS,
+  installComposerSkill,
+} from "./skill-installer.js";
+export type {
+  ComposerSkillInstallResult,
+  ComposerSkillTarget,
+  InstallComposerSkillOptions,
+} from "./skill-installer.js";
+export {
   PROJECT_TEMPLATES,
   isProjectTemplate,
   renderMinimalProject,

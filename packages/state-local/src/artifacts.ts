@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { opendir } from "node:fs/promises";
+import {
+  link,
+  opendir,
+  rename,
+  unlink,
+} from "node:fs/promises";
 import { join } from "node:path";
 
 import { parseArtifactRef, type ArtifactRef } from "@mono-agent/module-sdk";
@@ -12,6 +17,7 @@ import {
   inspectSecureFile,
   inspectSecureFileDetails,
   readSecureFile,
+  syncSecureDirectory,
   type FileIdentity,
   type ProcessLease,
   verifySecureDirectoryIdentity,
@@ -25,9 +31,11 @@ const ARTIFACT_INDEX_WITNESS_FILE = `${ARTIFACT_INDEX_FILE}.witness`;
 const ARTIFACT_BLOB_PATTERN =
   /^artifact-(?<id>[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})\.blob$/u;
 const ARTIFACT_INDEX_PREFIX = "artifact:";
-const ARTIFACT_INDEX_VALUE_BYTES = 512;
+const ARTIFACT_INDEX_VALUE_BYTES = 1_024;
 const ARTIFACT_ID_PATTERN = /^artifact:sha256:(?<digest>[a-f0-9]{64})$/u;
 const ARTIFACT_SHA256_PATTERN = /^sha256:(?<digest>[a-f0-9]{64})$/u;
+const ARTIFACT_REMOVAL_CLAIM_PATTERN =
+  /^\.retention-(?<id>[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12})\.claim$/u;
 const DEFAULT_MEDIA_TYPE = "application/octet-stream";
 
 export const STATE_LOCAL_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
@@ -65,14 +73,27 @@ export interface StateListArtifactsResult {
   readonly cursor?: string;
 }
 
+type StoredArtifactState =
+  | "reserved"
+  | "staged"
+  | "published"
+  | "removing"
+  | "releasing"
+  | "removed";
+
 interface StoredArtifact {
   readonly digest: string;
   readonly sizeBytes: number;
   readonly storageName: string;
+  readonly state: StoredArtifactState;
+  readonly createdAt?: string;
+  readonly identity?: FileIdentity;
+  readonly removalClaim?: string;
 }
 
 interface ArtifactSnapshot {
   readonly artifacts: readonly StoredArtifact[];
+  readonly records: readonly StoredArtifact[];
   readonly generation: string;
   readonly totalBytes: number;
 }
@@ -80,6 +101,14 @@ interface ArtifactSnapshot {
 interface ScannedArtifactEntry {
   readonly name: string;
   readonly size: number;
+  readonly identity: FileIdentity;
+}
+
+export interface StateLocalArtifactMaintenanceResult {
+  readonly candidates: number;
+  readonly removed: number;
+  readonly reclaimedBytes: number;
+  readonly truncated: boolean;
 }
 
 export interface StateLocalArtifactHooks {
@@ -89,6 +118,10 @@ export interface StateLocalArtifactHooks {
   readonly beforeIndexCommit?: (target: string) => void | Promise<void>;
   /** Crash seam after the transactional index commit but before caller success. */
   readonly afterIndexCommit?: (target: string) => void | Promise<void>;
+  /** Adversarial seam before an indexed unpublished artifact is claimed for removal. */
+  readonly beforeOrphanDelete?: (target: string) => void | Promise<void>;
+  /** Crash seam after a removal claim is durable but before its blob is unlinked. */
+  readonly afterOrphanClaim?: (claim: string) => void | Promise<void>;
 }
 
 export class StateLocalArtifacts {
@@ -97,6 +130,7 @@ export class StateLocalArtifacts {
     private readonly directoryIdentity: FileIdentity,
     private readonly lease: ProcessLease,
     private readonly hooks: StateLocalArtifactHooks,
+    private readonly clock: () => Date,
   ) {}
 
   static async open(
@@ -104,6 +138,7 @@ export class StateLocalArtifacts {
     forbiddenIdentity: FileIdentity,
     signal: AbortSignal,
     hooks: StateLocalArtifactHooks = {},
+    clock: () => Date = () => new Date(),
   ): Promise<StateLocalArtifacts> {
     throwIfAborted(signal);
     const secureDirectory = await ensureSecureDirectory(directory);
@@ -123,6 +158,7 @@ export class StateLocalArtifacts {
       secureDirectory.identity,
       lease,
       hooks,
+      clock,
     );
     try {
       await artifacts.scan(signal);
@@ -153,10 +189,14 @@ export class StateLocalArtifacts {
     const ref = createArtifactRef(digest, data.byteLength, mediaType, fileName);
 
     await this.guard();
-    const snapshot = await this.scan(request.signal);
-    const existing = snapshot.artifacts.find((artifact) => artifact.digest === digest);
-    if (existing !== undefined) {
-      const bytes = await this.readStoredAndVerify(existing, existing.sizeBytes, request.signal);
+    let snapshot = await this.scan(request.signal);
+    let existing = snapshot.records.find((artifact) => artifact.digest === digest);
+    if (existing?.state === "published") {
+      const bytes = await this.readStoredAndVerify(
+        existing,
+        existing.sizeBytes,
+        request.signal,
+      );
       if (bytes.byteLength !== data.byteLength) {
         throw new StateLocalError(
           "STATE_CORRUPT",
@@ -166,7 +206,17 @@ export class StateLocalArtifacts {
       await this.guard();
       return ref;
     }
-    if (snapshot.artifacts.length >= STATE_LOCAL_MAX_ARTIFACTS) {
+    if (existing?.state === "removing" || existing?.state === "releasing") {
+      await this.finishArtifactRemoval(existing, request.signal);
+      snapshot = await this.scan(request.signal);
+      existing = snapshot.records.find((artifact) => artifact.digest === digest);
+    }
+    const activeRecords = snapshot.records.filter((artifact) =>
+      artifact.state !== "removed").length;
+    if (
+      (existing === undefined || existing.state === "removed") &&
+      activeRecords >= STATE_LOCAL_MAX_ARTIFACTS
+    ) {
       throw new StateLocalError(
         "STATE_LIMIT_EXCEEDED",
         `Artifact storage has reached the ${STATE_LOCAL_MAX_ARTIFACTS} artifact package limit.`,
@@ -179,52 +229,92 @@ export class StateLocalArtifacts {
       );
     }
 
-    const storageName = `artifact-${randomUUID()}.blob`;
-    const target = join(this.directory, storageName);
-    await this.hooks.beforePublish?.(target);
-    try {
-      await createSecureFile(target, data);
-    } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
-      // Re-observe and re-guard after validating any concurrently committed
-      // winner. A random-path collision without a matching index is corruption,
-      // never permission to overwrite the path.
-      await this.guard();
-      const winner = (await this.scan(request.signal)).artifacts
-        .find((artifact) => artifact.digest === digest);
-      if (winner !== undefined) {
-        await this.readStoredAndVerify(winner, data.byteLength, request.signal);
-        await this.guard();
-        return ref;
+    let reserved: StoredArtifact;
+    if (
+      existing === undefined ||
+      existing.state === "removed"
+    ) {
+      reserved = {
+        digest,
+        sizeBytes: data.byteLength,
+        storageName: `artifact-${randomUUID()}.blob`,
+        state: "reserved",
+        createdAt: canonicalArtifactNow(this.clock),
+      };
+      const key = `${ARTIFACT_INDEX_PREFIX}${digest}`;
+      if (existing === undefined) {
+        const inserted = this.lease.writeIndexIfAbsent(
+          key,
+          encodeStoredArtifact(reserved),
+        );
+        if (!inserted) {
+          throw new StateLocalError(
+            "STATE_CORRUPT",
+            `Artifact reservation for ${ref.id} collided unexpectedly.`,
+          );
+        }
+      } else {
+        this.lease.writeIndex(key, encodeStoredArtifact(reserved));
       }
-      throw new StateLocalError(
-        "STATE_CORRUPT",
-        `Artifact staging target ${storageName} appeared during publication; it was left untouched.`,
-        error,
-      );
+      await this.guard();
+    } else {
+      reserved = existing;
+      if (
+        reserved.state !== "reserved" &&
+        reserved.state !== "staged"
+      ) {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          `Artifact ${ref.id} has an invalid publication state.`,
+        );
+      }
+      if (reserved.sizeBytes !== data.byteLength) {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          `Artifact reservation ${ref.id} has a mismatched size.`,
+        );
+      }
     }
-    await this.guard();
-    const staged: StoredArtifact = { digest, sizeBytes: data.byteLength, storageName };
+
+    const target = join(this.directory, reserved.storageName);
+    let identity = (await inspectSecureFileDetails(target))?.identity;
+    if (identity === undefined) {
+      await this.hooks.beforePublish?.(target);
+      try {
+        identity = await createSecureFile(target, data);
+      } catch (error) {
+        if (!isAlreadyExists(error)) throw error;
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          `Artifact staging target ${reserved.storageName} appeared during publication; it was left untouched.`,
+          error,
+        );
+      }
+    }
+    const staged: StoredArtifact = {
+      digest,
+      sizeBytes: data.byteLength,
+      storageName: reserved.storageName,
+      state: "staged",
+      createdAt: reserved.createdAt ?? canonicalArtifactNow(this.clock),
+      identity,
+    };
     await this.readStoredAndVerify(staged, data.byteLength, request.signal);
-    await this.hooks.beforeIndexCommit?.(target);
-    const inserted = this.lease.writeIndexIfAbsent(
+    this.lease.writeIndex(
       `${ARTIFACT_INDEX_PREFIX}${digest}`,
       encodeStoredArtifact(staged),
     );
-    if (!inserted) {
-      await this.guard();
-      const winner = (await this.scan(request.signal)).artifacts
-        .find((artifact) => artifact.digest === digest);
-      if (winner === undefined) {
-        throw new StateLocalError(
-          "STATE_CORRUPT",
-          `Artifact index collision for ${ref.id} has no verifiable winner.`,
-        );
-      }
-      await this.readStoredAndVerify(winner, data.byteLength, request.signal);
-      await this.guard();
-      return ref;
-    }
+    await this.guard();
+    await this.hooks.beforeIndexCommit?.(target);
+    const published: StoredArtifact = {
+      ...staged,
+      state: "published",
+    };
+    this.lease.writeIndex(
+      `${ARTIFACT_INDEX_PREFIX}${digest}`,
+      encodeStoredArtifact(published),
+    );
+    await this.guard();
     await this.hooks.afterIndexCommit?.(target);
     await this.guard();
     const committed = (await this.scan(request.signal)).artifacts
@@ -288,6 +378,51 @@ export class StateLocalArtifacts {
     return false;
   }
 
+  /**
+   * Private state-owner release. The execution recorder calls this only after
+   * every durable reference it can authorize has been retired. Generic
+   * StateStore deletion deliberately remains conservative and always false.
+   *
+   * Only schema-v2 rows carry the creation time and inode witness needed to
+   * authorize removal. Legacy published rows are immutable.
+   */
+  async releasePublished(request: StateDeleteArtifactRequest): Promise<boolean> {
+    throwIfAborted(request.signal);
+    const ref = validateArtifactRef(request.ref);
+    await this.guard();
+    const digest = digestFromRef(ref);
+    let stored = (await this.scan(request.signal)).records
+      .find((artifact) => artifact.digest === digest);
+    if (stored === undefined || stored.state === "removed") return false;
+    if (stored.state === "releasing") {
+      await this.finishArtifactRemoval(stored, request.signal);
+      return true;
+    }
+    if (stored.state !== "published" || stored.createdAt === undefined) {
+      return false;
+    }
+    if (stored.sizeBytes !== ref.sizeBytes) {
+      throw new StateLocalError(
+        "STATE_CORRUPT",
+        `Published artifact ${ref.id} does not match its release authority.`,
+      );
+    }
+    await this.readStoredAndVerify(stored, ref.sizeBytes, request.signal);
+    const removalClaim = `.retention-${randomUUID()}.claim`;
+    stored = {
+      ...stored,
+      state: "releasing",
+      removalClaim,
+    };
+    this.lease.writeIndex(
+      `${ARTIFACT_INDEX_PREFIX}${digest}`,
+      encodeStoredArtifact(stored),
+    );
+    await this.guard();
+    await this.finishArtifactRemoval(stored, request.signal);
+    return true;
+  }
+
   async list(request: StateListArtifactsRequest): Promise<StateListArtifactsResult> {
     throwIfAborted(request.signal);
     if (!Number.isSafeInteger(request.limit) || request.limit < 1 || request.limit > 1_000) {
@@ -319,6 +454,65 @@ export class StateLocalArtifacts {
     };
   }
 
+  async maintain(input: {
+    readonly cutoffAt: string;
+    readonly dryRun: boolean;
+    readonly limit: number;
+    readonly signal: AbortSignal;
+  }): Promise<StateLocalArtifactMaintenanceResult> {
+    throwIfAborted(input.signal);
+    const cutoff = Date.parse(input.cutoffAt);
+    if (
+      !Number.isFinite(cutoff) ||
+      new Date(cutoff).toISOString() !== input.cutoffAt
+    ) {
+      throw new StateLocalError(
+        "STATE_INVALID_CONFIG",
+        "Artifact maintenance cutoffAt must be a canonical timestamp.",
+      );
+    }
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 10_000) {
+      throw new StateLocalError(
+        "STATE_LIMIT_EXCEEDED",
+        "Artifact maintenance limit must be from 1 through 10000.",
+      );
+    }
+    await this.guard();
+    const snapshot = await this.scan(input.signal);
+    const candidates = snapshot.records
+      .filter((artifact) =>
+        artifact.state === "removing" ||
+        artifact.state === "releasing" ||
+        (
+          (artifact.state === "reserved" || artifact.state === "staged") &&
+          artifact.createdAt !== undefined &&
+          Date.parse(artifact.createdAt) <= cutoff
+        ))
+      .sort(compareArtifactMaintenanceCandidates);
+    const selected = candidates.slice(0, input.limit);
+    if (input.dryRun) {
+      return {
+        candidates: candidates.length,
+        removed: 0,
+        reclaimedBytes: 0,
+        truncated: candidates.length > selected.length,
+      };
+    }
+    let removed = 0;
+    let reclaimedBytes = 0;
+    for (const artifact of selected) {
+      throwIfAborted(input.signal);
+      reclaimedBytes += await this.finishArtifactRemoval(artifact, input.signal);
+      removed += 1;
+    }
+    return {
+      candidates: candidates.length,
+      removed,
+      reclaimedBytes,
+      truncated: candidates.length > selected.length,
+    };
+  }
+
   async close(): Promise<void> {
     await this.lease.release();
   }
@@ -331,15 +525,34 @@ export class StateLocalArtifacts {
     artifact: StoredArtifact,
     maximumBytes: number,
     signal: AbortSignal,
+    path = join(this.directory, artifact.storageName),
   ): Promise<Buffer> {
-    const path = join(this.directory, artifact.storageName);
-    if ((await inspectSecureFile(path)) === undefined) {
+    const identity = await inspectSecureFile(path);
+    if (identity === undefined) {
       throw new StateLocalError(
         "STATE_ARTIFACT_NOT_FOUND",
         `Artifact artifact:sha256:${artifact.digest} does not exist.`,
       );
     }
+    if (
+      artifact.identity !== undefined &&
+      !sameFileIdentity(identity, artifact.identity)
+    ) {
+      throw new StateLocalError(
+        "STATE_PATH_CHANGED",
+        `Artifact artifact:sha256:${artifact.digest} changed identity.`,
+      );
+    }
     const loaded = await readSecureFile(path, maximumBytes, signal);
+    if (
+      artifact.identity !== undefined &&
+      !sameFileIdentity(loaded.identity, artifact.identity)
+    ) {
+      throw new StateLocalError(
+        "STATE_PATH_CHANGED",
+        `Artifact artifact:sha256:${artifact.digest} changed identity.`,
+      );
+    }
     if (loaded.bytes.byteLength > STATE_LOCAL_MAX_ARTIFACT_BYTES) {
       throw new StateLocalError(
         "STATE_CORRUPT",
@@ -353,6 +566,155 @@ export class StateLocalArtifacts {
       );
     }
     return Buffer.from(loaded.bytes);
+  }
+
+  private async finishArtifactRemoval(
+    initial: StoredArtifact,
+    signal: AbortSignal,
+  ): Promise<number> {
+    throwIfAborted(signal);
+    if (
+      initial.state !== "reserved" &&
+      initial.state !== "staged" &&
+      initial.state !== "removing" &&
+      initial.state !== "releasing"
+    ) {
+      throw new StateLocalError(
+        "STATE_CORRUPT",
+        "Only owner-authorized artifact states can be removed.",
+      );
+    }
+    let artifact = initial;
+    const key = `${ARTIFACT_INDEX_PREFIX}${artifact.digest}`;
+    const target = join(this.directory, artifact.storageName);
+
+    if (artifact.state === "reserved") {
+      const targetDetails = await inspectSecureFileDetails(target);
+      if (targetDetails === undefined) {
+        this.lease.writeIndex(
+          key,
+          encodeStoredArtifact({
+            ...artifact,
+            state: "removed",
+          }),
+        );
+        await this.guard();
+        return 0;
+      }
+      artifact = {
+        ...artifact,
+        state: "staged",
+        identity: targetDetails.identity,
+      };
+      await this.readStoredAndVerify(artifact, artifact.sizeBytes, signal);
+      this.lease.writeIndex(key, encodeStoredArtifact(artifact));
+      await this.guard();
+    }
+
+    if (artifact.state === "staged") {
+      await this.hooks.beforeOrphanDelete?.(target);
+      await this.readStoredAndVerify(artifact, artifact.sizeBytes, signal);
+      const removalClaim = `.retention-${randomUUID()}.claim`;
+      artifact = {
+        ...artifact,
+        state: "removing",
+        removalClaim,
+      };
+      this.lease.writeIndex(key, encodeStoredArtifact(artifact));
+      await this.guard();
+    }
+
+    const claimName = artifact.removalClaim;
+    if (
+      (artifact.state !== "removing" && artifact.state !== "releasing")
+      || claimName === undefined
+    ) {
+      throw new StateLocalError(
+        "STATE_CORRUPT",
+        "Artifact removal state is incomplete.",
+      );
+    }
+    const claim = join(this.directory, claimName);
+    let reclaimedBytes = 0;
+    let targetDetails = await inspectSecureFileDetails(target);
+    let claimDetails = await inspectSecureFileDetails(claim);
+    if (targetDetails !== undefined && claimDetails !== undefined) {
+      throw new StateLocalError(
+        "STATE_CORRUPT",
+        "Artifact removal has both a source and a claim.",
+      );
+    }
+    if (targetDetails !== undefined) {
+      if (
+        artifact.identity === undefined ||
+        !sameFileIdentity(targetDetails.identity, artifact.identity)
+      ) {
+        throw new StateLocalError(
+          "STATE_PATH_CHANGED",
+          "Artifact changed identity before its retention claim.",
+        );
+      }
+      await this.readStoredAndVerify(artifact, artifact.sizeBytes, signal);
+      if ((await inspectSecureFileDetails(claim)) !== undefined) {
+        throw new StateLocalError(
+          "STATE_PATH_CHANGED",
+          "Artifact retention claim appeared before publication.",
+        );
+      }
+      await rename(target, claim);
+      await syncSecureDirectory(this.directory);
+      claimDetails = await inspectSecureFileDetails(claim);
+      targetDetails = await inspectSecureFileDetails(target);
+      if (targetDetails !== undefined) {
+        throw new StateLocalError(
+          "STATE_PATH_CHANGED",
+          "Artifact source reappeared during its retention claim.",
+        );
+      }
+    }
+    if (claimDetails !== undefined) {
+      if (
+        artifact.identity === undefined ||
+        !sameFileIdentity(claimDetails.identity, artifact.identity)
+      ) {
+        await restoreUnexpectedClaim(claim, target, this.directory);
+        throw new StateLocalError(
+          "STATE_PATH_CHANGED",
+          "Artifact retention claimed a different file; the claimed path was restored.",
+        );
+      }
+      await this.readStoredAndVerify(
+        artifact,
+        artifact.sizeBytes,
+        signal,
+        claim,
+      );
+      await this.hooks.afterOrphanClaim?.(claim);
+      await unlink(claim);
+      await syncSecureDirectory(this.directory);
+      reclaimedBytes = artifact.sizeBytes;
+    }
+    if (
+      (await inspectSecureFileDetails(target)) !== undefined ||
+      (await inspectSecureFileDetails(claim)) !== undefined
+    ) {
+      throw new StateLocalError(
+        "STATE_PATH_CHANGED",
+        "Artifact removal paths changed after cleanup.",
+      );
+    }
+    this.lease.writeIndex(
+      key,
+      encodeStoredArtifact({
+        digest: artifact.digest,
+        sizeBytes: artifact.sizeBytes,
+        storageName: artifact.storageName,
+        state: "removed",
+        ...(artifact.createdAt === undefined ? {} : { createdAt: artifact.createdAt }),
+      }),
+    );
+    await this.guard();
+    return reclaimedBytes;
   }
 
   private async scan(signal: AbortSignal): Promise<ArtifactSnapshot> {
@@ -372,18 +734,27 @@ export class StateLocalArtifacts {
     if (rows.length > STATE_LOCAL_MAX_ARTIFACTS) {
       throw new StateLocalError("STATE_LIMIT_EXCEEDED", "Artifact index contains too many entries.");
     }
-    const artifacts = rows.map(decodeStoredArtifact);
+    const records = rows.map(decodeStoredArtifact);
     const byStorageName = new Map<string, StoredArtifact>();
-    for (const artifact of artifacts) {
+    const byRemovalClaim = new Map<string, StoredArtifact>();
+    for (const artifact of records) {
       if (byStorageName.has(artifact.storageName)) {
         throw new StateLocalError("STATE_CORRUPT", "Artifact index aliases one physical blob.");
       }
       byStorageName.set(artifact.storageName, artifact);
+      if (artifact.removalClaim !== undefined) {
+        if (byRemovalClaim.has(artifact.removalClaim)) {
+          throw new StateLocalError("STATE_CORRUPT", "Artifact index aliases one removal claim.");
+        }
+        byRemovalClaim.set(artifact.removalClaim, artifact);
+      }
     }
     let entries = 0;
     let totalBytes = 0;
-    const observed = new Set<string>();
+    const observedTargets = new Set<string>();
+    const observedClaims = new Set<string>();
     const physicalEntries: ScannedArtifactEntry[] = [];
+    const removalClaims: ScannedArtifactEntry[] = [];
     for await (const entry of await opendir(this.directory)) {
       throwIfAborted(signal);
       entries += 1;
@@ -421,7 +792,16 @@ export class StateLocalArtifacts {
           `Artifact storage entry ${entry.name} disappeared during inspection.`,
         );
       }
-      physicalEntries.push({ name: entry.name, size: details.size });
+      const scanned = {
+        name: entry.name,
+        size: details.size,
+        identity: details.identity,
+      };
+      if (ARTIFACT_REMOVAL_CLAIM_PATTERN.test(entry.name)) {
+        removalClaims.push(scanned);
+      } else {
+        physicalEntries.push(scanned);
+      }
     }
     // Inspect every non-internal entry before interpreting names. This makes a
     // symlink or hard-link attack deterministically fail as insecure even when
@@ -449,28 +829,124 @@ export class StateLocalArtifacts {
       }
       const indexed = byStorageName.get(entry.name);
       if (indexed === undefined) {
-        // A crash before the SQLite index commit leaves a bounded private
-        // orphan. It is never listed or addressable and is counted against both
-        // physical entry and byte ceilings.
+        // Legacy stores can contain a blob created before durable reservation
+        // was introduced. Its ownership is not provable, so maintenance never
+        // deletes it. It remains invisible and counts against all bounds.
         continue;
       }
-      observed.add(entry.name);
+      if (indexed.state === "removed") {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          `Removed artifact ${entry.name} still has a physical blob.`,
+        );
+      }
+      observedTargets.add(entry.name);
       if (entry.size !== indexed.sizeBytes) {
         throw new StateLocalError(
           "STATE_CORRUPT",
           `Indexed artifact ${entry.name} does not match its declared size.`,
         );
       }
+      if (
+        indexed.identity !== undefined &&
+        !sameFileIdentity(entry.identity, indexed.identity)
+      ) {
+        throw new StateLocalError(
+          "STATE_PATH_CHANGED",
+          `Indexed artifact ${entry.name} changed identity.`,
+        );
+      }
       await this.readStoredAndVerify(indexed, indexed.sizeBytes, signal);
     }
-    if (observed.size !== artifacts.length) {
-      throw new StateLocalError("STATE_CORRUPT", "Artifact index references a missing blob.");
+    for (const entry of removalClaims) {
+      totalBytes += entry.size;
+      if (entry.size > STATE_LOCAL_MAX_ARTIFACT_BYTES) {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          `Artifact removal claim ${entry.name} exceeds the package size limit.`,
+        );
+      }
+      if (totalBytes > STATE_LOCAL_MAX_TOTAL_ARTIFACT_BYTES) {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          "Artifact storage exceeds the package total-size limit.",
+        );
+      }
+      const indexed = byRemovalClaim.get(entry.name);
+      if (
+        indexed === undefined ||
+        (indexed.state !== "removing" && indexed.state !== "releasing") ||
+        indexed.identity === undefined
+      ) {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          `Artifact removal claim ${entry.name} has no matching transaction.`,
+        );
+      }
+      if (
+        entry.size !== indexed.sizeBytes ||
+        !sameFileIdentity(entry.identity, indexed.identity)
+      ) {
+        throw new StateLocalError(
+          "STATE_PATH_CHANGED",
+          `Artifact removal claim ${entry.name} changed identity.`,
+        );
+      }
+      observedClaims.add(entry.name);
+      await this.readStoredAndVerify(
+        indexed,
+        indexed.sizeBytes,
+        signal,
+        join(this.directory, entry.name),
+      );
     }
-    artifacts.sort((left, right) =>
-      left.digest < right.digest ? -1 : left.digest > right.digest ? 1 : 0);
+    for (const artifact of records) {
+      const targetPresent = observedTargets.has(artifact.storageName);
+      const claimPresent = artifact.removalClaim === undefined
+        ? false
+        : observedClaims.has(artifact.removalClaim);
+      if (targetPresent && claimPresent) {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          "Artifact removal has both a source and a claim.",
+        );
+      }
+      if (
+        (artifact.state === "published" || artifact.state === "staged") &&
+        !targetPresent
+      ) {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          `Artifact index references missing ${artifact.state} bytes.`,
+        );
+      }
+      if (
+        (artifact.state === "removing" || artifact.state === "releasing") &&
+        artifact.removalClaim === undefined
+      ) {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          "Artifact removal index is missing its claim name.",
+        );
+      }
+      if (
+        artifact.state === "removed" &&
+        (targetPresent || claimPresent)
+      ) {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          "Removed artifact state still has physical bytes.",
+        );
+      }
+    }
+    const artifacts = records
+      .filter((artifact) => artifact.state === "published")
+      .sort((left, right) =>
+        left.digest < right.digest ? -1 : left.digest > right.digest ? 1 : 0);
     await this.guard();
     return {
       artifacts,
+      records,
       generation: sha256(Buffer.from(
         artifacts.map((artifact) => `${artifact.digest}:${artifact.sizeBytes}\n`).join(""),
         "utf8",
@@ -610,11 +1086,24 @@ function sha256(value: Uint8Array): string {
 }
 
 function encodeStoredArtifact(artifact: StoredArtifact): Buffer {
-  return Buffer.from(`${JSON.stringify({
+  const value = {
+    schemaVersion: 2,
     digest: artifact.digest,
     sizeBytes: artifact.sizeBytes,
     storageName: artifact.storageName,
-  })}\n`, "utf8");
+    state: artifact.state,
+    createdAt: artifact.createdAt,
+    ...(artifact.identity === undefined
+      ? {}
+      : {
+          device: artifact.identity.device,
+          inode: artifact.identity.inode,
+        }),
+    ...(artifact.removalClaim === undefined
+      ? {}
+      : { removalClaim: artifact.removalClaim }),
+  };
+  return Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
 }
 
 function decodeStoredArtifact(
@@ -626,20 +1115,10 @@ function decodeStoredArtifact(
   } catch (error) {
     throw new StateLocalError("STATE_CORRUPT", `Artifact index entry ${row.key} is invalid.`, error);
   }
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    Array.isArray(value) ||
-    Object.getPrototypeOf(value) !== Object.prototype ||
-    Object.keys(value).sort().join(",") !== "digest,sizeBytes,storageName"
-  ) {
+  if (!isPlainRecord(value)) {
     throw new StateLocalError("STATE_CORRUPT", `Artifact index entry ${row.key} is invalid.`);
   }
-  const candidate = value as {
-    readonly digest?: unknown;
-    readonly sizeBytes?: unknown;
-    readonly storageName?: unknown;
-  };
+  const candidate = value;
   const digest = row.key.slice(ARTIFACT_INDEX_PREFIX.length);
   if (
     !/^[a-f0-9]{64}$/u.test(digest) ||
@@ -652,11 +1131,153 @@ function decodeStoredArtifact(
   ) {
     throw new StateLocalError("STATE_CORRUPT", `Artifact index entry ${row.key} is invalid.`);
   }
+  if (hasExactKeys(candidate, ["digest", "sizeBytes", "storageName"])) {
+    // Pre-maintenance source-beta rows are immutable published artifacts.
+    // They remain readable but have no deletion provenance or retention age.
+    return {
+      digest,
+      sizeBytes: candidate.sizeBytes as number,
+      storageName: candidate.storageName,
+      state: "published",
+    };
+  }
+  const state = candidate.state;
+  if (
+    candidate.schemaVersion !== 2 ||
+    typeof state !== "string" ||
+    !["reserved", "staged", "published", "removing", "releasing", "removed"].includes(state)
+  ) {
+    throw new StateLocalError("STATE_CORRUPT", `Artifact index entry ${row.key} is invalid.`);
+  }
+  const expectedKeys = [
+    "createdAt",
+    "digest",
+    "schemaVersion",
+    "sizeBytes",
+    "state",
+    "storageName",
+    ...(state === "staged" || state === "published" || state === "removing" || state === "releasing"
+      ? ["device", "inode"]
+      : []),
+    ...(state === "removing" || state === "releasing" ? ["removalClaim"] : []),
+  ];
+  if (
+    !hasExactKeys(candidate, expectedKeys) ||
+    typeof candidate.createdAt !== "string" ||
+    !isCanonicalTimestamp(candidate.createdAt)
+  ) {
+    throw new StateLocalError("STATE_CORRUPT", `Artifact index entry ${row.key} is invalid.`);
+  }
+  const identityRequired =
+    state === "staged" || state === "published" || state === "removing" || state === "releasing";
+  const identity = identityRequired
+    ? readStoredIdentity(candidate, row.key)
+    : undefined;
+  const removalClaim = state === "removing" || state === "releasing"
+    ? candidate.removalClaim
+    : undefined;
+  if (
+    (state === "removing" || state === "releasing") &&
+    (
+      typeof removalClaim !== "string" ||
+      !ARTIFACT_REMOVAL_CLAIM_PATTERN.test(removalClaim)
+    )
+  ) {
+    throw new StateLocalError("STATE_CORRUPT", `Artifact index entry ${row.key} is invalid.`);
+  }
   return {
     digest,
     sizeBytes: candidate.sizeBytes as number,
     storageName: candidate.storageName,
+    state: state as StoredArtifactState,
+    createdAt: candidate.createdAt,
+    ...(identity === undefined ? {} : { identity }),
+    ...(typeof removalClaim === "string" ? { removalClaim } : {}),
   };
+}
+
+function readStoredIdentity(
+  candidate: Record<string, unknown>,
+  key: string,
+): FileIdentity {
+  if (
+    !Number.isSafeInteger(candidate.device) ||
+    (candidate.device as number) < 0 ||
+    !Number.isSafeInteger(candidate.inode) ||
+    (candidate.inode as number) < 1
+  ) {
+    throw new StateLocalError("STATE_CORRUPT", `Artifact index entry ${key} is invalid.`);
+  }
+  return {
+    device: candidate.device as number,
+    inode: candidate.inode as number,
+  };
+}
+
+function compareArtifactMaintenanceCandidates(
+  left: StoredArtifact,
+  right: StoredArtifact,
+): number {
+  const leftTime = left.createdAt ?? "";
+  const rightTime = right.createdAt ?? "";
+  if (leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
+  return left.digest < right.digest ? -1 : left.digest > right.digest ? 1 : 0;
+}
+
+async function restoreUnexpectedClaim(
+  claim: string,
+  target: string,
+  directory: string,
+): Promise<void> {
+  try {
+    await link(claim, target);
+  } catch (error) {
+    throw new StateLocalError(
+      "STATE_PATH_CHANGED",
+      "Artifact retention could not restore a mismatched claim without clobbering another path.",
+      error,
+    );
+  }
+  await syncSecureDirectory(directory);
+  await unlink(claim);
+  await syncSecureDirectory(directory);
+}
+
+function canonicalArtifactNow(clock: () => Date): string {
+  const value = clock();
+  if (!(value instanceof Date) || !Number.isFinite(value.valueOf())) {
+    throw new StateLocalError(
+      "STATE_INVALID_CONFIG",
+      "The local artifact clock returned an invalid date.",
+    );
+  }
+  return value.toISOString();
+}
+
+function isCanonicalTimestamp(value: string): boolean {
+  const date = new Date(value);
+  return Number.isFinite(date.valueOf()) && date.toISOString() === value;
+}
+
+function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return left.device === right.device && left.inode === right.inode;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.getPrototypeOf(value) === Object.prototype;
+}
+
+function hasExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  return actual.length === wanted.length &&
+    actual.every((key, index) => key === wanted[index]);
 }
 
 function isAlreadyExists(error: unknown): boolean {

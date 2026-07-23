@@ -21,10 +21,21 @@ Own the fail-closed process boundary for a preselected Sandbox Runtime Tool
 (SRT) executable and settings file. Both paths and SHA-256 digests are explicit
 configuration. Selection and every run verify canonical path, current-user
 ownership, mode, single-link device/inode identity, size, and content digest.
+Each run retains the verified descriptors through process creation so a
+pathname replacement cannot substitute different executable or policy bytes.
 
-Commands launch with `shell: false` as the exact argument vector
-`srt --settings <settings> <absolute-command> ...arguments`. Output, input,
-arguments, environment, duration, cancellation, and shutdown are bounded.
+SRT receives the logical argument vector
+`srt --settings <bound-settings> <absolute-command> ...arguments` without a
+shell. A reviewed, self-contained `#!/usr/bin/env node` ESM bundle is loaded
+from its inherited descriptor. Static imports may target `node:` built-ins;
+relative, absolute, `file:`, and bare-package imports fail closed, and dynamic
+import syntax is rejected before entrypoint evaluation. Linux can additionally
+execute a reviewed single-file native descriptor through `/proc/self/fd`;
+unsupported platform or executable shapes—including non-Node interpreter
+scripts—fail closed. Output, input, arguments, environment, duration,
+cancellation, and shutdown are bounded.
+Health re-proves both selected files and reports the integrity state, active
+command count, and selected digests without exposing command data.
 
 ## Install / Usage
 
@@ -68,7 +79,44 @@ by the current user, executable by that user, single-linked, free of set-ID
 bits, and not group/world writable. A missing file, mismatched digest, symlink,
 hard link, mode drift, or identity replacement makes creation or execution fail
 closed. The child starts with an empty environment except explicitly inherited
-ambient names and explicitly allowlisted per-command values.
+ambient names and explicitly allowlisted per-command values. `NODE_OPTIONS`,
+`NODE_PATH`, and every `LD_*` or `DYLD_*` variable are reserved: config cannot
+inherit or allow them, and per-command values fail before process creation.
+This prevents Node or the native dynamic loader from executing preload code
+outside SRT enforcement.
+
+Provisioning must bundle the reviewed SRT JavaScript transitive closure into
+the one configured entrypoint before computing its digest. The raw upstream
+multi-file `dist/cli.js` is not accepted directly because its relative imports
+would reopen code outside the pinned descriptor. Do not configure an npm bin
+shim or an entrypoint that imports adjacent runtime files.
+
+Descriptor binding closes replacement, rename, and unlink races between the
+integrity proof and process creation. It does not claim isolation from a
+malicious process already running as the same operating-system user: such a
+process can rewrite an already-open inode and is outside this package's
+security boundary. Provision the bundle in the reviewed private cache and do
+not run untrusted same-user host processes.
+
+The settings file is the policy authority. For example, network deny/allow
+behavior must be encoded and enforced by the independently reviewed SRT
+settings. Selecting no sandbox module is Core's `off` behavior; selecting this
+module is the explicit native boundary. This package never falls back to a host
+process when SRT or its policy cannot be proven.
+
+The selected module exposes a read-only status command without starting a
+serving lifecycle or executing the SRT binary:
+
+```bash
+mono-agent sandbox sandbox-srt:status \
+  --config ./mono-agent.config.json
+```
+
+It re-hashes the pinned executable and settings and returns bounded
+`mode`, `integrity`, `networkAvailability`, and active-command fields without
+paths or raw errors. `networkAvailability: "settings-controlled"` means the
+verified settings remain the network authority; it does not claim that an
+arbitrary settings file allows or denies any particular destination.
 
 ## Architecture
 
@@ -76,18 +124,19 @@ ambient names and explicitly allowlisted per-command values.
 
 1. Core validates the reserved sandbox config and creates one selected module instance.
 2. The module opens and hashes the canonical executable and settings paths with no-follow descriptors, pinning their filesystem fingerprints.
-3. Each request validates an absolute command, canonical working directory, argument/input/environment bounds, allowlisted environment, timeout, and cancellation.
-4. Immediately before launch, both selected files are rehashed and compared with the pinned fingerprints.
-5. Node spawns the SRT executable without a shell and collects a combined bounded stdout/stderr budget; overflow, abort, timeout, and stop terminate the whole process group.
-6. After process close, the selected files are verified again before a result is returned. Health performs the same integrity proof.
+3. Each request validates an absolute command, canonical working directory, argument/input/environment bounds, allowlisted non-preloader environment, timeout, and cancellation.
+4. Immediately before launch, both selected files are reopened with no-follow descriptors, rehashed positionally, and compared with the pinned fingerprints while those descriptors remain open.
+5. Node passes those descriptors into the child. A self-contained ESM bundle is loaded from `/proc/self/fd` on Linux or `/dev/fd` on macOS; its loader permits only `node:` built-ins and rejects every external module edge. Linux native executables launch directly through `/proc/self/fd`. The settings argument is descriptor-backed on both platforms.
+6. The module collects a combined bounded stdout/stderr budget; overflow, abort, timeout, and stop terminate the whole process group. Later runs and health independently re-prove the selected paths, but a post-run pathname check is not treated as the execution-race defense.
 
 ### Package structure
 
 | Source | Responsibility |
 | --- | --- |
 | `config.ts` | Strict executable, settings, limit, and environment configuration. |
-| `security.ts` | Canonical no-follow file resolution, POSIX safety checks, hashing, and fingerprints. |
-| `sandbox.ts` | Command validation, exact process spawn, bounded I/O, timeout, cancellation, health, and stop. |
+| `security.ts` | Canonical no-follow file resolution, POSIX safety checks, positional hashing, fingerprints, and retained descriptor bindings. |
+| `sandbox.ts` | Command validation, descriptor-bound process launch, bounded I/O, timeout, cancellation, health, and stop. |
+| `status-command.ts` | Strict read-only integrity and settings-authority status reporting. |
 | `errors.ts` | Stable fail-closed sandbox error codes. |
 | `index.ts` | The typed reserved `monoAgentModule` definition and public exports. |
 
@@ -164,5 +213,12 @@ pnpm --filter @mono-agent/sandbox-srt test
 The focused suite uses a deterministic fake SRT executable to prove exact
 argument vectors, environment isolation, bounded input/output/timeout/cancel,
 settings/executable digest and identity drift, missing and unsafe modes,
-symlink and hard-link rejection, canonical working directories, health, and
-closed-instance behavior.
+symlink and hard-link rejection, canonical working directories, pinned
+network-deny/network-allow policy handoff, health, closed-instance behavior,
+and a deterministic executable/settings replacement at the exact
+verify-to-spawn boundary. It also rewrites a relative dependency and proves
+static, dynamic, and `file:` imports fail without executing that dependency.
+The suite also proves Node and native-loader injection variables fail before a
+`NODE_OPTIONS --import` marker can run. The fake policy seam is contract
+evidence; a real provisioned bundled-SRT smoke remains the deployment-time
+proof of operating-system network enforcement.

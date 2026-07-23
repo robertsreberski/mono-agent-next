@@ -1,6 +1,7 @@
 # @mono-agent/memory-local
 
-Persist bounded owner-private agent memory in a local SQLite store.
+Persist bounded, owner-private BuJo memory with SQLite FTS and optional local
+vector recall.
 
 ## Category
 
@@ -17,20 +18,19 @@ First-party open memory module in the context layer.
 
 ## Responsibility
 
-Own deterministic local recall, explicit bounded capture, forgetting, health,
-and the permanent identity of one SQLite memory store. The directory is mode
-`0700`; its database and canonical first-run marker are mode `0600`, owned by
-the current operating-system user, single-linked, and bound to one another by
-device and inode identities.
+Own the local BuJo schema, completed-turn memory extraction, hybrid recall,
+forgetting, maintenance, and permanent identity of one memory root. BuJo
+records retain task/event/note type, lifecycle status, provenance, salience,
+tags, entity relations, FTS text, and optional vectors.
 
-The default capture path stores the caller's validated `MemoryRecord` exactly.
-`capture.mode: "runtime"` is optional and fails closed unless Core explicitly
-grants `memory.runtime-capture` with the SDK's bounded, tool-free completion
-surface.
+Capture is explicitly enabled. Core then invokes the configured runtime and
+model through the bounded `memory.runtime-capture` grant with a JSON schema,
+timeout, and output-token limit. Invalid or failed extraction remains in a
+durable retry intake and is never treated as success.
 
 ## Install / Usage
 
-Install the module as a direct dependency and select it in the memory slot:
+Install the module and select it in the memory slot:
 
 ```bash
 pnpm add @mono-agent/memory-local
@@ -40,49 +40,102 @@ pnpm add @mono-agent/memory-local
 {
   "memory": {
     "$use": "@mono-agent/memory-local",
-    "directory": "./.mono-agent/memory",
-    "limits": {
-      "maxRecords": 10000,
-      "maxTotalBytes": 67108864,
-      "maxRecallResults": 50
+    "root": "./.mono-agent/memory",
+    "maxBytes": 96000,
+    "capture": {
+      "enabled": true,
+      "model": {
+        "runtime": "pi",
+        "model": "openai-codex:gpt-5.4-mini"
+      },
+      "timeoutMs": 360000
     },
-    "capture": { "mode": "direct" }
+    "embeddings": {
+      "provider": "ollama",
+      "endpoint": "http://127.0.0.1:11434",
+      "model": "nomic-embed-text:v1.5",
+      "dimensions": 768
+    },
+    "recallTool": {
+      "enabled": true
+    }
   }
 }
 ```
 
-An omitted directory uses Core's instance-specific data directory. Relative
-paths resolve from the directory containing the agent config. Initialization
-is exclusive and occurs only in an empty owner-private directory. If either
-the database or permanent marker exists without the other, initialization
-stops and preserves the incomplete state for operator inspection.
+Omit `root` to use Core's instance data directory. Relative roots resolve from
+the agent-config directory. Set `capture.enabled` to `false` and omit
+`capture.model` to keep an existing store recall-only. `recallTool.enabled`
+controls model-visible recall; it does not disable host-side recall.
 
-Recall uses deterministic normalized lexical matching with stable score,
-timestamp, and ID tie-breaking. Capture is transactional: exact duplicates are
-idempotent, conflicting IDs fail without partial insertion, and configured
-record/byte capacity is checked before commit.
+The Ollama endpoint must use HTTPS or literal-loopback HTTP. Vector failures
+open a bounded circuit breaker and recall degrades to FTS instead of returning
+invented or unchecked matches.
 
 ## Architecture
 
 ### Data flow
 
-1. Core validates the module config and supplies the config and instance data directories.
-2. The module opens a canonical mode-`0700` root by descriptor, rejecting symlinks and unsafe ownership or permissions.
-3. First initialization exclusively creates SQLite and a permanent canonical marker, then cross-binds their filesystem identities in both files.
-4. Every operation revalidates root, database, and exact marker identities and bytes, runs SQLite integrity and binding checks, and fails closed on drift or corruption.
-5. Capture validates JSON metadata and all byte/count bounds before one SQLite transaction; recall revalidates every stored record and its derived hash before returning it.
-6. Forget deletes one validated record ID, while health proves the same store invariants without repairing operator data.
+1. Core validates config and grants only the selected runtime-capture route.
+2. The module opens a canonical owner-private root and acquires a separate
+   exclusive SQLite writer lease. SQLite receives only a verified, reserved
+   hard-link binding to the canonical database inode. An exact inode-derived,
+   descriptor-verified authority directory is synced before the link; both
+   survive a crash for WAL recovery and are removed after a clean close.
+   Accepted journal, shared-memory, and WAL inodes remain descriptor-pinned
+   across SQLite use. Any pathname drift is durably quarantined with an
+   admitted-inode snapshot before SQLite close and blocks a healthy reopen.
+3. First initialization writes `initializing:<uuid>` and then
+   `initialized:<uuid>` to the same pinned marker inode after the BuJo database
+   is durable. Partial initialization is preserved for operator inspection.
+4. Completed-turn capture records a durable intake, obtains schema-constrained
+   extraction, then atomically commits BuJo/FTS rows, vector-or-retry state, and
+   the replay receipt. Exact duplicate replay reconstructs missing vector
+   intake without rerunning a completed capture.
+5. Optional Ollama embeddings populate `sqlite-vec`; recall combines bounded
+   FTS and vector candidates with stable ordering and a total `maxBytes` cap.
+6. Explicit consolidation reads canonical rows and refreshes bounded
+   `index.md` plus the deterministic empty `future-log.md` without a model,
+   embedding call, scheduler, or canonical mutation. `future-log.md` publishes
+   first and `index.md` is the semantic commit point.
+7. Every operation revalidates ownership, modes, link counts, pinned file
+   identities, marker bytes, writer lease, SQLite schema, and quick-check.
 
 ### Package structure
 
 | Source | Responsibility |
 | --- | --- |
-| `config.ts` | Strict bounded memory and capture configuration. |
-| `security.ts` | POSIX owner/mode/link, canonical path, descriptor, and file-identity checks. |
-| `records.ts` | Record validation, canonical JSON, hashes, and deterministic lexical scoring. |
-| `store.ts` | Permanent marker, SQLite schema, capture transactions, recall, forget, and health. |
-| `errors.ts` | Stable fail-closed package error codes. |
-| `index.ts` | The typed memory `monoAgentModule` definition and public exports. |
+| `config.ts` | Exact capture, embedding, recall-tool, and byte-bound config. |
+| `security.ts` | Canonical root and pinned descriptor ownership/link/mode checks. |
+| `writer-lease.ts` | Exclusive fail-closed writer fence. |
+| `bujo-db.ts` | BuJo v1, FTS5, sqlite-vec, intake metadata, and index operations. |
+| `embeddings.ts` | Bounded no-redirect Ollama `/api/embed` client. |
+| `records.ts` | Record validation, canonical hashing, and lexical scoring. |
+| `consolidation.ts` | Bounded projection rendering, crash-safe publication, duplicate reporting, and projection audit. |
+| `commands.ts` | Namespaced maintenance commands and explicit destructive authorization. |
+| `store.ts` | Identity commit, capture/recall/forget, consolidation, audit, backup, rebuild, and retry. |
+| `errors.ts` | Stable fail-closed error codes. |
+| `index.ts` | Memory module definition and curated exports. |
+
+Maintenance is explicit: `audit({ strict: true })` gates cutover and rejects
+missing expected FTS or vector rows,
+`previewForget` shows the exact record and vector before deletion, `backup`
+writes a verified copy with SHA-256 evidence, `rebuild` recreates FTS/vector
+indexes, `consolidate` refreshes projection-only index/future-log files, and
+`retryIntake` resumes bounded failed capture or vector work. The module exposes
+the same logic as `memory-local:audit`, `backup`, `rebuild`, `forget`, and
+`consolidate` maintenance commands. Rebuild requires `confirm: true`; forget
+previews by default and mutates only with `dryRun: false, confirm: true`.
+
+Non-serving module diagnostics reuse the read-only audit path. A healthy store
+is silent; incomplete FTS/vector/intake/projection state returns bounded
+warnings or errors, and an unsafe, corrupt, or in-flight identity returns one
+sanitized integrity error. The diagnostics callback does not capture, embed,
+retry, consolidate, rebuild, or start the module.
+
+The sanitized v0-final fixture rehearses copied-data audit, backup, both old
+and new readers, capture idempotency, rebuild, and rollback without mutating
+the source store.
 
 ## Public API
 
@@ -90,10 +143,13 @@ record/byte capacity is checked before commit.
 
 | Export | Use it for |
 | --- | --- |
-| `monoAgentModule` | Select this package in a v1 memory slot. |
-| `MemoryLocalConfig` | Type programmatically supplied configuration. |
-| `MemoryLocal` | Use the concrete bounded local memory implementation. |
-| `MemoryLocalError` | Branch on stable fail-closed memory error codes. |
+| `monoAgentModule` | Select this package in the memory slot. |
+| `MemoryLocalConfig` | Type authored module configuration. |
+| `MemoryLocal` | Run recall, capture, forget, and operator maintenance. |
+| `openMemoryLocal` | Open a store directly for migration rehearsal or inspection. |
+| `MemoryLocalConsolidateResult` | Consume bounded duplicate and projection publication evidence. |
+| `OllamaMemoryEmbeddingProvider` | Supply the supported local vector provider. |
+| `MemoryLocalError` | Branch on stable fail-closed error codes. |
 
 <!-- public-api-inventory:start -->
 <!-- Generated by scripts/generate-public-api-docs.mjs. Do not edit by hand. -->
@@ -103,7 +159,10 @@ Every symbol exported by each public code entrypoint is listed below.
 **`@mono-agent/memory-local`**
 
 ```text
-DEFAULT_MEMORY_MAX_METADATA_BYTES
+DEFAULT_EMBEDDING_BREAKER_FAILURES
+DEFAULT_EMBEDDING_BREAKER_RESET_MS
+DEFAULT_EMBEDDING_TIMEOUT_MS
+DEFAULT_MEMORY_MAX_BYTES
 DEFAULT_MEMORY_MAX_RECALL_RESULTS
 DEFAULT_MEMORY_MAX_RECORDS
 DEFAULT_MEMORY_MAX_TEXT_BYTES
@@ -111,14 +170,35 @@ DEFAULT_MEMORY_MAX_TOTAL_BYTES
 DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_BYTES
 DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_TOKENS
 DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS
+DEFAULT_RUNTIME_CAPTURE_TIMEOUT_MS
 MEMORY_LOCAL_DATABASE_FILENAME
+MEMORY_LOCAL_FUTURE_LOG_FILENAME
+MEMORY_LOCAL_INDEX_FILENAME
 MEMORY_LOCAL_MARKER_FILENAME
+MEMORY_LOCAL_WRITER_LEASE_FILENAME
+MemoryEmbeddingProvider
 MemoryLocal
+MemoryLocalAudit
+MemoryLocalAuditRequest
+MemoryLocalBackupRequest
+MemoryLocalBackupResult
 MemoryLocalCaptureConfig
 MemoryLocalConfig
+MemoryLocalConsolidateRequest
+MemoryLocalConsolidateResult
+MemoryLocalEmbeddingsConfig
 MemoryLocalError
 MemoryLocalErrorCode
-MemoryLocalLimitsConfig
+MemoryLocalForgetPreview
+MemoryLocalModelRoute
+MemoryLocalProjectionAudit
+MemoryLocalProjectionStatus
+MemoryLocalRebuildRequest
+MemoryLocalRebuildResult
+MemoryLocalRecallToolConfig
+MemoryLocalRetryRequest
+MemoryLocalRetryResult
+OllamaMemoryEmbeddingProvider
 OpenMemoryLocalOptions
 default
 memoryLocalJsonSchema
@@ -131,23 +211,25 @@ parseMemoryLocalConfig
 
 ## Dependency Boundary
 
-This GPL package depends only on the public memory contracts in
-`@mono-agent/module-sdk` and Node built-ins. SQLite is supplied by the supported
-Node runtime. The package does not import Core, products, runtimes, channels,
-state implementations, v0 persistence helpers, or third-party database code.
+This GPL package depends on public memory contracts from
+`@mono-agent/module-sdk`, Node built-ins, and `sqlite-vec`. It does not import
+Core, channels, products, runtimes, state implementations, or predecessor
+persistence code.
 
 ## What This Package Does Not Own
 
-It does not decide when Core captures or recalls memory, prompt a model by
-default, silently grant runtime extraction, synthesize conversation records,
-choose agent data directories, back up or migrate v0 stores, repair corrupt
-operator data, or provide remote/vector memory. Those remain Core, operator,
-migration, or separately selected module responsibilities.
+It does not choose when Core submits a completed turn, broaden runtime
+authority, run a remote embedding service, schedule consolidation, silently
+repair corrupt operator data, delete without an explicit record ID and
+confirmation, or mutate the original v0 store during migration. State-local
+owns conversation/run durability; Core owns routing and model-visible tool
+policy.
 
 ## Related Documentation
 
 - [V1 product requirements](../../refactor/mono-agent-v1-prd.md)
 - [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Capability ladder](../../docs/reference/capability-ladder.md)
 - [Module SDK](../module-sdk/README.md)
 
 ## Verification
@@ -160,7 +242,8 @@ pnpm --filter @mono-agent/memory-local run build
 pnpm --filter @mono-agent/memory-local test
 ```
 
-The focused suite covers initialization and reopen, stable recall, direct and
-explicitly granted runtime capture, duplicate atomicity, forgetting, capacity,
-canonical marker mutation, incomplete stores, SQLite corruption preservation,
-owner-private modes, symlink rejection, and hard-link rejection.
+The suite covers same-inode first-run identity, unsafe path/link/mode failures,
+exclusive writers, BuJo/FTS/vector recall, embedding degradation, capture
+receipts and retries, audit/backup/rebuild/forget, deterministic consolidation
+and command authorization, and copied-data
+migration/rollback rehearsal.

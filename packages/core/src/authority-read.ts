@@ -2,13 +2,9 @@ import { createHash } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open, type FileHandle } from "node:fs/promises";
 import { resolve } from "node:path";
-
 import type { LoadedAuthoritySource } from "./types.js";
-
 export const DEFAULT_AUTHORITY_MAX_BYTES = 1_000_000;
-
 const READ_CHUNK_BYTES = 64 * 1024;
-
 export type AuthorityReadErrorCode =
   | "invalid_path"
   | "unsupported_platform"
@@ -19,11 +15,9 @@ export type AuthorityReadErrorCode =
   | "identity_changed"
   | "invalid_utf8"
   | "io_failed";
-
 export class AuthorityReadError extends Error {
   readonly code: AuthorityReadErrorCode;
   readonly path: string;
-
   constructor(options: {
     readonly code: AuthorityReadErrorCode;
     readonly path: string;
@@ -37,17 +31,14 @@ export class AuthorityReadError extends Error {
     this.path = options.path;
   }
 }
-
 export interface ReadAuthorityFileOptions {
   readonly maxBytes?: number;
   readonly requireSingleLink?: boolean;
 }
-
 export interface AuthorityFileSnapshot {
   readonly source: LoadedAuthoritySource;
   readonly bytes: Uint8Array;
 }
-
 /**
  * Read one authority-bearing file through the descriptor that was opened with
  * O_NOFOLLOW. Bytes are withheld until the descriptor and final pathname still
@@ -101,7 +92,6 @@ export async function readAuthorityFile(
     await handle?.close();
   }
 }
-
 export function decodeAuthorityText(snapshot: AuthorityFileSnapshot): string {
   try {
     return new TextDecoder("utf-8", { fatal: true }).decode(snapshot.bytes);
@@ -114,7 +104,6 @@ export function decodeAuthorityText(snapshot: AuthorityFileSnapshot): string {
     );
   }
 }
-
 async function readMaxPlusOne(
   handle: FileHandle,
   path: string,
@@ -141,7 +130,6 @@ async function readMaxPlusOne(
   }
   return bytes;
 }
-
 function validateRegularFile(
   path: string,
   stat: BigIntStats,
@@ -154,7 +142,6 @@ function validateRegularFile(
     throw authorityError("multiple_links", path, "Authority file must have exactly one hard link");
   }
 }
-
 async function assertPathIdentity(
   path: string,
   expected: BigIntStats,
@@ -175,7 +162,6 @@ async function assertPathIdentity(
     );
   }
 }
-
 function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev
     && left.ino === right.ino
@@ -184,7 +170,6 @@ function sameSnapshot(left: BigIntStats, right: BigIntStats): boolean {
     && left.ctimeNs === right.ctimeNs
     && left.nlink === right.nlink;
 }
-
 function noFollowReadFlags(): number {
   if (typeof constants.O_NOFOLLOW !== "number") {
     throw authorityError(
@@ -197,25 +182,21 @@ function noFollowReadFlags(): number {
     | constants.O_NOFOLLOW
     | (typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0);
 }
-
 function checkedPath(path: string): string {
   if (path.length === 0 || path.includes("\0")) {
     throw authorityError("invalid_path", path, "Authority path must not be empty or contain NUL");
   }
   return resolve(path);
 }
-
 function boundedMaxBytes(value: number): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > 1_073_741_824) {
     throw new RangeError("maxBytes must be an integer from 1 through 1073741824");
   }
   return value;
 }
-
 function hasCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && Reflect.get(error, "code") === code;
 }
-
 function authorityError(
   code: AuthorityReadErrorCode,
   path: string,

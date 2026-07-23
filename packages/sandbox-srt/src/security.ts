@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants, type Stats } from "node:fs";
-import { lstat, open, realpath } from "node:fs/promises";
+import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 
 import type { SandboxSrtFileConfig } from "./config.js";
@@ -17,9 +17,17 @@ export interface TrustedFile {
   readonly size: number;
 }
 
+export interface TrustedFileBinding {
+  readonly descriptor: number;
+  readonly firstLine?: string;
+  close(): Promise<void>;
+}
+
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const MAX_EXECUTABLE_BYTES = 128 * 1024 * 1024;
 const MAX_SETTINGS_BYTES = 1024 * 1024;
+const HASH_BUFFER_BYTES = 64 * 1024;
+const MAX_FIRST_LINE_BYTES = 256;
 
 export async function resolveTrustedExecutable(config: SandboxSrtFileConfig): Promise<TrustedFile> {
   return await resolveTrustedFile(config, "executable", MAX_EXECUTABLE_BYTES);
@@ -39,6 +47,14 @@ export async function verifyTrustedSettings(expected: TrustedFile): Promise<void
   if (!sameTrustedFile(expected, actual)) unavailable("SRT settings fingerprint changed after selection.");
 }
 
+export async function bindTrustedExecutable(expected: TrustedFile): Promise<TrustedFileBinding> {
+  return await bindTrustedFile(expected, "executable", MAX_EXECUTABLE_BYTES);
+}
+
+export async function bindTrustedSettings(expected: TrustedFile): Promise<TrustedFileBinding> {
+  return await bindTrustedFile(expected, "settings", MAX_SETTINGS_BYTES);
+}
+
 export function sameTrustedFile(left: TrustedFile, right: TrustedFile): boolean {
   return left.path === right.path
     && left.sha256 === right.sha256
@@ -55,12 +71,79 @@ async function resolveTrustedFile(
   kind: "executable" | "settings",
   maxBytes: number,
 ): Promise<TrustedFile> {
+  try {
+    return await inspectTrustedFile(config, kind, maxBytes);
+  } catch (error) {
+    if (error instanceof SandboxSrtError) throw error;
+    throw new SandboxSrtError(
+      "sandbox_unavailable",
+      `SRT ${kind} integrity could not be proven.`,
+    );
+  }
+}
+
+async function inspectTrustedFile(
+  config: SandboxSrtFileConfig,
+  kind: "executable" | "settings",
+  maxBytes: number,
+): Promise<TrustedFile> {
+  const inspected = await openTrustedFile(config, kind, maxBytes);
+  try {
+    return inspected.file;
+  } finally {
+    await inspected.handle.close();
+  }
+}
+
+async function bindTrustedFile(
+  expected: TrustedFile,
+  kind: "executable" | "settings",
+  maxBytes: number,
+): Promise<TrustedFileBinding> {
+  let opened: OpenTrustedFile;
+  try {
+    opened = await openTrustedFile(
+      { path: expected.path, sha256: expected.sha256 },
+      kind,
+      maxBytes,
+    );
+  } catch (error) {
+    if (error instanceof SandboxSrtError) throw error;
+    throw new SandboxSrtError(
+      "sandbox_unavailable",
+      `SRT ${kind} integrity could not be proven.`,
+    );
+  }
+  if (!sameTrustedFile(expected, opened.file)) {
+    await opened.handle.close();
+    unavailable(`SRT ${kind} fingerprint changed after selection.`);
+  }
+  return Object.freeze({
+    descriptor: opened.handle.fd,
+    ...(opened.firstLine === undefined ? {} : { firstLine: opened.firstLine }),
+    close: async () => {
+      await opened.handle.close();
+    },
+  });
+}
+
+interface OpenTrustedFile {
+  readonly file: TrustedFile;
+  readonly handle: FileHandle;
+  readonly firstLine?: string;
+}
+
+async function openTrustedFile(
+  config: SandboxSrtFileConfig,
+  kind: "executable" | "settings",
+  maxBytes: number,
+): Promise<OpenTrustedFile> {
   requirePosix();
   if (!isAbsolute(config.path)) unavailable(`SRT ${kind} path must be absolute.`);
   const path = resolve(config.path);
   const parent = dirname(path);
-  const parentCanonical = await realpath(parent).catch((error) => {
-    throw new SandboxSrtError("sandbox_unavailable", `SRT ${kind} parent is absent or inaccessible.`, { cause: error });
+  const parentCanonical = await realpath(parent).catch(() => {
+    throw new SandboxSrtError("sandbox_unavailable", `SRT ${kind} parent is absent or inaccessible.`);
   });
   if (parentCanonical !== parent) unavailable(`SRT ${kind} parent path must be canonical.`);
   const parentStat = await lstat(parent);
@@ -70,8 +153,8 @@ async function resolveTrustedFile(
   let canonical: string;
   try {
     canonical = await realpath(path);
-  } catch (error) {
-    throw new SandboxSrtError("sandbox_unavailable", `SRT ${kind} is absent or inaccessible.`, { cause: error });
+  } catch {
+    throw new SandboxSrtError("sandbox_unavailable", `SRT ${kind} is absent or inaccessible.`);
   }
   if (canonical !== path) unavailable(`SRT ${kind} path must be canonical and must not traverse symlinks.`);
   const before = await lstat(path);
@@ -81,26 +164,64 @@ async function resolveTrustedFile(
     const opened = await handle.stat();
     assertTrustedStat(opened, kind, maxBytes);
     if (!sameIdentity(before, opened)) unavailable(`SRT ${kind} changed while opening.`);
-    const bytes = await handle.readFile();
-    if (bytes.byteLength > maxBytes) unavailable(`SRT ${kind} exceeds its byte limit.`);
-    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const { sha256, firstLine } = await hashTrustedHandle(handle, opened.size, kind);
     if (sha256 !== config.sha256) unavailable(`SRT ${kind} content does not match its configured SHA-256 digest.`);
+    const openedAfterHash = await handle.stat();
+    assertTrustedStat(openedAfterHash, kind, maxBytes);
+    if (!sameIdentity(opened, openedAfterHash)) unavailable(`SRT ${kind} changed while hashing.`);
     const after = await lstat(path);
     assertTrustedStat(after, kind, maxBytes);
-    if (!sameIdentity(opened, after)) unavailable(`SRT ${kind} changed while hashing.`);
-    return Object.freeze({
+    if (!sameIdentity(openedAfterHash, after)) unavailable(`SRT ${kind} changed while hashing.`);
+    const file = Object.freeze({
       path,
       sha256,
-      device: String(opened.dev),
-      inode: String(opened.ino),
-      mode: opened.mode & 0o7777,
-      owner: opened.uid,
-      links: opened.nlink,
-      size: opened.size,
+      device: String(openedAfterHash.dev),
+      inode: String(openedAfterHash.ino),
+      mode: openedAfterHash.mode & 0o7777,
+      owner: openedAfterHash.uid,
+      links: openedAfterHash.nlink,
+      size: openedAfterHash.size,
     });
-  } finally {
+    return Object.freeze({
+      file,
+      handle,
+      ...(firstLine === undefined ? {} : { firstLine }),
+    });
+  } catch (error) {
     await handle.close();
+    throw error;
   }
+}
+
+async function hashTrustedHandle(
+  handle: FileHandle,
+  size: number,
+  kind: "executable" | "settings",
+): Promise<{ readonly sha256: string; readonly firstLine?: string }> {
+  const hash = createHash("sha256");
+  const buffer = Buffer.allocUnsafe(Math.min(HASH_BUFFER_BYTES, Math.max(size, 1)));
+  let position = 0;
+  let prefix = Buffer.alloc(0);
+  while (position < size) {
+    const length = Math.min(buffer.byteLength, size - position);
+    const { bytesRead } = await handle.read(buffer, 0, length, position);
+    if (bytesRead < 1) unavailable(`SRT ${kind} changed while hashing.`);
+    const chunk = buffer.subarray(0, bytesRead);
+    hash.update(chunk);
+    if (kind === "executable" && prefix.byteLength < MAX_FIRST_LINE_BYTES) {
+      const remaining = MAX_FIRST_LINE_BYTES - prefix.byteLength;
+      prefix = Buffer.concat([prefix, chunk.subarray(0, remaining)]);
+    }
+    position += bytesRead;
+  }
+  const newline = prefix.indexOf(0x0a);
+  const firstLine = kind === "executable" && newline >= 0
+    ? prefix.subarray(0, newline).toString("utf8").replace(/\r$/u, "")
+    : undefined;
+  return Object.freeze({
+    sha256: hash.digest("hex"),
+    ...(firstLine === undefined ? {} : { firstLine }),
+  });
 }
 
 function assertTrustedStat(stat: Stats, kind: "executable" | "settings", maxBytes: number): void {

@@ -1,5 +1,6 @@
 import { defineRuntimeModule } from "@mono-agent/module-sdk";
 
+import { openCodeAuthCommands } from "./auth-command.js";
 import { parseRuntimeOpenCodeConfig, runtimeOpenCodeJsonSchema, type RuntimeOpenCodeConfig } from "./config.js";
 import { validateRuntimeOpenCodeModel } from "./model.js";
 import { createRuntimeOpenCode } from "./runtime.js";
@@ -19,11 +20,12 @@ export const monoAgentModule = defineRuntimeModule({
   schema: { jsonSchema: runtimeOpenCodeJsonSchema, parse: parseRuntimeOpenCodeConfig },
   validateModel: validateRuntimeOpenCodeModel,
   create(context) {
-    return createRuntimeOpenCode({
+    const runtime = createRuntimeOpenCode({
       config: context.config,
       instanceId: context.instanceId,
       workspaceDirectory: context.workspaceDirectory,
     });
+    return { ...runtime, commands: openCodeAuthCommands(context.config) };
   },
 });
 

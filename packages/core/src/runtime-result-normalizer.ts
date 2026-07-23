@@ -8,11 +8,11 @@ import {
   type JsonValue,
   type ModuleDiagnostic,
   type NormalizedAttachment,
-  type RuntimeCompaction,
+  type RouteIdentity,
   type RuntimeCapabilities,
+  type RuntimeCompaction,
   type RuntimeModelValidation,
   type RuntimeNativeToolDescriptor,
-  type RouteIdentity,
   type RuntimeSession,
   type RuntimeToolCall,
   type RuntimeToolResult,
@@ -25,7 +25,13 @@ import {
   type TurnMessage,
 } from "@mono-agent/module-sdk";
 
-import { cloneIntrinsicUint8Array } from "./binary.js";
+import {
+  assertOwnKeys,
+  denseOwnDataArray,
+  ownDataRecord,
+  snapshotBoundedValue,
+  utf8Bytes,
+} from "./bounded-value.js";
 
 export const RUNTIME_RESULT_MAX_BYTES = 64 * 1024 * 1024;
 export const RUNTIME_RESULT_MAX_ITEMS = 20_000;
@@ -51,18 +57,12 @@ const MAX_MEDIA_TYPE_BYTES = 255;
 const MAX_FILE_NAME_BYTES = 255;
 const MAX_DIAGNOSTIC_MESSAGE_BYTES = 16 * 1024;
 const MAX_DIAGNOSTIC_PATH_SEGMENTS = 64;
-const UNSAFE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const RUNTIME_GRAPH_MAX_DEPTH = 64;
 const MEDIA_TYPE_PATTERN =
   /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/iu;
 
-interface BoundaryState {
-  readonly active: Set<object>;
-  readonly boundaryLabel: string;
-  readonly maxBytes: number;
-  bytes: number;
+interface FileBudget {
   fileBytes: number;
-  items: number;
-  jsonItems: number;
 }
 
 export interface RuntimeTurnEventBoundary {
@@ -71,104 +71,68 @@ export interface RuntimeTurnEventBoundary {
   violation: Error | undefined;
 }
 
-/** Core-owned identity that every provider-private session must match exactly. */
 export interface RuntimeSessionBoundaryAuthority {
   readonly conversationId: string;
   readonly route: RouteIdentity;
 }
 
 export function createRuntimeTurnEventBoundary(): RuntimeTurnEventBoundary {
-  return {
-    bytes: 0,
-    events: 0,
-    violation: undefined,
-  };
+  return { bytes: 0, events: 0, violation: undefined };
 }
 
-/**
- * Copy and validate one result returned across the public open-runtime seam.
- * The returned graph shares no mutable byte arrays or objects with the runtime.
- */
 export function normalizeRuntimeTurnResult(
   value: unknown,
   authority: RuntimeSessionBoundaryAuthority,
 ): RuntimeTurnResult {
-  const state = boundaryState(RUNTIME_RESULT_MAX_BYTES, "result");
-  const result = record(value, "runtime turn result");
-  assertKeys(
-    result,
-    ["status", "message", "structuredOutput", "usage", "session", "metadata"],
+  const detached = runtimeSnapshot(value, "runtime turn result", RUNTIME_RESULT_MAX_BYTES);
+  const input = shape(
+    detached.value,
     "runtime turn result",
+    ["status", "message", "structuredOutput", "usage", "session", "metadata"],
   );
-  const status = enumValue(
-    result.status,
+  const status = oneOf(
+    input.status,
     ["completed", "cancelled", "max-turns"] as const,
     "runtime turn result.status",
-    state,
   );
-  const message = result.message === undefined
-    ? undefined
-    : normalizeTurnMessage(result.message, state, "runtime turn result.message");
+  const files = { fileBytes: 0 };
+  const message = optional(input.message, (message) =>
+    turnMessage(message, files, "runtime turn result.message"));
   if (status === "completed" && message === undefined) {
     fail("runtime turn result.message", "is required for a completed result");
   }
-  if (status !== "completed" && result.structuredOutput !== undefined) {
+  if (status !== "completed" && input.structuredOutput !== undefined) {
     fail("runtime turn result.structuredOutput", "is only valid for a completed result");
   }
-  const structuredOutput = result.structuredOutput === undefined
-    ? undefined
-    : normalizeBoundedJson(
-      result.structuredOutput,
-      state,
+  const structuredOutput = optional(input.structuredOutput, (output) =>
+    boundedJson(
+      output,
       "runtime turn result.structuredOutput",
       RUNTIME_RESULT_MAX_STRUCTURED_OUTPUT_BYTES,
-    );
-  const usage = result.usage === undefined
-    ? undefined
-    : normalizeUsage(result.usage, state);
-  const session = result.session === undefined
-    ? undefined
-    : normalizeSession(result.session, state, authority);
+    ));
+  const usage = optional(input.usage, usageValue);
+  const session = optional(input.session, (session) => sessionValue(session, authority));
   if (usage?.sessionEvicted === true && session !== undefined) {
-    fail(
-      "runtime turn result.session",
-      "must be absent when usage.sessionEvicted is true",
-    );
+    fail("runtime turn result.session", "must be absent when usage.sessionEvicted is true");
   }
-  const metadata = result.metadata === undefined
-    ? undefined
-    : normalizeBoundedJsonObject(
-      result.metadata,
-      state,
+  const metadata = optional(input.metadata, (metadata) =>
+    boundedJsonObject(
+      metadata,
       "runtime turn result.metadata",
       RUNTIME_RESULT_MAX_METADATA_BYTES,
-    );
-
-  charge(state, 32, "runtime turn result");
+    ));
+  const common = compact({ message, usage, session, metadata });
   if (status === "completed") {
-    return {
+    return compact({
       status,
+      ...common,
       message: message!,
-      ...(structuredOutput === undefined ? {} : { structuredOutput }),
-      ...(usage === undefined ? {} : { usage }),
-      ...(session === undefined ? {} : { session }),
-      ...(metadata === undefined ? {} : { metadata }),
-    };
+      structuredOutput,
+    }) as RuntimeTurnResult;
   }
-  return {
-    status,
-    ...(message === undefined ? {} : { message }),
-    ...(usage === undefined ? {} : { usage }),
-    ...(session === undefined ? {} : { session }),
-    ...(metadata === undefined ? {} : { metadata }),
-  };
+  return { status, ...common } as RuntimeTurnResult;
 }
 
-/**
- * Copy and validate one event before it crosses from an open runtime into Core.
- * The supplied boundary is attempt-scoped. Any violation poisons it permanently,
- * including when a runtime catches the rejection and continues.
- */
 export function normalizeRuntimeTurnEvent(
   value: unknown,
   boundary: RuntimeTurnEventBoundary,
@@ -181,22 +145,21 @@ export function normalizeRuntimeTurnEvent(
   }
   if (boundary.events >= RUNTIME_EVENT_STREAM_MAX_EVENTS) {
     const error = new RangeError(
-      `runtime event stream exceeds the ${RUNTIME_EVENT_STREAM_MAX_EVENTS}-event boundary`,
+      `runtime event stream exceeds the ${String(RUNTIME_EVENT_STREAM_MAX_EVENTS)}-event boundary`,
     );
     boundary.violation = error;
     throw error;
   }
-
   try {
-    const state = boundaryState(RUNTIME_EVENT_MAX_BYTES, "event");
-    const event = normalizeTurnEvent(value, state, authority);
-    if (boundary.bytes + state.bytes > RUNTIME_EVENT_STREAM_MAX_BYTES) {
+    const detached = runtimeSnapshot(value, "runtime turn event", RUNTIME_EVENT_MAX_BYTES);
+    const event = turnEvent(detached.value, { fileBytes: 0 }, authority);
+    if (boundary.bytes + detached.bytes > RUNTIME_EVENT_STREAM_MAX_BYTES) {
       throw new RangeError(
-        `runtime event stream exceeds the ${RUNTIME_EVENT_STREAM_MAX_BYTES}-byte cumulative boundary`,
+        `runtime event stream exceeds the ${String(RUNTIME_EVENT_STREAM_MAX_BYTES)}-byte cumulative boundary`,
       );
     }
     boundary.events += 1;
-    boundary.bytes += state.bytes;
+    boundary.bytes += detached.bytes;
     return event;
   } catch (error) {
     const violation = error instanceof Error
@@ -217,32 +180,27 @@ export function assertRuntimeTurnEventBoundaryHealthy(
   }
 }
 
-/** Copy and validate a runtime-originated tool call before policy or execution. */
 export function normalizeRuntimeToolCall(value: unknown): RuntimeToolCall {
-  const state = boundaryState(RUNTIME_TOOL_CALL_MAX_BYTES, "tool-call");
-  const call = normalizeToolCall(value, state, "runtime tool call");
-  charge(state, 16, "runtime tool call");
-  return call;
+  return toolCall(
+    runtimeSnapshot(value, "runtime tool call", RUNTIME_TOOL_CALL_MAX_BYTES).value,
+    "runtime tool call",
+  );
 }
 
-/** Copy one immutable routing authority snapshot from a created runtime. */
 export function normalizeRuntimeCapabilities(
   value: unknown,
   path = "runtime capabilities",
 ): RuntimeCapabilities {
-  return normalizeRuntimeCapabilitiesValue(
-    value,
-    boundaryState(RUNTIME_CAPABILITIES_MAX_BYTES, "capabilities"),
+  return runtimeCapabilities(
+    runtimeSnapshot(value, path, RUNTIME_CAPABILITIES_MAX_BYTES).value,
     path,
   );
 }
 
-/** Copy and validate the exact authority claims exposed by an open channel. */
 export function normalizeChannelCapabilities(
   value: unknown,
   path = "channel capabilities",
 ): ChannelCapabilities {
-  const input = record(value, path);
   const required = [
     "attachments",
     "liveInput",
@@ -252,106 +210,77 @@ export function normalizeChannelCapabilities(
     "verbatim",
     "cancellation",
   ] as const;
-  assertKeys(input, [...required, "approvals"], path);
-
-  const normalized = {} as Record<(typeof required)[number], boolean>;
-  for (const key of required) {
-    const capability = ownDataProperty(input, key, path, true);
-    if (typeof capability !== "boolean") fail(`${path}.${key}`, "must be boolean");
-    normalized[key] = capability;
-  }
-
-  const approvals = ownDataProperty(input, "approvals", path);
-  if (approvals !== undefined && typeof approvals !== "boolean") {
-    fail(`${path}.approvals`, "must be boolean");
-  }
+  const values = booleanFields(
+    runtimeSnapshot(value, path, RUNTIME_CAPABILITIES_MAX_BYTES).value,
+    path,
+    required,
+    ["approvals"] as const,
+  );
   return {
-    ...normalized,
-    approvals: approvals === true,
+    attachments: values.attachments!,
+    liveInput: values.liveInput!,
+    askUser: values.askUser!,
+    approvals: values.approvals === true,
+    proactive: values.proactive!,
+    runtimeControl: values.runtimeControl!,
+    verbatim: values.verbatim!,
+    cancellation: values.cancellation!,
   };
 }
 
-/**
- * Copy and validate the common result shape returned by definition validators,
- * instance validators, and live preflight checks.
- */
 export function normalizeRuntimeModelValidation(
   value: unknown,
   path = "runtime model validation",
 ): RuntimeModelValidation {
-  const state = boundaryState(RUNTIME_MODEL_VALIDATION_MAX_BYTES, "model-validation");
-  const input = record(value, path);
-  assertKeys(input, ["supported", "capabilities", "nativeTools", "diagnostics"], path);
-  const supported = ownDataProperty(input, "supported", path, true);
-  if (typeof supported !== "boolean") fail(`${path}.supported`, "must be boolean");
-  const capabilitiesValue = ownDataProperty(input, "capabilities", path);
-  const nativeToolsValue = ownDataProperty(input, "nativeTools", path);
-  const diagnosticsValue = ownDataProperty(input, "diagnostics", path);
-  const capabilities = capabilitiesValue === undefined
-    ? undefined
-    : normalizeRuntimeCapabilitiesValue(capabilitiesValue, state, `${path}.capabilities`);
-  const nativeToolsInput = nativeToolsValue === undefined
-    ? undefined
-    : ownDataArray(
-      nativeToolsValue,
+  const input = shape(
+    runtimeSnapshot(value, path, RUNTIME_MODEL_VALIDATION_MAX_BYTES).value,
+    path,
+    ["supported", "capabilities", "nativeTools", "diagnostics"],
+  );
+  if (typeof input.supported !== "boolean") fail(`${path}.supported`, "must be boolean");
+  const capabilities = optional(input.capabilities, (capabilities) =>
+    runtimeCapabilities(capabilities, `${path}.capabilities`));
+  const nativeTools = optional(input.nativeTools, (nativeTools) =>
+    denseOwnDataArray(
+      nativeTools,
       `${path}.nativeTools`,
       RUNTIME_MODEL_VALIDATION_MAX_ITEMS,
-    );
-  const diagnosticsInput = diagnosticsValue === undefined
-    ? undefined
-    : ownDataArray(
-      diagnosticsValue,
+    ).map((descriptor, index) =>
+      nativeTool(descriptor, `${path}.nativeTools[${String(index)}]`)));
+  const diagnostics = optional(input.diagnostics, (diagnostics) =>
+    denseOwnDataArray(
+      diagnostics,
       `${path}.diagnostics`,
       RUNTIME_MODEL_VALIDATION_MAX_ITEMS,
-  );
-  const nativeTools = nativeToolsInput?.map((descriptor, index) => {
-    const detached = detachRuntimeNativeToolDescriptor(
-      descriptor,
-      `${path}.nativeTools[${index}]`,
-    );
-    let parsed: RuntimeNativeToolDescriptor;
-    try {
-      parsed = parseRuntimeNativeToolDescriptor(detached);
-    } catch (error) {
-      throw new TypeError(`${path}.nativeTools[${index}] is invalid`, { cause: error });
-    }
-    charge(
-      state,
-      utf8Bytes(parsed.id)
-        + utf8Bytes(parsed.displayName)
-        + parsed.effects.reduce((bytes, effect) => bytes + utf8Bytes(effect), 0)
-        + utf8Bytes(parsed.approval)
-        + utf8Bytes(parsed.sandbox)
-        + 32,
-      `${path}.nativeTools[${index}]`,
-    );
-    return parsed;
-  });
-  const diagnostics = diagnosticsInput?.map((diagnostic, index) =>
-    normalizeDiagnostic(diagnostic, state, `${path}.diagnostics[${index}]`));
-  addItems(
-    state,
-    (nativeTools?.length ?? 0) + (diagnostics?.length ?? 0),
-    path,
-    false,
-  );
-  charge(state, 16, path);
-  return {
-    supported,
-    ...(capabilities === undefined ? {} : { capabilities }),
-    ...(nativeTools === undefined ? {} : { nativeTools }),
-    ...(diagnostics === undefined ? {} : { diagnostics }),
-  };
+    ).map((diagnostic, index) =>
+      diagnosticValue(diagnostic, `${path}.diagnostics[${String(index)}]`)));
+  return compact({
+    supported: input.supported,
+    capabilities,
+    nativeTools,
+    diagnostics,
+  }) as RuntimeModelValidation;
 }
 
-function normalizeTurnEvent(
+/** Descriptor-safe parser for host health, lifecycle, and module diagnostics. */
+export function normalizeModuleDiagnostic(
   value: unknown,
-  state: BoundaryState,
+  path = "module diagnostic",
+): ModuleDiagnostic {
+  return diagnosticValue(
+    runtimeSnapshot(value, path, RUNTIME_MODEL_VALIDATION_MAX_BYTES).value,
+    path,
+  );
+}
+
+function turnEvent(
+  value: unknown,
+  files: FileBudget,
   authority: RuntimeSessionBoundaryAuthority,
 ): RuntimeTurnEvent {
   const path = "runtime turn event";
-  const input = record(value, path);
-  const type = enumValue(
+  const input = ownDataRecord(value, path);
+  const type = oneOf(
     input.type,
     [
       "text-delta",
@@ -364,69 +293,29 @@ function normalizeTurnEvent(
       "compaction",
     ] as const,
     `${path}.type`,
-    state,
   );
   if (type === "text-delta" || type === "thinking-delta") {
-    assertKeys(input, ["type", "delta"], path);
-    return {
-      type,
-      delta: text(
-        input.delta,
-        `${path}.delta`,
-        RUNTIME_RESULT_MAX_TEXT_BYTES,
-        state,
-        true,
-      ),
-    };
+    assertOwnKeys(input, ["type", "delta"], path);
+    return { type, delta: boundedText(input.delta, `${path}.delta`, RUNTIME_RESULT_MAX_TEXT_BYTES, true) };
   }
-  if (type === "tool-call") {
-    assertKeys(input, ["type", "call"], path);
-    return {
-      type,
-      call: normalizeToolCall(input.call, state, `${path}.call`),
-    };
+  const key = type === "tool-call" ? "call"
+    : type === "tool-result" ? "result"
+      : type === "usage" ? "usage"
+        : type === "diagnostic" ? "diagnostic"
+          : type === "session" ? "session"
+            : "compaction";
+  assertOwnKeys(input, ["type", key], path);
+  switch (type) {
+    case "tool-call": return { type, call: toolCall(input.call, `${path}.call`) };
+    case "tool-result": return { type, result: toolResult(input.result, files, `${path}.result`) };
+    case "usage": return { type, usage: usageValue(input.usage, `${path}.usage`) };
+    case "diagnostic": return { type, diagnostic: diagnosticValue(input.diagnostic, `${path}.diagnostic`) };
+    case "session": return { type, session: sessionValue(input.session, authority, `${path}.session`) };
+    case "compaction": return { type, compaction: compactionValue(input.compaction, `${path}.compaction`) };
   }
-  if (type === "tool-result") {
-    assertKeys(input, ["type", "result"], path);
-    return {
-      type,
-      result: normalizeToolResult(input.result, state, `${path}.result`),
-    };
-  }
-  if (type === "usage") {
-    assertKeys(input, ["type", "usage"], path);
-    return {
-      type,
-      usage: normalizeUsage(input.usage, state, `${path}.usage`),
-    };
-  }
-  if (type === "diagnostic") {
-    assertKeys(input, ["type", "diagnostic"], path);
-    return {
-      type,
-      diagnostic: normalizeDiagnostic(input.diagnostic, state, `${path}.diagnostic`),
-    };
-  }
-  if (type === "session") {
-    assertKeys(input, ["type", "session"], path);
-    return {
-      type,
-      session: normalizeSession(input.session, state, authority, `${path}.session`),
-    };
-  }
-  assertKeys(input, ["type", "compaction"], path);
-  return {
-    type,
-    compaction: normalizeCompaction(input.compaction, state, `${path}.compaction`),
-  };
 }
 
-function normalizeRuntimeCapabilitiesValue(
-  value: unknown,
-  state: BoundaryState,
-  path: string,
-): RuntimeCapabilities {
-  const input = record(value, path);
+function runtimeCapabilities(value: unknown, path: string): RuntimeCapabilities {
   const required = [
     "tools",
     "mcp",
@@ -436,372 +325,233 @@ function normalizeRuntimeCapabilitiesValue(
     "sandbox",
     "sessions",
   ] as const;
-  assertKeys(
-    input,
-    [...required, "artifactResults", "liveInput", "maxTurns", "maxOutputTokens"],
+  const values = booleanFields(
+    value,
     path,
+    required,
+    ["artifactResults", "liveInput", "maxTurns", "maxOutputTokens"] as const,
   );
-  const normalized = {} as Record<(typeof required)[number], boolean>;
+  return compact({
+    tools: values.tools!,
+    mcp: values.mcp!,
+    attachments: values.attachments!,
+    approvals: values.approvals!,
+    structuredOutput: values.structuredOutput!,
+    sandbox: values.sandbox!,
+    sessions: values.sessions!,
+    artifactResults: values.artifactResults === true,
+    liveInput: values.liveInput,
+    maxTurns: values.maxTurns === true,
+    maxOutputTokens: values.maxOutputTokens === true,
+  }) as RuntimeCapabilities;
+}
+
+function booleanFields<
+  const R extends readonly string[],
+  const O extends readonly string[],
+>(
+  value: unknown,
+  path: string,
+  required: R,
+  optional: O,
+): Record<R[number], boolean> & Partial<Record<O[number], boolean>> {
+  const input = shape(value, path, [...required, ...optional]);
+  const output: Record<string, boolean> = Object.create(null) as Record<string, boolean>;
   for (const key of required) {
-    const capability = ownDataProperty(input, key, path, true);
-    if (typeof capability !== "boolean") fail(`${path}.${key}`, "must be boolean");
-    normalized[key] = capability;
+    if (!Object.hasOwn(input, key)) fail(`${path}.${key}`, "is required");
+    if (typeof input[key] !== "boolean") fail(`${path}.${key}`, "must be boolean");
+    output[key] = input[key];
   }
-  const artifactResults = ownDataProperty(input, "artifactResults", path);
-  if (artifactResults !== undefined && typeof artifactResults !== "boolean") {
-    fail(`${path}.artifactResults`, "must be boolean when present");
+  for (const key of optional) {
+    if (input[key] !== undefined && typeof input[key] !== "boolean") {
+      fail(`${path}.${key}`, "must be boolean when present");
+    }
+    if (typeof input[key] === "boolean") output[key] = input[key];
   }
-  const liveInput = ownDataProperty(input, "liveInput", path);
-  if (liveInput !== undefined && typeof liveInput !== "boolean") {
-    fail(`${path}.liveInput`, "must be boolean when present");
-  }
-  const maxTurns = ownDataProperty(input, "maxTurns", path);
-  if (maxTurns !== undefined && typeof maxTurns !== "boolean") {
-    fail(`${path}.maxTurns`, "must be boolean when present");
-  }
-  const maxOutputTokens = ownDataProperty(input, "maxOutputTokens", path);
-  if (maxOutputTokens !== undefined && typeof maxOutputTokens !== "boolean") {
-    fail(`${path}.maxOutputTokens`, "must be boolean when present");
-  }
-  charge(state, 64, path);
-  return {
-    ...normalized,
-    artifactResults: artifactResults === true,
-    ...(liveInput === undefined ? {} : { liveInput }),
-    maxTurns: maxTurns === true,
-    maxOutputTokens: maxOutputTokens === true,
-  };
+  return output as Record<R[number], boolean> & Partial<Record<O[number], boolean>>;
 }
 
-function normalizeDiagnostic(
-  value: unknown,
-  state: BoundaryState,
-  path: string,
-): ModuleDiagnostic {
-  const input = record(value, path);
-  assertKeys(input, ["code", "severity", "message", "path", "hint"], path);
-  const code = ownDataProperty(input, "code", path, true);
-  const severity = ownDataProperty(input, "severity", path, true);
-  const message = ownDataProperty(input, "message", path, true);
-  const diagnosticPathValue = ownDataProperty(input, "path", path);
-  const hint = ownDataProperty(input, "hint", path);
-  const diagnosticPathInput = diagnosticPathValue === undefined
-    ? undefined
-    : ownDataArray(diagnosticPathValue, `${path}.path`, MAX_DIAGNOSTIC_PATH_SEGMENTS);
-  const diagnosticPath = diagnosticPathInput?.map((segment, index) => {
-    if (typeof segment === "string") {
-      return text(segment, `${path}.path[${index}]`, MAX_IDENTIFIER_BYTES, state);
-    }
-    if (typeof segment === "number" && Number.isSafeInteger(segment)) {
-      charge(state, 16, `${path}.path[${index}]`);
-      return segment;
-    }
-    return fail(`${path}.path[${index}]`, "must be a string or safe integer");
-  });
-  if (diagnosticPath !== undefined) {
-    addItems(state, diagnosticPath.length, `${path}.path`, false);
-  }
-  return {
-    code: text(code, `${path}.code`, MAX_IDENTIFIER_BYTES, state),
-    severity: enumValue(
-      severity,
-      ["info", "warning", "error"] as const,
-      `${path}.severity`,
-      state,
-    ),
-    message: text(
-      message,
-      `${path}.message`,
-      MAX_DIAGNOSTIC_MESSAGE_BYTES,
-      state,
-    ),
-    ...(diagnosticPath === undefined ? {} : { path: diagnosticPath }),
-    ...(hint === undefined
-      ? {}
-      : {
-          hint: text(
-            hint,
-            `${path}.hint`,
-            MAX_DIAGNOSTIC_MESSAGE_BYTES,
-            state,
-            true,
-          ),
-        }),
-  };
+function diagnosticValue(value: unknown, path: string): ModuleDiagnostic {
+  const input = shape(value, path, ["code", "severity", "message", "path", "hint"]);
+  const diagnosticPath = optional(input.path, (segments) =>
+    denseOwnDataArray(segments, `${path}.path`, MAX_DIAGNOSTIC_PATH_SEGMENTS)
+      .map((segment, index) => {
+        if (typeof segment === "string") {
+          return boundedText(segment, `${path}.path[${String(index)}]`, MAX_IDENTIFIER_BYTES);
+        }
+        if (typeof segment === "number" && Number.isSafeInteger(segment)) return segment;
+        return fail(`${path}.path[${String(index)}]`, "must be a string or safe integer");
+      }));
+  return compact({
+    code: boundedText(input.code, `${path}.code`, MAX_IDENTIFIER_BYTES),
+    severity: oneOf(input.severity, ["info", "warning", "error"] as const, `${path}.severity`),
+    message: boundedText(input.message, `${path}.message`, MAX_DIAGNOSTIC_MESSAGE_BYTES),
+    path: diagnosticPath,
+    hint: optional(input.hint, (hint) =>
+      boundedText(hint, `${path}.hint`, MAX_DIAGNOSTIC_MESSAGE_BYTES, true)),
+  }) as ModuleDiagnostic;
 }
 
-function normalizeTurnMessage(
-  value: unknown,
-  state: BoundaryState,
-  path: string,
-): TurnMessage {
-  const input = record(value, path);
-  assertKeys(input, ["id", "role", "content", "name", "createdAt"], path);
-  const role = enumValue(
-    input.role,
-    ["system", "user", "assistant", "tool"] as const,
-    `${path}.role`,
-    state,
-  );
-  const contentInput = ownDataArray(
+function turnMessage(value: unknown, files: FileBudget, path: string): TurnMessage {
+  const input = shape(value, path, ["id", "role", "content", "name", "createdAt"]);
+  const content = denseOwnDataArray(
     input.content,
     `${path}.content`,
     RUNTIME_RESULT_MAX_MESSAGE_PARTS,
-  );
-  addItems(state, contentInput.length, `${path}.content`, false);
-  const content = contentInput.map((part, index) =>
-    normalizeContentPart(part, state, `${path}.content[${index}]`));
-  return {
-    ...(input.id === undefined
-      ? {}
-      : { id: text(input.id, `${path}.id`, MAX_IDENTIFIER_BYTES, state, true) }),
-    role,
+  ).map((part, index) => contentPart(part, files, `${path}.content[${String(index)}]`));
+  return compact({
+    id: optional(input.id, (id) => boundedText(id, `${path}.id`, MAX_IDENTIFIER_BYTES, true)),
+    role: oneOf(input.role, ["system", "user", "assistant", "tool"] as const, `${path}.role`),
     content,
-    ...(input.name === undefined
-      ? {}
-      : { name: text(input.name, `${path}.name`, MAX_IDENTIFIER_BYTES, state, true) }),
-    ...(input.createdAt === undefined
-      ? {}
-      : {
-          createdAt: text(
-            input.createdAt,
-            `${path}.createdAt`,
-            MAX_IDENTIFIER_BYTES,
-            state,
-            true,
-          ),
-        }),
-  };
+    name: optional(input.name, (name) =>
+      boundedText(name, `${path}.name`, MAX_IDENTIFIER_BYTES, true)),
+    createdAt: optional(input.createdAt, (createdAt) =>
+      boundedText(createdAt, `${path}.createdAt`, MAX_IDENTIFIER_BYTES, true)),
+  }) as TurnMessage;
 }
 
-function normalizeContentPart(
-  value: unknown,
-  state: BoundaryState,
-  path: string,
-): TurnContentPart {
-  const input = record(value, path);
+function contentPart(value: unknown, files: FileBudget, path: string): TurnContentPart {
+  const input = ownDataRecord(value, path);
   if (input.type === "text") {
-    assertKeys(input, ["type", "text"], path);
-    return {
-      type: "text",
-      text: text(input.text, `${path}.text`, RUNTIME_RESULT_MAX_TEXT_BYTES, state),
-    };
+    assertOwnKeys(input, ["type", "text"], path);
+    return { type: "text", text: boundedText(input.text, `${path}.text`, RUNTIME_RESULT_MAX_TEXT_BYTES) };
   }
   if (input.type === "image" || input.type === "file") {
     const type = input.type;
-    assertKeys(input, ["type", "mediaType", "data", "name"], path);
-    const data = fileData(input.data, `${path}.data`, state);
-    const mediaType = mediaTypeValue(input.mediaType, `${path}.mediaType`, state);
-    if (type === "file" && input.name === undefined) {
-      fail(`${path}.name`, "is required for a file part");
-    }
-    const name = input.name === undefined
-      ? undefined
-      : fileName(input.name, `${path}.name`, state);
-    if (type === "file") {
-      return {
-        type,
-        mediaType,
-        data,
-        name: name!,
-      };
-    }
-    return {
-      type,
-      mediaType,
-      data,
-      ...(name === undefined ? {} : { name }),
+    assertOwnKeys(input, ["type", "mediaType", "data", "name"], path);
+    if (type === "file" && input.name === undefined) fail(`${path}.name`, "is required for a file part");
+    const name = optional(input.name, (name) => displayFileName(name, `${path}.name`));
+    const common = {
+      mediaType: mediaType(input.mediaType, `${path}.mediaType`),
+      data: fileData(input.data, `${path}.data`, files),
     };
+    return type === "file"
+      ? { type, ...common, name: name! }
+      : compact({ type, ...common, name }) as TurnContentPart;
   }
   if (input.type === "attachment") {
-    assertKeys(input, ["type", "attachment"], path);
-    return {
-      type: "attachment",
-      attachment: normalizeAttachment(input.attachment, state, `${path}.attachment`),
-    };
+    assertOwnKeys(input, ["type", "attachment"], path);
+    return { type: "attachment", attachment: attachment(input.attachment, files, `${path}.attachment`) };
   }
   if (input.type === "tool-call") {
-    assertKeys(input, ["type", "call"], path);
-    return {
-      type: "tool-call",
-      call: normalizeToolCall(input.call, state, `${path}.call`),
-    };
+    assertOwnKeys(input, ["type", "call"], path);
+    return { type: "tool-call", call: toolCall(input.call, `${path}.call`) };
   }
   if (input.type === "tool-result") {
-    assertKeys(input, ["type", "result"], path);
-    return {
-      type: "tool-result",
-      result: normalizeToolResult(input.result, state, `${path}.result`),
-    };
+    assertOwnKeys(input, ["type", "result"], path);
+    return { type: "tool-result", result: toolResult(input.result, files, `${path}.result`) };
   }
-  fail(`${path}.type`, "is not a supported turn content type");
+  return fail(`${path}.type`, "is not a supported turn content type");
 }
 
-function normalizeAttachment(
-  value: unknown,
-  state: BoundaryState,
-  path: string,
-): NormalizedAttachment {
-  const input = record(value, path);
-  assertKeys(input, ["id", "kind", "name", "mediaType", "sizeBytes", "data"], path);
-  const data = fileData(input.data, `${path}.data`, state, true);
-  const sizeBytes = nonNegativeSafeInteger(input.sizeBytes, `${path}.sizeBytes`);
-  if (sizeBytes !== data.byteLength) {
-    fail(`${path}.sizeBytes`, "must equal the attachment byte length");
-  }
+function attachment(value: unknown, files: FileBudget, path: string): NormalizedAttachment {
+  const input = shape(value, path, ["id", "kind", "name", "mediaType", "sizeBytes", "data"]);
+  const data = fileData(input.data, `${path}.data`, files, true);
+  const sizeBytes = nonNegativeInteger(input.sizeBytes, `${path}.sizeBytes`);
+  if (sizeBytes !== data.byteLength) fail(`${path}.sizeBytes`, "must equal the attachment byte length");
   return {
-    id: text(input.id, `${path}.id`, MAX_IDENTIFIER_BYTES, state),
-    kind: enumValue(
-      input.kind,
-      ["image", "audio", "file"] as const,
-      `${path}.kind`,
-      state,
-    ),
-    name: fileName(input.name, `${path}.name`, state),
-    mediaType: mediaTypeValue(input.mediaType, `${path}.mediaType`, state),
+    id: boundedText(input.id, `${path}.id`, MAX_IDENTIFIER_BYTES),
+    kind: oneOf(input.kind, ["image", "audio", "file"] as const, `${path}.kind`),
+    name: displayFileName(input.name, `${path}.name`),
+    mediaType: mediaType(input.mediaType, `${path}.mediaType`),
     sizeBytes,
     data,
   };
 }
 
-function normalizeToolCall(
-  value: unknown,
-  state: BoundaryState,
-  path: string,
-): RuntimeToolCall {
-  const input = record(value, path);
-  assertKeys(input, ["id", "name", "input"], path);
+function toolCall(value: unknown, path: string): RuntimeToolCall {
+  const input = shape(value, path, ["id", "name", "input"]);
   return {
-    id: text(input.id, `${path}.id`, MAX_IDENTIFIER_BYTES, state),
-    name: text(input.name, `${path}.name`, MAX_IDENTIFIER_BYTES, state),
-    input: normalizeBoundedJson(
-      input.input,
-      state,
-      `${path}.input`,
-      RUNTIME_RESULT_MAX_METADATA_BYTES,
-    ),
+    id: boundedText(input.id, `${path}.id`, MAX_IDENTIFIER_BYTES),
+    name: boundedText(input.name, `${path}.name`, MAX_IDENTIFIER_BYTES),
+    input: boundedJson(input.input, `${path}.input`, RUNTIME_RESULT_MAX_METADATA_BYTES),
   };
 }
 
-function normalizeToolResult(
-  value: unknown,
-  state: BoundaryState,
-  path: string,
-): RuntimeToolResult {
-  const input = record(value, path);
-  assertKeys(input, ["callId", "content", "isError"], path);
-  const contentInput = ownDataArray(
+function toolResult(value: unknown, files: FileBudget, path: string): RuntimeToolResult {
+  const input = shape(value, path, ["callId", "content", "isError"]);
+  const content = denseOwnDataArray(
     input.content,
     `${path}.content`,
     RUNTIME_RESULT_MAX_TOOL_RESULT_PARTS,
-  );
-  addItems(state, contentInput.length, `${path}.content`, false);
-  const content = contentInput.map((part, index) =>
-    normalizeToolResultPart(part, state, `${path}.content[${index}]`));
+  ).map((part, index) => toolResultPart(part, files, `${path}.content[${String(index)}]`));
   if (input.isError !== undefined && typeof input.isError !== "boolean") {
     fail(`${path}.isError`, "must be boolean when present");
   }
-  return {
-    callId: text(input.callId, `${path}.callId`, MAX_IDENTIFIER_BYTES, state),
+  return compact({
+    callId: boundedText(input.callId, `${path}.callId`, MAX_IDENTIFIER_BYTES),
     content,
-    ...(input.isError === undefined ? {} : { isError: input.isError }),
-  };
+    isError: input.isError,
+  }) as RuntimeToolResult;
 }
 
-function normalizeToolResultPart(
+function toolResultPart(
   value: unknown,
-  state: BoundaryState,
+  files: FileBudget,
   path: string,
 ): RuntimeToolResultPart {
-  const input = record(value, path);
+  const input = ownDataRecord(value, path);
   if (input.type === "text") {
-    assertKeys(input, ["type", "text"], path);
-    return {
-      type: "text",
-      text: text(input.text, `${path}.text`, RUNTIME_RESULT_MAX_TEXT_BYTES, state),
-    };
+    assertOwnKeys(input, ["type", "text"], path);
+    return { type: "text", text: boundedText(input.text, `${path}.text`, RUNTIME_RESULT_MAX_TEXT_BYTES) };
   }
   if (input.type === "json") {
-    assertKeys(input, ["type", "value"], path);
+    assertOwnKeys(input, ["type", "value"], path);
     if (!Object.hasOwn(input, "value")) fail(`${path}.value`, "is required");
     return {
       type: "json",
-      value: normalizeBoundedJson(
-        input.value,
-        state,
-        `${path}.value`,
-        RUNTIME_RESULT_MAX_STRUCTURED_OUTPUT_BYTES,
-      ),
+      value: boundedJson(input.value, `${path}.value`, RUNTIME_RESULT_MAX_STRUCTURED_OUTPUT_BYTES),
     };
   }
   if (input.type === "file") {
-    assertKeys(input, ["type", "mediaType", "data", "name"], path);
-    const name = input.name === undefined
-      ? undefined
-      : fileName(input.name, `${path}.name`, state);
-    return {
+    assertOwnKeys(input, ["type", "mediaType", "data", "name"], path);
+    const name = optional(input.name, (name) => displayFileName(name, `${path}.name`));
+    return compact({
       type: "file",
-      mediaType: mediaTypeValue(input.mediaType, `${path}.mediaType`, state),
-      data: fileData(input.data, `${path}.data`, state),
-      ...(name === undefined ? {} : { name }),
-    };
+      mediaType: mediaType(input.mediaType, `${path}.mediaType`),
+      data: fileData(input.data, `${path}.data`, files),
+      name,
+    }) as RuntimeToolResultPart;
   }
   if (input.type === "artifact") {
-    assertKeys(input, ["type", "ref", "preview"], path);
+    assertOwnKeys(input, ["type", "ref", "preview"], path);
     let ref: ArtifactRef;
     try {
       ref = parseArtifactRef(input.ref);
     } catch (error) {
       throw new TypeError(`${path}.ref is invalid`, { cause: error });
     }
-    chargeArtifactRef(ref, state, `${path}.ref`);
-    const preview = input.preview === undefined
-      ? undefined
-      : text(
-        input.preview,
+    const preview = optional(input.preview, (preview) =>
+      boundedText(
+        preview,
         `${path}.preview`,
         RUNTIME_TOOL_ARTIFACT_PREVIEW_MAX_BYTES,
-        state,
         true,
-      );
-    return {
-      type: "artifact",
-      ref,
-      ...(preview === undefined ? {} : { preview }),
-    };
+      ));
+    return compact({ type: "artifact", ref, preview }) as RuntimeToolResultPart;
   }
-  fail(`${path}.type`, "is not a supported tool-result content type");
+  return fail(`${path}.type`, "is not a supported tool-result content type");
 }
 
-function normalizeSession(
+function sessionValue(
   value: unknown,
-  state: BoundaryState,
   authority: RuntimeSessionBoundaryAuthority,
   path = "runtime turn result.session",
 ): RuntimeSession {
-  const input = record(value, path);
-  assertKeys(
-    input,
-    [
-      "id",
-      "conversationId",
-      "route",
-      "createdAt",
-      "expiresAt",
-      "metadata",
-    ],
+  const input = shape(
+    value,
     path,
+    ["id", "conversationId", "route", "createdAt", "expiresAt", "metadata"],
   );
-  const id = ownDataProperty(input, "id", path, true);
-  const conversation = ownDataProperty(input, "conversationId", path, true);
-  const routeValue = ownDataProperty(input, "route", path, true);
-  const conversationId = text(
-    conversation,
+  for (const key of ["id", "conversationId", "route"] as const) {
+    if (!Object.hasOwn(input, key)) fail(`${path}.${key}`, "is required");
+  }
+  const conversationId = boundedText(
+    input.conversationId,
     `${path}.conversationId`,
     MAX_IDENTIFIER_BYTES,
-    state,
   );
-  const route = normalizeRoute(routeValue, state, `${path}.route`);
+  const route = routeValue(input.route, `${path}.route`);
   if (conversationId !== authority.conversationId) {
     fail(`${path}.conversationId`, "does not match the active conversation");
   }
@@ -811,20 +561,10 @@ function normalizeSession(
   ) {
     fail(`${path}.route`, "does not match the active runtime route");
   }
-  const metadata = input.metadata === undefined
-    ? undefined
-    : normalizeBoundedJsonObject(
-      input.metadata,
-      state,
-      `${path}.metadata`,
-      RUNTIME_RESULT_MAX_METADATA_BYTES,
-    );
-  const createdAt = input.createdAt === undefined
-    ? undefined
-    : canonicalTimestampValue(input.createdAt, `${path}.createdAt`, state);
-  const expiresAt = input.expiresAt === undefined
-    ? undefined
-    : canonicalTimestampValue(input.expiresAt, `${path}.expiresAt`, state);
+  const createdAt = optional(input.createdAt, (createdAt) =>
+    canonicalTimestamp(createdAt, `${path}.createdAt`));
+  const expiresAt = optional(input.expiresAt, (expiresAt) =>
+    canonicalTimestamp(expiresAt, `${path}.expiresAt`));
   if (
     createdAt !== undefined
     && expiresAt !== undefined
@@ -832,58 +572,35 @@ function normalizeSession(
   ) {
     fail(`${path}.expiresAt`, "must be later than createdAt");
   }
-  return {
-    id: text(id, `${path}.id`, MAX_IDENTIFIER_BYTES, state),
+  const metadata = optional(input.metadata, (metadata) =>
+    boundedJsonObject(metadata, `${path}.metadata`, RUNTIME_RESULT_MAX_METADATA_BYTES));
+  return compact({
+    id: boundedText(input.id, `${path}.id`, MAX_IDENTIFIER_BYTES),
     conversationId,
     route,
-    ...(createdAt === undefined ? {} : { createdAt }),
-    ...(expiresAt === undefined ? {} : { expiresAt }),
-    ...(metadata === undefined ? {} : { metadata }),
-  };
+    createdAt,
+    expiresAt,
+    metadata,
+  }) as RuntimeSession;
 }
 
-function normalizeRoute(
+function routeValue(
   value: unknown,
-  state: BoundaryState,
   path: string,
 ): { readonly runtimeInstanceId: string; readonly model: string } {
-  const input = record(value, path);
-  assertKeys(input, ["runtimeInstanceId", "model"], path);
+  const input = shape(value, path, ["runtimeInstanceId", "model"]);
   return {
-    runtimeInstanceId: text(
+    runtimeInstanceId: boundedText(
       input.runtimeInstanceId,
       `${path}.runtimeInstanceId`,
       MAX_IDENTIFIER_BYTES,
-      state,
     ),
-    model: text(input.model, `${path}.model`, MAX_IDENTIFIER_BYTES, state),
+    model: boundedText(input.model, `${path}.model`, MAX_IDENTIFIER_BYTES),
   };
 }
 
-function normalizeUsage(
-  value: unknown,
-  state: BoundaryState,
-  path = "runtime turn result.usage",
-): RuntimeUsage {
-  const input = record(value, path);
-  assertKeys(
-    input,
-    [
-      "inputTokens",
-      "outputTokens",
-      "totalTokens",
-      "cacheReadTokens",
-      "cacheWriteTokens",
-      "reasoningTokens",
-      "contextWindow",
-      "contextUsed",
-      "cost",
-      "compaction",
-      "sessionEvicted",
-    ],
-    path,
-  );
-  const optionalNumbers = [
+function usageValue(value: unknown, path = "runtime turn result.usage"): RuntimeUsage {
+  const optional = [
     "totalTokens",
     "cacheReadTokens",
     "cacheWriteTokens",
@@ -891,25 +608,17 @@ function normalizeUsage(
     "contextWindow",
     "contextUsed",
   ] as const;
-  const output: {
-    inputTokens: number;
-    outputTokens: number;
-    totalTokens?: number;
-    cacheReadTokens?: number;
-    cacheWriteTokens?: number;
-    reasoningTokens?: number;
-    contextWindow?: number;
-    contextUsed?: number;
-    cost?: RuntimeUsageCost;
-    compaction?: RuntimeCompaction;
-    sessionEvicted?: boolean;
-  } = {
-    inputTokens: nonNegativeFiniteNumber(input.inputTokens, `${path}.inputTokens`),
-    outputTokens: nonNegativeFiniteNumber(input.outputTokens, `${path}.outputTokens`),
+  const input = shape(
+    value,
+    path,
+    ["inputTokens", "outputTokens", ...optional, "cost", "compaction", "sessionEvicted"],
+  );
+  const output: Record<string, unknown> = {
+    inputTokens: nonNegativeNumber(input.inputTokens, `${path}.inputTokens`),
+    outputTokens: nonNegativeNumber(input.outputTokens, `${path}.outputTokens`),
   };
-  for (const key of optionalNumbers) {
-    const candidate = input[key];
-    if (candidate !== undefined) output[key] = nonNegativeFiniteNumber(candidate, `${path}.${key}`);
+  for (const key of optional) {
+    if (input[key] !== undefined) output[key] = nonNegativeNumber(input[key], `${path}.${key}`);
   }
   if (input.sessionEvicted !== undefined) {
     if (typeof input.sessionEvicted !== "boolean") {
@@ -917,267 +626,165 @@ function normalizeUsage(
     }
     output.sessionEvicted = input.sessionEvicted;
   }
-  if (input.cost !== undefined) {
-    output.cost = normalizeUsageCost(input.cost, state, `${path}.cost`);
-  }
+  if (input.cost !== undefined) output.cost = usageCost(input.cost, `${path}.cost`);
   if (input.compaction !== undefined) {
-    output.compaction = normalizeCompaction(input.compaction, state, `${path}.compaction`);
+    output.compaction = compactionValue(input.compaction, `${path}.compaction`);
   }
-  charge(state, 128, path);
-  return output;
+  return output as unknown as RuntimeUsage;
 }
 
-function normalizeUsageCost(
-  value: unknown,
-  state: BoundaryState,
-  path = "runtime turn result.usage.cost",
-): RuntimeUsageCost {
-  const input = record(value, path);
-  assertKeys(input, ["currency", "input", "output", "cacheRead", "cacheWrite", "total"], path);
+function usageCost(value: unknown, path: string): RuntimeUsageCost {
+  const optional = ["input", "output", "cacheRead", "cacheWrite"] as const;
+  const input = shape(value, path, ["currency", ...optional, "total"]);
   if (input.currency !== "USD") fail(`${path}.currency`, "must be USD");
-  const output: {
-    currency: "USD";
-    input?: number;
-    output?: number;
-    cacheRead?: number;
-    cacheWrite?: number;
-    total: number;
-  } = {
+  const output: Record<string, unknown> = {
     currency: "USD",
-    total: nonNegativeFiniteNumber(input.total, `${path}.total`),
+    total: nonNegativeNumber(input.total, `${path}.total`),
   };
-  for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const) {
-    const candidate = input[key];
-    if (candidate !== undefined) output[key] = nonNegativeFiniteNumber(candidate, `${path}.${key}`);
+  for (const key of optional) {
+    if (input[key] !== undefined) output[key] = nonNegativeNumber(input[key], `${path}.${key}`);
   }
-  charge(state, 64, path);
-  return output;
+  return output as unknown as RuntimeUsageCost;
 }
 
-function normalizeCompaction(
+function compactionValue(
   value: unknown,
-  state: BoundaryState,
   path = "runtime turn result.usage.compaction",
 ): RuntimeCompaction {
-  const input = record(value, path);
-  assertKeys(
-    input,
-    ["compacted", "tokensBefore", "tokensAfter", "summaryTokens", "firstRetainedMessageId"],
-    path,
-  );
+  const optional = ["tokensBefore", "tokensAfter", "summaryTokens"] as const;
+  const input = shape(value, path, ["compacted", ...optional, "firstRetainedMessageId"]);
   if (typeof input.compacted !== "boolean") fail(`${path}.compacted`, "must be boolean");
-  const output: {
-    compacted: boolean;
-    tokensBefore?: number;
-    tokensAfter?: number;
-    summaryTokens?: number;
-    firstRetainedMessageId?: string;
-  } = { compacted: input.compacted };
-  for (const key of ["tokensBefore", "tokensAfter", "summaryTokens"] as const) {
-    const candidate = input[key];
-    if (candidate !== undefined) output[key] = nonNegativeFiniteNumber(candidate, `${path}.${key}`);
+  const output: Record<string, unknown> = { compacted: input.compacted };
+  for (const key of optional) {
+    if (input[key] !== undefined) output[key] = nonNegativeNumber(input[key], `${path}.${key}`);
   }
   if (input.firstRetainedMessageId !== undefined) {
-    output.firstRetainedMessageId = text(
+    output.firstRetainedMessageId = boundedText(
       input.firstRetainedMessageId,
       `${path}.firstRetainedMessageId`,
       MAX_IDENTIFIER_BYTES,
-      state,
     );
   }
-  charge(state, 64, path);
-  return output;
+  return output as unknown as RuntimeCompaction;
 }
 
-function normalizeBoundedJsonObject(
-  value: unknown,
-  state: BoundaryState,
-  path: string,
-  maxBytes: number,
-): JsonObject {
-  const normalized = normalizeBoundedJson(value, state, path, maxBytes);
+function nativeTool(value: unknown, path: string): RuntimeNativeToolDescriptor {
+  const detached = shape(value, path, ["id", "displayName", "effects", "approval", "sandbox"]);
+  detached.effects = denseOwnDataArray(detached.effects, `${path}.effects`, 4);
+  try {
+    return parseRuntimeNativeToolDescriptor(detached);
+  } catch (error) {
+    throw new TypeError(`${path} is invalid`, { cause: error });
+  }
+}
+
+function boundedJsonObject(value: unknown, path: string, maxBytes: number): JsonObject {
+  const normalized = boundedJson(value, path, maxBytes);
   if (normalized === null || Array.isArray(normalized) || typeof normalized !== "object") {
     fail(path, "must be a JSON object");
   }
   return normalized as JsonObject;
 }
 
-function normalizeBoundedJson(
+function boundedJson(value: unknown, path: string, maxBytes: number): JsonValue {
+  return snapshotBoundedValue<JsonValue>(value, {
+    path,
+    maxBytes,
+    maxItems: RUNTIME_RESULT_MAX_JSON_ITEMS,
+    maxDepth: RUNTIME_RESULT_MAX_JSON_DEPTH,
+    label: "JSON",
+    countRoot: false,
+  }).value;
+}
+
+function fileData(value: unknown, path: string, budget: FileBudget, requireBytes: true): Uint8Array;
+function fileData(value: unknown, path: string, budget: FileBudget, requireBytes?: false): Uint8Array | string;
+function fileData(
   value: unknown,
-  state: BoundaryState,
   path: string,
-  maxBytes: number,
-): JsonValue {
-  const startBytes = state.bytes;
-  const startJsonItems = state.jsonItems;
-  const normalized = normalizeJson(value, state, path, 0);
-  if (state.bytes - startBytes > maxBytes) {
-    fail(path, `exceeds the ${maxBytes}-byte boundary`);
+  budget: FileBudget,
+  requireBytes = false,
+): Uint8Array | string {
+  if (typeof value !== "string" && !(value instanceof Uint8Array)) {
+    fail(path, requireBytes ? "must be a Uint8Array" : "must be a string or Uint8Array");
   }
-  if (state.jsonItems - startJsonItems > RUNTIME_RESULT_MAX_JSON_ITEMS) {
-    fail(path, `exceeds the ${RUNTIME_RESULT_MAX_JSON_ITEMS}-item JSON boundary`);
+  if (requireBytes && typeof value === "string") fail(path, "must be a Uint8Array");
+  const bytes = typeof value === "string" ? utf8Bytes(value) : value.byteLength;
+  if (bytes > RUNTIME_RESULT_MAX_FILE_BYTES) {
+    fail(path, `exceeds the ${String(RUNTIME_RESULT_MAX_FILE_BYTES)}-byte boundary`);
   }
+  budget.fileBytes += bytes;
+  if (budget.fileBytes > RUNTIME_RESULT_MAX_TOTAL_FILE_BYTES) {
+    fail(path, `exceeds the ${String(RUNTIME_RESULT_MAX_TOTAL_FILE_BYTES)}-byte total file boundary`);
+  }
+  return value;
+}
+
+function shape(value: unknown, path: string, keys: readonly string[]): Record<string, unknown> {
+  const input = ownDataRecord(value, path);
+  assertOwnKeys(input, keys, path);
+  return input;
+}
+
+function optional<T>(value: unknown, parse: (value: unknown) => T): T | undefined {
+  return value === undefined ? undefined : parse(value);
+}
+
+function compact<T extends Record<string, unknown>>(value: T): T {
+  for (const key of Object.keys(value)) {
+    if (value[key] === undefined) delete value[key];
+  }
+  return value;
+}
+
+function runtimeSnapshot(value: unknown, path: string, maxBytes: number) {
+  const label = path.includes("event") ? "event" : path.includes("tool call")
+    ? "tool-call"
+    : path.includes("capabilit") ? "capabilities"
+      : path.includes("validation") ? "model-validation"
+        : "result";
+  return snapshotBoundedValue(value, {
+    path,
+    maxBytes,
+    maxItems: RUNTIME_RESULT_MAX_ITEMS,
+    maxDepth: RUNTIME_GRAPH_MAX_DEPTH,
+    label,
+    byteLabel: label,
+    allowUndefined: true,
+    allowCycles: true,
+    cloneBytes: true,
+    countRoot: false,
+  });
+}
+
+function mediaType(value: unknown, path: string): string {
+  const normalized = boundedText(value, path, MAX_MEDIA_TYPE_BYTES);
+  if (!MEDIA_TYPE_PATTERN.test(normalized)) fail(path, "must be a bounded IANA media type");
   return normalized;
 }
 
-function normalizeJson(
-  value: unknown,
-  state: BoundaryState,
-  path: string,
-  depth: number,
-): JsonValue {
-  if (value === null || typeof value === "boolean") {
-    charge(state, 8, path);
-    return value;
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) fail(path, "must contain only finite JSON numbers");
-    charge(state, 16, path);
-    return value;
-  }
-  if (typeof value === "string") {
-    charge(state, utf8Bytes(value), path);
-    return value;
-  }
-  if (depth >= RUNTIME_RESULT_MAX_JSON_DEPTH) {
-    fail(path, `exceeds the JSON depth boundary of ${RUNTIME_RESULT_MAX_JSON_DEPTH}`);
-  }
-  if (typeof value !== "object" || value === null || value instanceof Uint8Array) {
-    fail(path, "must contain only JSON values");
-  }
-  if (state.active.has(value)) fail(path, "must not contain cycles");
-  state.active.add(value);
-  try {
-    if (Array.isArray(value)) {
-      const entries = ownDataArray(value, path, RUNTIME_RESULT_MAX_JSON_ITEMS);
-      addItems(state, entries.length, path, true);
-      return entries.map((entry, index) =>
-        normalizeJson(entry, state, `${path}[${index}]`, depth + 1));
-    }
-    const input = record(value, path);
-    const entries = Object.entries(input);
-    addItems(state, entries.length, path, true);
-    const output: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;
-    for (const [key, entry] of entries) {
-      if (UNSAFE_KEYS.has(key)) fail(path, `contains unsafe key ${JSON.stringify(key)}`);
-      charge(state, utf8Bytes(key), path);
-      output[key] = normalizeJson(entry, state, `${path}.${key}`, depth + 1);
-    }
-    return output;
-  } finally {
-    state.active.delete(value);
-  }
-}
-
-function fileData(
-  value: unknown,
-  path: string,
-  state: BoundaryState,
-  requireBytes: true,
-): Uint8Array;
-function fileData(
-  value: unknown,
-  path: string,
-  state: BoundaryState,
-  requireBytes?: false,
-): Uint8Array | string;
-function fileData(
-  value: unknown,
-  path: string,
-  state: BoundaryState,
-  requireBytes = false,
-): Uint8Array | string {
-  if (typeof value !== "string") {
-    let bytes: Uint8Array;
-    try {
-      bytes = cloneIntrinsicUint8Array(
-        value,
-        path,
-        Math.min(
-          RUNTIME_RESULT_MAX_FILE_BYTES,
-          RUNTIME_RESULT_MAX_TOTAL_FILE_BYTES - state.fileBytes,
-          state.maxBytes - state.bytes,
-        ),
-      );
-    } catch (error) {
-      fail(
-        path,
-        error instanceof Error ? error.message : "must be stable Uint8Array byte data",
-      );
-    }
-    state.fileBytes += bytes.byteLength;
-    if (state.fileBytes > RUNTIME_RESULT_MAX_TOTAL_FILE_BYTES) {
-      fail(path, `exceeds the ${RUNTIME_RESULT_MAX_TOTAL_FILE_BYTES}-byte total file boundary`);
-    }
-    charge(state, bytes.byteLength, path);
-    return bytes;
-  }
-  if (!requireBytes && typeof value === "string") {
-    const bytes = utf8Bytes(value);
-    if (bytes > RUNTIME_RESULT_MAX_FILE_BYTES) {
-      fail(path, `exceeds the ${RUNTIME_RESULT_MAX_FILE_BYTES}-byte file boundary`);
-    }
-    state.fileBytes += bytes;
-    if (state.fileBytes > RUNTIME_RESULT_MAX_TOTAL_FILE_BYTES) {
-      fail(path, `exceeds the ${RUNTIME_RESULT_MAX_TOTAL_FILE_BYTES}-byte total file boundary`);
-    }
-    charge(state, bytes, path);
-    return value;
-  }
-  fail(path, requireBytes ? "must be a Uint8Array" : "must be a string or Uint8Array");
-}
-
-function chargeArtifactRef(ref: ArtifactRef, state: BoundaryState, path: string): void {
-  charge(
-    state,
-    utf8Bytes(ref.id)
-      + utf8Bytes(ref.sha256)
-      + utf8Bytes(ref.mediaType)
-      + (ref.fileName === undefined ? 0 : utf8Bytes(ref.fileName))
-      + 32,
-    path,
-  );
-}
-
-function mediaTypeValue(value: unknown, path: string, state: BoundaryState): string {
-  const mediaType = text(value, path, MAX_MEDIA_TYPE_BYTES, state);
-  if (!MEDIA_TYPE_PATTERN.test(mediaType)) fail(path, "must be a bounded IANA media type");
-  return mediaType;
-}
-
-function fileName(value: unknown, path: string, state: BoundaryState): string {
-  const name = text(value, path, MAX_FILE_NAME_BYTES, state);
-  if (
-    name === "."
-    || name === ".."
-    || /[/\\\u0000-\u001f\u007f]/u.test(name)
-  ) {
+function displayFileName(value: unknown, path: string): string {
+  const name = boundedText(value, path, MAX_FILE_NAME_BYTES);
+  if (name === "." || name === ".." || /[/\\\u0000-\u001f\u007f]/u.test(name)) {
     fail(path, "must be a path-free display name");
   }
   return name;
 }
 
-function text(
+function boundedText(
   value: unknown,
   path: string,
   maxBytes: number,
-  state: BoundaryState,
   allowEmpty = false,
 ): string {
   if (typeof value !== "string") fail(path, "must be a string");
   if (!allowEmpty && value.length === 0) fail(path, "must not be empty");
-  const bytes = utf8Bytes(value);
-  if (bytes > maxBytes) fail(path, `exceeds the ${maxBytes}-byte boundary`);
-  charge(state, bytes, path);
+  if (utf8Bytes(value) > maxBytes) fail(path, `exceeds the ${String(maxBytes)}-byte boundary`);
   return value;
 }
 
-function canonicalTimestampValue(
-  value: unknown,
-  path: string,
-  state: BoundaryState,
-): string {
-  const timestamp = text(value, path, MAX_IDENTIFIER_BYTES, state);
+function canonicalTimestamp(value: unknown, path: string): string {
+  const timestamp = boundedText(value, path, MAX_IDENTIFIER_BYTES);
   const parsed = new Date(timestamp);
   if (!Number.isFinite(parsed.valueOf()) || parsed.toISOString() !== timestamp) {
     fail(path, "must be a canonical ISO timestamp");
@@ -1185,173 +792,29 @@ function canonicalTimestampValue(
   return timestamp;
 }
 
-function enumValue<const T extends readonly string[]>(
+function oneOf<const T extends readonly string[]>(
   value: unknown,
   allowed: T,
   path: string,
-  state: BoundaryState,
 ): T[number] {
   if (typeof value !== "string" || !allowed.includes(value)) {
     fail(path, `must be one of ${allowed.join(", ")}`);
   }
-  charge(state, utf8Bytes(value), path);
   return value as T[number];
 }
 
-function nonNegativeFiniteNumber(value: unknown, path: string): number {
+function nonNegativeNumber(value: unknown, path: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     fail(path, "must be a non-negative finite number");
   }
   return value;
 }
 
-function nonNegativeSafeInteger(value: unknown, path: string): number {
+function nonNegativeInteger(value: unknown, path: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     fail(path, "must be a non-negative safe integer");
   }
   return value;
-}
-
-function ownDataArray(
-  value: unknown,
-  path: string,
-  maxItems: number,
-): readonly unknown[] {
-  if (!Array.isArray(value)) fail(path, "must be an array");
-  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
-  if (lengthDescriptor === undefined || !("value" in lengthDescriptor)) {
-    fail(`${path}.length`, "must be an own data property");
-  }
-  const length = lengthDescriptor.value;
-  if (!Number.isSafeInteger(length) || length < 0) {
-    fail(`${path}.length`, "must be a non-negative safe integer");
-  }
-  if (length > maxItems) fail(path, `exceeds the ${maxItems}-item boundary`);
-  const allowed = new Set(["length"]);
-  for (let index = 0; index < length; index += 1) allowed.add(String(index));
-  assertKeys(value as unknown as Record<string, unknown>, [...allowed], path);
-
-  const detached: unknown[] = [];
-  for (let index = 0; index < length; index += 1) {
-    detached.push(ownDataProperty(
-      value as unknown as Record<string, unknown>,
-      String(index),
-      path,
-      true,
-    ));
-  }
-  return detached;
-}
-
-function record(value: unknown, path: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    fail(path, "must be a plain object");
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    fail(path, "must be a plain object");
-  }
-  const detached: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string") fail(path, "contains an unknown symbol key");
-    if (UNSAFE_KEYS.has(key)) fail(path, `contains unsafe key ${JSON.stringify(key)}`);
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined || !("value" in descriptor)) {
-      fail(`${path}.${key}`, "must be a data property");
-    }
-    detached[key] = descriptor.value;
-  }
-  return detached;
-}
-
-function boundaryState(maxBytes: number, boundaryLabel: string): BoundaryState {
-  return {
-    active: new Set(),
-    boundaryLabel,
-    maxBytes,
-    bytes: 0,
-    fileBytes: 0,
-    items: 0,
-    jsonItems: 0,
-  };
-}
-
-function assertKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-  path: string,
-): void {
-  const allowedKeys = new Set(allowed);
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string") fail(path, "contains an unknown symbol key");
-    if (UNSAFE_KEYS.has(key)) fail(path, `contains unsafe key ${JSON.stringify(key)}`);
-    if (!allowedKeys.has(key)) fail(path, `contains unknown key ${JSON.stringify(key)}`);
-  }
-}
-
-function ownDataProperty(
-  value: Record<string, unknown>,
-  key: string,
-  path: string,
-  required = false,
-): unknown {
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  if (descriptor === undefined) {
-    if (required) fail(`${path}.${key}`, "is required");
-    return undefined;
-  }
-  if (!("value" in descriptor)) fail(`${path}.${key}`, "must be a data property");
-  return descriptor.value;
-}
-
-function detachRuntimeNativeToolDescriptor(
-  value: unknown,
-  path: string,
-): Readonly<Record<string, unknown>> {
-  const input = record(value, path);
-  const keys = ["id", "displayName", "effects", "approval", "sandbox"] as const;
-  assertKeys(input, keys, path);
-  return {
-    id: ownDataProperty(input, "id", path, true),
-    displayName: ownDataProperty(input, "displayName", path, true),
-    effects: ownDataArray(
-      ownDataProperty(input, "effects", path, true),
-      `${path}.effects`,
-      4,
-    ),
-    approval: ownDataProperty(input, "approval", path, true),
-    sandbox: ownDataProperty(input, "sandbox", path, true),
-  };
-}
-
-function addItems(
-  state: BoundaryState,
-  count: number,
-  path: string,
-  json: boolean,
-): void {
-  state.items += count;
-  if (json) state.jsonItems += count;
-  if (state.items > RUNTIME_RESULT_MAX_ITEMS) {
-    fail(
-      path,
-      `exceeds the ${RUNTIME_RESULT_MAX_ITEMS}-item ${state.boundaryLabel} boundary`,
-    );
-  }
-}
-
-function charge(state: BoundaryState, bytes: number, path: string): void {
-  state.bytes += bytes;
-  if (state.bytes > state.maxBytes) {
-    fail(
-      path,
-      `exceeds the ${state.maxBytes}-byte ${state.boundaryLabel} boundary`,
-    );
-  }
-}
-
-function utf8Bytes(value: string): number {
-  return Buffer.byteLength(value, "utf8");
 }
 
 function fail(path: string, message: string): never {

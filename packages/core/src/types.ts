@@ -10,6 +10,7 @@ import type {
   JsonObject,
   JsonValue,
   MemoryModuleDefinition,
+  ModuleDiagnostic,
   RouteIdentity,
   RuntimeNativeToolEffect,
   RuntimeModuleDefinition,
@@ -169,10 +170,12 @@ export interface AgentValidationResult {
 export interface ConfigExplanationEntry {
   readonly path: string;
   readonly owner: string;
-  readonly source: "config" | "env";
-  readonly value?: unknown;
+  readonly schemaPointer: string;
+  readonly source: "config" | "environment" | "default";
+  readonly value?: JsonValue;
   readonly env?: string;
-  readonly redacted?: boolean;
+  readonly redacted: boolean;
+  readonly remediation: string;
 }
 
 export interface AgentConfigExplanation {
@@ -466,6 +469,12 @@ export interface AgentModuleCommandResult {
   readonly value?: JsonValue;
 }
 
+export interface AgentModuleDiagnostics {
+  readonly kind: ModuleKind;
+  readonly instanceId: string;
+  readonly diagnostics: readonly ModuleDiagnostic[];
+}
+
 export interface AgentHealth {
   readonly status: "healthy" | "degraded" | "stopping" | "stopped";
   readonly accepting: boolean;
@@ -475,7 +484,7 @@ export interface AgentHealth {
     readonly kind: ModuleKind;
     readonly instanceId: string;
     readonly status: string;
-    readonly detail?: unknown;
+    readonly detail?: JsonValue;
   }[];
 }
 
@@ -509,6 +518,7 @@ export interface AgentHost {
   configView(): Promise<AgentConfigView>;
   deliver(channelInstanceId: string, message: ChannelOutboundMessage): Promise<ChannelDeliveryResult>;
   runModuleCommand(moduleInstanceId: string, commandName: string, input?: unknown): Promise<AgentModuleCommandResult>;
+  diagnostics(verbose?: boolean): Promise<readonly AgentModuleDiagnostics[]>;
   health(): Promise<AgentHealth>;
   drain(): Promise<void>;
   stop(): Promise<void>;

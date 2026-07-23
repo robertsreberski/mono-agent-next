@@ -19,8 +19,10 @@ First-party reserved exporter module in the observability layer.
 
 Own OTLP/HTTP span serialization, a bounded in-memory queue, count and byte
 batching, request/flush/stop deadlines, checked redirects, and collector
-transport. Delivery failures retain the active batch for a later flush; queue
-pressure is reported explicitly through accepted/rejected counts and health.
+transport. It maps Core turn metadata to stable OpenInference/Phoenix project,
+session, model, status, and span-kind attributes. Delivery failures retain the
+active batch for a later flush; queue pressure is reported explicitly through
+accepted/rejected counts and degraded health.
 
 ## Install / Usage
 
@@ -39,6 +41,7 @@ pnpm add @mono-agent/exporter-otlp
         "endpoint": "http://127.0.0.1:6006/v1/traces",
         "projectName": "personal-agent",
         "includeSensitiveData": false,
+        "contentPatternRedaction": false,
         "headers": {
           "authorization": { "$env": "OTLP_AUTHORIZATION" }
         },
@@ -67,8 +70,20 @@ configured header is stripped before a cross-origin redirect.
 
 `includeSensitiveData` defaults to `false`; record bodies are discarded before
 queueing and never reach the payload. Attributes are expected to have already
-passed Core's bounded redaction policy. Enabling the option explicitly includes
-the body as `mono.agent.body`.
+passed Core's bounded key-based redaction policy. Enabling the option explicitly
+includes the body as `mono.agent.body` and surfaces a warning in exporter health
+without treating the intentional opt-in as an availability failure.
+Module diagnostics inspect only the current bounded queue and parsed config:
+they warn when sensitive-body export is enabled and report degraded queue state
+as an error without starting the exporter, flushing records, contacting the
+collector, or exposing collector-provided error text.
+
+`contentPatternRedaction` is a separate, default-off defense-in-depth scan over
+every retained outbound string, including attributes and an opted-in body. It
+replaces only complete high-confidence `sk-`, `ghp_`, `github_pat_`, `AKIA`,
+`xox[baprs]-`, and `xapp-` credential shapes; short prefixes and prose remain
+unchanged. The traversal is bounded by the record byte limit, a nesting limit,
+and a node budget. This scan does not make an untrusted collector safe.
 
 ## Architecture
 
@@ -77,12 +92,14 @@ the body as `mono.agent.body`.
 1. Core validates and resolves secret environment wrappers, then creates the
    exporter with no ambient credential reads.
 2. `export` validates and clones each JSON record, removes bodies unless opted
-   in, and admits records only while both queue count and byte bounds allow it.
+   in, applies the optional bounded retained-text scan, and admits records only
+   while both queue count and byte bounds allow it.
 3. A single pump selects a batch bounded by record count and serialized bytes,
-   maps each record to a deterministic instantaneous OTLP span, and uses the
-   official transformer to encode an OTLP protobuf request accepted by Phoenix
-   and standard OTLP/HTTP trace collectors. Stable hashes derive trace and span
-   IDs from canonical record content.
+   maps each record to a deterministic instantaneous OTLP span, aliases Core's
+   conversation identity to `session.id`, and uses the official transformer to
+   encode an OTLP protobuf request accepted by Phoenix and standard OTLP/HTTP
+   trace collectors. Stable hashes derive trace and span IDs from canonical
+   record content.
 4. The transport sends a manual-redirect POST with per-request cancellation.
    Redirect targets are reparsed; configured headers survive only same-origin
    redirects and can never cross an origin boundary.
@@ -95,8 +112,8 @@ the body as `mono.agent.body`.
 
 | Source | Responsibility |
 | --- | --- |
-| `config.ts` | Strict endpoint, secret-header, queue, batch, redirect, and deadline config. |
-| `otlp.ts` | Deterministic span mapping and official OTLP protobuf serialization. |
+| `config.ts` | Strict endpoint, secret-header, sensitive-data, scan, queue, batch, redirect, and deadline config. |
+| `otlp.ts` | Deterministic OpenInference/Phoenix span mapping and official OTLP protobuf serialization. |
 | `transport.ts` | Injectable one-request transport and manual-redirect fetch implementation. |
 | `exporter.ts` | Admission, queueing, batching, retries, redirect policy, health, flush, and stop. |
 | `index.ts` | The typed reserved `monoAgentModule` definition. |
@@ -147,10 +164,11 @@ collector-specific clients.
 
 ## What This Package Does Not Own
 
-It does not decide which events are observable, redact Core attributes, persist
-an offline queue, sample traces, run a collector, provide Phoenix UI, or manage
-collector credentials. Core owns record selection and redaction; operators own
-collector availability and environment values.
+It does not decide which events are observable, replace Core's key-based
+redaction, persist an offline queue, sample traces, run a collector, provide
+Phoenix UI, or manage collector credentials. Core owns record selection and
+structured redaction; operators own collector availability and environment
+values.
 
 ## Related Documentation
 
@@ -169,5 +187,7 @@ pnpm --filter @mono-agent/exporter-otlp test
 
 The focused suite covers endpoint and header policy, environment schema
 annotations, queue pressure, count/byte batches, default sensitive-body
-omission, deterministic payloads, cross-origin credential stripping, protocol
-downgrade rejection, retained retries, and bounded request/stop deadlines.
+omission, explicit warnings, bounded credential-pattern replacement,
+project/session/OpenInference mapping, deterministic payloads, cross-origin
+credential stripping, protocol downgrade rejection, retained retries, visible
+degradation, and bounded request/stop deadlines.

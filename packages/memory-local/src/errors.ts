@@ -5,6 +5,9 @@ export type MemoryLocalErrorCode =
   | "invalid_record"
   | "duplicate_record"
   | "capacity_exceeded"
+  | "writer_active"
+  | "embedding_unavailable"
+  | "maintenance_failed"
   | "runtime_capture_unavailable"
   | "runtime_capture_invalid"
   | "closed";

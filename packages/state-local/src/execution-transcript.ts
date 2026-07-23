@@ -7,7 +7,7 @@ import type {
   AgentInteractionEvidence,
   AgentTranscriptContentPart,
   AgentTranscriptEntry,
-} from "./types.js";
+} from "./execution-types.js";
 
 const TRANSCRIPT_MAX_BYTES = 64 * 1024 * 1024;
 const TRANSCRIPT_MAX_ENTRIES = 50_000;

@@ -1,32 +1,51 @@
-export const DEFAULT_MEMORY_MAX_RECORDS = 10_000;
-export const DEFAULT_MEMORY_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
-export const DEFAULT_MEMORY_MAX_TEXT_BYTES = 64 * 1024;
-export const DEFAULT_MEMORY_MAX_METADATA_BYTES = 64 * 1024;
+import { assertSafeHttpUrl } from "@mono-agent/module-sdk";
+
+export const DEFAULT_MEMORY_MAX_BYTES = 96_000;
 export const DEFAULT_MEMORY_MAX_RECALL_RESULTS = 50;
-export const DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS = 8;
+export const DEFAULT_MEMORY_MAX_RECORDS = 100_000;
+export const DEFAULT_MEMORY_MAX_TEXT_BYTES = 64 * 1024;
+export const DEFAULT_MEMORY_MAX_TOTAL_BYTES = 1024 * 1024 * 1024;
 export const DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_BYTES = 256 * 1024;
 export const DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_TOKENS = 2_048;
+export const DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS = 8;
+export const DEFAULT_RUNTIME_CAPTURE_TIMEOUT_MS = 360_000;
+export const DEFAULT_EMBEDDING_TIMEOUT_MS = 30_000;
+export const DEFAULT_EMBEDDING_BREAKER_FAILURES = 3;
+export const DEFAULT_EMBEDDING_BREAKER_RESET_MS = 30_000;
 
-export interface MemoryLocalLimitsConfig {
-  readonly maxRecords: number;
-  readonly maxTotalBytes: number;
-  readonly maxTextBytes: number;
-  readonly maxMetadataBytes: number;
-  readonly maxRecallResults: number;
+export interface MemoryLocalModelRoute {
+  readonly runtime: string;
+  readonly model: string;
 }
 
 export interface MemoryLocalCaptureConfig {
-  readonly mode: "direct" | "runtime";
-  readonly maxRecords: number;
-  readonly maxOutputBytes: number;
-  readonly maxOutputTokens: number;
+  readonly enabled: boolean;
+  readonly model?: MemoryLocalModelRoute;
+  readonly timeoutMs: number;
+}
+
+export interface MemoryLocalEmbeddingsConfig {
+  readonly provider: "ollama";
+  readonly endpoint: string;
+  readonly model: string;
+  readonly dimensions: number;
+  readonly timeoutMs: number;
+  readonly breakerFailures: number;
+  readonly breakerResetMs: number;
+}
+
+export interface MemoryLocalRecallToolConfig {
+  readonly enabled: boolean;
 }
 
 export interface MemoryLocalConfig {
   /** Omit to use Core's instance-specific data directory. Relative paths resolve from agent config. */
-  readonly directory?: string;
-  readonly limits: MemoryLocalLimitsConfig;
+  readonly root?: string;
+  /** Maximum UTF-8 text returned by one recall. */
+  readonly maxBytes: number;
   readonly capture: MemoryLocalCaptureConfig;
+  readonly embeddings?: MemoryLocalEmbeddingsConfig;
+  readonly recallTool: MemoryLocalRecallToolConfig;
 }
 
 export const memoryLocalJsonSchema = Object.freeze({
@@ -34,59 +53,175 @@ export const memoryLocalJsonSchema = Object.freeze({
   type: "object",
   additionalProperties: false,
   properties: {
-    directory: { type: "string", minLength: 1 },
-    limits: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        maxRecords: { type: "integer", minimum: 1, maximum: 100_000, default: DEFAULT_MEMORY_MAX_RECORDS },
-        maxTotalBytes: { type: "integer", minimum: 1_024, maximum: 1_073_741_824, default: DEFAULT_MEMORY_MAX_TOTAL_BYTES },
-        maxTextBytes: { type: "integer", minimum: 1, maximum: 1_048_576, default: DEFAULT_MEMORY_MAX_TEXT_BYTES },
-        maxMetadataBytes: { type: "integer", minimum: 2, maximum: 262_144, default: DEFAULT_MEMORY_MAX_METADATA_BYTES },
-        maxRecallResults: { type: "integer", minimum: 1, maximum: 100, default: DEFAULT_MEMORY_MAX_RECALL_RESULTS },
-      },
+    root: { type: "string", minLength: 1 },
+    maxBytes: {
+      type: "integer",
+      minimum: 1_024,
+      maximum: 4_194_304,
+      default: DEFAULT_MEMORY_MAX_BYTES,
     },
     capture: {
       type: "object",
       additionalProperties: false,
       properties: {
-        mode: { enum: ["direct", "runtime"], default: "direct" },
-        maxRecords: { type: "integer", minimum: 1, maximum: 32, default: DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS },
-        maxOutputBytes: { type: "integer", minimum: 2, maximum: 4_194_304, default: DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_BYTES },
-        maxOutputTokens: { type: "integer", minimum: 1, maximum: 16_384, default: DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_TOKENS },
+        enabled: { type: "boolean", default: false },
+        model: {
+          type: "object",
+          additionalProperties: false,
+          required: ["runtime", "model"],
+          properties: {
+            runtime: { type: "string", minLength: 1, maxLength: 256 },
+            model: { type: "string", minLength: 1, maxLength: 512 },
+          },
+        },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 3_600_000,
+          default: DEFAULT_RUNTIME_CAPTURE_TIMEOUT_MS,
+        },
+      },
+    },
+    embeddings: {
+      type: "object",
+      additionalProperties: false,
+      required: ["provider", "endpoint", "model", "dimensions"],
+      properties: {
+        provider: { const: "ollama" },
+        endpoint: { type: "string", minLength: 1, maxLength: 4_096 },
+        model: { type: "string", minLength: 1, maxLength: 512 },
+        dimensions: { type: "integer", minimum: 1, maximum: 16_384 },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 600_000,
+          default: DEFAULT_EMBEDDING_TIMEOUT_MS,
+        },
+        breakerFailures: {
+          type: "integer",
+          minimum: 1,
+          maximum: 100,
+          default: DEFAULT_EMBEDDING_BREAKER_FAILURES,
+        },
+        breakerResetMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 3_600_000,
+          default: DEFAULT_EMBEDDING_BREAKER_RESET_MS,
+        },
+      },
+    },
+    recallTool: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        enabled: { type: "boolean", default: true },
       },
     },
   },
 } as const);
 
-const ROOT_KEYS = ["directory", "limits", "capture"] as const;
-const LIMIT_KEYS = ["maxRecords", "maxTotalBytes", "maxTextBytes", "maxMetadataBytes", "maxRecallResults"] as const;
-const CAPTURE_KEYS = ["mode", "maxRecords", "maxOutputBytes", "maxOutputTokens"] as const;
+const ROOT_KEYS = ["root", "maxBytes", "capture", "embeddings", "recallTool"] as const;
+const CAPTURE_KEYS = ["enabled", "model", "timeoutMs"] as const;
+const MODEL_KEYS = ["runtime", "model"] as const;
+const EMBEDDING_KEYS = [
+  "provider",
+  "endpoint",
+  "model",
+  "dimensions",
+  "timeoutMs",
+  "breakerFailures",
+  "breakerResetMs",
+] as const;
+const RECALL_TOOL_KEYS = ["enabled"] as const;
 const CONTROL = /[\u0000-\u001f\u007f]/u;
 
 export function parseMemoryLocalConfig(input: unknown): MemoryLocalConfig {
   const root = input === undefined ? {} : plainObject(input, "$", ROOT_KEYS);
-  const directory = optionalTrimmedString(root.directory, "$.directory");
-  const limits = root.limits === undefined ? {} : plainObject(root.limits, "$.limits", LIMIT_KEYS);
+  const authoredRoot = optionalTrimmedString(root.root, "$.root", 4_096);
   const capture = root.capture === undefined ? {} : plainObject(root.capture, "$.capture", CAPTURE_KEYS);
-  const mode = capture.mode ?? "direct";
-  if (mode !== "direct" && mode !== "runtime") fail("$.capture.mode", "must be direct or runtime");
+  const enabled = boolean(capture.enabled, false, "$.capture.enabled");
+  const model = capture.model === undefined ? undefined : parseModel(capture.model);
+  if (enabled && model === undefined) {
+    fail("$.capture.model", "is required when capture is enabled");
+  }
+  if (!enabled && model !== undefined) {
+    fail("$.capture.model", "must be omitted when capture is disabled");
+  }
+  const embeddings = root.embeddings === undefined ? undefined : parseEmbeddings(root.embeddings);
+  const recallTool = root.recallTool === undefined
+    ? {}
+    : plainObject(root.recallTool, "$.recallTool", RECALL_TOOL_KEYS);
 
   return Object.freeze({
-    ...(directory === undefined ? {} : { directory }),
-    limits: Object.freeze({
-      maxRecords: boundedInteger(limits.maxRecords, DEFAULT_MEMORY_MAX_RECORDS, 1, 100_000, "$.limits.maxRecords"),
-      maxTotalBytes: boundedInteger(limits.maxTotalBytes, DEFAULT_MEMORY_MAX_TOTAL_BYTES, 1_024, 1_073_741_824, "$.limits.maxTotalBytes"),
-      maxTextBytes: boundedInteger(limits.maxTextBytes, DEFAULT_MEMORY_MAX_TEXT_BYTES, 1, 1_048_576, "$.limits.maxTextBytes"),
-      maxMetadataBytes: boundedInteger(limits.maxMetadataBytes, DEFAULT_MEMORY_MAX_METADATA_BYTES, 2, 262_144, "$.limits.maxMetadataBytes"),
-      maxRecallResults: boundedInteger(limits.maxRecallResults, DEFAULT_MEMORY_MAX_RECALL_RESULTS, 1, 100, "$.limits.maxRecallResults"),
-    }),
+    ...(authoredRoot === undefined ? {} : { root: authoredRoot }),
+    maxBytes: boundedInteger(root.maxBytes, DEFAULT_MEMORY_MAX_BYTES, 1_024, 4_194_304, "$.maxBytes"),
     capture: Object.freeze({
-      mode,
-      maxRecords: boundedInteger(capture.maxRecords, DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS, 1, 32, "$.capture.maxRecords"),
-      maxOutputBytes: boundedInteger(capture.maxOutputBytes, DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_BYTES, 2, 4_194_304, "$.capture.maxOutputBytes"),
-      maxOutputTokens: boundedInteger(capture.maxOutputTokens, DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_TOKENS, 1, 16_384, "$.capture.maxOutputTokens"),
+      enabled,
+      ...(model === undefined ? {} : { model }),
+      timeoutMs: boundedInteger(
+        capture.timeoutMs,
+        DEFAULT_RUNTIME_CAPTURE_TIMEOUT_MS,
+        1,
+        3_600_000,
+        "$.capture.timeoutMs",
+      ),
     }),
+    ...(embeddings === undefined ? {} : { embeddings }),
+    recallTool: Object.freeze({
+      enabled: boolean(recallTool.enabled, true, "$.recallTool.enabled"),
+    }),
+  });
+}
+
+function parseModel(input: unknown): MemoryLocalModelRoute {
+  const value = plainObject(input, "$.capture.model", MODEL_KEYS);
+  return Object.freeze({
+    runtime: requiredTrimmedString(value.runtime, "$.capture.model.runtime", 256),
+    model: requiredTrimmedString(value.model, "$.capture.model.model", 512),
+  });
+}
+
+function parseEmbeddings(input: unknown): MemoryLocalEmbeddingsConfig {
+  const value = plainObject(input, "$.embeddings", EMBEDDING_KEYS);
+  if (value.provider !== "ollama") fail("$.embeddings.provider", "must be ollama");
+  const rawEndpoint = requiredTrimmedString(value.endpoint, "$.embeddings.endpoint", 4_096);
+  let endpoint: URL;
+  try {
+    endpoint = assertSafeHttpUrl(rawEndpoint);
+  } catch {
+    fail("$.embeddings.endpoint", "must use HTTPS or literal-loopback HTTP without credentials");
+  }
+  if (endpoint.search !== "" || endpoint.hash !== "") {
+    fail("$.embeddings.endpoint", "must not contain a query or fragment");
+  }
+  endpoint.pathname = endpoint.pathname.replace(/\/+$/u, "");
+  return Object.freeze({
+    provider: "ollama",
+    endpoint: endpoint.toString().replace(/\/$/u, ""),
+    model: requiredTrimmedString(value.model, "$.embeddings.model", 512),
+    dimensions: boundedInteger(value.dimensions, undefined, 1, 16_384, "$.embeddings.dimensions"),
+    timeoutMs: boundedInteger(
+      value.timeoutMs,
+      DEFAULT_EMBEDDING_TIMEOUT_MS,
+      1,
+      600_000,
+      "$.embeddings.timeoutMs",
+    ),
+    breakerFailures: boundedInteger(
+      value.breakerFailures,
+      DEFAULT_EMBEDDING_BREAKER_FAILURES,
+      1,
+      100,
+      "$.embeddings.breakerFailures",
+    ),
+    breakerResetMs: boundedInteger(
+      value.breakerResetMs,
+      DEFAULT_EMBEDDING_BREAKER_RESET_MS,
+      1,
+      3_600_000,
+      "$.embeddings.breakerResetMs",
+    ),
   });
 }
 
@@ -105,20 +240,42 @@ function plainObject(
   return value;
 }
 
-function optionalTrimmedString(input: unknown, path: string): string | undefined {
+function optionalTrimmedString(input: unknown, path: string, maximum: number): string | undefined {
   if (input === undefined) return undefined;
-  if (typeof input !== "string" || input.length === 0 || input !== input.trim() || CONTROL.test(input)) {
-    fail(path, "must be a non-empty trimmed string without control characters");
+  return requiredTrimmedString(input, path, maximum);
+}
+
+function requiredTrimmedString(input: unknown, path: string, maximum: number): string {
+  if (
+    typeof input !== "string" ||
+    input.length === 0 ||
+    input.length > maximum ||
+    input !== input.trim() ||
+    CONTROL.test(input)
+  ) {
+    fail(path, `must be a non-empty trimmed string of at most ${maximum} characters without control characters`);
   }
   return input;
 }
 
-function boundedInteger(input: unknown, fallback: number, minimum: number, maximum: number, path: string): number {
+function boolean(input: unknown, fallback: boolean, path: string): boolean {
   if (input === undefined) return fallback;
-  if (!Number.isSafeInteger(input) || (input as number) < minimum || (input as number) > maximum) {
+  if (typeof input !== "boolean") fail(path, "must be a boolean");
+  return input;
+}
+
+function boundedInteger(
+  input: unknown,
+  fallback: number | undefined,
+  minimum: number,
+  maximum: number,
+  path: string,
+): number {
+  const value = input === undefined ? fallback : input;
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
     fail(path, `must be an integer from ${minimum} through ${maximum}`);
   }
-  return input as number;
+  return value as number;
 }
 
 function fail(path: string, message: string): never {

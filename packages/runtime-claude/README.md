@@ -51,6 +51,13 @@ credential store. `mode: "sdk"` supports attempt-scoped live input; `mode:
 "cli"` is a bounded one-shot JSONL transport. Neither mode silently falls back
 to the other.
 
+The selected instance exposes `claude:auth` before it starts. Its default
+`status` action reports only whether module-config or unverified ambient native
+authentication was selected; it never returns credential values or starts a
+transport. `models` and `login` return explicit unsupported results because
+Claude exposes no bounded noninteractive catalog and this command does not
+emulate interactive login.
+
 ## Architecture
 
 ### Data flow
@@ -80,6 +87,7 @@ expose only bounded, redacted, accessor-free `Error` cause snapshots.
 | `transport.ts` | Transport-neutral request, event, and result seam. |
 | `sdk.ts` | Lazy Agent SDK adapter and live-input queue. |
 | `cli.ts` | Bounded direct-process stream-JSON adapter. |
+| `auth-command.ts` | Non-serving, redacted authentication status and unsupported-action results. |
 | `runtime.ts` | Lifecycle, validation, session linkage, and normalization. |
 | `index.ts` | Typed module definition. |
 
@@ -89,7 +97,7 @@ expose only bounded, redacted, accessor-free `Error` cause snapshots.
 
 | Export | Use it for |
 | --- | --- |
-| `monoAgentModule` | Select this runtime in a v1 runtime slot. |
+| `monoAgentModule` | Select this runtime and access its `claude:auth` command. |
 | `RuntimeClaudeConfig` | Type programmatic module configuration. |
 | `RuntimeClaudeError` | Inspect a typed provider/runtime failure. |
 

@@ -44,6 +44,11 @@ export interface OtlpExporterConfig {
   readonly endpoint: string;
   readonly projectName: string;
   readonly includeSensitiveData: boolean;
+  /**
+   * Replace a closed set of high-confidence credential shapes in every
+   * retained outbound string. Disabled by default.
+   */
+  readonly contentPatternRedaction: boolean;
   /** Resolved values. Public config accepts only SDK-owned {$env} wrappers. */
   readonly headers: Readonly<Record<string, string>>;
   readonly maxQueueRecords: number;
@@ -71,6 +76,7 @@ const CONFIG_KEYS = new Set([
   "endpoint",
   "projectName",
   "includeSensitiveData",
+  "contentPatternRedaction",
   "headers",
   "maxQueueRecords",
   "maxQueueBytes",
@@ -90,6 +96,11 @@ export function parseOtlpExporterConfig(value: unknown): OtlpExporterConfig {
   const endpoint = parseEndpoint(input.endpoint).toString();
   const projectName = readAsciiString(input.projectName, "projectName", 256);
   const includeSensitiveData = readBoolean(input.includeSensitiveData, false, "includeSensitiveData");
+  const contentPatternRedaction = readBoolean(
+    input.contentPatternRedaction,
+    false,
+    "contentPatternRedaction",
+  );
   const headers = parseHeaders(input.headers);
   const maxQueueRecords = readInteger(
     input.maxQueueRecords,
@@ -179,6 +190,7 @@ export function parseOtlpExporterConfig(value: unknown): OtlpExporterConfig {
     endpoint,
     projectName,
     includeSensitiveData,
+    contentPatternRedaction,
     headers,
     maxQueueRecords,
     maxQueueBytes,
@@ -206,6 +218,7 @@ export const otlpExporterConfigSchema = Object.freeze({
         pattern: "^[ -~]+$",
       },
       includeSensitiveData: { type: "boolean", default: false },
+      contentPatternRedaction: { type: "boolean", default: false },
       headers: {
         type: "object",
         maxProperties: MAX_HEADERS,

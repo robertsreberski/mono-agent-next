@@ -7,6 +7,11 @@ import {
   type PackageInstaller,
 } from "./scaffold.js";
 import {
+  COMPOSER_SKILL_TARGETS,
+  installComposerSkill,
+  type ComposerSkillTarget,
+} from "./skill-installer.js";
+import {
   PROJECT_TEMPLATES,
   isProjectTemplate,
   type ProjectTemplate,
@@ -16,6 +21,7 @@ export interface CreateMonoAgentCliOptions {
   invocationName?: string;
   delegate?: typeof runCli;
   installer?: PackageInstaller;
+  skillInstaller?: typeof installComposerSkill;
 }
 
 class CreateUsageError extends Error {}
@@ -28,14 +34,38 @@ export async function runCreateMonoAgentCli(
   const invocationName = options.invocationName ?? "create-mono-agent";
   const isCreateInvocation = invocationName.startsWith("create-mono-agent");
   const isInitCommand = argv[0] === "init" || argv[0] === "setup";
+  const isInstallSkillCommand = !isCreateInvocation && argv[0] === "install-skill";
 
-  if (!isCreateInvocation && !isInitCommand) {
+  if (!isCreateInvocation && !isInitCommand && !isInstallSkillCommand) {
     return (options.delegate ?? runCli)(argv, io);
   }
 
-  const scaffoldArgs = isInitCommand ? argv.slice(1) : argv;
   const stdout = io.stdout ?? ((text: string) => process.stdout.write(text));
   const stderr = io.stderr ?? ((text: string) => process.stderr.write(text));
+  if (isInstallSkillCommand) {
+    try {
+      const parsed = parseInstallSkillArgs(argv.slice(1));
+      if (parsed.help) {
+        stdout(installSkillUsage());
+        return 0;
+      }
+      const result = await (options.skillInstaller ?? installComposerSkill)({
+        target: parsed.target,
+        force: parsed.force,
+      });
+      stdout(`${JSON.stringify({ event: "skill-installed", ...result })}\n`);
+      return 0;
+    } catch (error) {
+      if (error instanceof CreateUsageError) {
+        stderr(`${error.message}\n\n${installSkillUsage()}`);
+        return 2;
+      }
+      stderr(`mono-agent install-skill: ${reasonOf(error)}\n`);
+      return 1;
+    }
+  }
+
+  const scaffoldArgs = isInitCommand ? argv.slice(1) : argv;
   const cwd = resolve(io.cwd ?? process.cwd());
 
   try {
@@ -64,6 +94,58 @@ export async function runCreateMonoAgentCli(
     stderr(`create-mono-agent: ${reasonOf(error)}\n`);
     return 1;
   }
+}
+
+interface ParsedInstallSkillArgs {
+  readonly target: ComposerSkillTarget;
+  readonly force: boolean;
+  readonly help: boolean;
+}
+
+function parseInstallSkillArgs(argv: readonly string[]): ParsedInstallSkillArgs {
+  let target: ComposerSkillTarget = "both";
+  let targetSeen = false;
+  let force = false;
+  let help = false;
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]!;
+    if (argument === "--") continue;
+    if (argument === "--help" || argument === "-h") {
+      help = true;
+      continue;
+    }
+    if (argument === "--force") {
+      if (force) throw new CreateUsageError("--force may be supplied only once");
+      force = true;
+      continue;
+    }
+    if (argument === "--target") {
+      if (targetSeen) throw new CreateUsageError("--target may be supplied only once");
+      const candidate = argv[index + 1];
+      if (candidate === undefined || candidate.startsWith("-")) {
+        throw new CreateUsageError("--target requires claude, codex, or both");
+      }
+      if (!COMPOSER_SKILL_TARGETS.includes(candidate as ComposerSkillTarget)) {
+        throw new CreateUsageError(`Unsupported skill target: ${candidate}`);
+      }
+      target = candidate as ComposerSkillTarget;
+      targetSeen = true;
+      index += 1;
+      continue;
+    }
+    if (argument.startsWith("-")) {
+      throw new CreateUsageError(`Unknown option: ${argument}`);
+    }
+    throw new CreateUsageError(`Unexpected argument: ${argument}`);
+  }
+  if (
+    help
+    && argv.some((argument) =>
+      argument !== "--help" && argument !== "-h" && argument !== "--")
+  ) {
+    throw new CreateUsageError("--help cannot be combined with install-skill arguments");
+  }
+  return { target, force, help };
 }
 
 interface ParsedScaffoldArgs {
@@ -163,7 +245,34 @@ function parsePackageManager(value: string): InstallPackageManager {
 }
 
 function reasonOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const reasons: string[] = [];
+  collectReasons(error, reasons, new Set<unknown>(), 0);
+  return [...new Set(reasons)].join(" | ");
+}
+
+function collectReasons(
+  error: unknown,
+  reasons: string[],
+  seen: Set<unknown>,
+  depth: number,
+): void {
+  if (reasons.length >= 8 || depth > 4 || seen.has(error)) return;
+  if ((typeof error === "object" && error !== null) || typeof error === "function") {
+    seen.add(error);
+  }
+  if (error instanceof Error) {
+    if (error.message.length > 0) reasons.push(error.message.slice(0, 2_000));
+    if (error instanceof AggregateError) {
+      for (const nested of error.errors.slice(0, 8)) {
+        collectReasons(nested, reasons, seen, depth + 1);
+      }
+    }
+    if (error.cause !== undefined) {
+      collectReasons(error.cause, reasons, seen, depth + 1);
+    }
+    return;
+  }
+  reasons.push(String(error).slice(0, 2_000));
 }
 
 function createUsage(): string {
@@ -173,9 +282,22 @@ function createUsage(): string {
     "  create-mono-agent [directory] [--template <minimal|personal|multi-runtime>] [--install] [--package-manager <pnpm|npm>]",
     "  mono-agent init [directory] [--template <minimal|personal|multi-runtime>] [--install] [--package-manager <pnpm|npm>] [--name <package-name>]",
     "  mono-agent setup [directory] [--template <minimal|personal|multi-runtime>] [--install] [--package-manager <pnpm|npm>] [--name <package-name>]",
+    "  mono-agent install-skill [--target <claude|codex|both>] [--force]",
     "",
     "The default template is minimal.",
     "Package installation never runs unless --install is supplied.",
+    "",
+  ].join("\n");
+}
+
+function installSkillUsage(): string {
+  return [
+    "Usage:",
+    "  mono-agent install-skill [--target <claude|codex|both>] [--force]",
+    "",
+    "Installs the bundled mono-agent-composer skill only.",
+    "The default target is both. Existing installs require --force.",
+    "This command does not install packages or pair the documentation MCP.",
     "",
   ].join("\n");
 }

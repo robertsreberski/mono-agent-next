@@ -1,7 +1,6 @@
 export const DEFAULT_HTTP_MAX_RESPONSE_BYTES = 1_048_576;
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 export const DEFAULT_HTTP_MAX_REDIRECTS = 3;
-
 export type HttpSafetyErrorCode =
   | "invalid_url"
   | "unsafe_protocol"
@@ -13,12 +12,10 @@ export type HttpSafetyErrorCode =
   | "redirect_unsafe_method"
   | "response_too_large"
   | "request_failed";
-
 export class HttpSafetyError extends Error {
   readonly code: HttpSafetyErrorCode;
   readonly url?: string;
   readonly status?: number;
-
   constructor(options: {
     readonly code: HttpSafetyErrorCode;
     readonly message: string;
@@ -34,7 +31,6 @@ export class HttpSafetyError extends Error {
     if (options.status !== undefined) this.status = options.status;
   }
 }
-
 export interface CheckedFetchOptions {
   readonly maxResponseBytes?: number;
   readonly timeoutMs?: number;
@@ -42,7 +38,6 @@ export interface CheckedFetchOptions {
   /** Cross-origin redirects are denied by default and always lose sensitive headers. */
   readonly allowCrossOriginRedirects?: boolean;
 }
-
 export interface BoundedHttpResponse {
   readonly url: string;
   readonly status: number;
@@ -52,13 +47,11 @@ export interface BoundedHttpResponse {
   text(): string;
   json(): unknown;
 }
-
 /** True only for numeric loopback literals; DNS names such as localhost fail. */
 export function isLiteralLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase();
   return normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
 }
-
 /** HTTPS is allowed; plaintext HTTP is restricted to an explicitly literal loopback host. */
 export function assertSafeHttpUrl(input: string | URL): URL {
   let url: URL;
@@ -80,7 +73,6 @@ export function assertSafeHttpUrl(input: string | URL): URL {
   }
   return url;
 }
-
 /**
  * Fetch a bounded response while manually validating every redirect. Redirects
  * for mutating methods and cross-origin redirects are denied by default.
@@ -115,7 +107,6 @@ export async function checkedFetch(
   const signal = init.signal == null
     ? timeoutSignal
     : AbortSignal.any([init.signal, timeoutSignal]);
-
   for (let redirects = 0; ; redirects += 1) {
     let response: Response;
     try {
@@ -130,12 +121,10 @@ export async function checkedFetch(
       if (signal.aborted) throw signal.reason ?? error;
       throw httpError("request_failed", "Bounded HTTP request failed", url.href, undefined, error);
     }
-
     if (!isRedirectStatus(response.status)) {
       const body = await readBoundedBody(response, maxResponseBytes);
       return boundedResponse(response, body);
     }
-
     await response.body?.cancel();
     if (method !== "GET" && method !== "HEAD") {
       throw httpError(
@@ -173,10 +162,8 @@ export async function checkedFetch(
     url = next;
   }
 }
-
 /** Backward-readable alias emphasizing that the response body is fully bounded. */
 export const fetchBounded = checkedFetch;
-
 async function readBoundedBody(response: Response, maxBytes: number): Promise<Uint8Array> {
   const declaredLength = response.headers.get("content-length");
   if (declaredLength !== null && /^\d+$/u.test(declaredLength) && Number(declaredLength) > maxBytes) {
@@ -184,7 +171,6 @@ async function readBoundedBody(response: Response, maxBytes: number): Promise<Ui
     throw httpError("response_too_large", `HTTP response exceeds ${maxBytes} bytes`, response.url, response.status);
   }
   if (response.body === null) return new Uint8Array();
-
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let length = 0;
@@ -202,7 +188,6 @@ async function readBoundedBody(response: Response, maxBytes: number): Promise<Ui
   } finally {
     reader.releaseLock();
   }
-
   const body = new Uint8Array(length);
   let offset = 0;
   for (const chunk of chunks) {
@@ -211,7 +196,6 @@ async function readBoundedBody(response: Response, maxBytes: number): Promise<Ui
   }
   return body;
 }
-
 function boundedResponse(response: Response, body: Uint8Array): BoundedHttpResponse {
   const copy = new Uint8Array(body);
   return Object.freeze({
@@ -224,17 +208,14 @@ function boundedResponse(response: Response, body: Uint8Array): BoundedHttpRespo
     json: () => JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(copy)) as unknown,
   });
 }
-
 function withoutSensitiveHeaders(input: Headers): Headers {
   const headers = new Headers(input);
   for (const name of ["authorization", "cookie", "proxy-authorization"]) headers.delete(name);
   return headers;
 }
-
 function isRedirectStatus(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
-
 function hasLiteralLoopbackAuthority(input: string | URL, parsed: URL): boolean {
   if (input instanceof URL) return isLiteralLoopbackHostname(input.hostname);
   const match = /^[a-z][a-z\d+.-]*:\/\/([^/?#]*)/iu.exec(input);
@@ -251,7 +232,6 @@ function hasLiteralLoopbackAuthority(input: string | URL, parsed: URL): boolean 
   }
   return isLiteralLoopbackHostname(hostname) && isLiteralLoopbackHostname(parsed.hostname);
 }
-
 function boundedInteger(value: number, name: string, minimum: number, maximum: number): number {
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     throw httpError(
@@ -261,7 +241,6 @@ function boundedInteger(value: number, name: string, minimum: number, maximum: n
   }
   return value;
 }
-
 function httpError(
   code: HttpSafetyErrorCode,
   message: string,

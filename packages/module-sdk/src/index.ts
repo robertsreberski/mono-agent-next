@@ -6,11 +6,8 @@
  * `@mono-agent/module-sdk/internal` until they are promoted through the public
  * architecture process.
  */
-
 export const MODULE_API_VERSION = 1 as const;
-
 export const OPEN_MODULE_KINDS = ["runtime", "channel", "memory"] as const;
-
 export type Awaitable<T> = T | PromiseLike<T>;
 export type ModuleApiVersion = typeof MODULE_API_VERSION;
 export type ModuleKind = (typeof OPEN_MODULE_KINDS)[number];
@@ -18,30 +15,18 @@ export type ModuleSlot = ModuleKind | "state" | "trigger" | "exporter" | "sandbo
 export type ModuleCapability = string;
 export type ConfigPathSegment = string | number;
 export type ConfigPath = readonly ConfigPathSegment[];
-
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | readonly JsonValue[];
 export type JsonObject = Readonly<{ [key: string]: JsonValue }>;
 export type JsonSchema = Readonly<Record<string, unknown>>;
-
 /** JSON Schema annotation consumed by core before a module parser runs. */
 export const MODULE_SCHEMA_ENV_ELIGIBLE = "x-mono-agent-env-eligible" as const;
-
 /** JSON Schema annotation that rejects inline literals and redacts explain output. */
 export const MODULE_SCHEMA_SECRET = "x-mono-agent-secret" as const;
-
 /** JSON Schema annotation naming a configured instance in another typed slot. */
 export const MODULE_SCHEMA_SLOT_REFERENCE = "x-mono-agent-slot-reference" as const;
-
-export interface EnvEligibleSchemaOptions {
-  readonly secret?: boolean;
-}
-
-export interface CrossSlotReference {
-  readonly slot: ModuleSlot;
-  readonly capability?: string;
-}
-
+export interface EnvEligibleSchemaOptions { readonly secret?: boolean; }
+export interface CrossSlotReference { readonly slot: ModuleSlot; readonly capability?: string; }
 /**
  * Marks a scalar schema as eligible for core's `{$env: "NAME"}` directive.
  * Core validates and resolves the wrapper before calling the module parser.
@@ -57,15 +42,12 @@ export function envEligibleSchema(
     ...(options.secret === true ? { [MODULE_SCHEMA_SECRET]: true } : {}),
   });
 }
-
 export function isEnvEligibleSchema(schema: JsonSchema): boolean {
   return schema[MODULE_SCHEMA_ENV_ELIGIBLE] === true;
 }
-
 export function isSecretSchema(schema: JsonSchema): boolean {
   return schema[MODULE_SCHEMA_SECRET] === true;
 }
-
 /**
  * Marks a string schema as an instance-id reference into another configured
  * slot. Core validates existence, slot kind, and the optional capability after
@@ -85,7 +67,6 @@ export function crossSlotReferenceSchema(
     [MODULE_SCHEMA_SLOT_REFERENCE]: Object.freeze({ ...reference }),
   });
 }
-
 export function readCrossSlotReference(schema: JsonSchema): CrossSlotReference | undefined {
   const value = schema[MODULE_SCHEMA_SLOT_REFERENCE];
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
@@ -97,7 +78,6 @@ export function readCrossSlotReference(schema: JsonSchema): CrossSlotReference |
   }
   return Object.freeze({ slot, ...(capability === undefined ? {} : { capability }) });
 }
-
 export interface ModuleManifest<K extends ModuleKind = ModuleKind> {
   readonly packageName: string;
   readonly packageVersion: string;
@@ -106,7 +86,6 @@ export interface ModuleManifest<K extends ModuleKind = ModuleKind> {
   readonly responsibility: string;
   readonly capabilities: readonly ModuleCapability[];
 }
-
 /**
  * An executable schema. Parsing must be deterministic and side-effect-free,
  * and return an acyclic graph of plain objects, dense arrays, and primitive
@@ -114,20 +93,14 @@ export interface ModuleManifest<K extends ModuleKind = ModuleKind> {
  * validation or module creation; accessors, proxies, symbols, and exotic
  * prototypes are rejected.
  */
-export interface ModuleSchema<TConfig> {
-  readonly jsonSchema: JsonSchema;
-  parse(input: unknown): TConfig;
-}
-
+export interface ModuleSchema<TConfig> { readonly jsonSchema: JsonSchema; parse(input: unknown): TConfig; }
 export type ModuleConfigSchema<TConfig> = ModuleSchema<TConfig>;
-
 export type ConfigProvenanceSource =
   | "default"
   | "file"
   | "environment"
   | "argument"
   | "generated";
-
 /**
  * Identifies where a value came from without retaining the value itself.
  * `environmentName` is safe to render; the referenced environment value is not.
@@ -138,81 +111,59 @@ export interface ConfigProvenance {
   readonly environmentName?: string;
   readonly description?: string;
 }
-
 /** JSON-pointer keys map to the provenance of the value at that path. */
 export type ConfigProvenanceMap = Readonly<Record<string, ConfigProvenance>>;
-
 export interface ConfigIssue {
   readonly code: string;
   readonly message: string;
   readonly path: ConfigPath;
   readonly provenance?: ConfigProvenance;
 }
-
 export interface ModuleConfigErrorOptions {
-  readonly message?: string;
-  readonly issues: readonly ConfigIssue[];
-  readonly cause?: unknown;
+  readonly message?: string; readonly issues: readonly ConfigIssue[]; readonly cause?: unknown;
 }
-
 export class ModuleConfigError extends Error {
   readonly code = "MODULE_CONFIG_INVALID";
   readonly issues: readonly ConfigIssue[];
-
   constructor(options: ModuleConfigErrorOptions) {
     const issues = options.issues.map((issue) => freezeConfigIssue(issue));
     const message = options.message ?? issues[0]?.message ?? "Module configuration is invalid";
-
-    if (options.cause === undefined) {
-      super(message);
-    } else {
-      super(message, { cause: options.cause });
-    }
-
+    if (options.cause === undefined) super(message);
+    else super(message, { cause: options.cause });
     this.name = "ModuleConfigError";
     this.issues = Object.freeze(issues);
   }
 }
-
 export interface ParseModuleConfigOptions {
-  readonly packageName?: string;
-  readonly provenance?: ConfigProvenanceMap;
+  readonly packageName?: string; readonly provenance?: ConfigProvenanceMap;
 }
-
 export function isModuleConfigError(value: unknown): value is ModuleConfigError {
   return value instanceof ModuleConfigError;
 }
-
 export function defineModuleSchema<TConfig>(schema: ModuleSchema<TConfig>): ModuleSchema<TConfig> {
   return Object.freeze({
     jsonSchema: Object.freeze({ ...schema.jsonSchema }),
     parse: schema.parse,
   });
 }
-
 export function defineConfigProvenance(provenance: ConfigProvenance): ConfigProvenance {
   return Object.freeze({ ...provenance });
 }
-
 export function configPathToPointer(path: ConfigPath): string {
   if (path.length === 0) return "";
   return `/${path.map((segment) => escapeJsonPointerSegment(String(segment))).join("/")}`;
 }
-
 export function provenanceAt(
   provenance: ConfigProvenanceMap | undefined,
   path: ConfigPath,
 ): ConfigProvenance | undefined {
   if (provenance === undefined) return undefined;
-
   for (let length = path.length; length >= 0; length -= 1) {
     const found = provenance[configPathToPointer(path.slice(0, length))];
     if (found !== undefined) return found;
   }
-
   return undefined;
 }
-
 export function configIssue(
   code: string,
   message: string,
@@ -226,7 +177,6 @@ export function configIssue(
     ...(provenance === undefined ? {} : { provenance }),
   });
 }
-
 export function parseModuleConfig<TConfig>(
   schema: ModuleSchema<TConfig>,
   input: unknown,
@@ -236,34 +186,27 @@ export function parseModuleConfig<TConfig>(
     return schema.parse(input);
   } catch (error) {
     if (isModuleConfigError(error)) throw error;
-
     const prefix = options.packageName === undefined ? "Module" : options.packageName;
     const message = error instanceof Error ? error.message : "Configuration parser rejected the input";
     throw new ModuleConfigError({
       message: `${prefix} configuration is invalid: ${message}`,
-      issues: [
-        configIssue("invalid_config", message, [], provenanceAt(options.provenance, [])),
-      ],
+      issues: [configIssue("invalid_config", message, [], provenanceAt(options.provenance, []))],
       cause: error,
     });
   }
 }
-
 export type ModuleLogFields = Readonly<Record<string, unknown>>;
-
 export interface ModuleLogger {
   debug(message: string, fields?: ModuleLogFields): void;
   info(message: string, fields?: ModuleLogFields): void;
   warn(message: string, fields?: ModuleLogFields): void;
   error(message: string, fields?: ModuleLogFields): void;
 }
-
 /** Host grants are bounded to names declared in the module manifest. */
 export interface ModuleHost {
   readonly grantedCapabilities: ReadonlySet<ModuleCapability>;
   getCapability<T = unknown>(name: ModuleCapability): T | undefined;
 }
-
 export interface ModuleCreateContext<TConfig, THost extends ModuleHost = ModuleHost> {
   readonly instanceId: string;
   readonly config: TConfig;
@@ -276,38 +219,19 @@ export interface ModuleCreateContext<TConfig, THost extends ModuleHost = ModuleH
   readonly host: THost;
   readonly signal: AbortSignal;
 }
-
-export interface ModuleStartContext {
-  readonly signal: AbortSignal;
-}
-
-export interface ModuleDrainContext {
-  readonly signal: AbortSignal;
-  readonly deadline?: string;
-}
-
+export interface ModuleStartContext { readonly signal: AbortSignal; }
+export interface ModuleDrainContext { readonly signal: AbortSignal; readonly deadline?: string; }
 export type ModuleStopReason = "shutdown" | "restart" | "startup-failed" | "health-failed";
-
-export interface ModuleStopContext {
-  readonly signal: AbortSignal;
-  readonly reason: ModuleStopReason;
-}
-
+export interface ModuleStopContext { readonly signal: AbortSignal; readonly reason: ModuleStopReason; }
 export type ModuleHealthStatus = "healthy" | "degraded" | "unhealthy" | "unknown";
-
 export interface ModuleHealth {
   readonly status: ModuleHealthStatus;
   readonly checkedAt: string;
   readonly summary?: string;
   readonly details?: Readonly<Record<string, JsonValue>>;
 }
-
-export interface ModuleHealthContext {
-  readonly signal: AbortSignal;
-}
-
+export interface ModuleHealthContext { readonly signal: AbortSignal; }
 export type ModuleDiagnosticSeverity = "info" | "warning" | "error";
-
 export interface ModuleDiagnostic {
   readonly code: string;
   readonly severity: ModuleDiagnosticSeverity;
@@ -315,19 +239,9 @@ export interface ModuleDiagnostic {
   readonly path?: ConfigPath;
   readonly hint?: string;
 }
-
-export interface ModuleDiagnosticsContext {
-  readonly signal: AbortSignal;
-  readonly verbose: boolean;
-}
-
+export interface ModuleDiagnosticsContext { readonly signal: AbortSignal; readonly verbose: boolean; }
 export type ModuleCommandKind = "authentication" | "maintenance";
-
-export interface ModuleCommandContext {
-  readonly signal: AbortSignal;
-  readonly logger: ModuleLogger;
-}
-
+export interface ModuleCommandContext { readonly signal: AbortSignal; readonly logger: ModuleLogger; }
 export interface ModuleCommand {
   /** A stable, package-namespaced command such as `pi:auth`. */
   readonly name: string;
@@ -336,7 +250,6 @@ export interface ModuleCommand {
   readonly inputSchema?: JsonSchema;
   run(input: unknown, context: ModuleCommandContext): Awaitable<JsonValue | undefined>;
 }
-
 export interface ModuleInstance {
   readonly commands?: readonly ModuleCommand[];
   start?(context: ModuleStartContext): Awaitable<void>;
@@ -345,9 +258,7 @@ export interface ModuleInstance {
   health?(context: ModuleHealthContext): Awaitable<ModuleHealth>;
   diagnostics?(context: ModuleDiagnosticsContext): Awaitable<readonly ModuleDiagnostic[]>;
 }
-
 export type AttachmentKind = "image" | "audio" | "file";
-
 /** A transport-neutral attachment whose size and bytes have already been bounded. */
 export interface NormalizedAttachment {
   readonly id: string;
@@ -357,7 +268,6 @@ export interface NormalizedAttachment {
   readonly sizeBytes: number;
   readonly data: Uint8Array;
 }
-
 /** Shared interaction bounds used by every runtime, channel, and host codec. */
 export const AGENT_INTERACTION_LIMITS = Object.freeze({
   identifierCharacters: 256,
@@ -374,19 +284,11 @@ export const AGENT_INTERACTION_LIMITS = Object.freeze({
   approvalSummaryBytes: 16_384,
   approvalReasonBytes: 4_096,
 } as const);
-
 export const ASK_USER_MAX_QUESTIONS = AGENT_INTERACTION_LIMITS.askQuestions;
-export const ASK_USER_MAX_CHOICES_PER_QUESTION =
-  AGENT_INTERACTION_LIMITS.askChoicesPerQuestion;
+export const ASK_USER_MAX_CHOICES_PER_QUESTION = AGENT_INTERACTION_LIMITS.askChoicesPerQuestion;
 export const ASK_USER_MAX_ANSWER_BYTES = AGENT_INTERACTION_LIMITS.askAnswerBytes;
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 60_000;
-
-export interface AskUserChoice {
-  readonly value: string;
-  readonly label: string;
-  readonly description?: string;
-}
-
+export interface AskUserChoice { readonly value: string; readonly label: string; readonly description?: string; }
 export interface AskUserQuestion {
   readonly id: string;
   readonly prompt: string;
@@ -394,31 +296,22 @@ export interface AskUserQuestion {
   readonly allowFreeText: boolean;
   readonly multiple: boolean;
 }
-
 export interface AskUserRequest {
-  readonly interactionId: string;
-  readonly questions: readonly AskUserQuestion[];
-  readonly requestedAt: string;
+  readonly interactionId: string; readonly questions: readonly AskUserQuestion[]; readonly requestedAt: string;
 }
-
 export interface AskUserAnswer {
-  readonly interactionId: string;
-  readonly answers: Readonly<Record<string, readonly string[]>>;
+  readonly interactionId: string; readonly answers: Readonly<Record<string, readonly string[]>>;
   readonly answeredAt: string;
 }
-
 export type RuntimeNativeToolEffect = "read" | "write" | "execute" | "network";
-
 export type RuntimeNativeToolApprovalEnforcement =
   | "core-callback"
   | "runtime-enforced"
   | "unsupported";
-
 export type RuntimeNativeToolSandboxEnforcement =
   | "core-executor"
   | "runtime-enforced"
   | "unsupported";
-
 /**
  * Provider-neutral authority metadata for one tool owned by a runtime.
  * An empty `effects` list represents a tool that has no external effect.
@@ -430,7 +323,6 @@ export interface RuntimeNativeToolDescriptor {
   readonly approval: RuntimeNativeToolApprovalEnforcement;
   readonly sandbox: RuntimeNativeToolSandboxEnforcement;
 }
-
 export interface ApprovalRequest {
   readonly interactionId: string;
   readonly callId: string;
@@ -440,34 +332,23 @@ export interface ApprovalRequest {
   readonly summary: string;
   readonly requestedAt: string;
 }
-
 export interface ApprovalDecision {
   readonly interactionId: string;
   readonly decision: "allow_once" | "deny";
   readonly decidedAt: string;
   readonly reason?: string;
 }
-
-export interface RouteIdentity {
-  readonly runtimeInstanceId: string;
-  readonly model: string;
-}
-
+export interface RouteIdentity { readonly runtimeInstanceId: string; readonly model: string; }
 export interface InteractionContext {
   readonly conversationId: string;
   readonly turnId: string;
   readonly route: RouteIdentity;
   readonly signal: AbortSignal;
 }
-
 export interface AgentInteractionHandler {
   askUser(request: AskUserRequest, context: InteractionContext): Promise<AskUserAnswer>;
-  requestApproval(
-    request: ApprovalRequest,
-    context: InteractionContext,
-  ): Promise<ApprovalDecision>;
+  requestApproval(request: ApprovalRequest, context: InteractionContext): Promise<ApprovalDecision>;
 }
-
 export interface ArtifactRef {
   readonly id: string;
   readonly sha256: `sha256:${string}`;
@@ -475,79 +356,53 @@ export interface ArtifactRef {
   readonly mediaType: string;
   readonly fileName?: string;
 }
-
 export const RUNTIME_TOOL_ARTIFACT_PREVIEW_MAX_BYTES = 16_384;
-
 /**
  * Parse and copy one transport-neutral AskUser request. Unknown fields,
  * non-canonical timestamps, duplicate ids, and values outside the shared
  * bounds fail closed.
  */
 export function parseAskUserRequest(value: unknown): AskUserRequest {
-  const input = contractRecord(value, "AskUser request");
-  assertContractKeys(input, ["interactionId", "questions", "requestedAt"], "AskUser request");
+  const input = contractRecord(value, "AskUser request", ["interactionId", "questions", "requestedAt"]);
   const interactionId = contractIdentifier(input.interactionId, "AskUser request.interactionId");
   const requestedAt = contractTimestamp(input.requestedAt, "AskUser request.requestedAt");
   const questionsInput = contractArray(
-    input.questions,
-    "AskUser request.questions",
-    1,
-    AGENT_INTERACTION_LIMITS.askQuestions,
+    input.questions, "AskUser request.questions", 1, AGENT_INTERACTION_LIMITS.askQuestions,
   );
   const questionIds = new Set<string>();
   const questions = questionsInput.map((questionValue, questionIndex): AskUserQuestion => {
     const path = `AskUser request.questions[${String(questionIndex)}]`;
-    const question = contractRecord(questionValue, path);
-    assertContractKeys(
-      question,
-      ["id", "prompt", "choices", "allowFreeText", "multiple"],
-      path,
-    );
+    const question = contractRecord(questionValue, path, [
+      "id", "prompt", "choices", "allowFreeText", "multiple",
+    ]);
     const id = contractIdentifier(question.id, `${path}.id`);
     if (questionIds.has(id)) contractFail(`${path}.id`, "must be unique");
     questionIds.add(id);
-    const prompt = contractText(
-      question.prompt,
-      `${path}.prompt`,
-      AGENT_INTERACTION_LIMITS.askPromptBytes,
-    );
+    const prompt = contractText(question.prompt, `${path}.prompt`, AGENT_INTERACTION_LIMITS.askPromptBytes);
     const allowFreeText = contractBoolean(question.allowFreeText, `${path}.allowFreeText`);
     const multiple = contractBoolean(question.multiple, `${path}.multiple`);
-    const choicesInput = question.choices === undefined
-      ? []
-      : contractArray(
-        question.choices,
-        `${path}.choices`,
-        0,
-        AGENT_INTERACTION_LIMITS.askChoicesPerQuestion,
-      );
+    const choicesInput = question.choices === undefined ? [] : contractArray(
+      question.choices, `${path}.choices`, 0, AGENT_INTERACTION_LIMITS.askChoicesPerQuestion,
+    );
     if (choicesInput.length === 0 && !allowFreeText) {
       contractFail(`${path}.choices`, "must contain a choice when free text is disabled");
     }
     const choiceValues = new Set<string>();
     const choices = choicesInput.map((choiceValue, choiceIndex): AskUserChoice => {
       const choicePath = `${path}.choices[${String(choiceIndex)}]`;
-      const choice = contractRecord(choiceValue, choicePath);
-      assertContractKeys(choice, ["value", "label", "description"], choicePath);
+      const choice = contractRecord(choiceValue, choicePath, ["value", "label", "description"]);
       const parsedValue = contractText(
-        choice.value,
-        `${choicePath}.value`,
-        AGENT_INTERACTION_LIMITS.askChoiceValueBytes,
+        choice.value, `${choicePath}.value`, AGENT_INTERACTION_LIMITS.askChoiceValueBytes,
       );
       if (choiceValues.has(parsedValue)) contractFail(`${choicePath}.value`, "must be unique");
       choiceValues.add(parsedValue);
       const label = contractText(
-        choice.label,
-        `${choicePath}.label`,
-        AGENT_INTERACTION_LIMITS.askChoiceLabelBytes,
+        choice.label, `${choicePath}.label`, AGENT_INTERACTION_LIMITS.askChoiceLabelBytes,
       );
-      const description = choice.description === undefined
-        ? undefined
-        : contractText(
-          choice.description,
-          `${choicePath}.description`,
-          AGENT_INTERACTION_LIMITS.askChoiceDescriptionBytes,
-        );
+      const description = choice.description === undefined ? undefined : contractText(
+        choice.description, `${choicePath}.description`,
+        AGENT_INTERACTION_LIMITS.askChoiceDescriptionBytes,
+      );
       return Object.freeze({
         value: parsedValue,
         label,
@@ -562,28 +417,16 @@ export function parseAskUserRequest(value: unknown): AskUserRequest {
       multiple,
     });
   });
-  return Object.freeze({
-    interactionId,
-    questions: Object.freeze(questions),
-    requestedAt,
-  });
+  return Object.freeze({ interactionId, questions: Object.freeze(questions), requestedAt });
 }
-
-export function assertAskUserRequest(value: unknown): asserts value is AskUserRequest {
-  parseAskUserRequest(value);
-}
-
+export function assertAskUserRequest(value: unknown): asserts value is AskUserRequest { parseAskUserRequest(value); }
 /**
  * Parse an AskUser answer and, when the originating request is supplied,
  * require an exact question set and enforce choice/free-text semantics.
  */
-export function parseAskUserAnswer(
-  value: unknown,
-  request?: AskUserRequest,
-): AskUserAnswer {
+export function parseAskUserAnswer(value: unknown, request?: AskUserRequest): AskUserAnswer {
   const parsedRequest = request === undefined ? undefined : parseAskUserRequest(request);
-  const input = contractRecord(value, "AskUser answer");
-  assertContractKeys(input, ["interactionId", "answers", "answeredAt"], "AskUser answer");
+  const input = contractRecord(value, "AskUser answer", ["interactionId", "answers", "answeredAt"]);
   const interactionId = contractIdentifier(input.interactionId, "AskUser answer.interactionId");
   if (parsedRequest !== undefined && interactionId !== parsedRequest.interactionId) {
     contractFail("AskUser answer.interactionId", "does not match the request");
@@ -591,17 +434,13 @@ export function parseAskUserAnswer(
   const answeredAt = contractTimestamp(input.answeredAt, "AskUser answer.answeredAt");
   const answersInput = contractRecord(input.answers, "AskUser answer.answers");
   const answerEntries = Object.entries(answersInput);
-  if (
-    answerEntries.length < 1
-    || answerEntries.length > AGENT_INTERACTION_LIMITS.askQuestions
-  ) {
+  if (answerEntries.length < 1 || answerEntries.length > AGENT_INTERACTION_LIMITS.askQuestions) {
     contractFail(
       "AskUser answer.answers",
       `must contain between 1 and ${String(AGENT_INTERACTION_LIMITS.askQuestions)} questions`,
     );
   }
-  const questions = parsedRequest === undefined
-    ? undefined
+  const questions = parsedRequest === undefined ? undefined
     : new Map(parsedRequest.questions.map((question) => [question.id, question]));
   if (questions !== undefined && answerEntries.length !== questions.size) {
     contractFail("AskUser answer.answers", "must answer every request question exactly once");
@@ -614,10 +453,8 @@ export function parseAskUserAnswer(
       contractFail(`AskUser answer.answers.${questionId}`, "does not match a request question");
     }
     const valuesInput = contractArray(
-      answerValue,
-      `AskUser answer.answers.${questionId}`,
-      1,
-      AGENT_INTERACTION_LIMITS.askAnswerValuesPerQuestion,
+      answerValue, `AskUser answer.answers.${questionId}`,
+      1, AGENT_INTERACTION_LIMITS.askAnswerValuesPerQuestion,
     );
     if (question !== undefined && !question.multiple && valuesInput.length !== 1) {
       contractFail(
@@ -625,122 +462,61 @@ export function parseAskUserAnswer(
         "must contain exactly one value for a single-select question",
       );
     }
-    const allowedChoices = question === undefined
-      ? undefined
+    const allowedChoices = question === undefined ? undefined
       : new Set((question.choices ?? []).map((choice) => choice.value));
     const seen = new Set<string>();
     const values = valuesInput.map((answer, answerIndex) => {
-      const answerPath =
-        `AskUser answer.answers.${questionId}[${String(answerIndex)}]`;
-      const parsed = contractText(
-        answer,
-        answerPath,
-        AGENT_INTERACTION_LIMITS.askAnswerBytes,
-      );
+      const answerPath = `AskUser answer.answers.${questionId}[${String(answerIndex)}]`;
+      const parsed = contractText(answer, answerPath, AGENT_INTERACTION_LIMITS.askAnswerBytes);
       if (seen.has(parsed)) contractFail(answerPath, "must be unique");
       seen.add(parsed);
-      if (
-        question !== undefined
-        && !question.allowFreeText
-        && !allowedChoices?.has(parsed)
-      ) {
+      if (question !== undefined && !question.allowFreeText && !allowedChoices?.has(parsed)) {
         contractFail(answerPath, "must match one of the request choices");
       }
       return parsed;
     });
     answers[questionId] = Object.freeze(values);
   }
-  return Object.freeze({
-    interactionId,
-    answers: Object.freeze(answers),
-    answeredAt,
-  });
+  return Object.freeze({ interactionId, answers: Object.freeze(answers), answeredAt });
 }
-
-export function assertAskUserAnswer(
-  value: unknown,
-  request?: AskUserRequest,
-): asserts value is AskUserAnswer {
+export function assertAskUserAnswer(value: unknown, request?: AskUserRequest): asserts value is AskUserAnswer {
   parseAskUserAnswer(value, request);
 }
-
 export function parseApprovalRequest(value: unknown): ApprovalRequest {
-  const input = contractRecord(value, "approval request");
-  assertContractKeys(
-    input,
-    [
-      "interactionId",
-      "callId",
-      "toolId",
-      "displayName",
-      "effects",
-      "summary",
-      "requestedAt",
-    ],
-    "approval request",
-  );
+  const input = contractRecord(value, "approval request", [
+    "interactionId", "callId", "toolId", "displayName", "effects", "summary", "requestedAt",
+  ]);
   return Object.freeze({
-    interactionId: contractIdentifier(
-      input.interactionId,
-      "approval request.interactionId",
-    ),
+    interactionId: contractIdentifier(input.interactionId, "approval request.interactionId"),
     callId: contractIdentifier(input.callId, "approval request.callId"),
     toolId: contractIdentifier(input.toolId, "approval request.toolId"),
     displayName: contractText(
-      input.displayName,
-      "approval request.displayName",
+      input.displayName, "approval request.displayName",
       AGENT_INTERACTION_LIMITS.approvalDisplayNameBytes,
     ),
-    effects: parseRuntimeNativeToolEffects(
-      input.effects,
-      "approval request.effects",
-    ),
+    effects: parseRuntimeNativeToolEffects(input.effects, "approval request.effects"),
     summary: contractText(
-      input.summary,
-      "approval request.summary",
-      AGENT_INTERACTION_LIMITS.approvalSummaryBytes,
+      input.summary, "approval request.summary", AGENT_INTERACTION_LIMITS.approvalSummaryBytes,
     ),
-    requestedAt: contractTimestamp(
-      input.requestedAt,
-      "approval request.requestedAt",
-    ),
+    requestedAt: contractTimestamp(input.requestedAt, "approval request.requestedAt"),
   });
 }
-
-export function assertApprovalRequest(value: unknown): asserts value is ApprovalRequest {
-  parseApprovalRequest(value);
-}
-
-export function parseApprovalDecision(
-  value: unknown,
-  request?: ApprovalRequest,
-): ApprovalDecision {
+export function assertApprovalRequest(value: unknown): asserts value is ApprovalRequest { parseApprovalRequest(value); }
+export function parseApprovalDecision(value: unknown, request?: ApprovalRequest): ApprovalDecision {
   const parsedRequest = request === undefined ? undefined : parseApprovalRequest(request);
-  const input = contractRecord(value, "approval decision");
-  assertContractKeys(
-    input,
-    ["interactionId", "decision", "decidedAt", "reason"],
-    "approval decision",
+  const input = contractRecord(
+    value, "approval decision", ["interactionId", "decision", "decidedAt", "reason"],
   );
-  const interactionId = contractIdentifier(
-    input.interactionId,
-    "approval decision.interactionId",
-  );
+  const interactionId = contractIdentifier(input.interactionId, "approval decision.interactionId");
   if (parsedRequest !== undefined && interactionId !== parsedRequest.interactionId) {
     contractFail("approval decision.interactionId", "does not match the request");
   }
   const decision = contractEnum(
-    input.decision,
-    ["allow_once", "deny"] as const,
-    "approval decision.decision",
+    input.decision, ["allow_once", "deny"] as const, "approval decision.decision",
   );
-  const reason = input.reason === undefined
-    ? undefined
-    : contractText(
-      input.reason,
-      "approval decision.reason",
-      AGENT_INTERACTION_LIMITS.approvalReasonBytes,
-    );
+  const reason = input.reason === undefined ? undefined : contractText(
+    input.reason, "approval decision.reason", AGENT_INTERACTION_LIMITS.approvalReasonBytes,
+  );
   return Object.freeze({
     interactionId,
     decision,
@@ -748,64 +524,37 @@ export function parseApprovalDecision(
     ...(reason === undefined ? {} : { reason }),
   });
 }
-
-export function assertApprovalDecision(
-  value: unknown,
-  request?: ApprovalRequest,
-): asserts value is ApprovalDecision {
+export function assertApprovalDecision(value: unknown, request?: ApprovalRequest): asserts value is ApprovalDecision {
   parseApprovalDecision(value, request);
 }
-
 export function parseRouteIdentity(value: unknown): RouteIdentity {
-  const input = contractRecord(value, "route identity");
-  assertContractKeys(input, ["runtimeInstanceId", "model"], "route identity");
+  const input = contractRecord(value, "route identity", ["runtimeInstanceId", "model"]);
   return Object.freeze({
-    runtimeInstanceId: contractIdentifier(
-      input.runtimeInstanceId,
-      "route identity.runtimeInstanceId",
-    ),
+    runtimeInstanceId: contractIdentifier(input.runtimeInstanceId, "route identity.runtimeInstanceId"),
     model: contractText(input.model, "route identity.model", 4_096),
   });
 }
-
-export function assertRouteIdentity(value: unknown): asserts value is RouteIdentity {
-  parseRouteIdentity(value);
-}
-
+export function assertRouteIdentity(value: unknown): asserts value is RouteIdentity { parseRouteIdentity(value); }
 export function parseArtifactRef(value: unknown): ArtifactRef {
-  const input = contractRecord(value, "artifact reference");
-  assertContractKeys(
-    input,
-    ["id", "sha256", "sizeBytes", "mediaType", "fileName"],
-    "artifact reference",
+  const input = contractRecord(
+    value, "artifact reference", ["id", "sha256", "sizeBytes", "mediaType", "fileName"],
   );
   const sha256 = contractText(input.sha256, "artifact reference.sha256", 71);
   if (!/^sha256:[a-f0-9]{64}$/u.test(sha256)) {
     contractFail("artifact reference.sha256", "must be a lowercase SHA-256 digest");
   }
-  const mediaType = contractText(
-    input.mediaType,
-    "artifact reference.mediaType",
-    255,
-  );
+  const mediaType = contractText(input.mediaType, "artifact reference.mediaType", 255);
   if (!/^[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(mediaType)) {
     contractFail("artifact reference.mediaType", "must be an IANA media type");
   }
-  const sizeBytes = contractNonNegativeInteger(
-    input.sizeBytes,
-    "artifact reference.sizeBytes",
-  );
+  const sizeBytes = contractNonNegativeInteger(input.sizeBytes, "artifact reference.sizeBytes");
   const fileName = input.fileName === undefined
     ? undefined
     : contractText(input.fileName, "artifact reference.fileName", 255);
-  if (
-    fileName !== undefined
-    && (fileName.includes("/")
-      || fileName.includes("\\")
-      || fileName.includes("\0")
-      || fileName === "."
-      || fileName === "..")
-  ) {
+  if (fileName !== undefined && (
+    fileName.includes("/") || fileName.includes("\\") || fileName.includes("\0")
+    || fileName === "." || fileName === ".."
+  )) {
     contractFail("artifact reference.fileName", "must be a base name");
   }
   return Object.freeze({
@@ -816,125 +565,69 @@ export function parseArtifactRef(value: unknown): ArtifactRef {
     ...(fileName === undefined ? {} : { fileName }),
   });
 }
-
-export function assertArtifactRef(value: unknown): asserts value is ArtifactRef {
-  parseArtifactRef(value);
-}
-
-export function parseRuntimeNativeToolDescriptor(
-  value: unknown,
-): RuntimeNativeToolDescriptor {
-  const input = contractRecord(value, "runtime native tool descriptor");
-  assertContractKeys(
-    input,
-    ["id", "displayName", "effects", "approval", "sandbox"],
+export function assertArtifactRef(value: unknown): asserts value is ArtifactRef { parseArtifactRef(value); }
+export function parseRuntimeNativeToolDescriptor(value: unknown): RuntimeNativeToolDescriptor {
+  const input = contractRecord(
+    value,
     "runtime native tool descriptor",
+    ["id", "displayName", "effects", "approval", "sandbox"],
   );
   return Object.freeze({
     id: contractIdentifier(input.id, "runtime native tool descriptor.id"),
     displayName: contractText(
-      input.displayName,
-      "runtime native tool descriptor.displayName",
+      input.displayName, "runtime native tool descriptor.displayName",
       AGENT_INTERACTION_LIMITS.approvalDisplayNameBytes,
     ),
-    effects: parseRuntimeNativeToolEffects(
-      input.effects,
-      "runtime native tool descriptor.effects",
-    ),
+    effects: parseRuntimeNativeToolEffects(input.effects, "runtime native tool descriptor.effects"),
     approval: contractEnum(
-      input.approval,
-      ["core-callback", "runtime-enforced", "unsupported"] as const,
+      input.approval, ["core-callback", "runtime-enforced", "unsupported"] as const,
       "runtime native tool descriptor.approval",
     ),
     sandbox: contractEnum(
-      input.sandbox,
-      ["core-executor", "runtime-enforced", "unsupported"] as const,
+      input.sandbox, ["core-executor", "runtime-enforced", "unsupported"] as const,
       "runtime native tool descriptor.sandbox",
     ),
   });
 }
-
-export function assertRuntimeNativeToolDescriptor(
-  value: unknown,
-): asserts value is RuntimeNativeToolDescriptor {
+export function assertRuntimeNativeToolDescriptor(value: unknown): asserts value is RuntimeNativeToolDescriptor {
   parseRuntimeNativeToolDescriptor(value);
 }
-
-export interface TurnTextPart {
-  readonly type: "text";
-  readonly text: string;
-}
-
+export interface TurnTextPart { readonly type: "text"; readonly text: string; }
 export interface TurnImagePart {
   readonly type: "image";
   readonly mediaType: string;
   readonly data: Uint8Array | string;
   readonly name?: string;
 }
-
 export interface TurnFilePart {
   readonly type: "file";
   readonly mediaType: string;
   readonly data: Uint8Array | string;
   readonly name: string;
 }
-
-export interface TurnAttachmentPart {
-  readonly type: "attachment";
-  readonly attachment: NormalizedAttachment;
-}
-
-export interface RuntimeToolCall {
-  readonly id: string;
-  readonly name: string;
-  readonly input: JsonValue;
-}
-
-export interface RuntimeToolResultTextPart {
-  readonly type: "text";
-  readonly text: string;
-}
-
-export interface RuntimeToolResultJsonPart {
-  readonly type: "json";
-  readonly value: JsonValue;
-}
-
+export interface TurnAttachmentPart { readonly type: "attachment"; readonly attachment: NormalizedAttachment; }
+export interface RuntimeToolCall { readonly id: string; readonly name: string; readonly input: JsonValue; }
+export interface RuntimeToolResultTextPart { readonly type: "text"; readonly text: string; }
+export interface RuntimeToolResultJsonPart { readonly type: "json"; readonly value: JsonValue; }
 export interface RuntimeToolResultFilePart {
   readonly type: "file";
   readonly mediaType: string;
   readonly data: Uint8Array | string;
   readonly name?: string;
 }
-
 export interface RuntimeToolResultArtifactPart {
-  readonly type: "artifact";
-  readonly ref: ArtifactRef;
-  readonly preview?: string;
+  readonly type: "artifact"; readonly ref: ArtifactRef; readonly preview?: string;
 }
-
 export type RuntimeToolResultPart =
   | RuntimeToolResultTextPart
   | RuntimeToolResultJsonPart
   | RuntimeToolResultFilePart
   | RuntimeToolResultArtifactPart;
-
 export interface RuntimeToolResult {
-  readonly callId: string;
-  readonly content: readonly RuntimeToolResultPart[];
-  readonly isError?: boolean;
+  readonly callId: string; readonly content: readonly RuntimeToolResultPart[]; readonly isError?: boolean;
 }
-
-export interface TurnToolCallPart {
-  readonly type: "tool-call";
-  readonly call: RuntimeToolCall;
-}
-
-export interface TurnToolResultPart {
-  readonly type: "tool-result";
-  readonly result: RuntimeToolResult;
-}
-
+export interface TurnToolCallPart { readonly type: "tool-call"; readonly call: RuntimeToolCall; }
+export interface TurnToolResultPart { readonly type: "tool-result"; readonly result: RuntimeToolResult; }
 export type TurnContentPart =
   | TurnTextPart
   | TurnImagePart
@@ -942,9 +635,7 @@ export type TurnContentPart =
   | TurnAttachmentPart
   | TurnToolCallPart
   | TurnToolResultPart;
-
 export type TurnRole = "system" | "user" | "assistant" | "tool";
-
 export interface TurnMessage {
   readonly id?: string;
   readonly role: TurnRole;
@@ -952,13 +643,9 @@ export interface TurnMessage {
   readonly name?: string;
   readonly createdAt?: string;
 }
-
 export interface RuntimeToolDefinition {
-  readonly name: string;
-  readonly description: string;
-  readonly inputSchema: JsonSchema;
+  readonly name: string; readonly description: string; readonly inputSchema: JsonSchema;
 }
-
 export interface RuntimeSession {
   /** Runtime-owned opaque identifier. Core must not interpret it. */
   readonly id: string;
@@ -970,14 +657,12 @@ export interface RuntimeSession {
   readonly expiresAt?: string;
   readonly metadata?: JsonObject;
 }
-
 export interface RuntimeTurnOptions {
   readonly effort?: string;
   readonly maxTurns?: number;
   readonly maxOutputTokens?: number;
   readonly responseSchema?: JsonSchema;
 }
-
 export interface RuntimeTurnRequest {
   readonly turnId: string;
   readonly conversationId: string;
@@ -989,7 +674,6 @@ export interface RuntimeTurnRequest {
   readonly options?: RuntimeTurnOptions;
   readonly metadata?: JsonObject;
 }
-
 export interface RuntimeUsage {
   readonly inputTokens: number;
   readonly outputTokens: number;
@@ -1003,7 +687,6 @@ export interface RuntimeUsage {
   readonly compaction?: RuntimeCompaction;
   readonly sessionEvicted?: boolean;
 }
-
 export interface RuntimeUsageCost {
   readonly currency: "USD";
   readonly input?: number;
@@ -1012,7 +695,6 @@ export interface RuntimeUsageCost {
   readonly cacheWrite?: number;
   readonly total: number;
 }
-
 export interface RuntimeCompaction {
   readonly compacted: boolean;
   readonly tokensBefore?: number;
@@ -1020,47 +702,14 @@ export interface RuntimeCompaction {
   readonly summaryTokens?: number;
   readonly firstRetainedMessageId?: string;
 }
-
-export interface RuntimeTextDeltaEvent {
-  readonly type: "text-delta";
-  readonly delta: string;
-}
-
-export interface RuntimeThinkingDeltaEvent {
-  readonly type: "thinking-delta";
-  readonly delta: string;
-}
-
-export interface RuntimeToolCallEvent {
-  readonly type: "tool-call";
-  readonly call: RuntimeToolCall;
-}
-
-export interface RuntimeToolResultEvent {
-  readonly type: "tool-result";
-  readonly result: RuntimeToolResult;
-}
-
-export interface RuntimeUsageEvent {
-  readonly type: "usage";
-  readonly usage: RuntimeUsage;
-}
-
-export interface RuntimeDiagnosticEvent {
-  readonly type: "diagnostic";
-  readonly diagnostic: ModuleDiagnostic;
-}
-
-export interface RuntimeSessionEvent {
-  readonly type: "session";
-  readonly session: RuntimeSession;
-}
-
-export interface RuntimeCompactionEvent {
-  readonly type: "compaction";
-  readonly compaction: RuntimeCompaction;
-}
-
+export interface RuntimeTextDeltaEvent { readonly type: "text-delta"; readonly delta: string; }
+export interface RuntimeThinkingDeltaEvent { readonly type: "thinking-delta"; readonly delta: string; }
+export interface RuntimeToolCallEvent { readonly type: "tool-call"; readonly call: RuntimeToolCall; }
+export interface RuntimeToolResultEvent { readonly type: "tool-result"; readonly result: RuntimeToolResult; }
+export interface RuntimeUsageEvent { readonly type: "usage"; readonly usage: RuntimeUsage; }
+export interface RuntimeDiagnosticEvent { readonly type: "diagnostic"; readonly diagnostic: ModuleDiagnostic; }
+export interface RuntimeSessionEvent { readonly type: "session"; readonly session: RuntimeSession; }
+export interface RuntimeCompactionEvent { readonly type: "compaction"; readonly compaction: RuntimeCompaction; }
 export type RuntimeTurnEvent =
   | RuntimeTextDeltaEvent
   | RuntimeThinkingDeltaEvent
@@ -1070,20 +719,11 @@ export type RuntimeTurnEvent =
   | RuntimeDiagnosticEvent
   | RuntimeSessionEvent
   | RuntimeCompactionEvent;
-
-export interface RuntimeLiveInput {
-  readonly id: string;
-  readonly text: string;
-  readonly receivedAt: string;
-}
-
+export interface RuntimeLiveInput { readonly id: string; readonly text: string; readonly receivedAt: string; }
 export type RuntimeLiveInputDisposition = "applied" | "requeue" | "discarded";
-
 export type RuntimeLiveInputHandler = (
-  input: RuntimeLiveInput,
-  signal: AbortSignal,
+  input: RuntimeLiveInput, signal: AbortSignal,
 ) => Awaitable<RuntimeLiveInputDisposition>;
-
 export interface RuntimeTurnContext {
   emit(event: RuntimeTurnEvent): Awaitable<void>;
   executeTool(call: RuntimeToolCall, signal: AbortSignal): Promise<RuntimeToolResult>;
@@ -1098,12 +738,8 @@ export interface RuntimeTurnContext {
    * This callback is absent unless the exact route advertises at least one
    * `core-callback` descriptor, and every request must match one exactly.
    */
-  requestApproval?(
-    request: ApprovalRequest,
-    signal: AbortSignal,
-  ): Promise<ApprovalDecision>;
+  requestApproval?(request: ApprovalRequest, signal: AbortSignal): Promise<ApprovalDecision>;
 }
-
 export interface RuntimeCompletedTurnResult {
   readonly status: "completed";
   readonly message: TurnMessage;
@@ -1112,7 +748,6 @@ export interface RuntimeCompletedTurnResult {
   readonly session?: RuntimeSession;
   readonly metadata?: JsonObject;
 }
-
 export interface RuntimeIncompleteTurnResult {
   readonly status: "cancelled" | "max-turns";
   readonly message?: TurnMessage;
@@ -1120,18 +755,13 @@ export interface RuntimeIncompleteTurnResult {
   readonly session?: RuntimeSession;
   readonly metadata?: JsonObject;
 }
-
 export type RuntimeTurnResult = RuntimeCompletedTurnResult | RuntimeIncompleteTurnResult;
-
 export type RuntimeRetryability = "retryable" | "not-retryable" | "unknown";
 export type RuntimeSideEffectStatus = "none" | "committed" | "unknown";
-
 /** Exact typed failure code requesting one sessionless retry on the same route. */
 export const RUNTIME_SESSION_UNAVAILABLE_CODE = "runtime_session_unavailable";
-
 const RUNTIME_TURN_ERROR_CODE_MAX_CHARS = 256;
 const RUNTIME_TURN_ERROR_MESSAGE_MAX_CHARS = 65_536;
-
 export interface RuntimeTurnErrorOptions {
   readonly code: string;
   readonly message: string;
@@ -1140,7 +770,6 @@ export interface RuntimeTurnErrorOptions {
   readonly retryAfterMs?: number;
   readonly cause?: unknown;
 }
-
 /**
  * An immutable, accessor-free classification captured from one runtime
  * failure. Hosts must use this snapshot, rather than re-reading the thrown
@@ -1153,17 +782,15 @@ export interface RuntimeTurnErrorSnapshot {
   readonly sideEffects: RuntimeSideEffectStatus;
   readonly retryAfterMs?: number;
 }
-
 /** A runtime failure whose fallback safety can be decided without string matching. */
 export class RuntimeTurnError extends Error {
   readonly code: string;
   readonly retryability: RuntimeRetryability;
   readonly sideEffects: RuntimeSideEffectStatus;
   readonly retryAfterMs?: number;
-
   constructor(options: RuntimeTurnErrorOptions) {
     if (options.code.trim().length === 0) throw new TypeError("Runtime turn error code must not be empty");
-    if (options.code.length > RUNTIME_TURN_ERROR_CODE_MAX_CHARS) {
+    if (!isRuntimeErrorCode(options.code)) {
       throw new RangeError("Runtime turn error code exceeds its character limit");
     }
     if (options.message.length > RUNTIME_TURN_ERROR_MESSAGE_MAX_CHARS) {
@@ -1175,8 +802,7 @@ export class RuntimeTurnError extends Error {
     if (!isRuntimeSideEffectStatus(options.sideEffects)) {
       throw new TypeError("Runtime turn error side-effects status is invalid");
     }
-    if (options.retryAfterMs !== undefined
-      && (!Number.isSafeInteger(options.retryAfterMs) || options.retryAfterMs < 0)) {
+    if (!isRuntimeRetryAfterMs(options.retryAfterMs)) {
       throw new RangeError("Runtime turn error retryAfterMs must be a non-negative safe integer");
     }
     if (options.cause === undefined) super(options.message);
@@ -1188,13 +814,11 @@ export class RuntimeTurnError extends Error {
     if (options.retryAfterMs !== undefined) this.retryAfterMs = options.retryAfterMs;
   }
 }
-
 function ownDescriptorValue(descriptor: PropertyDescriptor | undefined): unknown {
   return descriptor !== undefined && "value" in descriptor
     ? descriptor.value
     : undefined;
 }
-
 /**
  * Capture a compatible runtime failure from own data properties only.
  *
@@ -1217,22 +841,9 @@ export function snapshotRuntimeTurnError(
       return undefined;
     }
     const retryAfterMs = retryAfterDescriptor?.value;
-    if (
-      typeof code !== "string"
-      || code.trim().length === 0
-      || code.length > RUNTIME_TURN_ERROR_CODE_MAX_CHARS
-      || typeof message !== "string"
-      || !isRuntimeRetryability(retryability)
-      || !isRuntimeSideEffectStatus(sideEffects)
-      || (
-        retryAfterMs !== undefined
-        && (
-          typeof retryAfterMs !== "number"
-          || !Number.isSafeInteger(retryAfterMs)
-          || retryAfterMs < 0
-        )
-      )
-    ) {
+    if (!isRuntimeErrorCode(code) || typeof message !== "string"
+      || !isRuntimeRetryability(retryability) || !isRuntimeSideEffectStatus(sideEffects)
+      || !isRuntimeRetryAfterMs(retryAfterMs)) {
       return undefined;
     }
     return Object.freeze({
@@ -1246,17 +857,14 @@ export function snapshotRuntimeTurnError(
     return undefined;
   }
 }
-
 export function isRuntimeTurnError(value: unknown): value is RuntimeTurnError {
   return snapshotRuntimeTurnError(value) !== undefined;
 }
-
 export interface RuntimeModelValidationRequest {
   readonly model: string;
   /** Parsed module config supplied without granting host capabilities. */
   readonly config: unknown;
 }
-
 export interface RuntimeModelValidation {
   readonly supported: boolean;
   /** Effective capabilities for this exact model route. */
@@ -1265,19 +873,13 @@ export interface RuntimeModelValidation {
   readonly nativeTools?: readonly RuntimeNativeToolDescriptor[];
   readonly diagnostics?: readonly ModuleDiagnostic[];
 }
-
-export interface RuntimeModelPreflightRequest {
-  readonly model: string;
-  readonly signal: AbortSignal;
-}
-
+export interface RuntimeModelPreflightRequest { readonly model: string; readonly signal: AbortSignal; }
 export interface RuntimeModelPreflightResult {
   readonly supported: boolean;
   readonly capabilities?: RuntimeCapabilities;
   readonly nativeTools?: readonly RuntimeNativeToolDescriptor[];
   readonly diagnostics?: readonly ModuleDiagnostic[];
 }
-
 export interface RuntimeCapabilities {
   readonly tools: boolean;
   readonly mcp: boolean;
@@ -1295,7 +897,6 @@ export interface RuntimeCapabilities {
   /** Absent means unsupported for API-version-1 source compatibility. */
   readonly liveInput?: boolean;
 }
-
 export interface Runtime extends ModuleInstance {
   readonly capabilities: RuntimeCapabilities;
   /**
@@ -1303,15 +904,11 @@ export interface Runtime extends ModuleInstance {
    * `preflightModel` for created-instance auth or liveness checks.
    */
   validateModel?(model: string, signal: AbortSignal): Awaitable<RuntimeModelValidation>;
-  preflightModel?(
-    request: RuntimeModelPreflightRequest,
-  ): Awaitable<RuntimeModelPreflightResult>;
+  preflightModel?(request: RuntimeModelPreflightRequest): Awaitable<RuntimeModelPreflightResult>;
   runTurn(request: RuntimeTurnRequest, context: RuntimeTurnContext): Promise<RuntimeTurnResult>;
 }
-
 export type RuntimeHost = ModuleHost;
 export type RuntimeModuleCreateContext<TConfig> = ModuleCreateContext<TConfig, RuntimeHost>;
-
 export interface RuntimeModuleDefinition<TConfig = unknown, TInstance extends Runtime = Runtime> {
   readonly manifest: ModuleManifest<"runtime">;
   readonly schema: ModuleSchema<TConfig>;
@@ -1319,19 +916,11 @@ export interface RuntimeModuleDefinition<TConfig = unknown, TInstance extends Ru
    * Pure, synchronous route validation. It must not inspect credentials, read
    * files, access the network, or spawn a process.
    */
-  validateModel?(
-    request: RuntimeModelValidationRequest,
-  ): RuntimeModelValidation;
+  validateModel?(request: RuntimeModelValidationRequest): RuntimeModelValidation;
   create(context: RuntimeModuleCreateContext<TConfig>): Awaitable<TInstance>;
 }
-
 export interface ChannelAttachment extends NormalizedAttachment {}
-
-export interface ChannelActor {
-  readonly id: string;
-  readonly displayName?: string;
-}
-
+export interface ChannelActor { readonly id: string; readonly displayName?: string; }
 export interface ChannelInboundRequest {
   readonly requestId: string;
   readonly conversationId: string;
@@ -1346,42 +935,13 @@ export interface ChannelInboundRequest {
   readonly signal: AbortSignal;
   readonly metadata?: JsonObject;
 }
-
-export interface ChannelReplyTextDeltaEvent {
-  readonly type: "text-delta";
-  readonly delta: string;
-}
-
-export interface ChannelReplyTextReplaceEvent {
-  readonly type: "text-replace";
-  readonly text: string;
-}
-
-export interface ChannelReplyActivityEvent {
-  readonly type: "activity";
-  readonly text: string;
-}
-
-export interface ChannelReplyAttachmentEvent {
-  readonly type: "attachment";
-  readonly attachment: ChannelAttachment;
-}
-
-export interface ChannelReplyAskUserEvent {
-  readonly type: "ask-user";
-  readonly ask: AskUserRequest;
-}
-
-export interface ChannelReplyApprovalEvent {
-  readonly type: "approval";
-  readonly approval: ApprovalRequest;
-}
-
-export interface ChannelReplyUsageEvent {
-  readonly type: "usage";
-  readonly usage: RuntimeUsage;
-}
-
+export interface ChannelReplyTextDeltaEvent { readonly type: "text-delta"; readonly delta: string; }
+export interface ChannelReplyTextReplaceEvent { readonly type: "text-replace"; readonly text: string; }
+export interface ChannelReplyActivityEvent { readonly type: "activity"; readonly text: string; }
+export interface ChannelReplyAttachmentEvent { readonly type: "attachment"; readonly attachment: ChannelAttachment; }
+export interface ChannelReplyAskUserEvent { readonly type: "ask-user"; readonly ask: AskUserRequest; }
+export interface ChannelReplyApprovalEvent { readonly type: "approval"; readonly approval: ApprovalRequest; }
+export interface ChannelReplyUsageEvent { readonly type: "usage"; readonly usage: RuntimeUsage; }
 export type ChannelReplyEvent =
   | ChannelReplyTextDeltaEvent
   | ChannelReplyTextReplaceEvent
@@ -1390,105 +950,55 @@ export type ChannelReplyEvent =
   | ChannelReplyAskUserEvent
   | ChannelReplyApprovalEvent
   | ChannelReplyUsageEvent;
-
-export interface ChannelReplySink {
-  emit(event: ChannelReplyEvent): Awaitable<void>;
-}
-
+export interface ChannelReplySink { emit(event: ChannelReplyEvent): Awaitable<void>; }
 export interface ChannelTurnResult {
-  readonly status: "completed" | "cancelled" | "rejected";
-  readonly text?: string;
+  readonly status: "completed" | "cancelled" | "rejected"; readonly text?: string;
   readonly diagnostics?: readonly ModuleDiagnostic[];
 }
-
 export interface ChannelCancelRequest {
-  readonly conversationId: string;
-  readonly reason?: string;
-  readonly signal: AbortSignal;
+  readonly conversationId: string; readonly reason?: string; readonly signal: AbortSignal;
 }
-
-export interface ChannelCancelResult {
-  readonly status: "accepted" | "idle" | "unsupported";
-}
-
+export interface ChannelCancelResult { readonly status: "accepted" | "idle" | "unsupported"; }
 export interface ChannelLiveInput extends RuntimeLiveInput {
-  readonly conversationId: string;
-  readonly signal: AbortSignal;
+  readonly conversationId: string; readonly signal: AbortSignal;
 }
-
-export interface ChannelLiveInputResult {
-  readonly status: RuntimeLiveInputDisposition | "unavailable";
-}
-
-export interface ChannelAskAnswerResult {
-  readonly status: "accepted" | "expired" | "mismatch" | "unsupported";
-}
-
-export interface ChannelApprovalAnswerResult {
-  readonly status: "accepted" | "expired" | "mismatch" | "unsupported";
-}
-
+export interface ChannelLiveInputResult { readonly status: RuntimeLiveInputDisposition | "unavailable"; }
+export interface ChannelAskAnswerResult { readonly status: "accepted" | "expired" | "mismatch" | "unsupported"; }
+export interface ChannelApprovalAnswerResult { readonly status: "accepted" | "expired" | "mismatch" | "unsupported"; }
 export interface ChannelConversationSummary {
-  readonly conversationId: string;
-  readonly title?: string;
-  readonly updatedAt: string;
+  readonly conversationId: string; readonly title?: string; readonly updatedAt: string;
   readonly metadata?: JsonObject;
 }
-
 export interface ChannelConversationListRequest {
-  readonly cursor?: string;
-  readonly limit: number;
-  readonly signal: AbortSignal;
+  readonly cursor?: string; readonly limit: number; readonly signal: AbortSignal;
 }
-
 export interface ChannelConversationListResult {
-  readonly conversations: readonly ChannelConversationSummary[];
-  readonly cursor?: string;
+  readonly conversations: readonly ChannelConversationSummary[]; readonly cursor?: string;
 }
-
 export interface ChannelReplayRequest {
-  readonly conversationId: string;
-  readonly cursor?: string;
-  readonly limit: number;
+  readonly conversationId: string; readonly cursor?: string; readonly limit: number;
   readonly signal: AbortSignal;
 }
-
 export interface ChannelReplayEntry {
-  readonly turnId: string;
-  readonly message: TurnMessage;
-  readonly createdAt: string;
+  readonly turnId: string; readonly message: TurnMessage; readonly createdAt: string;
 }
-
 export interface ChannelReplayResult {
-  readonly entries: readonly ChannelReplayEntry[];
-  readonly cursor?: string;
+  readonly entries: readonly ChannelReplayEntry[]; readonly cursor?: string;
 }
-
 export interface ChannelOpenConversationRequest {
-  readonly title?: string;
-  readonly initialText?: string;
-  readonly metadata?: JsonObject;
+  readonly title?: string; readonly initialText?: string; readonly metadata?: JsonObject;
   readonly signal: AbortSignal;
 }
-
-export interface ChannelOpenConversationResult {
-  readonly conversationId: string;
-  readonly createdAt: string;
-}
-
+export interface ChannelOpenConversationResult { readonly conversationId: string; readonly createdAt: string; }
 export interface ChannelHost extends ModuleHost {
   dispatch(request: ChannelInboundRequest, reply: ChannelReplySink): Promise<ChannelTurnResult>;
   cancel?(request: ChannelCancelRequest): Promise<ChannelCancelResult>;
   offerLiveInput?(input: ChannelLiveInput): Promise<ChannelLiveInputResult>;
   answerAsk?(
-    conversationId: string,
-    answer: AskUserAnswer,
-    signal: AbortSignal,
+    conversationId: string, answer: AskUserAnswer, signal: AbortSignal,
   ): Promise<ChannelAskAnswerResult>;
   answerApproval?(
-    conversationId: string,
-    decision: ApprovalDecision,
-    signal: AbortSignal,
+    conversationId: string, decision: ApprovalDecision, signal: AbortSignal,
   ): Promise<ChannelApprovalAnswerResult>;
   listConversations?(request: ChannelConversationListRequest): Promise<ChannelConversationListResult>;
   readReplay?(request: ChannelReplayRequest): Promise<ChannelReplayResult>;
@@ -1496,7 +1006,6 @@ export interface ChannelHost extends ModuleHost {
   readHealth?(signal: AbortSignal): Promise<ModuleHealth>;
   openConversation?(request: ChannelOpenConversationRequest): Promise<ChannelOpenConversationResult>;
 }
-
 export interface ChannelOutboundMessage {
   readonly conversationId: string;
   readonly text: string;
@@ -1505,14 +1014,12 @@ export interface ChannelOutboundMessage {
   readonly idempotencyKey: string;
   readonly metadata?: JsonObject;
 }
-
 export interface ChannelDeliveryResult {
   readonly status: "delivered" | "duplicate" | "unknown" | "failed";
   readonly idempotencyKey: string;
   readonly messageId?: string;
   readonly diagnostic?: ModuleDiagnostic;
 }
-
 export interface ChannelCapabilities {
   readonly attachments: boolean;
   readonly liveInput: boolean;
@@ -1524,7 +1031,6 @@ export interface ChannelCapabilities {
   readonly verbatim: boolean;
   readonly cancellation: boolean;
 }
-
 export interface Channel extends ModuleInstance {
   readonly capabilities: ChannelCapabilities;
   /**
@@ -1536,114 +1042,75 @@ export interface Channel extends ModuleInstance {
   readHostPresence?(): JsonObject | undefined;
   deliver?(message: ChannelOutboundMessage, signal: AbortSignal): Promise<ChannelDeliveryResult>;
 }
-
 export type ChannelModuleCreateContext<TConfig> = ModuleCreateContext<TConfig, ChannelHost>;
-
 export interface ChannelModuleDefinition<TConfig = unknown, TInstance extends Channel = Channel> {
   readonly manifest: ModuleManifest<"channel">;
   readonly schema: ModuleSchema<TConfig>;
   create(context: ChannelModuleCreateContext<TConfig>): Awaitable<TInstance>;
 }
-
 export interface MemoryRecord {
-  readonly id: string;
-  readonly text: string;
-  readonly createdAt: string;
-  readonly metadata?: JsonObject;
+  readonly id: string; readonly text: string; readonly createdAt: string; readonly metadata?: JsonObject;
 }
-
 export interface MemoryRecallRequest {
-  readonly query: string;
-  readonly limit: number;
-  readonly signal: AbortSignal;
+  readonly query: string; readonly limit: number; readonly signal: AbortSignal;
   readonly conversationId?: string;
 }
-
-export interface MemoryRecallResult {
-  readonly records: readonly MemoryRecord[];
-}
-
-export interface MemoryCaptureRequest {
-  readonly record: MemoryRecord;
-  readonly signal: AbortSignal;
-}
-
-export interface MemoryForgetRequest {
-  readonly recordId: string;
-  readonly signal: AbortSignal;
-}
-
-export interface MemoryCapabilities {
-  readonly capture: boolean;
-  readonly forget: boolean;
-}
-
+export interface MemoryRecallResult { readonly records: readonly MemoryRecord[]; }
+export interface MemoryCaptureRequest { readonly record: MemoryRecord; readonly signal: AbortSignal; }
+export interface MemoryForgetRequest { readonly recordId: string; readonly signal: AbortSignal; }
+export interface MemoryCapabilities { readonly capture: boolean; readonly forget: boolean; }
 export const HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE = "memory.runtime-capture" as const;
-
 /** Tool-free, session-free completion surface granted only to selected memory. */
 export interface MemoryRuntimeCaptureRequest {
   readonly instructions: string;
   readonly input: string;
   readonly responseSchema?: JsonSchema;
   readonly maxOutputTokens: number;
+  /** Exact selected runtime instance; Core never silently substitutes the primary route. */
+  readonly runtime: string;
+  /** Exact runtime-owned model identifier. */
+  readonly model: string;
+  /** Independent upper bound enforced by both the memory module and Core. */
+  readonly timeoutMs: number;
   readonly signal: AbortSignal;
 }
-
 export interface MemoryRuntimeCaptureResult {
-  readonly text: string;
-  readonly structuredOutput?: JsonValue;
-  readonly usage?: RuntimeUsage;
+  readonly text: string; readonly structuredOutput?: JsonValue; readonly usage?: RuntimeUsage;
 }
-
 export interface MemoryRuntimeCaptureGrant {
   complete(request: MemoryRuntimeCaptureRequest): Promise<MemoryRuntimeCaptureResult>;
 }
-
 export interface Memory extends ModuleInstance {
   readonly capabilities: MemoryCapabilities;
   recall(request: MemoryRecallRequest): Promise<MemoryRecallResult>;
   capture?(request: MemoryCaptureRequest): Promise<void>;
   forget?(request: MemoryForgetRequest): Promise<boolean>;
 }
-
 export interface MemoryHost extends ModuleHost {
   /** Present only when declared by the module and bound to a validated route. */
   readonly runtimeCapture?: MemoryRuntimeCaptureGrant;
 }
 export type MemoryModuleCreateContext<TConfig> = ModuleCreateContext<TConfig, MemoryHost>;
-
 export interface MemoryModuleDefinition<TConfig = unknown, TInstance extends Memory = Memory> {
   readonly manifest: ModuleManifest<"memory">;
   readonly schema: ModuleSchema<TConfig>;
   create(context: MemoryModuleCreateContext<TConfig>): Awaitable<TInstance>;
 }
-
 export type OpenModuleDefinition =
   | RuntimeModuleDefinition
   | ChannelModuleDefinition
   | MemoryModuleDefinition;
-
 /** The type of a package's public `monoAgentModule` export. */
 export type MonoAgentModule = OpenModuleDefinition;
-
 export function defineRuntimeModule<TConfig, TInstance extends Runtime>(
   definition: RuntimeModuleDefinition<TConfig, TInstance>,
-): RuntimeModuleDefinition<TConfig, TInstance> {
-  return freezeDefinition(definition);
-}
-
+): RuntimeModuleDefinition<TConfig, TInstance> { return freezeDefinition(definition); }
 export function defineChannelModule<TConfig, TInstance extends Channel>(
   definition: ChannelModuleDefinition<TConfig, TInstance>,
-): ChannelModuleDefinition<TConfig, TInstance> {
-  return freezeDefinition(definition);
-}
-
+): ChannelModuleDefinition<TConfig, TInstance> { return freezeDefinition(definition); }
 export function defineMemoryModule<TConfig, TInstance extends Memory>(
   definition: MemoryModuleDefinition<TConfig, TInstance>,
-): MemoryModuleDefinition<TConfig, TInstance> {
-  return freezeDefinition(definition);
-}
-
+): MemoryModuleDefinition<TConfig, TInstance> { return freezeDefinition(definition); }
 function freezeDefinition<T extends { readonly manifest: ModuleManifest; readonly schema: ModuleSchema<unknown> }>(
   definition: T,
 ): T {
@@ -1653,46 +1120,41 @@ function freezeDefinition<T extends { readonly manifest: ModuleManifest; readonl
   });
   return Object.freeze({ ...definition, manifest }) as T;
 }
-
 function freezeConfigIssue(issue: ConfigIssue): ConfigIssue {
   return Object.freeze({
     ...issue,
     path: Object.freeze([...issue.path]),
-    ...(issue.provenance === undefined
-      ? {}
-      : { provenance: defineConfigProvenance(issue.provenance) }),
+    ...(issue.provenance === undefined ? {} : { provenance: defineConfigProvenance(issue.provenance) }),
   });
 }
-
 function escapeJsonPointerSegment(segment: string): string {
   return segment.replaceAll("~", "~0").replaceAll("/", "~1");
 }
-
 function isModuleSlot(value: unknown): value is ModuleSlot {
-  return value === "runtime"
-    || value === "channel"
-    || value === "memory"
-    || value === "state"
-    || value === "trigger"
-    || value === "exporter"
-    || value === "sandbox";
+  return value === "runtime" || value === "channel" || value === "memory" || value === "state"
+    || value === "trigger" || value === "exporter" || value === "sandbox";
 }
-
 function isRuntimeRetryability(value: unknown): value is RuntimeRetryability {
   return value === "retryable" || value === "not-retryable" || value === "unknown";
 }
-
 function isRuntimeSideEffectStatus(value: unknown): value is RuntimeSideEffectStatus {
   return value === "none" || value === "committed" || value === "unknown";
 }
-
+function isRuntimeErrorCode(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0
+    && value.length <= RUNTIME_TURN_ERROR_CODE_MAX_CHARS;
+}
+function isRuntimeRetryAfterMs(value: unknown): value is number | undefined {
+  return value === undefined
+    || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0);
+}
 type ContractRecord = Record<string, unknown>;
-
 function contractFail(path: string, message: string): never {
   throw new TypeError(`${path} ${message}`);
 }
-
-function contractRecord(value: unknown, path: string): ContractRecord {
+function contractRecord(
+  value: unknown, path: string, allowed?: readonly string[],
+): ContractRecord {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return contractFail(path, "must be a plain object");
   }
@@ -1701,6 +1163,7 @@ function contractRecord(value: unknown, path: string): ContractRecord {
     return contractFail(path, "must be a plain object");
   }
   const detached: ContractRecord = Object.create(null) as ContractRecord;
+  const allowedSet = allowed === undefined ? undefined : new Set(allowed);
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== "string") contractFail(path, "contains an unknown symbol field");
     if (key === "__proto__" || key === "constructor" || key === "prototype") {
@@ -1712,31 +1175,16 @@ function contractRecord(value: unknown, path: string): ContractRecord {
     }
     detached[key] = descriptor.value;
   }
-  return detached;
-}
-
-function assertContractKeys(
-  value: ContractRecord,
-  allowed: readonly string[],
-  path: string,
-): void {
-  const allowedSet = new Set(allowed);
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string") contractFail(path, "contains an unknown symbol field");
-    if (key === "__proto__" || key === "constructor" || key === "prototype") {
-      contractFail(path, `contains unsafe field ${JSON.stringify(key)}`);
-    }
-    if (!allowedSet.has(key)) {
-      contractFail(path, `contains unknown field ${JSON.stringify(key)}`);
+  if (allowedSet !== undefined) {
+    for (const key of Reflect.ownKeys(detached)) {
+      if (typeof key !== "string") contractFail(path, "contains an unknown symbol field");
+      if (!allowedSet.has(key)) contractFail(path, `contains unknown field ${JSON.stringify(key)}`);
     }
   }
+  return detached;
 }
-
 function contractArray(
-  value: unknown,
-  path: string,
-  minimum: number,
-  maximum: number,
+  value: unknown, path: string, minimum: number, maximum: number,
 ): readonly unknown[] {
   if (!Array.isArray(value)) contractFail(path, "must be an array");
   const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
@@ -1745,65 +1193,43 @@ function contractArray(
   }
   const length = lengthDescriptor.value;
   if (
-    typeof length !== "number"
-    || !Number.isSafeInteger(length)
-    || length < minimum
-    || length > maximum
+    typeof length !== "number" || !Number.isSafeInteger(length)
+    || length < minimum || length > maximum
   ) {
-    contractFail(
-      path,
-      `must contain between ${String(minimum)} and ${String(maximum)} items`,
-    );
+    contractFail(path, `must contain between ${String(minimum)} and ${String(maximum)} items`);
   }
   const allowed = new Set(["length"]);
   for (let index = 0; index < length; index += 1) allowed.add(String(index));
   for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== "string" || !allowed.has(key)) {
-      contractFail(path, "contains an unknown array field");
-    }
+    if (typeof key !== "string" || !allowed.has(key)) contractFail(path, "contains an unknown array field");
   }
   const detached: unknown[] = [];
   for (let index = 0; index < length; index += 1) {
     const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
     if (descriptor === undefined) contractFail(`${path}.${String(index)}`, "is required");
-    if (!("value" in descriptor)) {
-      contractFail(`${path}.${String(index)}`, "must be a data property");
-    }
+    if (!("value" in descriptor)) contractFail(`${path}.${String(index)}`, "must be a data property");
     detached.push(descriptor.value);
   }
   return detached;
 }
-
 function contractText(value: unknown, path: string, maximumBytes: number): string {
   if (typeof value !== "string") contractFail(path, "must be a string");
-  if (value.length === 0 || value.trim().length === 0) {
-    contractFail(path, "must not be empty");
-  }
+  if (value.length === 0 || value.trim().length === 0) contractFail(path, "must not be empty");
   if (value.includes("\0")) contractFail(path, "must not contain NUL");
   const bytes = new TextEncoder().encode(value).byteLength;
-  if (bytes > maximumBytes) {
-    contractFail(path, `must be at most ${String(maximumBytes)} UTF-8 bytes`);
-  }
+  if (bytes > maximumBytes) contractFail(path, `must be at most ${String(maximumBytes)} UTF-8 bytes`);
   return value;
 }
-
 function contractIdentifier(value: unknown, path: string): string {
   if (typeof value !== "string") contractFail(path, "must be a string");
-  if (
-    value.length === 0
-    || value.length > AGENT_INTERACTION_LIMITS.identifierCharacters
-  ) {
-    contractFail(
-      path,
-      `must contain between 1 and ${String(AGENT_INTERACTION_LIMITS.identifierCharacters)} characters`,
-    );
+  if (value.length === 0 || value.length > AGENT_INTERACTION_LIMITS.identifierCharacters) {
+    contractFail(path, `must contain between 1 and ${String(AGENT_INTERACTION_LIMITS.identifierCharacters)} characters`);
   }
   if (!/^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u.test(value)) {
     contractFail(path, "contains unsupported characters");
   }
   return value;
 }
-
 function contractTimestamp(value: unknown, path: string): string {
   if (
     typeof value !== "string"
@@ -1816,19 +1242,15 @@ function contractTimestamp(value: unknown, path: string): string {
   }
   return value;
 }
-
 function contractBoolean(value: unknown, path: string): boolean {
-  if (typeof value !== "boolean") contractFail(path, "must be a boolean");
-  return value;
+  if (typeof value !== "boolean") contractFail(path, "must be a boolean"); return value;
 }
-
 function contractNonNegativeInteger(value: unknown, path: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
     contractFail(path, "must be a non-negative safe integer");
   }
   return value;
 }
-
 function contractEnum<const T extends readonly string[]>(
   value: unknown,
   allowed: T,
@@ -1839,22 +1261,13 @@ function contractEnum<const T extends readonly string[]>(
   }
   return value as T[number];
 }
-
-function parseRuntimeNativeToolEffects(
-  value: unknown,
-  path: string,
-): readonly RuntimeNativeToolEffect[] {
+function parseRuntimeNativeToolEffects(value: unknown, path: string): readonly RuntimeNativeToolEffect[] {
   const values = contractArray(value, path, 0, 4);
   const effects = values.map((effect, index) => contractEnum(
-    effect,
-    ["read", "write", "execute", "network"] as const,
-    `${path}[${String(index)}]`,
+    effect, ["read", "write", "execute", "network"] as const, `${path}[${String(index)}]`,
   ));
-  if (new Set(effects).size !== effects.length) {
-    contractFail(path, "must not contain duplicate effects");
-  }
+  if (new Set(effects).size !== effects.length) contractFail(path, "must not contain duplicate effects");
   return Object.freeze(effects);
 }
-
 export * from "./http.js";
 export * from "./secure-fs.js";
