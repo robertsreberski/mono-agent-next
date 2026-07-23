@@ -74,9 +74,12 @@ false and must not be simulated by a product.
 
 ## Protocol bounds and request security
 
-- Request and JSON-response bodies are capped at 1 MiB.
-- Each serialized NDJSON frame is capped at 256 KiB and a complete stream at
-  8 MiB, with room reserved for a terminal frame.
+- Turn, cancellation, live-input, and JSON-response bodies are capped at 1 MiB.
+  AskUser answers have a dedicated 8 MiB cap so the maximum canonical
+  3-question × 20-value answer remains representable after JSON escaping.
+- Each serialized NDJSON frame is capped at 4 MiB so even a maximally populated
+  canonical AskUser request remains representable after JSON escaping. A
+  complete stream is capped at 8 MiB, with room reserved for a terminal frame.
 - Mutation bodies require `Content-Type: application/json`.
 - The channel accepts only its actual loopback authority and rejects cross-site
   browser requests and mismatched `Origin` values.
@@ -108,4 +111,3 @@ vertical.
 - [Terminal operator](/observability/tui/) — standalone pi-tui product.
 - [Web operator](/observability/web-console/) — standalone authenticated browser product.
 - [v1 architecture](/reference/v1-architecture/) — dependency and product boundaries.
-- [OpenAI-compatible API](/channels/openai-api/) — third-party Chat Completions surface rather than the operator protocol.

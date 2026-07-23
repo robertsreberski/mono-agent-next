@@ -45,20 +45,25 @@ describe("verify-all", () => {
       "check:secrets",
       "check:oss-hygiene",
       "check:licenses",
+      "check:apache-provenance",
       "check:dependency-vulnerabilities",
       "check:codex-discoverability",
       "check:consumer-docs-consistency",
       "check:getting-started-version-pins",
+      "check:source-beta-budgets",
+      "check:source-beta-docs",
       "check:docs",
       "release:validate",
       "check:architecture",
       "build",
       "check:doc-snippets",
       "check:deep-imports",
+      "verify:v1-operator-products",
       "verify:consumers",
       "release:pack",
       "release:consumer",
       "typecheck",
+      "scripts:test",
       "test",
       "git diff --check",
     ]);
@@ -192,10 +197,10 @@ describe("verify-all", () => {
     );
   });
 
-  it("keeps the built-export check in CI after build and before tests", () => {
+  it("keeps the built-export import-safety check in CI after build and before tests", () => {
     const workflow = readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
     const build = workflow.indexOf("- name: Build and typecheck the complete v1 workspace");
-    const exportsCheck = workflow.indexOf("- name: Check built package exports");
+    const exportsCheck = workflow.indexOf("- name: Check built package exports and import safety");
     const tests = workflow.indexOf("- name: Test the complete v1 workspace");
 
     expect(build).toBeGreaterThanOrEqual(0);

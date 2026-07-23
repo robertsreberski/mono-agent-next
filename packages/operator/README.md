@@ -212,6 +212,8 @@ serializeOperatorFrame
 ASK_USER_TURN_FRAMES
 FIXTURE_CAPABILITIES
 MALFORMED_OPERATOR_FRAMES
+MULTI_QUESTION_ASK_USER_ANSWER
+MULTI_QUESTION_ASK_USER_TURN_FRAMES
 VALID_OPERATOR_INFO
 VALID_TURN_FRAMES
 VALID_TURN_REQUEST
@@ -253,4 +255,5 @@ pnpm --filter @mono-agent/operator run test
 
 Focused tests cover valid, malformed, oversized, incomplete, delayed, and
 consumer-disconnected streams; owner/mode/symlink registry rejection; endpoint
-and redirect policy; AskUser state; reducer determinism; and action parity.
+and redirect policy; the module-sdk-aligned AskUser byte/shape contract;
+reducer determinism; and action parity.

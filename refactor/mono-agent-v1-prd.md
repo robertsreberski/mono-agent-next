@@ -731,6 +731,9 @@ This is the full agent-process config, not a maximal first-party showcase. It pr
       "apiKey": {
         "$env": "MONO_AGENT_WEBHOOK_API_KEY"
       },
+      "signatureSecret": {
+        "$env": "MONO_AGENT_WEBHOOK_SIGNATURE_SECRET"
+      },
       "routesDirectory": "./webhook",
       "defaultMode": "async",
       "retentionMs": 300000,
@@ -782,7 +785,7 @@ This is the full agent-process config, not a maximal first-party showcase. It pr
 }
 ```
 
-The fixture intentionally omits Slack, native sandboxing, TUI, web, docs-mcp, and service-macos because the live Personal Agent process does not select those capabilities. A2A, continuations, and host-capability grants are v1 cuts. It intentionally includes the local Ollama provider because the live config registers one. Phoenix exports metadata by default; exporting prompts, replies, tool arguments/results, or system instructions is a separate explicit opt-in for a trusted collector.
+The fixture intentionally omits Slack, native sandboxing, TUI, web, docs-mcp, and service-macos because the live Personal Agent process does not select those capabilities. A2A, continuations, and host-capability grants are v1 cuts. It intentionally includes the local Ollama provider because the live config registers one. The non-loopback webhook requires both a strong bearer key and an independent signature secret; this is the tightened admission contract exercised by the generated fixture. Phoenix exports metadata by default; exporting prompts, replies, tool arguments/results, or system instructions is a separate explicit opt-in for a trusted collector.
 
 ### 6.4 Multi-runtime addition
 

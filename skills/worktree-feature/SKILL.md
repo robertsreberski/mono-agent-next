@@ -5,22 +5,86 @@ description: Start isolated mono-agent work with diff-aware setup, keep only req
 
 # Worktree feature workflow
 
-The normal non-bare `main` checkout is the clean live source for the global
-local mono-agent CLI and Personal Agent. Never develop in, commit from, or
-`git stash` WIP in that checkout. All tracked changes happen in isolated
-worktrees; `main` advances only to reviewed commits.
+Keep the normal non-bare `main` checkout as the clean integration checkout.
+Never develop in, commit from, or `git stash` WIP in that checkout. All tracked
+changes happen in isolated worktrees; `main` advances only to reviewed commits.
+Live consumers remain on their current reviewed source until a separate
+cutover is explicitly authorized.
 
-Current practice keeps worktrees under
-`~/.config/superpowers/worktrees/mono-agent/`.
+Current practice keeps worktrees under a repository-specific directory below
+`${XDG_CONFIG_HOME:-$HOME/.config}/superpowers/worktrees/`. Derive that
+directory from the current checkout's verified GitHub `origin`; never copy a
+repository name or a worktree path from another checkout.
+
+Load this resolver before the commands below. It fails closed unless `origin`
+has exactly one fetch URL and one push URL, both identify the same GitHub
+repository, and GitHub returns that same canonical repository identity:
+
+<!-- github-origin-identity:start -->
+```bash
+canonical_github_repo_from_url() {
+  local url="$1"
+  local path owner name
+
+  case "$url" in
+    git@github.com:*) path="${url#git@github.com:}" ;;
+    ssh://git@github.com/*) path="${url#ssh://git@github.com/}" ;;
+    https://github.com/*) path="${url#https://github.com/}" ;;
+    *) return 1 ;;
+  esac
+
+  path="${path%.git}"
+  owner="${path%%/*}"
+  name="${path#*/}"
+  test -n "$owner" || return 1
+  test -n "$name" || return 1
+  test "$name" != "$path" || return 1
+  case "$name" in */*) return 1 ;; esac
+  case "$owner" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+  case "$name" in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+
+  printf '%s/%s\n' "$owner" "$name" | tr '[:upper:]' '[:lower:]'
+}
+
+verified_github_repo_from_common_dir() {
+  local common_dir="$1"
+  local fetch_urls push_urls fetch_repo push_repo api_repo
+
+  test -d "$common_dir" || return 1
+  fetch_urls="$(git --git-dir="$common_dir" remote get-url --all origin)" || return 1
+  push_urls="$(git --git-dir="$common_dir" remote get-url --push --all origin)" || return 1
+  test -n "$fetch_urls" || return 1
+  test -n "$push_urls" || return 1
+  case "$fetch_urls" in *$'\n'*) return 1 ;; esac
+  case "$push_urls" in *$'\n'*) return 1 ;; esac
+
+  fetch_repo="$(canonical_github_repo_from_url "$fetch_urls")" || return 1
+  push_repo="$(canonical_github_repo_from_url "$push_urls")" || return 1
+  test "$fetch_repo" = "$push_repo" || return 1
+
+  api_repo="$(gh api --hostname github.com "repos/$fetch_repo" \
+    --jq '.full_name')" || return 1
+  api_repo="$(printf '%s' "$api_repo" | tr '[:upper:]' '[:lower:]')"
+  test "$api_repo" = "$fetch_repo" || return 1
+  printf '%s\n' "$fetch_repo"
+}
+```
+<!-- github-origin-identity:end -->
 
 ## Create
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
+repo_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+repo_common_dir="$(cd "$repo_common_dir" && pwd -P)"
+repo="$(verified_github_repo_from_common_dir "$repo_common_dir")" || exit 1
+repo_name="${repo#*/}"
+worktree_parent="${XDG_CONFIG_HOME:-$HOME/.config}/superpowers/worktrees/$repo_name"
+mkdir -p "$worktree_parent"
 git fetch origin main
-git worktree add ~/.config/superpowers/worktrees/mono-agent/<name> -b <branch> origin/main
+git worktree add "$worktree_parent/<name>" -b <branch> origin/main
 # or branch from current work:
-git worktree add ~/.config/superpowers/worktrees/mono-agent/<name> -b <branch> HEAD
+git worktree add "$worktree_parent/<name>" -b <branch> HEAD
 ```
 
 Branch naming in this repo: `feat/<topic>`, `fix/<topic>`, `docs/<topic>`, `worktree-<topic>`.
@@ -36,7 +100,7 @@ Do not build the whole monorepo by default:
 | Cross-cutting package graph or build tooling | Install dependencies, then run the full dependency-ordered build |
 
 ```bash
-cd ~/.config/superpowers/worktrees/mono-agent/<name>
+cd "$worktree_parent/<name>"
 
 # Only when dependencies are absent or manifests/lockfile changed:
 pnpm install --frozen-lockfile
@@ -119,26 +183,27 @@ to the API-proved branch at the API/local reviewed OID:
 <!-- merged-worktree-cleanup:start -->
 ```bash
 cleanup_merged_worktree() {
-  local repo="$1"
-  local pr="$2"
-  local branch="$3"
-  local worktree="$4"
-  local repo_common_dir repo_root proof api_branch api_head local_head
+  local pr="$1"
+  local branch="$2"
+  local worktree="$3"
+  local repo_common_dir repo proof api_branch api_head local_head
   local worktree_common_dir worktree_root supplied_worktree
   local worktree_branch worktree_head worktree_status
 
+  case "$pr" in ""|*[!0-9]*) return 1 ;; esac
+  test "$pr" -gt 0 || return 1
   git check-ref-format --branch "$branch" >/dev/null || return 1
   repo_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)" || return 1
   repo_common_dir="$(cd "$repo_common_dir" && pwd -P)" || return 1
-  repo_root="$(dirname "$repo_common_dir")"
+  repo="$(verified_github_repo_from_common_dir "$repo_common_dir")" || return 1
 
-  proof="$(gh pr view "$pr" --repo "$repo" \
+  proof="$(gh pr view "$pr" --repo "github.com/$repo" \
     --json state,mergedAt,headRefName,headRefOid \
     --jq 'select(.state == "MERGED" and .mergedAt != null) | [.headRefName, .headRefOid] | join(" ")')" || return 1
   test -n "$proof" || return 1
   api_branch="${proof%% *}"
   api_head="${proof#* }"
-  local_head="$(git -C "$repo_root" rev-parse --verify "refs/heads/$branch^{commit}")" || return 1
+  local_head="$(git --git-dir="$repo_common_dir" rev-parse --verify "refs/heads/$branch^{commit}")" || return 1
 
   worktree_common_dir="$(git -C "$worktree" rev-parse --path-format=absolute --git-common-dir)" || return 1
   worktree_common_dir="$(cd "$worktree_common_dir" && pwd -P)" || return 1
@@ -157,17 +222,16 @@ cleanup_merged_worktree() {
   test "$worktree_head" = "$api_head" || return 1
   test -z "$worktree_status" || return 1
 
-  git -C "$repo_root" worktree remove "$worktree" || return 1
-  git -C "$repo_root" update-ref -d "refs/heads/$branch" "$api_head" || return 1
-  git -C "$repo_root" worktree prune
+  cd "$repo_common_dir" || return 1
+  git --git-dir="$repo_common_dir" worktree remove "$worktree" || return 1
+  git --git-dir="$repo_common_dir" update-ref -d "refs/heads/$branch" "$api_head" || return 1
+  git --git-dir="$repo_common_dir" worktree prune
 }
 ```
 <!-- merged-worktree-cleanup:end -->
 
 ```bash
-cleanup_merged_worktree \
-  robertsreberski/mono-agent <number> <branch> \
-  ~/.config/superpowers/worktrees/mono-agent/<name>
+cleanup_merged_worktree <number> <branch> "$worktree_parent/<name>"
 ```
 
 Any failed proof or dirty worktree stops the cleanup. Investigate it; never add

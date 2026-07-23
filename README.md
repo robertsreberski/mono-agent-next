@@ -1,6 +1,6 @@
 # mono-agent
 
-`mono-agent-next` is the private development successor for mono-agent v1. It is
+`mono-agent-next` is the public development successor for mono-agent v1. It is
 a config-first agent framework: `@mono-agent/core` reads one strict
 `mono-agent.config.json`, validates every explicitly selected module, and runs
 the resulting agent without importing a concrete provider or channel itself.
@@ -38,7 +38,16 @@ The independent operator products have a separate integration proof:
 pnpm run verify:v1-operator-products
 ```
 
-Neither command publishes a package or touches a live consumer.
+The complete source-candidate proof requires a clean committed checkout. It
+clones that exact SHA into an owner-private temporary workspace, packs all 23
+packages, installs the three scaffold closures from those exact artifacts, and
+emits machine-readable digest evidence:
+
+```bash
+pnpm run verify:v1-system
+```
+
+None of these commands publishes a package or touches a live consumer.
 
 ## Architecture
 
@@ -130,7 +139,7 @@ reference; mono-agent does not implicitly load `.env` files.
 | `personal` | Pi; Telegram, webhook, OpenAI-compatible API, and operator channels; local memory/state; cron; OTLP. TUI and web remain separate products. |
 | `multi-runtime` | Pi primary, native Claude SDK fallback, and loopback webhook. |
 
-After building this private source tree, render a template without installing
+After building this source tree, render a template without installing
 unreleased dependencies:
 
 ```bash
@@ -205,11 +214,16 @@ Security reporting and repository-wide policy live in [SECURITY.md](./SECURITY.m
 - [Core concepts](./docs/getting-started/concepts.md)
 - [Exact v1 architecture](./docs/reference/v1-architecture.md)
 - [Generated package directory](./PACKAGES.md)
+- [Generated config reference](./docs/config/reference.md)
+- [Generated public API inventory](./docs/reference/public-api.md)
+- [Generated source-beta complexity report](./docs/reference/source-beta-complexity.md)
+- [v0 to v1 source-beta migration guide](./docs/migration/v0-to-v1-source-beta.md)
 - [V1 product requirements](./refactor/mono-agent-v1-prd.md)
 
 ## Phase boundary
 
-The current milestone ends at a buildable, tested, runnable private source tree.
-A later, explicitly authorized phase owns release candidate packing, registry
-publication, live installation, migration rehearsal, rollback proof, bounded
-soak and observation, consumer cutover, and eventual predecessor retirement.
+The current milestone ends at a buildable, tested, runnable public source tree
+with a clean, packed migration rehearsal. Public visibility and hosted CI do
+not authorize registry publication, live installation, service mutation, data
+cutover, bounded soak and observation, consumer migration, or predecessor
+retirement. Those operations remain a later, explicitly authorized phase.

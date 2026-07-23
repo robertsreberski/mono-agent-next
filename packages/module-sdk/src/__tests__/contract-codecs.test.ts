@@ -155,6 +155,31 @@ describe("AskUser codecs", () => {
     }, ASK_USER_REQUEST)).toThrow("does not match the request");
   });
 
+  it("represents every valid identifier as a prototype-safe answer key", () => {
+    const request = parseAskUserRequest({
+      interactionId: "prototype-safe",
+      requestedAt: REQUESTED_AT,
+      questions: ["constructor", "prototype"].map((id) => ({
+        id,
+        prompt: `Answer ${id}`,
+        allowFreeText: true,
+        multiple: false,
+      })),
+    });
+    const answer = parseAskUserAnswer({
+      interactionId: request.interactionId,
+      answers: Object.fromEntries([
+        ["constructor", ["constructor value"]],
+        ["prototype", ["prototype value"]],
+      ]),
+      answeredAt: ANSWERED_AT,
+    }, request);
+
+    expect(Object.getPrototypeOf(answer.answers)).toBeNull();
+    expect(answer.answers["constructor" as string]).toEqual(["constructor value"]);
+    expect(answer.answers["prototype" as string]).toEqual(["prototype value"]);
+  });
+
   it("rejects sparse or accessor-backed contract records and arrays without invoking getters", () => {
     expect(() => parseAskUserRequest({
       ...ASK_USER_REQUEST,

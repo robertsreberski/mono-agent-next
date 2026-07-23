@@ -24,6 +24,11 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
     { label: "check:oss-hygiene", command: "pnpm", args: ["run", "check:oss-hygiene"] },
     { label: "check:licenses", command: "pnpm", args: ["run", "check:licenses"] },
     {
+      label: "check:apache-provenance",
+      command: "pnpm",
+      args: ["run", "check:apache-provenance"],
+    },
+    {
       label: "check:dependency-vulnerabilities",
       command: "pnpm",
       args: ["run", "check:dependency-vulnerabilities"],
@@ -39,12 +44,27 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
       command: "pnpm",
       args: ["run", "check:getting-started-version-pins"],
     },
+    {
+      label: "check:source-beta-budgets",
+      command: "pnpm",
+      args: ["run", "check:source-beta-budgets"],
+    },
+    {
+      label: "check:source-beta-docs",
+      command: "pnpm",
+      args: ["run", "check:source-beta-docs"],
+    },
     { label: "check:docs", command: "pnpm", args: ["run", "check:docs"] },
     { label: "release:validate", command: "pnpm", args: ["run", "release:validate", "--", "--tag", releaseTag] },
     { label: "check:architecture", command: "pnpm", args: ["run", "check:architecture"] },
     { label: "build", command: "pnpm", args: ["run", "build"] },
     { label: "check:doc-snippets", command: "pnpm", args: ["run", "check:doc-snippets"] },
     { label: "check:deep-imports", command: "pnpm", args: ["run", "check:deep-imports"] },
+    {
+      label: "verify:v1-operator-products",
+      command: "pnpm",
+      args: ["run", "verify:v1-operator-products"],
+    },
     {
       label: "verify:consumers",
       command: "pnpm",
@@ -54,6 +74,7 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
     { label: "release:pack", command: "pnpm", args: ["run", "release:pack", "--", "--tag", releaseTag] },
     { label: "release:consumer", command: "pnpm", args: packedConsumerArgs },
     { label: "typecheck", command: "pnpm", args: ["run", "typecheck"] },
+    { label: "scripts:test", command: "pnpm", args: ["run", "scripts:test"] },
     { label: "test", command: "pnpm", args: ["run", "test"] },
     { label: "git diff --check", command: "git", args: ["diff", "--check"] },
   ];

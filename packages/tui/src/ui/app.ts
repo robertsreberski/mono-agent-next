@@ -17,9 +17,12 @@ import {
   evaluateOperatorRuntimeOverride,
   initialOperatorState,
   OPERATOR_LIMITS,
+  parseAskAnswerRequest,
   parseTurnRequest,
   reduceOperatorFrame,
   type OperatorAction,
+  type OperatorAsk,
+  type OperatorAskAnswerRequest,
   type OperatorCapabilities,
   type OperatorClient,
   type OperatorConversationState,
@@ -40,6 +43,7 @@ export interface MonoAgentTuiAppOptions {
   readonly client: OperatorClient;
   readonly conversationId: string;
   readonly title?: string;
+  readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
   /** Present only for registry discovery; binds endpoint responses to that descriptor. */
@@ -60,6 +64,7 @@ export class MonoAgentTuiApp {
   private turnAbort: AbortController | undefined;
   private preflightAbort: AbortController | undefined;
   private turnStarting = false;
+  private runtimeOverride: string | undefined;
   private modelOverride: string | undefined;
   private effortOverride: string | undefined;
   private attachments: OperatorAttachment[] = [];
@@ -71,6 +76,7 @@ export class MonoAgentTuiApp {
   constructor(options: MonoAgentTuiAppOptions) {
     this.options = options;
     this.state = initialOperatorState(options.conversationId);
+    this.runtimeOverride = options.runtime;
     this.modelOverride = options.model;
     this.effortOverride = options.effort;
     this.tui = new TUI(options.terminal);
@@ -169,6 +175,9 @@ export class MonoAgentTuiApp {
       case "cancel":
         await this.cancelTurn();
         return;
+      case "runtime":
+        this.setRuntime(argument);
+        return;
       case "model":
         this.setModel(argument);
         return;
@@ -197,7 +206,7 @@ export class MonoAgentTuiApp {
         await this.showHealth();
         return;
       case "help":
-        this.addNotice("/attach <path> · /quote <message-id>[=<text>] · /send [text] · /replay · /config · /health · /model <ref|default> · /effort <level|default> · /answer <question>=<value> · /cancel · /exit");
+        this.addNotice('/attach <path> · /quote <message-id>[=<text>] · /send [text] · /replay · /config · /health · /runtime <instance|default> · /model <ref|default> · /effort <level|default> · /answer {"question":"value","other":["value"]} · /cancel · /exit');
         return;
       default:
         this.addNotice(`Unknown command /${name}. Run /help.`, "warning");
@@ -243,6 +252,7 @@ export class MonoAgentTuiApp {
         ...(turnAttachments.length === 0 ? {} : { attachments: turnAttachments }),
         ...(turnQuote === undefined ? {} : { quote: turnQuote }),
       },
+      ...(this.runtimeOverride === undefined ? {} : { runtime: this.runtimeOverride }),
       ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
       ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
       metadata: { source: "tui" },
@@ -276,6 +286,7 @@ export class MonoAgentTuiApp {
           ...(turnAttachments.length === 0 ? {} : { attachments: turnAttachments }),
           ...(turnQuote === undefined ? {} : { quote: turnQuote }),
         },
+        ...(this.runtimeOverride === undefined ? {} : { runtime: this.runtimeOverride }),
         ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
         ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
         metadata: { source: "tui" },
@@ -309,11 +320,13 @@ export class MonoAgentTuiApp {
       const info = await this.options.client.getInfo(controller.signal);
       assertOperatorIdentity(expected, info);
       const decision = evaluateOperatorRuntimeOverride(info, {
+        ...(this.runtimeOverride === undefined ? {} : { runtime: this.runtimeOverride }),
         ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
         ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
       });
       if (!decision.allowed) throw new Error(decision.message);
       this.info = info;
+      this.runtimeOverride = decision.intent.runtime;
       this.modelOverride = decision.intent.model;
       this.effortOverride = decision.intent.effort;
       this.renderHeader();
@@ -347,7 +360,7 @@ export class MonoAgentTuiApp {
         break;
       case "ask_user":
         this.addAsk(frame);
-        this.setStatus(this.statusText("awaiting answer · /answer <question>=<value>"));
+        this.setStatus(this.statusText('awaiting answer · /answer {"q":"v","q2":["v1","v2"]}'));
         break;
       case "capabilities":
         this.setStatus(this.statusText("capabilities updated"));
@@ -376,12 +389,18 @@ export class MonoAgentTuiApp {
   }
 
   private addAsk(frame: Extract<OperatorFrame, { type: "ask_user" }>): void {
-    const lines = frame.ask.questions.flatMap((question) => [
-      `? ${sanitizeTerminalText(question.id)}: ${sanitizeTerminalText(question.prompt, { multiline: true })}`,
-      ...(question.choices ?? []).map((choice) =>
-        `    ${sanitizeTerminalText(choice.value)} — ${sanitizeTerminalText(choice.label)}`
-      ),
-    ]);
+    const lines = [
+      ...frame.ask.questions.flatMap((question) => [
+        `? ${sanitizeTerminalText(question.id)}: ${sanitizeTerminalText(question.prompt, { multiline: true })}`,
+        ...(question.choices ?? []).map((choice) =>
+          `    ${sanitizeTerminalText(choice.value)} — ${sanitizeTerminalText(choice.label)}`
+        ),
+        `    ${question.multiple ? "choose one or more" : "choose one"}${question.allowFreeText ? " · free text accepted" : ""}`,
+      ]),
+      "Answer every question in one command:",
+      '    /answer {"question":"value","other-question":["value-1","value-2"]}',
+      "Legacy question=value; other=value remains available for simple values.",
+    ];
     this.transcript.addChild(new Text(style.warning(lines.join("\n")), 1, 1));
   }
 
@@ -423,6 +442,30 @@ export class MonoAgentTuiApp {
     }
   }
 
+  private setRuntime(value: string): void {
+    if (!this.can("set_runtime")) {
+      this.addNotice("The selected agent does not permit runtime overrides.", "warning");
+      return;
+    }
+    if (value.length === 0) {
+      this.addNotice("Use /runtime <configured-instance|default>.", "warning");
+      return;
+    }
+    const decision = evaluateOperatorRuntimeOverride(this.info!, {
+      ...(value === "default" ? {} : { runtime: value }),
+      ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
+      ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
+    });
+    if (!decision.allowed) {
+      this.addNotice(decision.message, "warning");
+      return;
+    }
+    this.runtimeOverride = decision.intent.runtime;
+    this.modelOverride = decision.intent.model;
+    this.effortOverride = decision.intent.effort;
+    this.setStatus(this.statusText(value === "default" ? "runtime override cleared" : `runtime ${value}`));
+  }
+
   private setModel(value: string): void {
     if (!this.can("set_model")) {
       this.addNotice("The selected agent does not permit model overrides.", "warning");
@@ -435,16 +478,20 @@ export class MonoAgentTuiApp {
         : `Models: ${choices.length === 0 ? "none advertised" : choices}`);
       return;
     }
-    const decision = evaluateOperatorRuntimeOverride(this.info!, value === "default"
-      ? {}
-      : {
-          model: value,
-          ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
-        });
+    const decision = evaluateOperatorRuntimeOverride(this.info!, {
+      ...(this.runtimeOverride === undefined ? {} : { runtime: this.runtimeOverride }),
+      ...(value === "default"
+        ? {}
+        : {
+            model: value,
+            ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
+          }),
+    });
     if (!decision.allowed) {
       this.addNotice(decision.message, "warning");
       return;
     }
+    this.runtimeOverride = decision.intent.runtime;
     this.modelOverride = decision.intent.model;
     this.effortOverride = decision.intent.effort;
     if (value === "default") this.effortOverride = undefined;
@@ -453,12 +500,14 @@ export class MonoAgentTuiApp {
 
   private validateInitialOverrides(): void {
     const decision = evaluateOperatorRuntimeOverride(this.info!, {
+      ...(this.runtimeOverride === undefined ? {} : { runtime: this.runtimeOverride }),
       ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
       ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
     });
     if (!decision.allowed) {
       throw new Error(decision.message);
     }
+    this.runtimeOverride = decision.intent.runtime;
     this.modelOverride = decision.intent.model;
     this.effortOverride = decision.intent.effort;
   }
@@ -477,6 +526,7 @@ export class MonoAgentTuiApp {
       return;
     }
     const decision = evaluateOperatorRuntimeOverride(this.info!, {
+      ...(this.runtimeOverride === undefined ? {} : { runtime: this.runtimeOverride }),
       ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
       ...(value === "default" ? {} : { effort: value }),
     });
@@ -484,6 +534,7 @@ export class MonoAgentTuiApp {
       this.addNotice(decision.message, "warning");
       return;
     }
+    this.runtimeOverride = decision.intent.runtime;
     this.modelOverride = decision.intent.model;
     this.effortOverride = decision.intent.effort;
     this.setStatus(this.statusText(value === "default" ? "effort override cleared" : `effort ${value}`));
@@ -494,20 +545,21 @@ export class MonoAgentTuiApp {
       this.addNotice("There is no answerable question.", "warning");
       return;
     }
-    const separator = value.indexOf("=");
-    if (separator <= 0 || separator === value.length - 1) {
-      this.addNotice("Use /answer <question-id>=<value>[,<value>].", "warning");
+    let request: OperatorAskAnswerRequest;
+    try {
+      request = parseTuiAskAnswer(value, this.state.pendingAsk);
+    } catch (error) {
+      this.addNotice(errorMessage(error), "warning");
       return;
     }
-    const questionId = value.slice(0, separator).trim();
-    const answers = value.slice(separator + 1).split(",").map((answer) => answer.trim()).filter(Boolean);
     const result = await this.options.client.answerAsk(
       this.options.conversationId,
-      {
-        interactionId: this.state.pendingAsk.interactionId,
-        answers: { [questionId]: answers },
-      },
+      request,
     );
+    if (result.status === "accepted") {
+      const { pendingAsk: _pendingAsk, ...next } = this.state;
+      this.state = { ...next, status: next.activeTurnId === undefined ? next.status : "streaming" };
+    }
     this.addNotice(`answer ${result.status}`);
   }
 
@@ -661,9 +713,10 @@ export class MonoAgentTuiApp {
   }
 
   private statusText(prefix: string): string {
+    const runtime = this.runtimeOverride ?? this.info?.defaults?.runtime;
     const model = this.modelOverride ?? this.info?.defaults?.model;
     const effort = this.effortOverride ?? this.info?.defaults?.effort;
-    return [prefix, model, effort].filter((value): value is string => value !== undefined).join(" · ");
+    return [prefix, runtime, model, effort].filter((value): value is string => value !== undefined).join(" · ");
   }
 
   private setStatus(value: string): void {
@@ -676,6 +729,89 @@ export class MonoAgentTuiApp {
     this.transcript.addChild(new Text(paint(sanitizeTerminalText(value)), 1, 1));
     this.tui.requestRender();
   }
+}
+
+function parseTuiAskAnswer(value: string, ask: OperatorAsk): OperatorAskAnswerRequest {
+  if (value.length === 0) {
+    throw new Error('Use /answer {"question":"value","other-question":["value-1","value-2"]}.');
+  }
+  if (Buffer.byteLength(value) > OPERATOR_LIMITS.askAnswerRequestBytes) {
+    throw new Error("AskUser answer exceeds the shared operator request bound.");
+  }
+  const questions = new Map(ask.questions.map((question) => [question.id, question]));
+  const answerEntries = value.startsWith("{")
+    ? structuredAnswerEntries(value)
+    : legacyAnswerEntries(value);
+  const answers = new Map<string, readonly string[]>();
+  for (const [questionId, values] of answerEntries) {
+    if (answers.has(questionId)) {
+      throw new Error(`Question ${JSON.stringify(questionId)} is answered more than once.`);
+    }
+    const question = questions.get(questionId);
+    if (question === undefined) {
+      throw new Error(`Question ${JSON.stringify(questionId)} is not pending.`);
+    }
+    if (values.length === 0) {
+      throw new Error(`Question ${JSON.stringify(questionId)} requires an answer.`);
+    }
+    if (!question.multiple && values.length !== 1) {
+      throw new Error(`Question ${JSON.stringify(questionId)} accepts exactly one answer.`);
+    }
+    if (!question.allowFreeText) {
+      const choices = new Set(question.choices?.map((choice) => choice.value) ?? []);
+      const unknown = values.find((answer) => !choices.has(answer));
+      if (unknown !== undefined) {
+        throw new Error(`Answer ${JSON.stringify(unknown)} is not a choice for ${JSON.stringify(questionId)}.`);
+      }
+    }
+    answers.set(questionId, values);
+  }
+  const missing = ask.questions.filter((question) => !answers.has(question.id)).map((question) => question.id);
+  if (missing.length > 0) {
+    throw new Error(`Answer every pending question; missing ${missing.map((id) => JSON.stringify(id)).join(", ")}.`);
+  }
+  const parsed = parseAskAnswerRequest({
+    interactionId: ask.interactionId,
+    answers: Object.fromEntries(answers),
+  });
+  if (Buffer.byteLength(JSON.stringify(parsed)) > OPERATOR_LIMITS.askAnswerRequestBytes) {
+    throw new Error("AskUser answer exceeds the shared operator request bound.");
+  }
+  return parsed;
+}
+
+function structuredAnswerEntries(value: string): Array<[string, readonly string[]]> {
+  let input: unknown;
+  try {
+    input = JSON.parse(value) as unknown;
+  } catch {
+    throw new Error("Structured /answer input must be valid JSON.");
+  }
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    throw new Error("Structured /answer input must be a JSON object.");
+  }
+  return Object.entries(input).map(([questionId, answer]) => {
+    if (typeof answer === "string") return [questionId, [answer]];
+    if (Array.isArray(answer) && answer.every((item) => typeof item === "string")) {
+      return [questionId, answer];
+    }
+    throw new Error(`Answer for ${JSON.stringify(questionId)} must be a string or string array.`);
+  });
+}
+
+function legacyAnswerEntries(value: string): Array<[string, readonly string[]]> {
+  return value.split(";").map((rawAssignment) => {
+    const assignment = rawAssignment.trim();
+    const separator = assignment.indexOf("=");
+    if (separator <= 0 || separator === assignment.length - 1) {
+      throw new Error('Use /answer {"question":"value","other-question":["value-1","value-2"]}.');
+    }
+    const questionId = assignment.slice(0, separator).trim();
+    const values = assignment.slice(separator + 1).split(",")
+      .map((answer) => answer.trim())
+      .filter(Boolean);
+    return [questionId, values];
+  });
 }
 
 const NO_CAPABILITIES: OperatorCapabilities = {

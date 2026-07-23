@@ -2,8 +2,8 @@ import { resolve } from "node:path";
 
 import { MODULE_API_VERSION } from "@mono-agent/module-sdk";
 import {
-  defineTriggerModule,
   type TriggerModuleCreateContext,
+  type TriggerModuleDefinition,
 } from "@mono-agent/module-sdk/internal";
 
 import {
@@ -19,15 +19,15 @@ import {
 const PACKAGE_NAME = "@mono-agent/trigger-cron";
 const PACKAGE_VERSION = "0.15.0";
 
-export const monoAgentModule = defineTriggerModule({
-  manifest: {
+export const monoAgentModule = Object.freeze({
+  manifest: Object.freeze({
     packageName: PACKAGE_NAME,
     packageVersion: PACKAGE_VERSION,
     apiVersion: MODULE_API_VERSION,
     kind: "trigger",
     responsibility: "Discovers scheduled Markdown jobs and emits deterministic idempotent trigger events.",
-    capabilities: [HOST_CAPABILITY_CRON_DURABLE_STATE],
-  },
+    capabilities: Object.freeze([HOST_CAPABILITY_CRON_DURABLE_STATE]),
+  }),
   schema: triggerCronConfigSchema,
   async create(context: TriggerModuleCreateContext<TriggerCronConfig>) {
     const directory = resolve(context.configDirectory, context.config.jobsDirectory);
@@ -39,7 +39,7 @@ export const monoAgentModule = defineTriggerModule({
       signal: context.signal,
     });
   },
-});
+}) satisfies TriggerModuleDefinition<TriggerCronConfig>;
 
 export {
   DEFAULT_CRON_TIMEZONE,

@@ -5,17 +5,33 @@ import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import {
   mkdir,
-  mkdtemp,
+  readdir,
   readFile,
-  realpath,
-  rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parse as parseYaml } from "yaml";
 
 import { packageCatalog, packageRelativePath } from "./package-catalog.mjs";
+import { publicExportSpecifiers } from "./release/fixtures/packed-consumer/public-exports.mjs";
+import {
+  assertFreshPackageOutputs,
+  assertLockfileArtifactIntegrities,
+  assertProofNodeVersion,
+  assertStableGitHead,
+  assertTarballSnapshotsStable,
+  assertV1PublicExportSpecifiers,
+  buildArtifactSetEvidence,
+  buildConfigSetEvidence,
+  buildInstalledClosure,
+  buildTemplateConfigRecord,
+  buildV1SystemProofEvidence,
+  captureCleanGitHead,
+  createFreshProofWorkspace,
+  removeFreshProofWorkspace,
+  snapshotTarball,
+} from "./lib/v1-system-proof.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const VERSION = "0.15.0";
@@ -23,9 +39,11 @@ const COMMAND_TIMEOUT_MS = 300_000;
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 const EXPECTED_REPLY = "mono-agent-next durable provider fact 7d3f9c";
 const MEMORY_QUERY = "packed-memory-query-a41c";
+const PERSONAL_WEBHOOK_PROMPT = "Handle this authenticated project webhook request.";
 const WEBHOOK_SECRET = "packed-system-webhook-token";
 const OPERATOR_SECRET = "packed-system-operator-token-0000000000000001";
 const DELIVERY_SECRET = "packed-system-delivery-token";
+const TEMPLATE_NAMES = Object.freeze(["minimal", "personal", "multi-runtime"]);
 
 const EXPECTED_PACKAGE_NAMES = Object.freeze([
   "@mono-agent/module-sdk",
@@ -65,10 +83,11 @@ const FORBIDDEN_PREDECESSOR_PACKAGES = Object.freeze([
 const TEMPLATE_ENVIRONMENT = Object.freeze({
   WEBHOOK_API_KEY: "packed-template-webhook-token",
   CLAUDE_CODE_OAUTH_TOKEN: "packed-template-claude-oauth-token",
-  MONO_AGENT_OPENAI_API_KEY: "packed-template-openai-token",
+  MONO_AGENT_OPENAI_API_KEY: "packed-template-openai-token-0000000001",
   MONO_AGENT_OPERATOR_TOKEN: "packed-template-operator-token-0000000000000001",
   MONO_AGENT_TELEGRAM_BOT_TOKEN: "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
   MONO_AGENT_WEBHOOK_API_KEY: "packed-template-personal-webhook-token",
+  MONO_AGENT_WEBHOOK_SIGNATURE_SECRET: "packed-template-personal-signature-secret-0001",
   PERSONAL_AGENT_TELEGRAM_CHAT_ID: "123456789",
 });
 
@@ -105,18 +124,21 @@ const TEMPLATE_DEPENDENCIES = Object.freeze({
 });
 
 async function main() {
-  assertSupportedNode();
+  assertProofNodeVersion();
   assertExactCatalog();
 
-  const authoredTemporaryRoot = await mkdtemp(join(tmpdir(), "mono-agent-v1-system-"));
-  const temporaryRoot = await realpath(authoredTemporaryRoot);
-  const tarballDirectory = join(temporaryRoot, "tarballs");
-  const consumerDirectory = join(temporaryRoot, "consumer");
-  const scaffoldDirectory = join(temporaryRoot, "scaffolds");
+  const sourceInitial = captureCleanGitHead({ repo: REPO_ROOT });
+  const workspace = createFreshProofWorkspace({ repo: REPO_ROOT, source: sourceInitial });
+  const tarballDirectory = join(workspace.root, "tarballs");
+  const consumerDirectory = join(workspace.root, "consumer");
+  const scaffoldDirectory = join(workspace.root, "scaffolds");
   let packageRegistry;
   let provider;
+  let personalOtlpReceiver;
   let otlpReceiver;
   let deliveryReceiver;
+  let proofInputs;
+  let proofFailure;
 
   try {
     await Promise.all([
@@ -125,19 +147,43 @@ async function main() {
       mkdir(scaffoldDirectory, { recursive: true }),
     ]);
 
-    buildPackages();
-    const tarballs = packPackages(tarballDirectory);
+    assertFreshPackageOutputs({
+      workspace,
+      catalog: packageCatalog,
+      expectedPackageNames: EXPECTED_PACKAGE_NAMES,
+    });
+    installFreshCheckout(workspace.checkout);
+    buildPackages(workspace.checkout);
+    const { tarballs, snapshots, artifacts } = await packPackages(
+      tarballDirectory,
+      workspace.checkout,
+    );
     packageRegistry = await startPackageRegistry(tarballs);
     await installSystemConsumer(consumerDirectory, tarballs, packageRegistry.url);
-    await assertCleanInstalledClosure(consumerDirectory);
+    const closure = await assertCleanInstalledClosure(consumerDirectory, artifacts);
     await importAllPackages(consumerDirectory);
-    await scaffoldAndValidateTemplates(consumerDirectory, scaffoldDirectory, packageRegistry.url);
+    await proveDocsMcpPackedClient(
+      workspace.checkout,
+      tarballs.get("@mono-agent/docs-mcp"),
+    );
+    const configs = await scaffoldAndValidateTemplates(
+      consumerDirectory,
+      scaffoldDirectory,
+      packageRegistry.url,
+    );
 
-    [provider, otlpReceiver, deliveryReceiver] = await Promise.all([
+    [provider, personalOtlpReceiver, otlpReceiver, deliveryReceiver] = await Promise.all([
       startOpenAiCompatibleProvider(),
+      startOtlpReceiver(),
       startOtlpReceiver(),
       startDeliveryReceiver(),
     ]);
+    await proveScaffoldFirstTurns(
+      scaffoldDirectory,
+      provider.baseUrl,
+      personalOtlpReceiver.endpoint,
+    );
+    assertPersonalTemplateOtlpRequests(personalOtlpReceiver.requests);
 
     await writeSystemFixture(consumerDirectory, {
       providerBaseUrl: provider.baseUrl,
@@ -158,26 +204,89 @@ async function main() {
     const scenarioProof = assertScenarioOutput(scenario.stdout);
     assertProviderRequests(provider.requests);
     assertOtlpRequests(otlpReceiver.requests);
-    assertDeliveryRequests(deliveryReceiver.requests, scenarioProof.expectedCronKey);
-
-    console.log(
-      `Verified exact ${String(EXPECTED_PACKAGE_NAMES.length)}-package packed v1: clean install/import, all templates, Core/Pi/state/memory/webhook/operator/cron/OTLP, restart persistence, atomic trigger delivery, and bounded shutdown on Node.js ${process.versions.node}.`,
+    assertDeliveryRequests(
+      deliveryReceiver.requests,
+      scenarioProof.expectedCronKey,
+      webhookDefaultDestination(deliveryReceiver.endpoint),
     );
-  } finally {
-    await Promise.allSettled([
-      provider?.close(),
-      otlpReceiver?.close(),
-      deliveryReceiver?.close(),
-      packageRegistry?.close(),
-    ]);
-    await rm(temporaryRoot, { recursive: true, force: true });
+
+    const stableArtifacts = assertTarballSnapshotsStable(snapshots, {
+      expectedPackageNames: EXPECTED_PACKAGE_NAMES,
+      expectedVersion: VERSION,
+    });
+    if (stableArtifacts.aggregateSha256 !== artifacts.aggregateSha256) {
+      throw new Error("Packed artifact aggregate changed during the system scenario.");
+    }
+    assertStableGitHead(
+      workspace.source,
+      captureCleanGitHead({ repo: workspace.checkout }),
+      "fresh-checkout execution",
+    );
+    proofInputs = { artifacts: stableArtifacts, closure, configs };
+  } catch (error) {
+    proofFailure = error;
   }
+
+  let cleanupFailure;
+  try {
+    await closeProofResources([
+      provider,
+      personalOtlpReceiver,
+      otlpReceiver,
+      deliveryReceiver,
+      packageRegistry,
+    ]);
+  } catch (error) {
+    cleanupFailure = error;
+  }
+  try {
+    removeFreshProofWorkspace(workspace);
+  } catch (error) {
+    cleanupFailure = cleanupFailure === undefined
+      ? error
+      : new AggregateError(
+        [cleanupFailure, error],
+        "Packed v1 fixture shutdown and workspace cleanup both failed.",
+      );
+  }
+
+  if (proofFailure !== undefined || cleanupFailure !== undefined) {
+    const failures = [proofFailure, cleanupFailure].filter((error) => error !== undefined);
+    if (failures.length === 1) throw failures[0];
+    throw new AggregateError(failures, "Packed v1 proof and safe cleanup both failed.");
+  }
+  if (proofInputs === undefined) throw new Error("Packed v1 proof completed without evidence.");
+
+  const sourceFinal = captureCleanGitHead({ repo: REPO_ROOT });
+  const evidence = buildV1SystemProofEvidence({
+    sourceInitial,
+    sourceFinal,
+    nodeVersion: process.versions.node,
+    artifacts: proofInputs.artifacts,
+    closure: proofInputs.closure,
+    configs: proofInputs.configs,
+    expectedPackageNames: EXPECTED_PACKAGE_NAMES,
+    expectedVersion: VERSION,
+    forbiddenNames: FORBIDDEN_PREDECESSOR_PACKAGES,
+    expectedTemplates: TEMPLATE_NAMES,
+  });
+  console.log(JSON.stringify(evidence));
 }
 
-function assertSupportedNode() {
-  const [major, minor] = process.versions.node.split(".").map(Number);
-  if (major < 22 || (major === 22 && minor < 19)) {
-    throw new Error(`Packed v1 proof requires Node.js >=22.19.0; current runtime is ${process.versions.node}`);
+async function closeProofResources(resources) {
+  const results = await Promise.allSettled(
+    resources
+      .filter((resource) => resource !== undefined)
+      .map((resource) => resource.close()),
+  );
+  const failures = results
+    .filter((result) => result.status === "rejected")
+    .map((result) => result.reason);
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      "Packed v1 proof could not close all bounded fixture resources.",
+    );
   }
 }
 
@@ -193,21 +302,32 @@ function assertExactCatalog() {
   }
 }
 
-function buildPackages() {
+function installFreshCheckout(repoRoot) {
+  run(
+    "pnpm",
+    ["install", "--frozen-lockfile", "--offline", "--ignore-scripts"],
+    repoRoot,
+    offlineEnvironment(),
+  );
+}
+
+function buildPackages(repoRoot) {
   const args = ["-r", "--sort"];
   for (const packageName of EXPECTED_PACKAGE_NAMES) args.push("--filter", packageName);
   args.push("run", "build");
-  run("pnpm", args, REPO_ROOT);
+  run("pnpm", args, repoRoot, offlineEnvironment());
 }
 
-function packPackages(tarballDirectory) {
+async function packPackages(tarballDirectory, repoRoot) {
   const packed = new Map();
+  const snapshots = [];
   for (const entry of packageCatalog) {
     const directory = packageRelativePath(entry);
     const result = run(
       "pnpm",
       ["--dir", directory, "pack", "--pack-destination", tarballDirectory, "--json"],
-      REPO_ROOT,
+      repoRoot,
+      offlineEnvironment(),
     );
     const packResult = parsePackJson(result.stdout);
     if (packResult.name !== entry.name || packResult.version !== VERSION) {
@@ -232,8 +352,25 @@ function packPackages(tarballDirectory) {
       throw new Error(`${entry.name} packed manifest still contains a workspace protocol`);
     }
     packed.set(entry.name, tarballPath);
+    snapshots.push(snapshotTarball({
+      name: entry.name,
+      version: packResult.version,
+      tarballPath,
+      expectedDirectory: tarballDirectory,
+    }));
   }
-  return packed;
+  const artifacts = buildArtifactSetEvidence(snapshots, {
+    expectedPackageNames: EXPECTED_PACKAGE_NAMES,
+    expectedVersion: VERSION,
+  });
+  const actualFiles = (await readdir(tarballDirectory)).sort();
+  const expectedFiles = artifacts.packages.map((entry) => entry.filename).sort();
+  if (JSON.stringify(actualFiles) !== JSON.stringify(expectedFiles)) {
+    throw new Error(
+      `Packed artifact directory must contain exactly ${String(expectedFiles.length)} tarballs; found ${actualFiles.join(", ")}`,
+    );
+  }
+  return { tarballs: packed, snapshots, artifacts };
 }
 
 function parsePackJson(output) {
@@ -266,7 +403,7 @@ async function installSystemConsumer(directory, tarballs, registryUrl) {
   await runAsync("pnpm", ["install", "--ignore-scripts", "--frozen-lockfile"], directory, environment);
 }
 
-async function assertCleanInstalledClosure(directory) {
+async function assertCleanInstalledClosure(directory, artifacts) {
   const lock = await readFile(join(directory, "pnpm-lock.yaml"), "utf8");
   if (lock.includes("workspace:")) throw new Error("Packed consumer lockfile contains a workspace protocol");
   for (const forbidden of FORBIDDEN_PREDECESSOR_PACKAGES) {
@@ -274,6 +411,7 @@ async function assertCleanInstalledClosure(directory) {
       throw new Error(`Packed consumer lockfile contains predecessor package ${forbidden}`);
     }
   }
+  assertLockfileArtifactIntegrities(parseYaml(lock), artifacts);
 
   const listedText = run("pnpm", ["list", "--prod", "--depth", "Infinity", "--json"], directory).stdout;
   for (const forbidden of FORBIDDEN_PREDECESSOR_PACKAGES) {
@@ -299,6 +437,11 @@ async function assertCleanInstalledClosure(directory) {
       throw new Error(`Installed package identity mismatch for ${packageName}`);
     }
   }
+  return buildInstalledClosure(listedText, {
+    expectedFirstPartyNames: EXPECTED_PACKAGE_NAMES,
+    expectedFirstPartyVersion: VERSION,
+    forbiddenNames: FORBIDDEN_PREDECESSOR_PACKAGES,
+  });
 }
 
 function collectPackageNames(value, output = new Set()) {
@@ -317,33 +460,77 @@ function collectPackageNames(value, output = new Set()) {
 }
 
 async function importAllPackages(directory) {
+  const specifiers = assertV1PublicExportSpecifiers((
+    await Promise.all(EXPECTED_PACKAGE_NAMES.map(async (packageName) => ({
+      packageName,
+      manifest: await readJson(
+        join(directory, "node_modules", ...packageName.split("/"), "package.json"),
+      ),
+    })))
+  ).flatMap(({ packageName, manifest }) => publicExportSpecifiers(packageName, manifest)));
   const path = join(directory, "import-all.mjs");
   await writeFile(path, [
-    `const packages = ${JSON.stringify(EXPECTED_PACKAGE_NAMES)};`,
-    "for (const packageName of packages) {",
-    "  const imported = await import(packageName);",
-    "  if (imported === null || typeof imported !== 'object') throw new Error('Invalid import for ' + packageName);",
+    `const specifiers = ${JSON.stringify(specifiers)};`,
+    "for (const specifier of specifiers) {",
+    "  const imported = specifier.endsWith('/package.json')",
+    "    ? await import(specifier, { with: { type: 'json' } })",
+    "    : await import(specifier);",
+    "  if (imported === null || typeof imported !== 'object') throw new Error('Invalid import for ' + specifier);",
     "}",
-    "process.stdout.write(JSON.stringify({ imported: packages }) + '\\n');",
+    "process.stdout.write(JSON.stringify({ imported: specifiers }) + '\\n');",
     "",
   ].join("\n"), "utf8");
   const result = await runAsync(process.execPath, [basename(path)], directory);
   const parsed = JSON.parse(result.stdout.trim());
-  if (JSON.stringify(parsed.imported) !== JSON.stringify(EXPECTED_PACKAGE_NAMES)) {
-    throw new Error("Packed import proof did not cover the exact v1 package roster");
+  assertV1PublicExportSpecifiers(parsed.imported);
+}
+
+async function proveDocsMcpPackedClient(checkout, tarballPath) {
+  if (typeof tarballPath !== "string") {
+    throw new Error("Packed docs-mcp artifact is unavailable for the client-registration smoke");
+  }
+  const result = await runAsync(
+    process.execPath,
+    [join(checkout, "extras", "docs-mcp", "scripts", "smoke-packed.mjs")],
+    checkout,
+    {
+      ...process.env,
+      CI: "1",
+      MONO_AGENT_DOCS_MCP_TARBALL: tarballPath,
+      NPM_CONFIG_OFFLINE: "true",
+      npm_config_offline: "true",
+    },
+  );
+  const lines = result.stdout.trim().split("\n").filter(Boolean);
+  const proof = JSON.parse(lines.at(-1) ?? "null");
+  if (
+    proof?.ok !== true
+    || proof.package !== "@mono-agent/docs-mcp"
+    || proof.transport !== "packed-stdio"
+    || proof.registration !== "mcpServers.mono-agent-docs"
+    || proof.artifact !== basename(tarballPath)
+  ) {
+    throw new Error(`Packed docs-mcp client-registration smoke failed: ${result.stdout}`);
   }
 }
 
 async function scaffoldAndValidateTemplates(consumerDirectory, scaffoldDirectory, registryUrl) {
   const create = join(consumerDirectory, "node_modules", ".bin", "create-mono-agent");
-  for (const template of ["minimal", "personal", "multi-runtime"]) {
+  const configRecords = [];
+  for (const template of TEMPLATE_NAMES) {
     const target = join(scaffoldDirectory, template);
     const scaffold = run(create, [target, "--template", template], consumerDirectory);
     const event = JSON.parse(scaffold.stdout.trim());
     if (event.event !== "scaffolded" || event.template !== template) {
       throw new Error(`Packed scaffolder returned an invalid ${template} result: ${scaffold.stdout}`);
     }
-    await assertTemplateContract(target, template);
+    const contract = await assertTemplateContract(target, template);
+    configRecords.push(buildTemplateConfigRecord({
+      template,
+      configSource: contract.configSource,
+      dependencies: contract.dependencies,
+      selectedPackages: contract.selectedPackages,
+    }));
     await writeRegistryConfig(target, registryUrl);
     const installEnv = installEnvironment();
     await runAsync("pnpm", ["install", "--ignore-scripts", "--no-frozen-lockfile"], target, installEnv);
@@ -357,6 +544,7 @@ async function scaffoldAndValidateTemplates(consumerDirectory, scaffoldDirectory
     );
     assertJsonOk(validation.stdout, `${template} packed validation`);
   }
+  return buildConfigSetEvidence(configRecords, { expectedTemplates: TEMPLATE_NAMES });
 }
 
 async function assertTemplateContract(directory, template) {
@@ -373,7 +561,8 @@ async function assertTemplateContract(directory, template) {
       throw new Error(`${template} must pin ${packageName} to ${VERSION}`);
     }
   }
-  const config = await readJson(join(directory, "mono-agent.config.json"));
+  const configSource = await readFile(join(directory, "mono-agent.config.json"));
+  const config = JSON.parse(configSource.toString("utf8"));
   const expectedUses = expectedDependencies
     .filter((name) => !["@mono-agent/cli", "@mono-agent/core", "@mono-agent/module-sdk"].includes(name))
     .sort();
@@ -383,6 +572,628 @@ async function assertTemplateContract(directory, template) {
       `${template} module selection must be ${expectedUses.join(", ")}; found ${actualUses.join(", ")}`,
     );
   }
+  if (template === "personal") await assertPersonalTemplateContract(directory, config);
+  return {
+    configSource,
+    dependencies: manifest.dependencies,
+    selectedPackages: actualUses,
+  };
+}
+
+async function assertPersonalTemplateContract(directory, config) {
+  const mcp = await readJson(join(directory, ".mcp.json"));
+  const expectedMcp = {
+    mcpServers: {
+      "project-status": {
+        type: "stdio",
+        command: "node",
+        args: ["./tools/project-status-mcp.mjs"],
+      },
+    },
+  };
+  if (JSON.stringify(mcp) !== JSON.stringify(expectedMcp)) {
+    throw new Error(`Personal template must contain the ordinary project-status MCP fixture: ${JSON.stringify(mcp)}`);
+  }
+  const mcpSource = await readFile(join(directory, "tools", "project-status-mcp.mjs"), "utf8");
+  if (
+    !mcpSource.includes('name: "project_status"')
+    || !mcpSource.includes("The scaffolded project MCP fixture is available.")
+    || mcpSource.includes("@mono-agent/module-sdk")
+  ) {
+    throw new Error("Personal project MCP must be a real project-owned stdio fixture without module-sdk coupling");
+  }
+  const cronSource = await readFile(join(directory, "cron", "morning-briefing.md"), "utf8");
+  for (const expected of [
+    "id: morning-briefing",
+    "expression: 30 7 * * *",
+    "timezone: Europe/Rome",
+    "runtime: pi",
+    "model: openai-codex:gpt-5.6-sol",
+    "notify: telegram",
+    "Do not change files, contact external services",
+  ]) {
+    if (!cronSource.includes(expected)) {
+      throw new Error(`Personal Markdown cron fixture omitted ${JSON.stringify(expected)}`);
+    }
+  }
+  const webhookRoute = await readFile(join(directory, "webhook", "invoke.md"), "utf8");
+  for (const expected of [
+    "name: invoke",
+    "path: /webhook/invoke",
+    "enabled: true",
+    PERSONAL_WEBHOOK_PROMPT,
+  ]) {
+    if (!webhookRoute.includes(expected)) {
+      throw new Error(`Personal webhook route omitted ${JSON.stringify(expected)}`);
+    }
+  }
+  if (
+    config.context?.mcp?.configPath !== "./.mcp.json"
+    || config.triggers?.cron?.jobsDirectory !== "./cron"
+    || config.observability?.exporters?.phoenix?.$use !== "@mono-agent/exporter-otlp"
+    || config.observability.exporters.phoenix.includeSensitiveData !== false
+  ) {
+    throw new Error("Personal config must select its MCP, Markdown cron, and OTLP surfaces");
+  }
+  assertExactPersonalConfig(config);
+  const channelIds = Object.keys(config.channels ?? {}).sort();
+  if (JSON.stringify(channelIds) !== JSON.stringify(["openai-api", "operator", "telegram", "webhook"])) {
+    throw new Error(`Personal config must select its exact four process channels; found ${channelIds.join(", ")}`);
+  }
+  for (const productField of ["tui", "web", "service", "docsMcp"]) {
+    if (Object.hasOwn(config, productField)) {
+      throw new Error(`Personal agent config must not select the separate ${productField} product`);
+    }
+  }
+}
+
+function assertExactPersonalConfig(config) {
+  const agentId = config.agent?.id;
+  const agentName = config.agent?.name;
+  if (
+    typeof agentId !== "string"
+    || agentId.length === 0
+    || typeof agentName !== "string"
+    || agentName.length === 0
+  ) {
+    throw new Error("Personal config must contain a generated agent identity");
+  }
+  if (
+    config.$schema !== "./.mono-agent/mono-agent.config.schema.json"
+    || config.configVersion !== 1
+  ) {
+    throw new Error("Personal config must retain its schema and config-version contract");
+  }
+  const env = (name) => ({ $env: name });
+  assertExactJson(Object.keys(config).sort(), [
+    "$schema",
+    "agent",
+    "channels",
+    "configVersion",
+    "context",
+    "memory",
+    "observability",
+    "policy",
+    "routing",
+    "runtimes",
+    "session",
+    "state",
+    "triggers",
+  ], "Personal top-level config shape");
+  assertExactJson(config.agent, {
+    id: agentId,
+    name: agentName,
+    instructions: "./AGENTS.md",
+    workspace: ".",
+  }, "Personal agent contract");
+  assertExactJson(config.runtimes, {
+    pi: {
+      $use: "@mono-agent/runtime-pi",
+      auth: { path: "./.secrets/pi/auth.json" },
+      sessions: { root: "./.mono-agent/sessions" },
+      retry: { maxDelayMs: 30_000 },
+      localProviders: [{ id: "ollama", baseUrl: "http://127.0.0.1:11434" }],
+    },
+  }, "Personal Pi runtime contract");
+  assertExactJson(config.routing, {
+    primary: { runtime: "pi", model: "openai-codex:gpt-5.6-sol" },
+    fallbacks: [
+      { runtime: "pi", model: "github-copilot:gemini-3.1-pro-preview" },
+      { runtime: "pi", model: "github-copilot:gemini-3.5-flash" },
+      { runtime: "pi", model: "opencode-go:kimi-k2.7-code" },
+      { runtime: "pi", model: "opencode-go:glm-5.2" },
+      { runtime: "pi", model: "anthropic:claude-opus-4-8" },
+      { runtime: "pi", model: "anthropic:claude-fable-5" },
+      { runtime: "pi", model: "opencode-go:kimi-k2.6" },
+      { runtime: "pi", model: "opencode-go:glm-5.1" },
+      { runtime: "pi", model: "openai-codex:gpt-5.6-terra" },
+    ],
+    effort: "high",
+  }, "Personal routing contract");
+  assertExactJson(config.session, {
+    mode: "continuous",
+    idleTimeoutMs: 1_800_000,
+    rollover: "daily",
+    timezone: "Europe/Rome",
+    isolateProactiveRuns: true,
+  }, "Personal session contract");
+  assertExactJson(config.context, {
+    skills: {
+      roots: ["./skills"],
+      load: "all",
+      disclosure: "index",
+      maxBytes: 96_000,
+    },
+    mcp: { configPath: "./.mcp.json" },
+  }, "Personal context contract");
+  assertExactJson(config.memory, {
+    $use: "@mono-agent/memory-local",
+    root: "./.mono-agent/memory",
+    maxBytes: 96_000,
+    capture: {
+      enabled: true,
+      model: { runtime: "pi", model: "openai-codex:gpt-5.4-mini" },
+      timeoutMs: 360_000,
+    },
+    embeddings: {
+      provider: "ollama",
+      endpoint: "http://127.0.0.1:11434",
+      model: "nomic-embed-text:v1.5",
+      dimensions: 768,
+    },
+    recallTool: { enabled: true },
+  }, "Personal memory contract");
+  assertExactJson(config.state, {
+    $use: "@mono-agent/state-local",
+    root: "./.mono-agent/state",
+    runs: {
+      artifactsDirectory: "./.mono-agent/artifacts",
+      retentionDays: 30,
+    },
+    discovery: {
+      registryDirectory: "./.mono-agent/trace-sources",
+      sourceId: agentId,
+      sourceLabel: agentName,
+    },
+  }, "Personal state contract");
+  assertExactJson(config.policy, {
+    tools: { default: "allow", deny: [] },
+    approvals: { default: "allow" },
+    sandbox: { mode: "off" },
+  }, "Personal policy contract");
+  assertExactJson(config.channels, {
+    telegram: {
+      $use: "@mono-agent/channel-telegram",
+      botToken: env("MONO_AGENT_TELEGRAM_BOT_TOKEN"),
+      allowedChatIds: [env("PERSONAL_AGENT_TELEGRAM_CHAT_ID")],
+      allowAllChats: false,
+      defaultDestination: env("PERSONAL_AGENT_TELEGRAM_CHAT_ID"),
+      reactions: { working: true, done: false, error: true },
+      quietHours: { start: "23:00", end: "07:00", timezone: "Europe/Rome" },
+      transport: { ipFamily: 4 },
+      transcription: {
+        endpoint: "http://127.0.0.1:50060/v1/audio/transcriptions",
+        model: "large-v3-v20240930",
+      },
+    },
+    webhook: {
+      $use: "@mono-agent/channel-webhook",
+      listen: { host: "100.64.0.10", port: 4313 },
+      allowNonLoopback: true,
+      apiKey: env("MONO_AGENT_WEBHOOK_API_KEY"),
+      signatureSecret: env("MONO_AGENT_WEBHOOK_SIGNATURE_SECRET"),
+      routesDirectory: "./webhook",
+      defaultMode: "async",
+      retentionMs: 300_000,
+      maxStoredRequests: 100,
+    },
+    "openai-api": {
+      $use: "@mono-agent/channel-openai-api",
+      listen: { host: "0.0.0.0", port: 4312 },
+      allowNonLoopback: true,
+      basePath: "/v1",
+      apiKey: env("MONO_AGENT_OPENAI_API_KEY"),
+      modelId: agentId,
+    },
+    operator: {
+      $use: "@mono-agent/channel-operator",
+      listen: { host: "127.0.0.1", port: 0 },
+      auth: { token: env("MONO_AGENT_OPERATOR_TOKEN") },
+    },
+  }, "Personal channel contract");
+  assertExactJson(config.triggers, {
+    cron: {
+      $use: "@mono-agent/trigger-cron",
+      jobsDirectory: "./cron",
+      timezone: "Europe/Rome",
+    },
+  }, "Personal cron selection");
+  assertExactJson(config.observability, {
+    exporters: {
+      phoenix: {
+        $use: "@mono-agent/exporter-otlp",
+        endpoint: "http://127.0.0.1:6006/v1/traces",
+        projectName: agentId,
+        includeSensitiveData: false,
+      },
+    },
+  }, "Personal metadata-only OTLP contract");
+}
+
+async function proveScaffoldFirstTurns(scaffoldDirectory, providerBaseUrl, personalOtlpEndpoint) {
+  for (const template of TEMPLATE_NAMES) {
+    const directory = join(scaffoldDirectory, template);
+    const renderedConfigPath = join(directory, "mono-agent.config.json");
+    const renderedConfigSource = await readFile(renderedConfigPath, "utf8");
+    const renderedConfig = JSON.parse(renderedConfigSource);
+    if (template === "personal") await writePersonalProofCron(directory);
+    const proofConfig = template === "personal"
+      ? hermeticPersonalScaffoldConfig(renderedConfig, providerBaseUrl, personalOtlpEndpoint)
+      : hermeticScaffoldConfig(renderedConfig, template, providerBaseUrl);
+    const proofConfigName = "mono-agent.verify.config.json";
+    await writeJson(
+      join(directory, proofConfigName),
+      proofConfig,
+    );
+    const scenarioPath = join(directory, "packed-first-turn.mjs");
+    await writeFile(scenarioPath, scaffoldFirstTurnScenarioSource(), "utf8");
+    const result = await runAsync(
+      process.execPath,
+      [basename(scenarioPath), proofConfigName, template],
+      directory,
+      {
+        ...process.env,
+        ...TEMPLATE_ENVIRONMENT,
+        CLAUDE_CODE_OAUTH_TOKEN: "packed-template-claude-oauth-token",
+      },
+    );
+    const parsed = JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "null");
+    if (
+      parsed?.ok !== true
+      || parsed.template !== template
+      || parsed.reply !== EXPECTED_REPLY
+      || (
+        template === "personal"
+        && (
+          parsed.firstRunMarker !== "initialized"
+          || parsed.personalCron?.status !== "accepted"
+          || !isCanonicalInstant(parsed.personalCron?.scheduledAt)
+          || parsed.personalCron.idempotencyKey !== cronIdempotencyKey(
+            "cron",
+            "morning-briefing",
+            parsed.personalCron.scheduledAt,
+          )
+          || parsed.telegramDeliveries !== 1
+          || JSON.stringify(parsed.channelIds) !== JSON.stringify([
+            "openai-api",
+            "operator",
+            "telegram",
+            "webhook",
+          ])
+        )
+      )
+    ) {
+      throw new Error(`Packed ${template} first-turn fixture failed: ${result.stdout}`);
+    }
+    if (await readFile(renderedConfigPath, "utf8") !== renderedConfigSource) {
+      throw new Error(`Packed ${template} proof mutated the rendered template config`);
+    }
+  }
+}
+
+async function writePersonalProofCron(directory) {
+  const jobsDirectory = join(directory, ".mono-agent", "verify-cron");
+  await mkdir(jobsDirectory, { recursive: true });
+  await writeFile(join(jobsDirectory, "morning-briefing.md"), `---
+id: morning-briefing
+expression: 30 7 * * *
+timezone: Europe/Rome
+runtime: pi
+model: packed-local:echo
+effort: high
+notify: telegram
+overlap: skip
+maxRunMs: 300000
+---
+
+Prepare a concise morning briefing from information already available in this workspace.
+Do not change files, contact external services, or perform any other side effect.
+`, "utf8");
+}
+
+function isCanonicalInstant(value) {
+  return typeof value === "string" && new Date(value).toISOString() === value;
+}
+
+function cronIdempotencyKey(instanceId, jobId, scheduledAt) {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([1, instanceId, jobId, scheduledAt]), "utf8")
+    .digest("hex");
+  return `cron:v1:${digest}`;
+}
+
+function hermeticScaffoldConfig(renderedConfig, template, providerBaseUrl) {
+  if (template !== "minimal" && template !== "multi-runtime") {
+    throw new Error(`Unsupported hermetic scaffold template ${String(template)}`);
+  }
+  const proof = structuredClone(renderedConfig);
+  const selectedBefore = collectSelectedPackages(renderedConfig).sort();
+  const pi = proof.runtimes?.pi;
+  const inbound = proof.channels?.inbound;
+  if (
+    pi?.$use !== "@mono-agent/runtime-pi"
+    || inbound?.$use !== "@mono-agent/channel-webhook"
+    || proof.routing?.primary?.runtime !== "pi"
+  ) {
+    throw new Error(`${template} proof requires the rendered Pi and webhook selections`);
+  }
+  if (
+    template === "multi-runtime"
+    && proof.runtimes?.["claude-sdk"]?.$use !== "@mono-agent/runtime-claude"
+  ) {
+    throw new Error("Multi-runtime proof requires the rendered Claude runtime selection");
+  }
+  pi.retry = { maxRetries: 0, maxDelayMs: 0, timeoutMs: 10_000 };
+  pi.localProviders = [{
+    id: "packed-local",
+    baseUrl: providerBaseUrl,
+    models: [{ id: "echo", contextWindow: 16_384, maxTokens: 1_024 }],
+  }];
+  proof.routing.primary = { ...proof.routing.primary, model: "packed-local:echo" };
+  inbound.listen = { ...inbound.listen, port: 0 };
+  inbound.maxRunMs = 10_000;
+  if (proof.policy?.approvals?.default !== "ask") {
+    throw new Error(`${template} rendered approval policy must remain ask during its first turn`);
+  }
+  const selectedAfter = collectSelectedPackages(proof).sort();
+  if (JSON.stringify(selectedAfter) !== JSON.stringify(selectedBefore)) {
+    throw new Error(`${template} hermetic proof must retain every rendered module selection`);
+  }
+  assertScaffoldHermeticOverlay(renderedConfig, proof, template, providerBaseUrl);
+  return proof;
+}
+
+function hermeticPersonalScaffoldConfig(renderedConfig, providerBaseUrl, otlpEndpoint) {
+  const proof = structuredClone(renderedConfig);
+  const selectedBefore = collectSelectedPackages(renderedConfig).sort();
+  const pi = proof.runtimes?.pi;
+  if (pi?.$use !== "@mono-agent/runtime-pi" || !Array.isArray(pi.localProviders)) {
+    throw new Error("Personal proof requires the rendered Pi runtime and local-provider registry");
+  }
+  pi.retry = { maxRetries: 0, maxDelayMs: 0, timeoutMs: 10_000 };
+  pi.localProviders = [{
+    id: "packed-local",
+    baseUrl: providerBaseUrl,
+    models: [{ id: "echo", contextWindow: 16_384, maxTokens: 1_024 }],
+  }];
+  proof.routing.primary = { runtime: "pi", model: "packed-local:echo" };
+  proof.routing.fallbacks = [];
+  const memory = proof.memory;
+  if (memory?.$use !== "@mono-agent/memory-local" || memory.root !== "./.mono-agent/memory") {
+    throw new Error("Personal proof requires the rendered current local-memory root");
+  }
+  if (
+    memory.capture?.enabled !== true
+    || typeof memory.capture?.model?.runtime !== "string"
+    || typeof memory.capture?.model?.model !== "string"
+  ) {
+    throw new Error("Personal proof requires the rendered runtime-backed memory capture contract");
+  }
+  memory.capture = { enabled: false };
+  delete memory.embeddings;
+
+  const channels = proof.channels;
+  if (
+    channels?.telegram?.$use !== "@mono-agent/channel-telegram"
+    || channels?.webhook?.$use !== "@mono-agent/channel-webhook"
+    || channels?.["openai-api"]?.$use !== "@mono-agent/channel-openai-api"
+    || channels?.operator?.$use !== "@mono-agent/channel-operator"
+  ) {
+    throw new Error("Personal proof requires the rendered four-channel selection");
+  }
+  channels.telegram.pollSeconds = 1;
+  delete channels.telegram.quietHours;
+  channels.webhook.listen = { ...channels.webhook.listen, host: "127.0.0.1", port: 0 };
+  channels.webhook.allowNonLoopback = false;
+  delete channels.webhook.mode;
+  channels.webhook.defaultMode = "sync";
+  channels.webhook.maxRunMs = 10_000;
+  channels["openai-api"].listen = {
+    ...channels["openai-api"].listen,
+    host: "127.0.0.1",
+    port: 0,
+  };
+  channels["openai-api"].allowNonLoopback = false;
+  channels["openai-api"].maxRunMs = 10_000;
+
+  const exporter = proof.observability?.exporters?.phoenix;
+  if (
+    proof.context?.mcp?.configPath !== "./.mcp.json"
+    || proof.triggers?.cron?.jobsDirectory !== "./cron"
+    || exporter?.$use !== "@mono-agent/exporter-otlp"
+  ) {
+    throw new Error("Personal proof requires the rendered MCP, cron, and OTLP selections");
+  }
+  proof.triggers.cron.jobsDirectory = "./.mono-agent/verify-cron";
+  Object.assign(exporter, {
+    endpoint: otlpEndpoint,
+    flushIntervalMs: 25,
+    requestTimeoutMs: 5_000,
+    flushTimeoutMs: 5_000,
+    stopTimeoutMs: 5_000,
+  });
+  const selectedAfter = collectSelectedPackages(proof).sort();
+  if (JSON.stringify(selectedAfter) !== JSON.stringify(selectedBefore)) {
+    throw new Error("Personal hermetic proof must retain every rendered module selection");
+  }
+  assertPersonalHermeticOverlay(renderedConfig, proof, providerBaseUrl, otlpEndpoint);
+  return proof;
+}
+
+function scaffoldFirstTurnScenarioSource() {
+  return String.raw`import assert from "node:assert/strict";
+import { createHash, createHmac } from "node:crypto";
+import { access, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+
+import { createAgentHost } from "@mono-agent/core";
+
+const configPath = resolve(process.argv[2] ?? "mono-agent.config.json");
+const template = process.argv[3];
+const expectedReply = "mono-agent-next durable provider fact 7d3f9c";
+const secret = template === "personal"
+  ? process.env.MONO_AGENT_WEBHOOK_API_KEY
+  : process.env.WEBHOOK_API_KEY;
+assert.ok(secret, "The scaffold webhook token is required");
+const signatureSecret = template === "personal"
+  ? process.env.MONO_AGENT_WEBHOOK_SIGNATURE_SECRET
+  : undefined;
+if (template === "personal") {
+  assert.ok(
+    typeof signatureSecret === "string" && signatureSecret.length >= 32,
+    "The Personal scaffold webhook signature secret is required",
+  );
+}
+const nativeFetch = globalThis.fetch;
+let telegramDeliveries = 0;
+if (template === "personal") globalThis.fetch = telegramFixtureFetch;
+let markerPath;
+if (template === "personal") {
+  const { MEMORY_LOCAL_MARKER_FILENAME } = await import("@mono-agent/memory-local");
+  markerPath = join(dirname(configPath), ".mono-agent", "memory", MEMORY_LOCAL_MARKER_FILENAME);
+  await assert.rejects(() => access(markerPath), (error) => error?.code === "ENOENT");
+}
+
+let host;
+try {
+  host = await createAgentHost(configPath, { drainTimeoutMs: 5_000, lifecycleTimeoutMs: 5_000 });
+  const channelIds = host.startInfo.channels.map((channel) => channel.instanceId).sort();
+  const expectedChannelIds = template === "personal"
+    ? ["openai-api", "operator", "telegram", "webhook"]
+    : ["inbound"];
+  assert.deepEqual(channelIds, expectedChannelIds);
+  const webhookId = template === "personal" ? "webhook" : "inbound";
+  const endpoint = host.startInfo.channels.find((channel) => channel.instanceId === webhookId)?.endpoint;
+  assert.equal(typeof endpoint, "string", "scaffold webhook did not expose an endpoint");
+  const payload = JSON.stringify({
+    text: "packed scaffold " + template + " first turn",
+    conversationId: "scaffold-first-turn",
+  });
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer " + secret,
+      "content-type": "application/json",
+      ...(signatureSecret === undefined
+        ? {}
+        : {
+            "x-mono-agent-signature": "sha256="
+              + createHmac("sha256", signatureSecret).update(payload).digest("hex"),
+          }),
+    },
+    body: payload,
+  });
+  const body = await response.text();
+  assert.equal(response.status, 200, body);
+  const completed = JSON.parse(body);
+  assert.equal(completed.status, "succeeded");
+  assert.equal(completed.text, expectedReply);
+  let personalCron;
+  if (template === "personal") {
+    const cron = await host.runModuleCommand("cron", "trigger-cron:invoke", {
+      jobId: "morning-briefing",
+    });
+    assert.equal(cron.value.status, "accepted", JSON.stringify(cron.value));
+    const cronInstant = cron.value.scheduledAt;
+    assert.equal(new Date(cronInstant).toISOString(), cronInstant);
+    assert.equal(cron.value.idempotencyKey, personalCronIdempotencyKey(cronInstant));
+    assert.equal(telegramDeliveries, 1);
+    personalCron = cron.value;
+  }
+  await host.drain();
+  await host.stop();
+  host = undefined;
+
+  let firstRunMarker;
+  if (markerPath !== undefined) {
+    const initialized = await readFile(markerPath, "utf8");
+    assert.match(initialized, /^initialized:[0-9a-f-]+\n$/u);
+    firstRunMarker = "initialized";
+
+    const interrupted = initialized.replace(/^initialized:/u, "initializing:");
+    await writeFile(markerPath, interrupted, { encoding: "utf8", mode: 0o600 });
+    await assert.rejects(
+      () => createAgentHost(configPath, { drainTimeoutMs: 5_000, lifecycleTimeoutMs: 5_000 }),
+      /incomplete|initializ/iu,
+    );
+    assert.equal(await readFile(markerPath, "utf8"), interrupted);
+  }
+
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    template,
+    reply: expectedReply,
+    channelIds,
+    ...(firstRunMarker === undefined ? {} : { firstRunMarker }),
+    ...(personalCron === undefined ? {} : { personalCron, telegramDeliveries }),
+  }) + "\n");
+} finally {
+  if (host !== undefined) await host.stop().catch(() => undefined);
+}
+
+async function telegramFixtureFetch(input, init) {
+  const url = new URL(
+    typeof input === "string"
+      ? input
+      : input instanceof URL
+        ? input.href
+        : input.url,
+  );
+  if (url.origin !== "https://api.telegram.org") return nativeFetch(input, init);
+  const method = url.pathname.split("/").at(-1);
+  if (method === "getUpdates") {
+    await pause(25, init?.signal);
+    return telegramResponse([]);
+  }
+  if (method === "sendMessage") {
+    telegramDeliveries += 1;
+    return telegramResponse({ message_id: 9_000 + telegramDeliveries });
+  }
+  return new Response(JSON.stringify({ ok: false, description: "Unsupported fixture method." }), {
+    status: 404,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+function telegramResponse(result) {
+  return new Response(JSON.stringify({ ok: true, result }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function pause(milliseconds, signal) {
+  if (signal?.aborted) return;
+  await new Promise((resolvePause) => {
+    let timer;
+    const done = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolvePause();
+    };
+    timer = setTimeout(done, milliseconds);
+    timer.unref();
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+function personalCronIdempotencyKey(scheduledAt) {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([1, "cron", "morning-briefing", scheduledAt]), "utf8")
+    .digest("hex");
+  return "cron:v1:" + digest;
+}
+`;
 }
 
 function collectSelectedPackages(value, output = []) {
@@ -394,6 +1205,139 @@ function collectSelectedPackages(value, output = []) {
   if (typeof value.$use === "string") output.push(value.$use);
   for (const child of Object.values(value)) collectSelectedPackages(child, output);
   return output;
+}
+
+function assertExactJson(actual, expected, label) {
+  if (JSON.stringify(canonicalJson(actual)) !== JSON.stringify(canonicalJson(expected))) {
+    throw new Error(`${label} drifted from the exact retained decision.`);
+  }
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalJson);
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, canonicalJson(value[key])]),
+  );
+}
+
+function assertPersonalHermeticOverlay(rendered, proof, providerBaseUrl, otlpEndpoint) {
+  const changes = [];
+  collectJsonChanges(rendered, proof, "", changes);
+  assertExactJson(changes.sort(), [
+    "channels.openai-api.allowNonLoopback",
+    "channels.openai-api.listen.host",
+    "channels.openai-api.listen.port",
+    "channels.openai-api.maxRunMs",
+    "channels.telegram.pollSeconds",
+    "channels.telegram.quietHours",
+    "channels.webhook.allowNonLoopback",
+    "channels.webhook.defaultMode",
+    "channels.webhook.listen.host",
+    "channels.webhook.listen.port",
+    "channels.webhook.maxRunMs",
+    "memory.capture.enabled",
+    "memory.capture.model",
+    "memory.capture.timeoutMs",
+    "memory.embeddings",
+    "observability.exporters.phoenix.endpoint",
+    "observability.exporters.phoenix.flushIntervalMs",
+    "observability.exporters.phoenix.flushTimeoutMs",
+    "observability.exporters.phoenix.requestTimeoutMs",
+    "observability.exporters.phoenix.stopTimeoutMs",
+    "routing.fallbacks",
+    "routing.primary.model",
+    "runtimes.pi.localProviders",
+    "runtimes.pi.retry.maxDelayMs",
+    "runtimes.pi.retry.maxRetries",
+    "runtimes.pi.retry.timeoutMs",
+    "triggers.cron.jobsDirectory",
+  ].sort(), "Personal rendered-to-proof overlay");
+
+  const expected = structuredClone(rendered);
+  expected.runtimes.pi.retry = { maxRetries: 0, maxDelayMs: 0, timeoutMs: 10_000 };
+  expected.runtimes.pi.localProviders = [{
+    id: "packed-local",
+    baseUrl: providerBaseUrl,
+    models: [{ id: "echo", contextWindow: 16_384, maxTokens: 1_024 }],
+  }];
+  expected.routing.primary = { runtime: "pi", model: "packed-local:echo" };
+  expected.routing.fallbacks = [];
+  expected.memory.capture = { enabled: false };
+  delete expected.memory.embeddings;
+  expected.channels.telegram.pollSeconds = 1;
+  delete expected.channels.telegram.quietHours;
+  expected.channels.webhook.listen = { host: "127.0.0.1", port: 0 };
+  expected.channels.webhook.allowNonLoopback = false;
+  delete expected.channels.webhook.mode;
+  expected.channels.webhook.defaultMode = "sync";
+  expected.channels.webhook.maxRunMs = 10_000;
+  expected.channels["openai-api"].listen = { host: "127.0.0.1", port: 0 };
+  expected.channels["openai-api"].allowNonLoopback = false;
+  expected.channels["openai-api"].maxRunMs = 10_000;
+  expected.triggers.cron.jobsDirectory = "./.mono-agent/verify-cron";
+  Object.assign(expected.observability.exporters.phoenix, {
+    endpoint: otlpEndpoint,
+    flushIntervalMs: 25,
+    requestTimeoutMs: 5_000,
+    flushTimeoutMs: 5_000,
+    stopTimeoutMs: 5_000,
+  });
+  assertExactJson(proof, expected, "Personal hermetic proof shape");
+}
+
+function assertScaffoldHermeticOverlay(rendered, proof, template, providerBaseUrl) {
+  const changes = [];
+  collectJsonChanges(rendered, proof, "", changes);
+  assertExactJson(changes.sort(), [
+    "channels.inbound.listen.port",
+    "channels.inbound.maxRunMs",
+    "routing.primary.model",
+    "runtimes.pi.localProviders",
+    "runtimes.pi.retry",
+  ].sort(), `${template} rendered-to-proof overlay`);
+
+  const expected = structuredClone(rendered);
+  expected.runtimes.pi.retry = { maxRetries: 0, maxDelayMs: 0, timeoutMs: 10_000 };
+  expected.runtimes.pi.localProviders = [{
+    id: "packed-local",
+    baseUrl: providerBaseUrl,
+    models: [{ id: "echo", contextWindow: 16_384, maxTokens: 1_024 }],
+  }];
+  expected.routing.primary = { ...expected.routing.primary, model: "packed-local:echo" };
+  expected.channels.inbound.listen = {
+    ...expected.channels.inbound.listen,
+    port: 0,
+  };
+  expected.channels.inbound.maxRunMs = 10_000;
+  assertExactJson(proof, expected, `${template} hermetic proof shape`);
+}
+
+function collectJsonChanges(before, after, path, output) {
+  if (
+    Array.isArray(before)
+    || Array.isArray(after)
+    || before === null
+    || after === null
+    || typeof before !== "object"
+    || typeof after !== "object"
+  ) {
+    if (JSON.stringify(canonicalJson(before)) !== JSON.stringify(canonicalJson(after))) {
+      output.push(path);
+    }
+    return;
+  }
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const key of [...keys].sort()) {
+    const childPath = path === "" ? key : `${path}.${key}`;
+    if (!Object.hasOwn(before, key) || !Object.hasOwn(after, key)) {
+      output.push(childPath);
+      continue;
+    }
+    collectJsonChanges(before[key], after[key], childPath, output);
+  }
 }
 
 async function writeSystemFixture(directory, endpoints) {
@@ -415,9 +1359,7 @@ timezone: UTC
 runtime: pi
 model: local:echo
 effort: high
-notify:
-  channel: webhook
-  destination: packed-system-destination
+notify: webhook
 maxRunMs: 10000
 ---
 
@@ -781,17 +1723,30 @@ function assertProviderRequests(requests) {
   }
   const captureRequests = requests.filter((request) => isStructuredCaptureRequest(request.parsed));
   const userRequests = requests.filter((request) => !isStructuredCaptureRequest(request.parsed));
-  if (captureRequests.length !== 3 || userRequests.length !== 3) {
+  if (captureRequests.length !== 3 || userRequests.length !== 7) {
     throw new Error(
-      `Fake provider expected three agent turns and three memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
+      `Fake provider expected seven agent turns and three memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
     );
   }
   const userInputs = userRequests.map((request) => finalProviderUserText(request.parsed));
-  const expectedInputs = [MEMORY_QUERY, "Run the packed system cron proof.", MEMORY_QUERY];
+  const expectedInputs = [
+    "packed scaffold minimal first turn",
+    `${PERSONAL_WEBHOOK_PROMPT}\n\npacked scaffold personal first turn`,
+    "Prepare a concise morning briefing from information already available in this workspace.\nDo not change files, contact external services, or perform any other side effect.",
+    "packed scaffold multi-runtime first turn",
+    MEMORY_QUERY,
+    "Run the packed system cron proof.",
+    MEMORY_QUERY,
+  ];
   if (JSON.stringify(userInputs) !== JSON.stringify(expectedInputs)) {
     throw new Error(`Packed provider user inputs must be ${JSON.stringify(expectedInputs)}; found ${JSON.stringify(userInputs)}`);
   }
-  const memoryRecallRequest = userRequests[2];
+  for (const personalRequest of [userRequests[1], userRequests[2]]) {
+    if (!JSON.stringify(personalRequest.parsed.tools ?? []).includes("project_status")) {
+      throw new Error("Personal provider request did not receive the project-owned MCP tool catalog");
+    }
+  }
+  const memoryRecallRequest = userRequests[6];
   if (!JSON.stringify(memoryRecallRequest.parsed.messages).includes(EXPECTED_REPLY)) {
     throw new Error("Fresh operator conversation did not receive Core-recalled memory in its Pi provider request");
   }
@@ -835,11 +1790,34 @@ function assertOtlpRequests(requests) {
   }
 }
 
+function assertPersonalTemplateOtlpRequests(requests) {
+  if (requests.length === 0) {
+    throw new Error("Personal template OTLP exporter did not reach the offline receiver");
+  }
+  for (const request of requests) {
+    if (
+      request.method !== "POST"
+      || request.url !== "/v1/traces"
+      || request.bytes === 0
+      || request.contentType !== "application/x-protobuf"
+      || request.project !== "personal"
+    ) {
+      throw new Error(`Invalid Personal template OTLP request: ${JSON.stringify(otlpRequestSummary(request))}`);
+    }
+  }
+  const payload = Buffer.concat(requests.map((request) => request.body));
+  for (const expected of ["personal", "mono_agent.turn.settled"]) {
+    if (!payload.includes(Buffer.from(expected, "utf8"))) {
+      throw new Error(`Personal template OTLP proof omitted ${expected}`);
+    }
+  }
+}
+
 function otlpRequestSummary({ body: _body, ...summary }) {
   return summary;
 }
 
-function assertDeliveryRequests(requests, expectedCronKey) {
+function assertDeliveryRequests(requests, expectedCronKey, expectedDestination) {
   if (requests.length !== 1) {
     throw new Error(`Atomic trigger delivery expected exactly one request; received ${String(requests.length)}`);
   }
@@ -856,9 +1834,13 @@ function assertDeliveryRequests(requests, expectedCronKey) {
   ) {
     throw new Error(`Trigger delivery used an invalid idempotency key: ${JSON.stringify(request)}`);
   }
-  if (request.body.conversationId !== "packed-system-destination" || request.body.text !== EXPECTED_REPLY) {
+  if (request.body.conversationId !== expectedDestination || request.body.text !== EXPECTED_REPLY) {
     throw new Error(`Trigger delivery payload was invalid: ${JSON.stringify(request.body)}`);
   }
+}
+
+function webhookDefaultDestination(url) {
+  return `webhook:outbound:sha256:${createHash("sha256").update(url, "utf8").digest("hex")}`;
 }
 
 function expectedCronIdempotencyKey(scheduledAt) {
@@ -1136,6 +2118,16 @@ function installEnvironment() {
     ...process.env,
     NPM_CONFIG_REGISTRY: "https://registry.npmjs.org/",
     NPM_CONFIG_USERCONFIG: "/dev/null",
+  };
+}
+
+function offlineEnvironment() {
+  return {
+    ...process.env,
+    NPM_CONFIG_OFFLINE: "true",
+    NPM_CONFIG_FROZEN_LOCKFILE: "true",
+    npm_config_offline: "true",
+    npm_config_frozen_lockfile: "true",
   };
 }
 

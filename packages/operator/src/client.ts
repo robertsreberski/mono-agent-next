@@ -37,6 +37,7 @@ import {
 
 export interface OperatorClientLimits {
   readonly requestBytes: number;
+  readonly askAnswerRequestBytes: number;
   readonly jsonResponseBytes: number;
   readonly frameBytes: number;
   readonly streamBytes: number;
@@ -193,6 +194,7 @@ export class OperatorClient {
     this.requestTimeoutMs = positiveLimit(options.requestTimeoutMs ?? 15_000, "requestTimeoutMs");
     this.limits = {
       requestBytes: positiveLimit(options.limits?.requestBytes ?? OPERATOR_LIMITS.requestBytes, "limits.requestBytes"),
+      askAnswerRequestBytes: positiveLimit(options.limits?.askAnswerRequestBytes ?? OPERATOR_LIMITS.askAnswerRequestBytes, "limits.askAnswerRequestBytes"),
       jsonResponseBytes: positiveLimit(options.limits?.jsonResponseBytes ?? OPERATOR_LIMITS.jsonResponseBytes, "limits.jsonResponseBytes"),
       frameBytes: positiveLimit(options.limits?.frameBytes ?? OPERATOR_LIMITS.frameBytes, "limits.frameBytes"),
       streamBytes: positiveLimit(options.limits?.streamBytes ?? OPERATOR_LIMITS.streamBytes, "limits.streamBytes"),
@@ -266,7 +268,7 @@ export class OperatorClient {
 
   async answerAsk(conversationId: string, request: OperatorAskAnswerRequest, signal?: AbortSignal): Promise<OperatorAskAnswerResponse> {
     const parsed = parseAskAnswerRequest(request);
-    return await this.#json(OPERATOR_ROUTES.ask(conversationId), { method: "POST", headers: this.#headers(true), body: requestBody(parsed, this.limits.requestBytes) }, parseAskAnswerResponse, signal, [409]) as OperatorAskAnswerResponse;
+    return await this.#json(OPERATOR_ROUTES.ask(conversationId), { method: "POST", headers: this.#headers(true), body: requestBody(parsed, this.limits.askAnswerRequestBytes) }, parseAskAnswerResponse, signal, [409]) as OperatorAskAnswerResponse;
   }
 
   async cancelConversation(conversationId: string, request: OperatorCancelRequest = {}, signal?: AbortSignal): Promise<OperatorCancelResponse> {

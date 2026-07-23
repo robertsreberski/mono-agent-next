@@ -1,0 +1,85 @@
+---
+title: "Source-beta complexity report"
+description: "Reproducible production, test, tooling, package, dependency, public-API, and scaffold-closure measurements for mono-agent v1."
+sidebar:
+  order: 10
+---
+
+This report is generated from the current source tree. It counts reportable
+source files returned by Git (`--cached --others --exclude-standard`), so a
+clean checkout and a pre-commit worktree produce the same result for the same
+files. Generated documentation outputs are excluded from their own input.
+
+Reproduce it with:
+
+```bash
+pnpm run report:source-beta
+pnpm run generate:source-beta-docs
+```
+
+Source manifest digest: `751a824532b4f2e8cd439c2a9c427a4ffee5db57ecffcefba725b564b849a155`
+
+## Lines of code
+
+| Classification | Files | Physical lines |
+| --- | ---: | ---: |
+| Production | 188 | 73310 |
+| Tests | 128 | 56848 |
+| Repository and product tooling | 62 | 22449 |
+| Checked-in generated source | 0 | 0 |
+| **Total executable source** | **378** | **152607** |
+
+Blank lines and comments count as physical source lines. Markdown, JSON,
+lockfiles, vendored dependencies, build output, and generated documentation do
+not. Production means shipped package or website source; tests and authoring
+tooling are reported separately and never reduce the production budget.
+
+Average production file size is 389.9 lines.
+
+## Binding budgets
+
+| Budget | Actual | Maximum | Result |
+| --- | ---: | ---: | --- |
+| repository-production | 73310 | 130000 | within limit |
+| kernel-production | 14998 | 15000 | within limit |
+
+## Largest package ownership surfaces
+
+| Package | Production files | Production lines | Test lines |
+| --- | ---: | ---: | ---: |
+| `@mono-agent/state-local` | 14 | 12164 | 4264 |
+| `@mono-agent/core` | 18 | 11937 | 13961 |
+| `@mono-agent/runtime-pi` | 12 | 5935 | 3166 |
+| `@mono-agent/memory-local` | 11 | 5021 | 2507 |
+| `create-mono-agent` | 7 | 3505 | 1289 |
+| `@mono-agent/service-macos` | 13 | 3153 | 1196 |
+| `@mono-agent/module-sdk` | 5 | 2630 | 1421 |
+| `@mono-agent/channel-slack` | 8 | 2629 | 1115 |
+
+The complete package table is retained in the generated report model exposed by
+`pnpm --silent run report:source-beta -- --json`.
+
+## Structural complexity
+
+| Measure | Current value |
+| --- | ---: |
+| Publishable packages | 23 |
+| First-party dependency edges | 21 |
+| First-party dependency cycles | 0 |
+| Public code entrypoints | 28 |
+| Public named exports | 930 |
+| Distinct scaffold config paths | 104 |
+
+The first-party package graph is acyclic.
+
+## Scaffold closure
+
+| Template | Direct production dependencies | Selected modules |
+| --- | ---: | ---: |
+| `minimal` | 5 | 2 |
+| `personal` | 12 | 9 |
+| `multi-runtime` | 6 | 3 |
+
+The generated [config reference](/config/reference/) records the exact package
+names and seed configuration for each template. The packed system verification
+installs all three closures and executes their first-turn fixtures.

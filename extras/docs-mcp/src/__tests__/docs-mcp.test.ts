@@ -34,7 +34,7 @@ describe.sequential("@mono-agent/docs-mcp", () => {
 
     const corpus = await loadDocsCorpus(corpusDir);
     const paths = new Set(corpus.documents.map((document) => document.path));
-    expect(paths).toContain("docs/reference/feature-matrix.md");
+    expect(paths).toContain("docs/reference/public-api.md");
     expect(paths).toContain("docs/tools/documentation-mcp.md");
     expect([...paths].some((path) => path.startsWith("docs/skills/"))).toBe(false);
     expect([...paths].some((path) => path.startsWith("docs/superpowers/"))).toBe(false);
@@ -75,7 +75,7 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     const semantic = await index.search({ query: "How can my agent answer people through Telegram?", limit: 5 });
     expect(semantic.results.some((result) => /telegram/iu.test(`${result.title} ${result.headingPath.join(" ")} ${result.markdown}`))).toBe(true);
 
-    const docsOnly = await index.search({ query: "external Supermemory backend", scope: "docs", limit: 8 });
+    const docsOnly = await index.search({ query: "permanent first-run memory marker", scope: "docs", limit: 8 });
     expect(docsOnly.results.every((result) => result.source === "docs")).toBe(true);
     expect(docsOnly.results.some((result) => result.path.includes("memory"))).toBe(true);
     const sections = docsOnly.results.map((result) => `${result.path}:${result.canonicalUrl?.split("#")[1] ?? "overview"}`);
@@ -119,7 +119,7 @@ describe.sequential("@mono-agent/docs-mcp", () => {
       expect(anchored.markdown).toMatch(/^## Tool contract/mu);
     }
 
-    const first = index.read("docs/reference/feature-registry.md");
+    const first = index.read("docs/reference/public-api.md");
     expect("error" in first).toBe(false);
     if ("error" in first) throw new Error(first.error.message);
     expect(first.previousTarget).toBeUndefined();

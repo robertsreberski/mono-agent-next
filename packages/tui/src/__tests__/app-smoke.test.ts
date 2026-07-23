@@ -11,6 +11,8 @@ import {
 } from "@mono-agent/operator";
 import {
   FIXTURE_CAPABILITIES,
+  MULTI_QUESTION_ASK_USER_ANSWER,
+  MULTI_QUESTION_ASK_USER_TURN_FRAMES,
   VALID_OPERATOR_INFO,
   VALID_TURN_FRAMES,
 } from "@mono-agent/operator/testing";
@@ -169,6 +171,7 @@ describe("standalone TUI", () => {
       fetch: fetchImpl,
       terminal,
       conversationId: "fixture-conversation",
+      runtime: "pi",
       model: "fixture:model",
       effort: "high",
     });
@@ -189,6 +192,7 @@ describe("standalone TUI", () => {
       body: {
         conversationId: "fixture-conversation",
         input: { text: "hello" },
+        runtime: "pi",
         model: "fixture:model",
         effort: "high",
         metadata: { source: "tui" },
@@ -399,17 +403,71 @@ describe("standalone TUI", () => {
       terminal,
       conversationId: "override-conversation",
     });
-    for (const value of ["/model custom:model", "/effort custom-effort", "use overrides"]) {
+    for (const value of ["/runtime alternate-pi", "/model custom:model", "/effort custom-effort", "use overrides"]) {
       for (const character of value) terminal.feed(character);
       terminal.feed("\r");
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     await eventually(() => expect(turnBody).toBeDefined());
     expect(turnBody).toMatchObject({
+      runtime: "alternate-pi",
       model: "custom:model",
       effort: "custom-effort",
       input: { text: "use overrides" },
     });
+    await handle.stop();
+  });
+
+  it("renders and submits every question from the shared multi-question AskUser fixture", async () => {
+    const terminal = new TestTerminal();
+    const encoder = new TextEncoder();
+    let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let answerBody: unknown;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v1/turns")) {
+        return new Response(new ReadableStream({
+          start(controller) {
+            streamController = controller;
+            for (const frame of MULTI_QUESTION_ASK_USER_TURN_FRAMES.slice(0, -1)) {
+              controller.enqueue(encoder.encode(serializeOperatorFrame(frame)));
+            }
+          },
+        }), { headers: { "content-type": "application/x-ndjson" } });
+      }
+      if (url.endsWith("/v1/conversations/fixture-conversation/ask")) {
+        answerBody = JSON.parse(String(init?.body));
+        streamController?.enqueue(encoder.encode(serializeOperatorFrame(
+          MULTI_QUESTION_ASK_USER_TURN_FRAMES.at(-1)!,
+        )));
+        streamController?.close();
+        return json({ status: "accepted" });
+      }
+      throw new Error(`unexpected request ${url}`);
+    };
+    const handle = await startMonoAgentTui({
+      endpoint: "http://127.0.0.1:4321/operator",
+      fetch: fetchImpl,
+      terminal,
+      conversationId: "fixture-conversation",
+    });
+    const submit = async (value: string, expected: string) => {
+      for (const character of value) terminal.feed(character);
+      terminal.feed("\r");
+      await eventually(() => expect(stripAnsi(terminal.output())).toContain(expected));
+    };
+
+    await submit("ask me", "Answer every question in one command");
+    expect(stripAnsi(terminal.output())).toContain("constructor");
+    expect(stripAnsi(terminal.output())).toContain("checks");
+    await submit("/answer constructor=speed", 'missing "checks"');
+    expect(answerBody).toBeUndefined();
+    await submit("/answer constructor=fast; checks=tests", 'not a choice for "constructor"');
+    expect(answerBody).toBeUndefined();
+    await submit(`/answer ${JSON.stringify(MULTI_QUESTION_ASK_USER_ANSWER.answers)}`, "answer accepted");
+    expect(answerBody).toEqual(MULTI_QUESTION_ASK_USER_ANSWER);
+    await eventually(() => expect(stripAnsi(terminal.output())).toContain("Answers recorded."));
     await handle.stop();
   });
 

@@ -1,13 +1,13 @@
 ---
 title: "Getting Started"
-description: "Build the private v1 workspace, run the packed minimal proof, and learn the strict config-first model."
+description: "Build the public v1 workspace, run the packed minimal proof, and learn the strict config-first model."
 sidebar:
   order: 0
 ---
 
-The current getting-started path is source-first. `mono-agent-next` is private
-and unreleased, so these pages prove the implementation without publishing it or
-changing a live agent.
+The current getting-started path is source-first. `mono-agent-next` is public
+and unreleased, so these pages prove the implementation without publishing
+packages or changing a live agent.
 
 ## The path
 
@@ -35,3 +35,6 @@ Registry publication, clean installation from the real registry, provider
 credential setup, consumer data migration, service reconciliation, live smoke,
 soak, observation, cutover, and predecessor retirement are intentionally
 outside this phase.
+
+The [migration guide](/migration/v0-to-v1-source-beta/) describes the isolated
+rehearsal that must be green before any of those operations can be proposed.

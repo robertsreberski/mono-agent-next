@@ -2,8 +2,12 @@ import { once } from "node:events";
 import { createConnection, isIP } from "node:net";
 
 import {
+  AGENT_INTERACTION_LIMITS,
   isEnvEligibleSchema,
   isSecretSchema,
+  parseAskUserAnswer,
+  parseAskUserRequest,
+  type AskUserAnswer,
   type ChannelHost,
   type ChannelInboundRequest,
   type ChannelReplySink,
@@ -13,9 +17,11 @@ import {
 import {
   OPERATOR_LIMITS,
   OperatorClient,
+  parseAskAnswerRequest,
   parseOperatorFrame,
   parseOperatorHealth,
   parseOperatorInfo,
+  serializeOperatorFrame,
   type OperatorFrame,
 } from "@mono-agent/operator";
 import {
@@ -92,6 +98,109 @@ describe("operator channel config", () => {
 });
 
 describe("operator HTTP channel", () => {
+  it("represents every canonical module-sdk AskUser field at its exact bound", async () => {
+    expect(OPERATOR_LIMITS).toMatchObject({
+      askQuestions: AGENT_INTERACTION_LIMITS.askQuestions,
+      askChoicesPerQuestion: AGENT_INTERACTION_LIMITS.askChoicesPerQuestion,
+      askPromptBytes: AGENT_INTERACTION_LIMITS.askPromptBytes,
+      askChoiceValueBytes: AGENT_INTERACTION_LIMITS.askChoiceValueBytes,
+      askChoiceLabelBytes: AGENT_INTERACTION_LIMITS.askChoiceLabelBytes,
+      askChoiceDescriptionBytes: AGENT_INTERACTION_LIMITS.askChoiceDescriptionBytes,
+      askAnswerValuesPerQuestion: AGENT_INTERACTION_LIMITS.askAnswerValuesPerQuestion,
+      askAnswerBytes: AGENT_INTERACTION_LIMITS.askAnswerBytes,
+    });
+    const control = "\u0001";
+    const ask = parseAskUserRequest({
+      interactionId: "maximal-ask",
+      requestedAt: "2026-01-02T03:04:06.500Z",
+      questions: Array.from(
+        { length: AGENT_INTERACTION_LIMITS.askQuestions },
+        (_, questionIndex) => ({
+          id: `question-${String(questionIndex)}`,
+          prompt: control.repeat(AGENT_INTERACTION_LIMITS.askPromptBytes),
+          choices: Array.from(
+            { length: AGENT_INTERACTION_LIMITS.askChoicesPerQuestion },
+            (_, choiceIndex) => {
+              const prefix = `${String(questionIndex)}-${String(choiceIndex)}:`;
+              return {
+                value: prefix + control.repeat(
+                  AGENT_INTERACTION_LIMITS.askChoiceValueBytes - prefix.length,
+                ),
+                label: control.repeat(AGENT_INTERACTION_LIMITS.askChoiceLabelBytes),
+                description: control.repeat(AGENT_INTERACTION_LIMITS.askChoiceDescriptionBytes),
+              };
+            },
+          ),
+          allowFreeText: false,
+          multiple: true,
+        }),
+      ),
+    });
+    const serialized = serializeOperatorFrame({
+      type: "ask_user",
+      turnId: "maximal-turn",
+      ask,
+    });
+    expect(Buffer.byteLength(serialized)).toBeLessThanOrEqual(OPERATOR_LIMITS.frameBytes);
+    expect(parseOperatorFrame(JSON.parse(serialized))).toEqual({
+      type: "ask_user",
+      turnId: "maximal-turn",
+      ask,
+    });
+
+    const freeTextRequest = parseAskUserRequest({
+      interactionId: "maximal-answer",
+      requestedAt: "2026-01-02T03:04:06.500Z",
+      questions: Array.from(
+        { length: AGENT_INTERACTION_LIMITS.askQuestions },
+        (_, questionIndex) => ({
+          id: `free-${String(questionIndex)}`,
+          prompt: "Provide values",
+          allowFreeText: true,
+          multiple: true,
+        }),
+      ),
+    });
+    const moduleAnswer = parseAskUserAnswer({
+      interactionId: freeTextRequest.interactionId,
+      answers: Object.fromEntries(freeTextRequest.questions.map((question, questionIndex) => [
+        question.id,
+        Array.from(
+          { length: AGENT_INTERACTION_LIMITS.askAnswerValuesPerQuestion },
+          (_, answerIndex) => {
+            const prefix = `${String(questionIndex)}-${String(answerIndex)}:`;
+            return prefix + control.repeat(AGENT_INTERACTION_LIMITS.askAnswerBytes - prefix.length);
+          },
+        ),
+      ])),
+      answeredAt: "2026-01-02T03:04:07.000Z",
+    }, freeTextRequest);
+    const operatorAnswer = parseAskAnswerRequest({
+      interactionId: moduleAnswer.interactionId,
+      answers: moduleAnswer.answers,
+    });
+    const answerBytes = Buffer.byteLength(JSON.stringify(operatorAnswer));
+    expect(answerBytes).toBeGreaterThan(OPERATOR_LIMITS.requestBytes);
+    expect(answerBytes).toBeLessThanOrEqual(OPERATOR_LIMITS.askAnswerRequestBytes);
+
+    const answerAsk = vi.fn(async (_conversationId: string, answer: AskUserAnswer) => {
+      expect(parseAskUserAnswer(answer, freeTextRequest).answers).toEqual(moduleAnswer.answers);
+      return { status: "accepted" as const };
+    });
+    const channel = await startChannel(async (_request, reply) => {
+      await reply.emit({ type: "ask-user", ask: freeTextRequest });
+      return { status: "completed", text: "waiting" };
+    }, { answerAsk });
+    await readFrames(await postJson(channel.startInfo.turnsUrl, {
+      conversationId: "maximal-answer",
+      input: { text: "ask" },
+    }));
+    const client = new OperatorClient({ endpoint: channel.startInfo.endpoint, token: TOKEN });
+    await expect(client.answerAsk("maximal-answer", operatorAnswer))
+      .resolves.toEqual({ status: "accepted" });
+    expect(answerAsk).toHaveBeenCalledOnce();
+  });
+
   it("advertises the actual literal loopback address when configured with localhost", async () => {
     const channel = createOperatorChannel({
       config: parseOperatorChannelConfig({
@@ -731,6 +840,55 @@ describe("mono-agent operator channel module", () => {
     expect(openConversation).toHaveBeenCalledOnce();
   });
 
+  it("fingerprints Unicode metadata keys in deterministic UTF-8 byte order", async () => {
+    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
+    const operatorIdentity = identity("module-agent", "Module Agent");
+    const openConversation =
+      vi.fn<NonNullable<ChannelHost["openConversation"]>>(async () => ({
+        conversationId: "opened-unicode",
+        createdAt: new Date().toISOString(),
+      }));
+    const channel = await monoAgentModule.create({
+      instanceId: "operator",
+      config,
+      provenance: {},
+      configDirectory: "/config",
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: {
+        grantedCapabilities: new Set(["operator.identity.v1"]),
+        getCapability<T>(name: string): T | undefined {
+          return (name === "operator.identity.v1"
+            ? operatorIdentity
+            : undefined) as T | undefined;
+        },
+        async dispatch() { return { status: "completed" }; },
+        openConversation,
+      },
+      signal: new AbortController().signal,
+    });
+    moduleChannels.add(channel);
+    const message = {
+      conversationId: "",
+      text: "unicode metadata",
+      idempotencyKey: "unicode-metadata",
+    };
+    const metadata = Object.fromEntries([
+      ["é", "precomposed"],
+      ["e\u0301", "decomposed"],
+    ]);
+    await expect(channel.deliver!({
+      ...message,
+      metadata,
+    }, new AbortController().signal)).resolves.toMatchObject({ status: "delivered" });
+    await expect(channel.deliver!({
+      ...message,
+      metadata: Object.fromEntries(Object.entries(metadata).reverse()),
+    }, new AbortController().signal)).resolves.toMatchObject({ status: "duplicate" });
+    expect(openConversation).toHaveBeenCalledOnce();
+  });
+
   it("bounds proactive metadata before fingerprinting and allows a valid retry", async () => {
     const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
     const operatorIdentity = identity("module-agent", "Module Agent");
@@ -816,6 +974,10 @@ describe("mono-agent operator channel module", () => {
         idempotencyKey: `key-${String(index)}`,
       }, signal);
     }
+    await expect(channel.health?.({ signal })).resolves.toMatchObject({
+      status: "degraded",
+      details: { deliveryReceiptCapacityExhausted: true },
+    });
     await expect(channel.deliver!({
       conversationId: "",
       text: "one too many",
@@ -840,8 +1002,14 @@ describe("mono-agent operator channel module", () => {
     const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
     const operatorIdentity = identity("module-agent", "Module Agent");
     const openConversation = vi.fn<NonNullable<ChannelHost["openConversation"]>>(
-      async () => {
-        throw new Error("secret storage detail /private/operator-token");
+      async (request) => {
+        if (request.initialText === "proactive") {
+          throw new Error("secret storage detail /private/operator-token");
+        }
+        return {
+          conversationId: "opened-after-unknown",
+          createdAt: new Date().toISOString(),
+        };
       },
     );
     const host: ChannelHost = {
@@ -884,7 +1052,25 @@ describe("mono-agent operator channel module", () => {
       },
     });
     expect(JSON.stringify(first)).not.toContain("secret storage");
-    expect(openConversation).toHaveBeenCalledOnce();
+    await expect(channel.health?.({
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({
+      status: "degraded",
+      summary: "An operator proactive delivery outcome is unknown.",
+      details: { deliveryOutcomeAmbiguous: true },
+    });
+    await expect(channel.deliver!({
+      ...message,
+      text: "definitive success",
+      idempotencyKey: "after-unknown",
+    }, new AbortController().signal)).resolves.toMatchObject({ status: "delivered" });
+    await expect(channel.health?.({
+      signal: new AbortController().signal,
+    })).resolves.toMatchObject({
+      status: "degraded",
+      details: { deliveryOutcomeAmbiguous: true },
+    });
+    expect(openConversation).toHaveBeenCalledTimes(2);
   });
 });
 

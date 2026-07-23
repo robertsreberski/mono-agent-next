@@ -5,7 +5,7 @@ sidebar:
   order: 2
 ---
 
-The fastest honest first-agent result in the private repository is the packed
+The fastest honest first-agent result in the public source repository is the packed
 minimal verification. It exercises a clean installed consumer and one real HTTP
 turn without requiring registry publication or live provider credentials.
 

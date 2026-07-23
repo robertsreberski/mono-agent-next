@@ -215,7 +215,7 @@ service, start a product, or publish packages.
 
 ## Source completion is not delivery completion
 
-The private source milestone ends when the repository builds, tests, and runs
+The public source milestone ends when the repository builds, tests, and runs
 the packed minimal and operator-product proofs. Registry release, live consumer
 migration, data audit, rollback rehearsal, deployment, soak, observation,
 cutover, and predecessor retirement remain a later explicitly authorized phase.

@@ -5,7 +5,7 @@ sidebar:
   order: 9
 ---
 
-Status: Accepted architecture; implemented private source target
+Status: Accepted architecture; implemented public source target
 
 Decision date: 2026-07-22
 
@@ -257,7 +257,7 @@ record; it never receives the bearer-token value.
 
 ## Deliberate separation from delivery
 
-The first v1 deliverable is a buildable, tested, runnable private repository with
+The first v1 deliverable is a buildable, tested, runnable public repository with
 packed minimal-agent and standalone operator-product proofs. That establishes a
 source candidate, not a production release.
 

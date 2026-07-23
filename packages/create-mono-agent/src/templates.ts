@@ -54,6 +54,7 @@ const TEMPLATE_ENVIRONMENT_NAMES: Readonly<Record<ProjectTemplate, readonly stri
     "MONO_AGENT_OPERATOR_TOKEN",
     "MONO_AGENT_TELEGRAM_BOT_TOKEN",
     "MONO_AGENT_WEBHOOK_API_KEY",
+    "MONO_AGENT_WEBHOOK_SIGNATURE_SECRET",
     "PERSONAL_AGENT_TELEGRAM_CHAT_ID",
   ],
   "multi-runtime": ["CLAUDE_CODE_OAUTH_TOKEN", "WEBHOOK_API_KEY"],
@@ -112,11 +113,21 @@ export function renderProject(options: ProjectTemplateOptions): readonly Rendere
     files.push(
       {
         path: ".mcp.json",
-        contents: `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`,
+        contents: `${JSON.stringify({
+          mcpServers: {
+            "project-status": {
+              type: "stdio",
+              command: "node",
+              args: ["./tools/project-status-mcp.mjs"],
+            },
+          },
+        }, null, 2)}\n`,
         mode: 0o644,
       },
-      { path: "cron/.gitkeep", contents: "", mode: 0o644 },
+      { path: "cron/morning-briefing.md", contents: personalCronJob(), mode: 0o644 },
       { path: "skills/.gitkeep", contents: "", mode: 0o644 },
+      { path: "tools/project-status-mcp.mjs", contents: projectStatusMcpServer(), mode: 0o644 },
+      { path: "webhook/invoke.md", contents: personalWebhookRoute(), mode: 0o644 },
     );
   }
 
@@ -199,7 +210,7 @@ function minimalConfig(agentId: string, displayName: string): Record<string, unk
     },
     policy: {
       tools: { default: "deny", allow: [] },
-      approvals: { default: "allow" },
+      approvals: { default: "ask" },
       sandbox: { mode: "off" },
     },
   };
@@ -247,7 +258,7 @@ function multiRuntimeConfig(agentId: string, displayName: string): Record<string
     },
     policy: {
       tools: { default: "deny", allow: [] },
-      approvals: { default: "allow" },
+      approvals: { default: "ask" },
       sandbox: { mode: "off" },
     },
   };
@@ -346,19 +357,32 @@ function personalConfig(agentId: string, displayName: string): Record<string, un
         allowAllChats: false,
         defaultDestination: env("PERSONAL_AGENT_TELEGRAM_CHAT_ID"),
         reactions: { working: true, done: false, error: true },
+        quietHours: {
+          start: "23:00",
+          end: "07:00",
+          timezone: "Europe/Rome",
+        },
+        transport: { ipFamily: 4 },
+        transcription: {
+          endpoint: "http://127.0.0.1:50060/v1/audio/transcriptions",
+          model: "large-v3-v20240930",
+        },
       },
       webhook: {
         $use: "@mono-agent/channel-webhook",
-        listen: { host: "127.0.0.1", port: 4313 },
+        listen: { host: "100.64.0.10", port: 4313 },
+        allowNonLoopback: true,
         apiKey: env("MONO_AGENT_WEBHOOK_API_KEY"),
-        path: "/webhook/invoke",
-        mode: "async",
+        signatureSecret: env("MONO_AGENT_WEBHOOK_SIGNATURE_SECRET"),
+        routesDirectory: "./webhook",
+        defaultMode: "async",
         retentionMs: 300_000,
         maxStoredRequests: 100,
       },
       "openai-api": {
         $use: "@mono-agent/channel-openai-api",
-        listen: { host: "127.0.0.1", port: 4312 },
+        listen: { host: "0.0.0.0", port: 4312 },
+        allowNonLoopback: true,
         basePath: "/v1",
         apiKey: env("MONO_AGENT_OPENAI_API_KEY"),
         modelId: agentId,
@@ -473,7 +497,10 @@ function projectReadme(displayName: string, template: ProjectTemplate): string {
   const templateNotes = template === "personal"
     ? [
         "This template selects Telegram, webhook, OpenAI-compatible API, and operator channels,",
-        "owner-private local memory/state, an empty cron directory, and a local OTLP exporter.",
+        "owner-private local memory/state, a harmless Markdown cron example, a project-owned",
+        "status MCP fixture, one enabled directory-backed webhook route, and a local OTLP exporter.",
+        "Replace the example job, route, and tool with your own project behavior after reviewing",
+        "their explicit channel, destination, listener, authentication, and tool policies.",
         "TUI, web, service management, and docs MCP remain separately installed products.",
       ]
     : template === "multi-runtime"
@@ -524,6 +551,7 @@ function projectReadme(displayName: string, template: ProjectTemplate): string {
 
 function gitignore(): string {
   return [
+    ".mono-agent/artifacts/",
     ".env",
     ".secrets/",
     ".mono-agent/memory/",
@@ -531,6 +559,88 @@ function gitignore(): string {
     ".mono-agent/state/",
     ".mono-agent/trace-sources/",
     "node_modules/",
+    "",
+  ].join("\n");
+}
+
+function personalCronJob(): string {
+  return [
+    "---",
+    "id: morning-briefing",
+    "expression: 30 7 * * *",
+    "timezone: Europe/Rome",
+    "runtime: pi",
+    "model: openai-codex:gpt-5.6-sol",
+    "effort: high",
+    "notify: telegram",
+    "overlap: skip",
+    "maxRunMs: 600000",
+    "---",
+    "",
+    "Prepare a concise morning briefing from information already available in this workspace.",
+    "Do not change files, contact external services, or perform any other side effect.",
+    "",
+  ].join("\n");
+}
+
+function personalWebhookRoute(): string {
+  return [
+    "---",
+    "name: invoke",
+    "path: /webhook/invoke",
+    "enabled: true",
+    "---",
+    "",
+    "Handle this authenticated project webhook request.",
+    "",
+  ].join("\n");
+}
+
+function projectStatusMcpServer(): string {
+  return [
+    "let buffer = \"\";",
+    "",
+    "process.stdin.setEncoding(\"utf8\");",
+    "process.stdin.on(\"data\", (chunk) => {",
+    "  buffer += chunk;",
+    "  while (buffer.includes(\"\\n\")) {",
+    "    const index = buffer.indexOf(\"\\n\");",
+    "    const line = buffer.slice(0, index);",
+    "    buffer = buffer.slice(index + 1);",
+    "    if (line.trim().length === 0) continue;",
+    "    const message = JSON.parse(line);",
+    "    if (message.id === undefined) continue;",
+    "    let result;",
+    "    if (message.method === \"initialize\") {",
+    "      result = {",
+    "        protocolVersion: message.params?.protocolVersion,",
+    "        capabilities: { tools: {} },",
+    "        serverInfo: { name: \"project-status\", version: \"1.0.0\" },",
+    "      };",
+    "    } else if (message.method === \"tools/list\") {",
+    "      result = {",
+    "        tools: [{",
+    "          name: \"project_status\",",
+    "          description: \"Return the static status of this scaffolded project fixture.\",",
+    "          inputSchema: { type: \"object\", properties: {}, additionalProperties: false },",
+    "        }],",
+    "      };",
+    "    } else if (message.method === \"tools/call\" && message.params?.name === \"project_status\") {",
+    "      result = {",
+    "        content: [{ type: \"text\", text: \"The scaffolded project MCP fixture is available.\" }],",
+    "      };",
+    "    } else {",
+    "      process.stdout.write(JSON.stringify({",
+    "        jsonrpc: \"2.0\",",
+    "        id: message.id,",
+    "        error: { code: -32601, message: \"Unknown MCP method or tool.\" },",
+    "      }) + \"\\n\");",
+    "      continue;",
+    "    }",
+    "    process.stdout.write(JSON.stringify({ jsonrpc: \"2.0\", id: message.id, result }) + \"\\n\");",
+    "  }",
+    "});",
+    "process.stdin.on(\"end\", () => process.exit(0));",
     "",
   ].join("\n");
 }

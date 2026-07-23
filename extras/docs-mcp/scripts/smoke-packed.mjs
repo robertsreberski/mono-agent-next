@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import process from "node:process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -16,24 +16,38 @@ const smokeRoot = await mkdtemp(join(tmpdir(), "mono-agent-docs-packed-smoke-"))
 let client;
 
 try {
-  await execFileAsync("pnpm", ["pack", "--pack-destination", smokeRoot], {
-    cwd: packageRoot,
-    env: { ...process.env, CI: "1" },
-    maxBuffer: 4 * 1024 * 1024,
-    timeout: 120_000,
-  });
-  const tarballs = (await readdir(smokeRoot)).filter((name) => name.endsWith(".tgz"));
+  const providedTarball = process.env.MONO_AGENT_DOCS_MCP_TARBALL;
+  if (providedTarball !== undefined) {
+    assert.equal(
+      isAbsolute(providedTarball),
+      true,
+      "MONO_AGENT_DOCS_MCP_TARBALL must be an absolute path.",
+    );
+  } else {
+    await execFileAsync("pnpm", ["pack", "--pack-destination", smokeRoot], {
+      cwd: packageRoot,
+      env: { ...process.env, CI: "1" },
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 120_000,
+    });
+  }
+  const tarballs = providedTarball === undefined
+    ? (await readdir(smokeRoot))
+      .filter((name) => name.endsWith(".tgz"))
+      .map((name) => join(smokeRoot, name))
+    : [providedTarball];
   assert.equal(tarballs.length, 1, `Expected one packed tarball, found ${tarballs.length}.`);
+  const tarballPath = tarballs[0];
 
   await writeFile(join(smokeRoot, "package.json"), `${JSON.stringify({
     name: "mono-agent-docs-packed-smoke",
     private: true,
     type: "module",
     dependencies: {
-      "@mono-agent/docs-mcp": `file:./${tarballs[0]}`,
+      "@mono-agent/docs-mcp": `file:${tarballPath}`,
     },
   }, null, 2)}\n`, "utf8");
-  await execFileAsync("pnpm", ["install", "--ignore-scripts"], {
+  await execFileAsync("pnpm", ["install", "--ignore-scripts", "--offline"], {
     cwd: smokeRoot,
     env: { ...process.env, CI: "1" },
     maxBuffer: 8 * 1024 * 1024,
@@ -46,8 +60,31 @@ try {
     ".bin",
     process.platform === "win32" ? "mono-agent-docs-mcp.cmd" : "mono-agent-docs-mcp",
   );
+  const registrationPath = join(smokeRoot, ".mcp.json");
+  await writeFile(registrationPath, `${JSON.stringify({
+    mcpServers: {
+      "mono-agent-docs": {
+        type: "stdio",
+        command: executable,
+        args: [],
+      },
+    },
+  }, null, 2)}\n`, "utf8");
+  const registration = JSON.parse(await readFile(registrationPath, "utf8"));
+  const registeredServer = registration?.mcpServers?.["mono-agent-docs"];
+  assert.deepEqual(
+    Object.keys(registration),
+    ["mcpServers"],
+    "Companion registration must remain outside mono-agent.config.json.",
+  );
+  assert.deepEqual(
+    registeredServer,
+    { type: "stdio", command: executable, args: [] },
+    "Companion registration did not preserve the exact stdio command.",
+  );
   const transport = new StdioClientTransport({
-    command: executable,
+    command: registeredServer.command,
+    args: registeredServer.args,
     cwd: smokeRoot,
     stderr: "pipe",
   });
@@ -99,7 +136,9 @@ try {
   process.stdout.write(`${JSON.stringify({
     ok: true,
     package: "@mono-agent/docs-mcp",
+    artifact: basename(tarballPath),
     transport: "packed-stdio",
+    registration: "mcpServers.mono-agent-docs",
     docsVersion: structured.docsVersion,
     corpusDigest: structured.corpusDigest,
     topResult: first.readTarget,

@@ -546,7 +546,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
     conversationId: string,
   ): Promise<void> => {
     let input;
-    try { input = parseAskAnswerRequest(await readBoundedJsonBody(request, OPERATOR_LIMITS.requestBytes)); }
+    try { input = parseAskAnswerRequest(await readBoundedJsonBody(request, OPERATOR_LIMITS.askAnswerRequestBytes)); }
     catch (error) { closeAfterOversize(request, response, error instanceof HttpError ? error : new HttpError(400, "invalid_request", "The AskUser answer is invalid.")); return; }
     const pending = pendingAsks.get(conversationId);
     if (pending === undefined || pending.interactionId !== input.interactionId || options.host?.answerAsk === undefined) {

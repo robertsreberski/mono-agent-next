@@ -17,6 +17,7 @@ export interface StartMonoAgentTuiOptions {
   readonly operatorId?: string;
   readonly conversationId?: string;
   readonly title?: string;
+  readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
   readonly terminal?: Terminal;
@@ -79,6 +80,7 @@ export async function startMonoAgentTui(
     terminal: options.terminal ?? new ProcessTerminal(),
     conversationId: options.conversationId ?? `tui-${crypto.randomUUID()}`,
     ...(options.title === undefined ? {} : { title: options.title }),
+    ...(options.runtime === undefined ? {} : { runtime: options.runtime }),
     ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.effort === undefined ? {} : { effort: options.effort }),
     ...(discoveredOperator === undefined ? {} : { discoveredOperator }),

@@ -204,7 +204,7 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
     const askMatch = /^\/api\/v1\/threads\/([^/]+)\/ask$/u.exec(url.pathname);
     if (request.method === "POST" && askMatch !== null) {
       requireMutationSafety(request, config.listen.host, listeningPort(server));
-      const input = parseAnswerAsk(await readJsonBody(request));
+      const input = parseAnswerAsk(await readJsonBody(request, OPERATOR_LIMITS.askAnswerRequestBytes));
       return sendJson(response, 200, await web.answerAsk(decodePath(askMatch[1]!), input));
     }
     const liveInputMatch = /^\/api\/v1\/threads\/([^/]+)\/live-input$/u.exec(url.pathname);
@@ -331,18 +331,18 @@ function rejectAuthority(): never {
   throw new WebProductError("invalid_authority", "Request authority is not accepted by this web listener.", 421);
 }
 
-async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+async function readJsonBody(request: IncomingMessage, maximumBytes: number = MAX_BODY_BYTES): Promise<unknown> {
   const declared = request.headers["content-length"];
-  if (typeof declared === "string" && /^\d+$/u.test(declared) && Number(declared) > MAX_BODY_BYTES) {
-    throw new WebProductError("body_too_large", `Request body exceeds ${String(MAX_BODY_BYTES)} bytes.`, 413);
+  if (typeof declared === "string" && /^\d+$/u.test(declared) && Number(declared) > maximumBytes) {
+    throw new WebProductError("body_too_large", `Request body exceeds ${String(maximumBytes)} bytes.`, 413);
   }
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of request) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
     total += bytes.length;
-    if (total > MAX_BODY_BYTES) {
-      throw new WebProductError("body_too_large", `Request body exceeds ${String(MAX_BODY_BYTES)} bytes.`, 413);
+    if (total > maximumBytes) {
+      throw new WebProductError("body_too_large", `Request body exceeds ${String(maximumBytes)} bytes.`, 413);
     }
     chunks.push(bytes);
   }
@@ -361,7 +361,7 @@ function parseCreateThread(raw: unknown): CreateWebThreadInput {
 }
 
 function parseStartTurn(raw: unknown): StartWebTurnInput {
-  const value = strictObject(raw, ["text", "attachments", "quote", "model", "effort"]);
+  const value = strictObject(raw, ["text", "attachments", "quote", "runtime", "model", "effort"]);
   try {
     const parsed = parseTurnRequest({
       conversationId: "web-browser-request",
@@ -370,6 +370,7 @@ function parseStartTurn(raw: unknown): StartWebTurnInput {
         ...(value.attachments === undefined ? {} : { attachments: value.attachments }),
         ...(value.quote === undefined ? {} : { quote: value.quote }),
       },
+      ...(value.runtime === undefined ? {} : { runtime: value.runtime }),
       ...(value.model === undefined ? {} : { model: value.model }),
       ...(value.effort === undefined ? {} : { effort: value.effort }),
     });
@@ -378,6 +379,7 @@ function parseStartTurn(raw: unknown): StartWebTurnInput {
       text: parsed.input.text ?? "",
       ...(parsed.input.attachments === undefined ? {} : { attachments: parsed.input.attachments }),
       ...(parsed.input.quote === undefined ? {} : { quote: parsed.input.quote }),
+      ...(parsed.runtime === undefined ? {} : { runtime: parsed.runtime }),
       ...(parsed.model === undefined ? {} : { model: parsed.model }),
       ...(parsed.effort === undefined ? {} : { effort: parsed.effort }),
     };

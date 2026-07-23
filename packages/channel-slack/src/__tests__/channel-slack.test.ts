@@ -225,6 +225,15 @@ describe("slack channel", () => {
       status: "failed",
       diagnostic: { code: "slack_delivery_idempotency_conflict" },
     });
+    const metadata = Object.fromEntries([["é", "precomposed"], ["e\u0301", "decomposed"]]);
+    const unicodeMessage = { ...message, idempotencyKey: "unicode-metadata", metadata };
+    await expect(delivery.deliver(unicodeMessage, signal)).resolves.toMatchObject({
+      status: "delivered",
+    });
+    await expect(delivery.deliver({
+      ...unicodeMessage,
+      metadata: Object.fromEntries(Object.entries(metadata).reverse()),
+    }, signal)).resolves.toMatchObject({ status: "duplicate" });
 
     const ambiguous = {
       conversationId: "slack:C1",
@@ -244,7 +253,9 @@ describe("slack channel", () => {
       },
     });
     expect(JSON.stringify(first)).not.toContain("secret transport");
-    expect(postMessage).toHaveBeenCalledTimes(2);
+    expect(postMessage).toHaveBeenCalledTimes(3);
+    expect(delivery.degraded).toBe(true);
+    expect(delivery.hasAmbiguousOutcome).toBe(true);
   });
 
   it("bounds and snapshots public delivery payloads before fingerprinting or transport", async () => {

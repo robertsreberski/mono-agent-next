@@ -432,7 +432,7 @@ export function parseAskUserAnswer(value: unknown, request?: AskUserRequest): As
     contractFail("AskUser answer.interactionId", "does not match the request");
   }
   const answeredAt = contractTimestamp(input.answeredAt, "AskUser answer.answeredAt");
-  const answersInput = contractRecord(input.answers, "AskUser answer.answers");
+  const answersInput = contractRecord(input.answers, "AskUser answer.answers", undefined, true);
   const answerEntries = Object.entries(answersInput);
   if (answerEntries.length < 1 || answerEntries.length > AGENT_INTERACTION_LIMITS.askQuestions) {
     contractFail(
@@ -445,7 +445,7 @@ export function parseAskUserAnswer(value: unknown, request?: AskUserRequest): As
   if (questions !== undefined && answerEntries.length !== questions.size) {
     contractFail("AskUser answer.answers", "must answer every request question exactly once");
   }
-  const answers: Record<string, readonly string[]> = {};
+  const answers = Object.create(null) as Record<string, readonly string[]>;
   for (const [rawQuestionId, answerValue] of answerEntries) {
     const questionId = contractIdentifier(rawQuestionId, "AskUser answer.answers key");
     const question = questions?.get(questionId);
@@ -1173,7 +1173,7 @@ function contractFail(path: string, message: string): never {
   throw new TypeError(`${path} ${message}`);
 }
 function contractRecord(
-  value: unknown, path: string, allowed?: readonly string[],
+  value: unknown, path: string, allowed?: readonly string[], identifierKeys = false,
 ): ContractRecord {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return contractFail(path, "must be a plain object");
@@ -1186,7 +1186,7 @@ function contractRecord(
   const allowedSet = allowed === undefined ? undefined : new Set(allowed);
   for (const key of Reflect.ownKeys(value)) {
     if (typeof key !== "string") contractFail(path, "contains an unknown symbol field");
-    if (key === "__proto__" || key === "constructor" || key === "prototype") {
+    if (key === "__proto__" || (!identifierKeys && (key === "constructor" || key === "prototype"))) {
       contractFail(path, `contains unsafe field ${JSON.stringify(key)}`);
     }
     const descriptor = Object.getOwnPropertyDescriptor(value, key);

@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   mkdtemp,
   mkdir,
@@ -57,7 +58,7 @@ const EXPECTED_DEPENDENCIES: Readonly<Record<ProjectTemplate, readonly string[]>
 
 const DECLARED_RUNTIME_APPROVAL_CAPABILITIES: Readonly<Record<string, boolean>> = {
   "@mono-agent/runtime-claude": false,
-  "@mono-agent/runtime-pi": false,
+  "@mono-agent/runtime-pi": true,
 };
 
 afterEach(async () => {
@@ -89,12 +90,12 @@ describe("project templates", () => {
           apiKey: { $env: "WEBHOOK_API_KEY" },
         },
       },
-      policy: { approvals: { default: "allow" } },
+      policy: { approvals: { default: "ask" } },
     });
   });
 
   it.each(["minimal", "multi-runtime"] as const)(
-    "renders every %s route with an approval policy supported by its runtime",
+    "renders %s with deny-by-default tools and ask-by-default approvals",
     (template) => {
       const files = fileMap(renderProject({ projectName: `${template}-agent`, template }));
       const config = parseJson(files, "mono-agent.config.json");
@@ -104,16 +105,23 @@ describe("project templates", () => {
       const approvalDefault = record(policy.approvals).default;
       const routes = [record(routing.primary), ...(routing.fallbacks as readonly unknown[]).map(record)];
 
+      expect(policy).toMatchObject({
+        tools: { default: "deny", allow: [] },
+        approvals: { default: "ask" },
+      });
       for (const route of routes) {
         const runtimeId = String(route.runtime);
         const packageName = String(record(runtimes[runtimeId]).$use);
         const approvalsSupported = DECLARED_RUNTIME_APPROVAL_CAPABILITIES[packageName];
         expect(approvalsSupported, `${packageName} must declare an approval capability fixture`).toBeDefined();
-        expect(
-          approvalDefault !== "ask" || approvalsSupported,
-          `${template} route ${runtimeId} is blocked because ${packageName} does not support approvals`,
-        ).toBe(true);
       }
+      const primaryRuntimeId = String(record(routing.primary).runtime);
+      const primaryPackage = String(record(runtimes[primaryRuntimeId]).$use);
+      expect(approvalDefault).toBe("ask");
+      expect(
+        DECLARED_RUNTIME_APPROVAL_CAPABILITIES[primaryPackage],
+        `${template} primary runtime must support approval callbacks`,
+      ).toBe(true);
     },
   );
 
@@ -137,17 +145,48 @@ describe("project templates", () => {
     });
   });
 
-  it("renders the current Personal Agent module shapes without stale PRD-only fields", () => {
+  it("renders the retained Personal Agent contract with current module fields", () => {
     const files = fileMap(renderProject({ projectName: "personal-agent", template: "personal" }));
     const config = parseJson(files, "mono-agent.config.json");
     const memory = record(config.memory);
     const state = record(config.state);
     const channels = record(config.channels);
+    const mcp = parseJson(files, ".mcp.json");
+    const cron = files.get("cron/morning-briefing.md") ?? "";
+    const projectMcp = files.get("tools/project-status-mcp.mjs") ?? "";
+    const webhookRoute = files.get("webhook/invoke.md") ?? "";
+    const environment = files.get(".env.example") ?? "";
+    const gitignore = files.get(".gitignore") ?? "";
 
     expect([...files.keys()]).toContain(".mcp.json");
-    expect([...files.keys()]).toContain("cron/.gitkeep");
+    expect([...files.keys()]).toContain("cron/morning-briefing.md");
     expect([...files.keys()]).toContain("skills/.gitkeep");
+    expect([...files.keys()]).toContain("tools/project-status-mcp.mjs");
+    expect([...files.keys()]).toContain("webhook/invoke.md");
+    expect([...files.keys()]).not.toContain("cron/.gitkeep");
     expect([...files.keys()]).not.toContain(".mono-agent/memory/.first-run-memory-initializing");
+    expect(mcp).toEqual({
+      mcpServers: {
+        "project-status": {
+          type: "stdio",
+          command: "node",
+          args: ["./tools/project-status-mcp.mjs"],
+        },
+      },
+    });
+    expect(projectMcp).toContain('name: "project_status"');
+    expect(projectMcp).toContain("The scaffolded project MCP fixture is available.");
+    expect(cron).toContain("id: morning-briefing");
+    expect(cron).toContain("expression: 30 7 * * *");
+    expect(cron).toContain("runtime: pi");
+    expect(cron).toContain("model: openai-codex:gpt-5.6-sol");
+    expect(cron).toContain("notify: telegram");
+    expect(cron).toContain("Do not change files, contact external services");
+    expect(webhookRoute).toContain("name: invoke");
+    expect(webhookRoute).toContain("path: /webhook/invoke");
+    expect(webhookRoute).toContain("enabled: true");
+    expect(environment).toContain("MONO_AGENT_WEBHOOK_SIGNATURE_SECRET=\n");
+    expect(gitignore).toContain(".mono-agent/artifacts/\n");
     expect(memory).toEqual({
       $use: "@mono-agent/memory-local",
       root: "./.mono-agent/memory",
@@ -180,11 +219,63 @@ describe("project templates", () => {
       },
       policy: { tools: { default: "allow" } },
     });
-    expect(record(channels.telegram)).not.toHaveProperty("quietHours");
-    expect(record(channels.telegram)).not.toHaveProperty("transcription");
-    expect(record(channels.webhook)).toMatchObject({ path: "/webhook/invoke", mode: "async" });
-    expect(record(channels.webhook)).not.toHaveProperty("routesDirectory");
-    expect(record(channels["openai-api"]).listen).toEqual({ host: "127.0.0.1", port: 4312 });
+    expect(record(channels.telegram)).toMatchObject({
+      quietHours: { start: "23:00", end: "07:00", timezone: "Europe/Rome" },
+      transport: { ipFamily: 4 },
+      transcription: {
+        endpoint: "http://127.0.0.1:50060/v1/audio/transcriptions",
+        model: "large-v3-v20240930",
+      },
+    });
+    expect(record(channels.webhook)).toMatchObject({
+      listen: { host: "100.64.0.10", port: 4313 },
+      allowNonLoopback: true,
+      apiKey: { $env: "MONO_AGENT_WEBHOOK_API_KEY" },
+      signatureSecret: { $env: "MONO_AGENT_WEBHOOK_SIGNATURE_SECRET" },
+      routesDirectory: "./webhook",
+      defaultMode: "async",
+      retentionMs: 300_000,
+      maxStoredRequests: 100,
+    });
+    expect(record(channels.webhook)).not.toHaveProperty("path");
+    expect(record(channels.webhook)).not.toHaveProperty("mode");
+    expect(record(channels["openai-api"])).toMatchObject({
+      listen: { host: "0.0.0.0", port: 4312 },
+      allowNonLoopback: true,
+    });
+  });
+
+  it("ships a runnable project-owned MCP fixture without a mono-agent module dependency", async () => {
+    const root = await makeTemporaryDirectory();
+    const target = join(root, "personal-agent");
+    await scaffoldAgent({ targetDirectory: target, template: "personal" });
+    const input = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } },
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "project_status", arguments: {} } },
+    ].map((message) => JSON.stringify(message)).join("\n") + "\n";
+    const result = spawnSync(process.execPath, ["./tools/project-status-mcp.mjs"], {
+      cwd: target,
+      input,
+      encoding: "utf8",
+      timeout: 5_000,
+      shell: false,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    const frames = result.stdout.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(frames).toHaveLength(3);
+    expect(frames[1]).toMatchObject({
+      id: 2,
+      result: { tools: [{ name: "project_status" }] },
+    });
+    expect(frames[2]).toMatchObject({
+      id: 3,
+      result: {
+        content: [{ type: "text", text: "The scaffolded project MCP fixture is available." }],
+      },
+    });
   });
 
   it("renders explicit Pi and native Claude routes for multi-runtime", () => {

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { access, readdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -1414,6 +1414,21 @@ describe("dependency and package preflight", () => {
     await expectConfigIssue(loadAgentConfig(project.configPath), /direct project dependency/u);
   });
 
+  it("rejects an ancestor-only node_modules package despite matching manifest and lock claims", async () => {
+    const project = await fixture({ kind: "runtime", controller: { create: () => ({}) } });
+    await project.writeConfig(minimalConfig(project.modules[0]!.name));
+    const consumerRoot = join(project.root, "consumer");
+    await mkdir(consumerRoot);
+    for (const name of ["package.json", "package-lock.json", "AGENTS.md", "mono-agent.config.json"]) {
+      await rename(join(project.root, name), join(consumerRoot, name));
+    }
+
+    await expectConfigIssue(
+      loadAgentConfig(join(consumerRoot, "mono-agent.config.json")),
+      /must be installed at .*ancestor node_modules are not eligible/u,
+    );
+  });
+
   it("rejects missing and version-mismatched lock entries", async () => {
     const missing = await fixture({ kind: "runtime", omitFromLock: true, controller: { create: () => ({}) } });
     await missing.writeConfig(minimalConfig(missing.modules[0]!.name));
@@ -1443,6 +1458,172 @@ describe("dependency and package preflight", () => {
     const kind = await fixture({ kind: "runtime", manifestKind: "channel", controller: { create: () => ({}) } });
     await kind.writeConfig(minimalConfig(kind.modules[0]!.name));
     await expectConfigIssue(loadAgentConfig(kind.configPath), /expected runtime/u);
+  });
+
+  it.each([
+    ["GitLab shorthand", "gitlab:owner/repo#main"],
+    ["Bitbucket shorthand", "bitbucket:owner/repo#main"],
+    ["GitHub shorthand", "owner/repo#main"],
+    ["Git SSH URL", "git+ssh://git@github.com/owner/repo.git#main"],
+    ["SSH URL", "ssh://git@github.com/owner/repo.git"],
+    ["scp-style Git URL", "git@github.com:owner/repo.git"],
+    ["local tgz archive", "module.tgz"],
+    ["local tar archive", "module.tar"],
+    ["local tar.gz archive", "module.tar.gz"],
+    ["case-variant local archive", "module.TGZ"],
+    ["numeric JSON value", 1],
+    ["object JSON value", { source: "registry" }],
+  ])("rejects non-registry dependency spec: %s", async (_label, dependencySpec) => {
+    const project = await fixture({
+      kind: "runtime",
+      dependencySpec,
+      controller: { create: () => ({}) },
+    });
+    await project.writeConfig(minimalConfig(project.modules[0]!.name));
+    await expectConfigIssue(loadAgentConfig(project.configPath), /forbidden dependency spec/u);
+  });
+
+  it("binds npm lock root evidence to the exact authored dependency spec", async () => {
+    const project = await fixture({
+      kind: "runtime",
+      dependencySpec: "^1.0.0",
+      controller: { create: () => ({}) },
+    });
+    await project.writeConfig(minimalConfig(project.modules[0]!.name));
+    const lockPath = join(project.root, "package-lock.json");
+    const lock = JSON.parse(await readFile(lockPath, "utf8")) as {
+      packages: Record<string, { dependencies?: Record<string, unknown> }>;
+    };
+    lock.packages[""]!.dependencies![project.modules[0]!.name] = "file:../evil";
+    await writeFile(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
+
+    await expectConfigIssue(loadAgentConfig(project.configPath), /mismatched.*npm lockfile/u);
+  });
+
+  it("rejects workspace specs and non-registry pnpm resolutions before reserved module import", async () => {
+    const workspace = await createFixtureProject([
+      { kind: "runtime", controller: runtimeController(async () => ({})) },
+      {
+        name: "@mono-agent/state-local",
+        kind: "state",
+        dependencySpec: "workspace:*",
+        entrySource: "throw new Error('workspace reserved module was imported');",
+      },
+    ]);
+    projects.push(workspace);
+    await workspace.writeConfig(minimalConfig(workspace.modules[0]!.name, {
+      state: { $use: "@mono-agent/state-local" },
+    }));
+    await expectConfigIssue(loadAgentConfig(workspace.configPath), /forbidden dependency spec/u);
+
+    const marker = `reserved-link-${randomUUID().toLowerCase()}`;
+    const linked = await createFixtureProject([
+      { kind: "runtime", controller: runtimeController(async () => ({})) },
+      {
+        name: "@mono-agent/state-local",
+        kind: "state",
+        dependencySpec: "^1.0.0",
+        entrySource: `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "bad");`,
+      },
+    ]);
+    projects.push(linked);
+    const [runtime] = linked.modules;
+    const markerPath = join(linked.root, marker);
+    const stateRoot = join(linked.root, "node_modules", "@mono-agent", "state-local");
+    await writeFile(
+      join(stateRoot, "index.js"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(markerPath)}, "bad");`,
+    );
+    await linked.writeConfig(minimalConfig(runtime!.name, {
+      state: { $use: "@mono-agent/state-local" },
+    }));
+    await rm(join(linked.root, "package-lock.json"));
+    await writeFile(join(linked.root, "pnpm-lock.yaml"), [
+      "lockfileVersion: '9.0'",
+      "importers:",
+      "  .:",
+      "    dependencies:",
+      `      ${JSON.stringify(runtime!.name)}:`,
+      "        specifier: 1.0.0",
+      "        version: 1.0.0",
+      "      '@mono-agent/state-local':",
+      "        specifier: file:evil",
+      "        version: 1.0.0",
+      "",
+    ].join("\n"));
+
+    await expectConfigIssue(loadAgentConfig(linked.configPath), /mismatched.*pnpm lockfile/u);
+    await expect(access(markerPath)).rejects.toThrow();
+  });
+
+  it.each([
+    {
+      kind: "state" as const,
+      catalogPackage: "@mono-agent/state-local",
+      configPath: "state",
+      override: (packageName: string) => ({ state: { $use: packageName } }),
+    },
+    {
+      kind: "trigger" as const,
+      catalogPackage: "@mono-agent/trigger-cron",
+      configPath: "triggers.rejected",
+      override: (packageName: string) => ({ triggers: { rejected: { $use: packageName } } }),
+    },
+    {
+      kind: "exporter" as const,
+      catalogPackage: "@mono-agent/exporter-otlp",
+      configPath: "observability.exporters.rejected",
+      override: (packageName: string) => ({
+        observability: { exporters: { rejected: { $use: packageName } } },
+      }),
+    },
+    {
+      kind: "sandbox" as const,
+      catalogPackage: "@mono-agent/sandbox-srt",
+      configPath: "policy.sandbox",
+      override: (packageName: string) => ({
+        policy: {
+          tools: { default: "deny", allow: [] },
+          approvals: { default: "allow" },
+          sandbox: { $use: packageName },
+        },
+      }),
+    },
+  ])("rejects a non-catalog $kind module before importing its entrypoint", async ({
+    kind,
+    catalogPackage,
+    configPath,
+    override,
+  }) => {
+    const marker = `reserved-import-${randomUUID().toLowerCase()}`;
+    const runtimeName = `@fixture/runtime-${randomUUID().toLowerCase()}`;
+    const reservedName = `@fixture/${kind}-${randomUUID().toLowerCase()}`;
+    const project = await createFixtureProject([
+      { name: runtimeName, kind: "runtime", controller: runtimeController(async () => ({})) },
+      {
+        name: reservedName,
+        kind,
+        useFirstPartyReservedPackage: false,
+        entrySource: `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "bad");`,
+      },
+    ]);
+    projects.push(project);
+    const markerPath = join(project.root, marker);
+    const packageRoot = join(project.root, "node_modules", ...reservedName.split("/"));
+    await writeFile(
+      join(packageRoot, "index.js"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(markerPath)}, "bad");`,
+    );
+    await project.writeConfig(minimalConfig(runtimeName, override(reservedName)));
+
+    await expect(loadAgentConfig(project.configPath)).rejects.toMatchObject({
+      issues: [{
+        code: "reserved_module_not_first_party",
+        path: configPath,
+        message: expect.stringContaining(catalogPackage),
+      }],
+    });
+    await expect(access(markerPath)).rejects.toThrow();
   });
 
   it("preflights metadata before import and rejects an entry symlink escape", async () => {

@@ -1,72 +1,43 @@
-import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-
+import { readServiceInput } from "./input.js";
 export const SERVICE_MACOS_CONFIG_VERSION = 1;
 export const DEFAULT_LOG_MAX_BYTES = 10_485_760;
 export const DEFAULT_LOG_RETAIN_FILES = 5;
 export const MAX_SERVICE_CONFIG_BYTES = 1_048_576;
-
 export type ServiceRestartPolicy = "never" | "on-failure" | "always";
-
 export interface ServiceMacosLogsConfig {
-  readonly directory: string;
-  readonly maxBytes: number;
-  readonly retainFiles: number;
+  readonly directory: string; readonly maxBytes: number; readonly retainFiles: number;
 }
-
 export interface ServiceMacosServiceConfig {
-  readonly agentConfig: string;
-  readonly startAtLogin: boolean;
-  readonly restartPolicy: ServiceRestartPolicy;
+  readonly agentConfig: string; readonly startAtLogin: boolean; readonly restartPolicy: ServiceRestartPolicy;
   readonly environmentFile?: string;
   readonly logs: ServiceMacosLogsConfig;
 }
-
 export interface ServiceMacosConfig {
   readonly $schema?: string;
   readonly configVersion: 1;
   readonly services: Readonly<Record<string, ServiceMacosServiceConfig>>;
 }
-
 export interface LoadedServiceMacosConfig {
-  readonly path: string;
-  readonly source: string;
-  readonly config: ServiceMacosConfig;
+  readonly path: string; readonly source: string; readonly config: ServiceMacosConfig;
 }
-
 export class ServiceMacosConfigError extends Error {
   readonly code = "invalid_service_macos_config";
-
   constructor(message: string) {
     super(message);
     this.name = "ServiceMacosConfigError";
   }
 }
-
 const ROOT_KEYS = new Set(["$schema", "configVersion", "services"]);
 const SERVICE_KEYS = new Set(["agentConfig", "startAtLogin", "restartPolicy", "environmentFile", "logs"]);
 const LOG_KEYS = new Set(["directory", "maxBytes", "retainFiles"]);
-
 export async function loadServiceMacosConfig(path: string): Promise<LoadedServiceMacosConfig> {
   const absolutePath = resolve(path);
-  const before = await lstat(absolutePath);
-  if (!before.isFile() || before.isSymbolicLink()) {
-    throw new ServiceMacosConfigError("Service config must be a regular file, not a symlink.");
-  }
-  if (before.size > MAX_SERVICE_CONFIG_BYTES) {
-    throw new ServiceMacosConfigError(`Service config exceeds ${String(MAX_SERVICE_CONFIG_BYTES)} bytes.`);
-  }
-  const handle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
   let source: string;
   try {
-    const after = await handle.stat();
-    if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino || after.nlink !== 1) {
-      throw new ServiceMacosConfigError("Service config changed identity while it was opened.");
-    }
-    source = await handle.readFile("utf8");
-  } finally {
-    await handle.close();
+    source = (await readServiceInput(absolutePath, MAX_SERVICE_CONFIG_BYTES)).source.toString("utf8");
+  } catch (error) {
+    throw new ServiceMacosConfigError(`Service config is not a protected regular file: ${errorMessage(error)}`);
   }
   let value: unknown;
   try {
@@ -76,7 +47,6 @@ export async function loadServiceMacosConfig(path: string): Promise<LoadedServic
   }
   return Object.freeze({ path: absolutePath, source, config: parseServiceMacosConfig(value) });
 }
-
 export function parseServiceMacosConfig(value: unknown): ServiceMacosConfig {
   const input = readRecord(value, "Service config");
   rejectUnknown(input, ROOT_KEYS, "Service config");
@@ -102,7 +72,6 @@ export function parseServiceMacosConfig(value: unknown): ServiceMacosConfig {
     services: Object.freeze(services),
   });
 }
-
 export const serviceMacosConfigSchema = Object.freeze({
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
@@ -142,7 +111,6 @@ export const serviceMacosConfigSchema = Object.freeze({
   },
   required: ["configVersion", "services"],
 });
-
 function parseService(value: unknown, id: string): ServiceMacosServiceConfig {
   const input = readRecord(value, `services.${id}`);
   rejectUnknown(input, SERVICE_KEYS, `services.${id}`);
@@ -165,7 +133,6 @@ function parseService(value: unknown, id: string): ServiceMacosServiceConfig {
     logs,
   });
 }
-
 function parseLogs(value: unknown, id: string): ServiceMacosLogsConfig {
   const input = readRecord(value, `services.${id}.logs`);
   rejectUnknown(input, LOG_KEYS, `services.${id}.logs`);
@@ -175,7 +142,6 @@ function parseLogs(value: unknown, id: string): ServiceMacosLogsConfig {
     retainFiles: integer(input.retainFiles, DEFAULT_LOG_RETAIN_FILES, 100, `services.${id}.logs.retainFiles`),
   });
 }
-
 function readRecord(value: unknown, field: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new ServiceMacosConfigError(`${field} must be an object.`);
@@ -186,18 +152,15 @@ function readRecord(value: unknown, field: string): Record<string, unknown> {
   }
   return value as Record<string, unknown>;
 }
-
 function rejectUnknown(input: Record<string, unknown>, allowed: ReadonlySet<string>, field: string): void {
   const unknown = Object.keys(input).filter((key) => !allowed.has(key)).sort();
   if (unknown.length > 0) throw new ServiceMacosConfigError(`${field} contains unknown field(s): ${unknown.join(", ")}.`);
 }
-
 function absolutePath(value: unknown, field: string): string {
   const path = optionalString(value, field, true);
   if (path === undefined || !isAbsolute(path)) throw new ServiceMacosConfigError(`${field} must be an absolute path.`);
   return resolve(path);
 }
-
 function optionalString(value: unknown, field: string, rejectControl: boolean): string | undefined {
   if (value === undefined) return undefined;
   if (
@@ -211,12 +174,10 @@ function optionalString(value: unknown, field: string, rejectControl: boolean): 
   }
   return value;
 }
-
 function boolean(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") throw new ServiceMacosConfigError(`${field} must be a boolean.`);
   return value;
 }
-
 function integer(value: unknown, fallback: number, maximum: number, field: string): number {
   if (value === undefined) return fallback;
   if (!Number.isSafeInteger(value) || (value as number) <= 0 || (value as number) > maximum) {
@@ -224,14 +185,12 @@ function integer(value: unknown, fallback: number, maximum: number, field: strin
   }
   return value as number;
 }
-
 function enumValue<T extends string>(value: unknown, allowed: readonly T[], field: string): T {
   if (typeof value !== "string" || !allowed.includes(value as T)) {
     throw new ServiceMacosConfigError(`${field} must be one of: ${allowed.join(", ")}.`);
   }
   return value as T;
 }
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

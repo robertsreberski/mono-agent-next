@@ -70,6 +70,15 @@ function text(value: unknown, path: string, options: { allowEmpty?: boolean; max
   return value;
 }
 
+function contractText(value: unknown, path: string, maximumBytes: number): string {
+  if (typeof value !== "string") fail(path, "must be a string");
+  if (value.length === 0 || value.trim().length === 0) fail(path, "must not be empty");
+  if (value.includes("\0")) fail(path, "must not contain NUL");
+  const bytes = new TextEncoder().encode(value).byteLength;
+  if (bytes > maximumBytes) fail(path, `must be at most ${maximumBytes} UTF-8 bytes`);
+  return value;
+}
+
 function identifier(value: unknown, path: string): string {
   const parsed = text(value, path, { max: OPERATOR_LIMITS.identifierCharacters });
   if (!/^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/.test(parsed)) {
@@ -168,20 +177,43 @@ function questionChoice(value: unknown, path: string): OperatorQuestionChoice {
   const input = record(value, path);
   keys(input, ["value", "label", "description"], path);
   return {
-    value: text(input.value, `${path}.value`, { max: 1_024 }),
-    label: text(input.label, `${path}.label`, { max: 1_024 }),
-    ...(input.description === undefined ? {} : { description: text(input.description, `${path}.description`, { max: 4_096 }) }),
+    value: contractText(input.value, `${path}.value`, OPERATOR_LIMITS.askChoiceValueBytes),
+    label: contractText(input.label, `${path}.label`, OPERATOR_LIMITS.askChoiceLabelBytes),
+    ...(input.description === undefined ? {} : {
+      description: contractText(
+        input.description,
+        `${path}.description`,
+        OPERATOR_LIMITS.askChoiceDescriptionBytes,
+      ),
+    }),
   };
 }
 
 function question(value: unknown, path: string): OperatorQuestion {
   const input = record(value, path);
   keys(input, ["id", "prompt", "choices", "allowFreeText", "multiple"], path);
+  const allowFreeText = bool(input.allowFreeText, `${path}.allowFreeText`);
+  const choices = input.choices === undefined
+    ? undefined
+    : array(
+      input.choices,
+      `${path}.choices`,
+      questionChoice,
+      OPERATOR_LIMITS.askChoicesPerQuestion,
+    );
+  if ((choices?.length ?? 0) === 0 && !allowFreeText) {
+    fail(`${path}.choices`, "must contain a choice when free text is disabled");
+  }
+  const choiceValues = new Set<string>();
+  for (const [index, choice] of (choices ?? []).entries()) {
+    if (choiceValues.has(choice.value)) fail(`${path}.choices[${index}].value`, "must be unique");
+    choiceValues.add(choice.value);
+  }
   return {
     id: identifier(input.id, `${path}.id`),
-    prompt: text(input.prompt, `${path}.prompt`, { max: 16_384 }),
-    ...(input.choices === undefined ? {} : { choices: array(input.choices, `${path}.choices`, questionChoice, 100) }),
-    allowFreeText: bool(input.allowFreeText, `${path}.allowFreeText`),
+    prompt: contractText(input.prompt, `${path}.prompt`, OPERATOR_LIMITS.askPromptBytes),
+    ...(choices === undefined ? {} : { choices }),
+    allowFreeText,
     multiple: bool(input.multiple, `${path}.multiple`),
   };
 }
@@ -189,8 +221,18 @@ function question(value: unknown, path: string): OperatorQuestion {
 function ask(value: unknown, path: string): OperatorAsk {
   const input = record(value, path);
   keys(input, ["interactionId", "questions", "requestedAt"], path);
-  const questions = array(input.questions, `${path}.questions`, question, 3);
+  const questions = array(
+    input.questions,
+    `${path}.questions`,
+    question,
+    OPERATOR_LIMITS.askQuestions,
+  );
   if (questions.length === 0) fail(`${path}.questions`, "must contain at least one question");
+  const questionIds = new Set<string>();
+  for (const [index, item] of questions.entries()) {
+    if (questionIds.has(item.id)) fail(`${path}.questions[${index}].id`, "must be unique");
+    questionIds.add(item.id);
+  }
   return {
     interactionId: identifier(input.interactionId, `${path}.interactionId`),
     questions,
@@ -399,14 +441,32 @@ export function parseAskAnswerRequest(value: unknown): OperatorAskAnswerRequest 
   const input = record(value, "askAnswer");
   keys(input, ["interactionId", "answers"], "askAnswer");
   const answerInput = record(input.answers, "askAnswer.answers");
-  const answers: Record<string, readonly string[]> = {};
-  for (const [questionId, values] of Object.entries(answerInput)) {
-    const parsedId = identifier(questionId, "askAnswer.answers key");
-    const parsedValues = array(values, `askAnswer.answers.${questionId}`, (item, itemPath) => text(item, itemPath, { allowEmpty: true, max: 16_384 }), 100);
-    if (parsedValues.length === 0) fail(`askAnswer.answers.${questionId}`, "must contain at least one answer");
-    answers[parsedId] = parsedValues;
+  const entries = Object.entries(answerInput);
+  if (entries.length < 1 || entries.length > OPERATOR_LIMITS.askQuestions) {
+    fail(
+      "askAnswer.answers",
+      `must contain between 1 and ${OPERATOR_LIMITS.askQuestions} questions`,
+    );
   }
-  if (Object.keys(answers).length === 0) fail("askAnswer.answers", "must not be empty");
+  const answerEntries: Array<[string, readonly string[]]> = [];
+  for (const [questionId, values] of entries) {
+    const parsedId = identifier(questionId, "askAnswer.answers key");
+    const parsedValues = array(
+      values,
+      `askAnswer.answers.${questionId}`,
+      (item, itemPath) => contractText(item, itemPath, OPERATOR_LIMITS.askAnswerBytes),
+      OPERATOR_LIMITS.askAnswerValuesPerQuestion,
+    );
+    if (parsedValues.length === 0) {
+      fail(`askAnswer.answers.${questionId}`, "must contain at least one answer");
+    }
+    const unique = new Set(parsedValues);
+    if (unique.size !== parsedValues.length) {
+      fail(`askAnswer.answers.${questionId}`, "must contain unique answers");
+    }
+    answerEntries.push([parsedId, parsedValues]);
+  }
+  const answers = Object.fromEntries(answerEntries) as Record<string, readonly string[]>;
   return { interactionId: identifier(input.interactionId, "askAnswer.interactionId"), answers };
 }
 

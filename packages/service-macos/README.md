@@ -42,20 +42,82 @@ Apply requires the conspicuous mutation flag:
 mono-agent-service-macos apply --config ./service-macos.json --allow-mutation
 ```
 
+Removal is also fingerprinted and explicitly authorized:
+
+```bash
+mono-agent-service-macos remove --config ./service-macos.json --allow-mutation
+```
+
+Removal unloads only the configured LaunchAgent labels and deletes their
+managed plist files. It never deletes agent config, state, memory, logs, or
+product data. A changed config, file observation, runtime binding, or launchd
+observation fails before mutation. Apply and removal use an owner-private,
+fsynced transaction journal and quarantine the exact fingerprinted plist inode
+before changing its canonical name. Publication and restoration are
+no-clobber operations. If a concurrent file occupies the target, both the
+operator file and the recoverable prior file are preserved and the operation
+fails closed. Apply retains rollback material until launchd reports the exact
+runner PID in `running` state and that runner publishes an owner-private
+readiness proof for the fingerprinted config, package manifest, lockfile, and
+protected environment. A loaded-but-unhealthy or crash-looping runner fails
+closed and rolls back. A bounded failure restores the prior plist and loaded
+state only after its own exact readiness proof. Stop and restart wait for both
+launchd unload and death of the previously observed PID. A running or unknown
+job without a provable PID fails closed, and every `launchctl` call has an
+independent wall timeout, including calls made through an injected runner.
+Repeating removal after success is a no-op.
+An explicitly authorized apply or removal automatically recovers a known
+interrupted transaction before creating a new plan. Inspect and plan remain
+read-only and refuse unresolved transactions.
+
 The service file uses `configVersion: 1` and a `services` map. Each entry names
 an absolute `agentConfig`, `startAtLogin`, `restartPolicy`, and owner-controlled
 log directory; an optional protected environment file must be mode `0600`.
+That file is the complete config-resolution environment and ambient launcher
+values cannot override it; without a file, config resolution receives an empty
+environment.
+Service, agent, package, lockfile, runtime, environment, plist, readiness, and
+log inputs reject group/world-writable files. `logs.maxBytes` and
+`logs.retainFiles` are enforced independently for stdout and stderr through a
+fixed number of exact owner-private archive slots and copy-truncate tail
+rotation. The runner binds the planned log directory and live log inodes, so a
+replaced path fails closed instead of truncating an operator file. Lowering
+`retainFiles` is rejected before mutation while higher-numbered managed slots
+remain; remove those explicit archive files before applying the decrease.
 
 ## Architecture
 
 ### Data flow
 
 1. The package reads and strictly validates its own desired-state JSON.
-2. Inspect resolves exact `ai.mono-agent.<service-id>` labels and plist paths, safely fingerprints owner-private plist files, and calls only `launchctl print`.
-3. Plan validates each agent config through core and binds config, package, lockfile, protected environment, Node, runner, log, plist, and launchd observations into one fingerprint.
-4. Apply first requires `allowMutation: true`, verifies the fingerprint, and rechecks every binding and observation before any write.
-5. A mode-`0600` temporary plist is fsynced and atomically promoted; `launchctl` is invoked only as an argument vector through the injected runner.
-6. Activation failure restores the prior plist and best-effort prior launchd definition.
+2. Inspect resolves exact `ai.mono-agent.<service-id>` labels and plist paths,
+   safely fingerprints owner-private plist files, and reports launchd
+   running/exited state, PID, and installed-activation readiness honestly.
+3. Plan validates each agent config through core and binds config, package,
+   lockfile, protected environment, Node, runner, LaunchAgents directory, log,
+   plist, and launchd observations into one fingerprint.
+4. Apply first requires `allowMutation: true`, verifies the fingerprint, and
+   rechecks every binding and observation around mutation and `launchctl`
+   boundaries before proceeding.
+5. Mutation creates a mode-`0700` per-service transaction directory and fsyncs
+   its bounded mode-`0600` journal before changing the canonical namespace.
+6. Update and removal move the canonical plist to quarantine, validate its
+   device, inode, uid, mode, link count, size, digest, and planned identity,
+   then publish or restore only through a no-clobber hard link.
+7. The plist carries a non-secret digest binding. The child reads the config,
+   package manifest, and lockfile before and after Core validation, starts Core
+   from that exact validated snapshot, checks health, and writes a mode-`0600`
+   readiness proof only after health, signal handling, and log bindings are
+   ready. The proof is replaced for each PID and withdrawn before drain.
+8. `launchctl` is invoked only as an argument vector through the injected
+   runner. Apply waits a bounded interval for matching PID, running state, and
+   readiness proof. An exact exited or unready job plans a restart. Apply
+   explicitly kickstarts jobs whose steady-state `startAtLogin` policy is
+   false. Activation failure conservatively unloads ambiguous state and
+   restores only a verified prior inode.
+9. Removal deletes only the quarantined planned inode after unload,
+   prior-PID-death, and no-resurrection proof. Unknown, corrupt, or occupied
+   recovery states retain every artifact and require operator resolution.
 
 ### Package structure
 
@@ -64,8 +126,10 @@ log directory; an optional protected environment file must be mode `0600`.
 | `config.ts` | Exact product configuration and schema. |
 | `plist.ts` | Exact labels, target paths, and deterministic owner-private plist content. |
 | `environment.ts` | No-follow protected environment reads without secret expansion into plists. |
+| `input.ts` | Stable, no-follow, permission-checked service input snapshots. |
+| `logs.ts` | Owner-private readiness proof plus bounded log rotation and retention. |
 | `command.ts` | Shell-free bounded subprocess runner. |
-| `reconciler.ts` | Safe inspect, fingerprinted plan, drift checks, atomic apply, and rollback. |
+| `reconciler.ts` | Safe inspect, fingerprinted apply/removal plans, drift checks, atomic mutation, and rollback. |
 | `cli.ts` | Thin JSON frontend plus the pinned foreground core runner. |
 
 ## Public API
@@ -78,6 +142,9 @@ log directory; an optional protected environment file must be mode `0600`.
 | `inspectServiceMacos` | Read exact plist and launchd state without mutation. |
 | `planServiceMacos` | Produce a deterministic, validated, fingerprinted reconciliation plan. |
 | `applyServiceMacosPlan` | Recheck and apply a plan only with explicit mutation authorization. |
+| `planServiceMacosRemoval` | Produce a deterministic removal plan for selected configured services. |
+| `removeServiceMacosPlan` | Recheck, unload, remove, verify, and roll back only with explicit mutation authorization. |
+| `recoverServiceMacosTransactions` | Recover known journaled interruptions only with explicit mutation authorization; unknown artifacts fail closed. |
 | `runServiceMacosCli` | Embed the optional CLI frontend with injected paths and command runner. |
 
 <!-- public-api-inventory:start -->
@@ -100,9 +167,13 @@ LAUNCHCTL_PATH
 LoadedServiceMacosConfig
 MAX_SERVICE_CONFIG_BYTES
 PlanServiceMacosOptions
+PlanServiceMacosRemovalOptions
 ProtectedEnvironment
+RecoverServiceMacosOptions
+RemoveServiceMacosOptions
 SERVICE_MACOS_CONFIG_VERSION
 SERVICE_PLAN_SCHEMA_VERSION
+ServiceFileIdentity
 ServiceFileObservation
 ServiceMacosCliOptions
 ServiceMacosConfig
@@ -113,24 +184,32 @@ ServiceMacosMutationDisabledError
 ServiceMacosObservation
 ServiceMacosPlan
 ServiceMacosPlanEntry
+ServiceMacosRemovalPlan
+ServiceMacosRemovalPlanEntry
 ServiceMacosRuntimePaths
 ServiceMacosServiceConfig
 ServiceMacosTarget
 ServicePlanAction
+ServiceRemovalAction
 ServiceRestartPolicy
+ServiceRunnerBinding
 ServiceSignal
 ServiceSignalSource
 applyServiceMacosPlan
 assertRuntimePaths
 defaultRuntime
 fingerprintPlan
+fingerprintRemovalPlan
 inspectServiceMacos
 loadProtectedEnvironment
 loadServiceMacosConfig
 parseEnvironment
 parseServiceMacosConfig
 planServiceMacos
+planServiceMacosRemoval
 processCommandRunner
+recoverServiceMacosTransactions
+removeServiceMacosPlan
 renderServicePlist
 runServiceMacosCli
 serviceMacosConfigSchema

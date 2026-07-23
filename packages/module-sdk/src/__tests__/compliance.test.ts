@@ -466,7 +466,7 @@ describe("public compliance assertions", () => {
 });
 
 describe("entrypoint boundary", () => {
-  it("exports reserved definitions only from the internal entrypoint", () => {
+  it("does not export reserved-slot factories from any supported entrypoint", () => {
     for (const name of [
       "defineStateModule",
       "defineTriggerModule",
@@ -474,7 +474,8 @@ describe("entrypoint boundary", () => {
       "defineSandboxModule",
     ]) {
       expect(publicApi).not.toHaveProperty(name);
-      expect(internalApi).toHaveProperty(name);
+      expect(internalApi).not.toHaveProperty(name);
     }
+    expect(internalApi).toHaveProperty("RESERVED_MODULE_KINDS");
   });
 });

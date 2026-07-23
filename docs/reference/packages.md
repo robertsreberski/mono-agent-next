@@ -7,13 +7,17 @@ sidebar:
 
 The package catalog is the source of truth for mono-agent ownership and dependency boundaries. Use this directory to find the package that owns a capability; use the linked README for its public API and embedding guidance.
 
-For the dependency graph and the distinction between static dependencies and runtime composition, see the [repository package map](https://github.com/robertsreberski/mono-agent/blob/main/PACKAGES.md).
+For the dependency graph and the distinction between static dependencies and
+runtime composition, see the [repository package map](https://github.com/robertsreberski/mono-agent-next/blob/main/PACKAGES.md).
 
 ## Reading the directory
 
-- `core` tier packages live under `packages/` and may participate in the built-in app composition when their category boundary allows it.
-- `plugin` tier packages live under `extras/`, publish in the same lockstep, and load only through an explicit plugin, backend, request extension, or MCP-companion selection.
-- The `alias` tier is the unscoped `create-mono-agent` installer that forwards its commands to `@mono-agent/agent-app`.
+- `core` tier packages live under `packages/`.
+- The one catalog `plugin`-tier entry is the independently registered docs-mcp
+  companion under `extras/`; the tier name is physical/release metadata and
+  does not create a generic v1 plugin plane.
+- The `alias` tier is the unscoped `create-mono-agent` project scaffolder and
+  CLI entrypoint.
 
 Category describes responsibility (`runtime`, `communication`, `context`, and so on); tier describes how the package joins the product and release graph.
 

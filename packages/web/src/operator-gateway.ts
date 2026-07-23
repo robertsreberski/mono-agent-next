@@ -93,8 +93,9 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
         active.client = client;
         active.capabilities = info.capabilities;
         let overrides: OperatorRuntimeOverrideIntent = {};
-        if (input.model !== undefined || input.effort !== undefined) {
+        if (input.runtime !== undefined || input.model !== undefined || input.effort !== undefined) {
           const decision = evaluateOperatorRuntimeOverride(info, {
+            ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
             ...(input.model === undefined ? {} : { model: input.model }),
             ...(input.effort === undefined ? {} : { effort: input.effort }),
           });

@@ -1,6 +1,6 @@
 # mono-agent v1 architecture
 
-This is the maintainer map for the private v1 source target. The accepted
+This is the maintainer map for the public v1 source target. The accepted
 product contract is in the [v1 architecture decision](./docs/reference/v1-architecture.md),
 and each package README owns its detailed public API and operational boundary.
 

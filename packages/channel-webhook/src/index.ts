@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 import {
@@ -55,6 +56,9 @@ function createWebhookModuleChannel(
   let info: WebhookChannelStartInfo | undefined;
   let startPromise: Promise<void> | undefined;
   const delivery = context.config.outbound === undefined ? undefined : new WebhookDelivery(context.config.outbound);
+  const defaultDeliveryConversationId = context.config.outbound === undefined
+    ? undefined
+    : `webhook:outbound:sha256:${createHash("sha256").update(context.config.outbound.url, "utf8").digest("hex")}`;
 
   const submit: WebhookSubmit = async (request) => {
     let replyText = "";
@@ -115,14 +119,28 @@ function createWebhookModuleChannel(
 
   const health = async (_healthContext: ModuleHealthContext): Promise<ModuleHealth> => {
     const channelHealth = transport?.health();
+    const deliveryDegraded = delivery?.degraded ?? false;
+    const deliveryReceiptCapacityExhausted = delivery?.receiptCapacityExhausted ?? false;
+    const deliveryAmbiguousOutcome = delivery?.hasAmbiguousOutcome ?? false;
+    const deliverySummary = deliveryReceiptCapacityExhausted
+      ? "Webhook delivery receipt capacity is exhausted."
+      : "Webhook delivery has an unresolved ambiguous outcome.";
     if (channelHealth === undefined) {
       return {
-        status: "unknown",
+        status: deliveryDegraded ? "degraded" : "unknown",
         checkedAt: new Date().toISOString(),
-        summary: "Webhook channel has not started.",
+        summary: deliveryDegraded
+          ? deliverySummary
+          : "Webhook channel has not started.",
+        details: {
+          deliveryReceiptCapacityExhausted,
+          deliveryAmbiguousOutcome,
+        },
       };
     }
-    const status = channelHealth.status === "healthy"
+    const status = deliveryDegraded
+      ? "degraded"
+      : channelHealth.status === "healthy"
       ? "healthy"
       : channelHealth.status === "degraded"
         ? "degraded"
@@ -130,10 +148,16 @@ function createWebhookModuleChannel(
     return {
       status,
       checkedAt: new Date().toISOString(),
-      ...(channelHealth.message === undefined ? {} : { summary: channelHealth.message }),
+      ...(channelHealth.message !== undefined
+        ? { summary: channelHealth.message }
+        : deliveryDegraded
+          ? { summary: deliverySummary }
+          : {}),
       details: {
         activeRequests: channelHealth.activeRequests,
         storedRequests: channelHealth.storedRequests,
+        deliveryReceiptCapacityExhausted,
+        deliveryAmbiguousOutcome,
         ...(info === undefined ? {} : { endpoint: info.invokeUrl }),
         ...(info === undefined ? {} : { routes: info.routes.length }),
       },
@@ -164,7 +188,12 @@ function createWebhookModuleChannel(
     },
     stop,
     health,
-    ...(delivery === undefined ? {} : { deliver: (message, signal) => delivery.deliver(message, signal) }),
+    ...(delivery === undefined
+      ? {}
+      : {
+          resolveDefaultDeliveryConversationId: () => defaultDeliveryConversationId,
+          deliver: (message, signal) => delivery.deliver(message, signal),
+        }),
   };
 }
 

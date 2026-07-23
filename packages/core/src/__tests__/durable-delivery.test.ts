@@ -66,6 +66,28 @@ describe("durable proactive delivery", () => {
     expect(sends).toBe(1);
   });
 
+  it("canonicalizes collation-equivalent metadata keys without insertion-order conflicts", async () => {
+    let sends = 0;
+    const fixture = await createDurableDeliveryFixture({
+      notify: async (message) => {
+        sends += 1;
+        return { status: "delivered", idempotencyKey: message.idempotencyKey };
+      },
+    });
+    const host = await fixture.start();
+    const message = outboundMessage("delivery-unicode-metadata", "hello");
+    const metadata = Object.fromEntries([["é", "precomposed"], ["e\u0301", "decomposed"]]);
+    const reversed = Object.fromEntries(Object.entries(metadata).reverse());
+
+    await expect(host.deliver("notify", { ...message, metadata })).resolves.toMatchObject({
+      status: "delivered",
+    });
+    await expect(host.deliver("notify", { ...message, metadata: reversed })).resolves.toMatchObject({
+      status: "duplicate",
+    });
+    expect(sends).toBe(1);
+  });
+
   it("retries a known failed receipt only after a second explicit delivery attempt", async () => {
     let sends = 0;
     const fixture = await createDurableDeliveryFixture({

@@ -230,6 +230,15 @@ describe("telegram channel", () => {
       status: "failed",
       diagnostic: { code: "telegram_delivery_idempotency_conflict" },
     });
+    const metadata = Object.fromEntries([["é", "precomposed"], ["e\u0301", "decomposed"]]);
+    const unicodeMessage = { ...message, idempotencyKey: "unicode-metadata", metadata };
+    await expect(delivery.deliver(unicodeMessage, signal)).resolves.toMatchObject({
+      status: "delivered",
+    });
+    await expect(delivery.deliver({
+      ...unicodeMessage,
+      metadata: Object.fromEntries(Object.entries(metadata).reverse()),
+    }, signal)).resolves.toMatchObject({ status: "duplicate" });
 
     const ambiguous = {
       conversationId: "telegram:42",
@@ -249,7 +258,9 @@ describe("telegram channel", () => {
       },
     });
     expect(JSON.stringify(first)).not.toContain("secret transport");
-    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenCalledTimes(3);
+    expect(delivery.degraded).toBe(true);
+    expect(delivery.hasAmbiguousOutcome).toBe(true);
   });
 
   it("bounds and snapshots public delivery payloads before fingerprinting or transport", async () => {

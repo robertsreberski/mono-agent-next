@@ -4344,7 +4344,7 @@ function deliveryFingerprint(
 function durableFingerprint(value: unknown): DurableFingerprint {
   const encoded = JSON.stringify(value, (_key, entry: unknown) => (
     isRecord(entry)
-      ? Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left.localeCompare(right)))
+      ? Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
       : entry
   ));
   return `sha256:${createHash("sha256").update(encoded).digest("hex")}`;

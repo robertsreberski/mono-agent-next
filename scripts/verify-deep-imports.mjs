@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -81,8 +82,8 @@ export function mappedEntries(
 }
 
 /**
- * Verify every declared ESM default/import target loads and every declared
- * `types` target exists.
+ * Verify every declared ESM default/import target loads inside the import
+ * boundary and every declared `types` target exists.
  *
  * @param {{
  *   repoRoot?: string,
@@ -158,16 +159,124 @@ export async function runVerifyDeepImports({
     return { exitCode: 1, results };
   }
   stdout.write(
-    `built-exports ok (${String(packageCount)} packages, ${String(results.length)} exports; default + declared types)\n`,
+    `built-exports ok (${String(packageCount)} packages, ${String(results.length)} exports; import-safe default + declared types)\n`,
   );
   return { exitCode: 0, results };
 }
 
 async function realImporter(_specifier, entry) {
-  const resolvedUrl = pathToFileURL(entry.defaultTarget).href;
-  return entry.json
-    ? import(resolvedUrl, { with: { type: "json" } })
-    : import(resolvedUrl);
+  return instrumentedImporter(entry);
+}
+
+/**
+ * Import one built package entrypoint in a clean subprocess that fails closed
+ * on import-time environment access, network use, child processes, or writes.
+ *
+ * @param {ReturnType<typeof mappedEntries>[number]} entry
+ */
+export function instrumentedImporter(entry) {
+  const harness = fileURLToPath(new URL("./import-safety-harness.mjs", import.meta.url));
+  const args = importSafetyNodeArguments(harness, entry);
+  return new Promise((resolveImport, rejectImport) => {
+    const child = spawn(process.execPath, args, {
+      cwd: entry.packageDirectory,
+      env: { NODE_NO_WARNINGS: "1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let outputBytes = 0;
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (error === undefined) resolveImport(undefined);
+      else rejectImport(error);
+    };
+    const collect = (chunk) => {
+      outputBytes += chunk.length;
+      if (outputBytes > 64 * 1024) {
+        child.kill("SIGKILL");
+        finish(new Error("import-safety subprocess exceeded its output limit"));
+        return;
+      }
+      stdout += chunk.toString("utf8");
+    };
+    child.stdout.on("data", collect);
+    child.stderr.on("data", collect);
+    child.on("error", () => finish(new Error("import-safety subprocess could not start")));
+    child.on("close", (code) => {
+      if (settled) return;
+      const marker = stdout.lastIndexOf("MONO_AGENT_IMPORT_SAFETY:");
+      if (marker < 0) {
+        finish(new Error(`import-safety subprocess exited ${String(code)} without a result`));
+        return;
+      }
+      const line = stdout.slice(marker + "MONO_AGENT_IMPORT_SAFETY:".length).split(/\r?\n/u)[0];
+      let result;
+      try {
+        result = JSON.parse(line);
+      } catch {
+        finish(new Error("import-safety subprocess returned malformed evidence"));
+        return;
+      }
+      if (code !== 0 || result.ok !== true) {
+        const reason = typeof result.violation === "string"
+          ? `import-time ${result.violation} is forbidden`
+          : typeof result.importError === "string"
+            ? `import failed: ${result.importError}`
+            : typeof result.harnessError === "string"
+              ? `import-safety harness failed: ${result.harnessError}`
+              : `import-safety subprocess exited ${String(code)}`;
+        finish(new Error(reason));
+        return;
+      }
+      finish();
+    });
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      finish(new Error("import-safety subprocess timed out"));
+    }, 10_000);
+    timeout.unref();
+  });
+}
+
+/**
+ * Build the subprocess arguments for one import probe. The permission model is
+ * the categorical backstop: the loader may read only package code and installed
+ * dependencies, while arbitrary project/host paths, writes, child processes,
+ * workers, and WASI remain denied even if package code bypasses or swallows an
+ * explicit harness guard.
+ *
+ * @param {string} harness
+ * @param {ReturnType<typeof mappedEntries>[number]} entry
+ */
+export function importSafetyNodeArguments(harness, entry) {
+  const canonicalHarness = canonicalExistingPath(harness);
+  const workspaceRoot = canonicalExistingPath(dirname(dirname(entry.packageDirectory)));
+  const readablePaths = new Set([
+    canonicalHarness,
+    resolve(dirname(canonicalHarness), "..", "package.json"),
+    resolve(workspaceRoot, "package.json"),
+    resolve(workspaceRoot, "packages"),
+    resolve(workspaceRoot, "extras"),
+    resolve(workspaceRoot, "node_modules"),
+  ]);
+  return [
+    "--permission",
+    ...[...readablePaths].map((path) => `--allow-fs-read=${path}`),
+    canonicalHarness,
+    pathToFileURL(canonicalExistingPath(entry.defaultTarget)).href,
+    entry.json ? "json" : "module",
+  ];
+}
+
+function canonicalExistingPath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return path;
+  }
 }
 
 function manifestExportEntries({

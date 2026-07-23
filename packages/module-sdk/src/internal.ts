@@ -7,7 +7,6 @@
  */
 import type {
   ArtifactRef,
-  Awaitable,
   JsonObject,
   JsonValue,
   ModuleApiVersion,
@@ -250,7 +249,7 @@ interface ReservedModuleDefinitionBase<
 > {
   readonly manifest: ReservedModuleManifest<K>;
   readonly schema: ModuleSchema<TConfig>;
-  create(context: ModuleCreateContext<TConfig, THost>): Awaitable<TInstance>;
+  create(context: ModuleCreateContext<TConfig, THost>): TInstance | PromiseLike<TInstance>;
 }
 export interface StateModuleDefinition<TConfig = unknown, TInstance extends StateStore = StateStore>
   extends ReservedModuleDefinitionBase<"state", TConfig, TInstance, StateHost> {}
@@ -265,24 +264,3 @@ export type ReservedModuleDefinition =
   | TriggerModuleDefinition
   | ExporterModuleDefinition
   | SandboxModuleDefinition;
-export function defineStateModule<TConfig, TInstance extends StateStore>(
-  definition: StateModuleDefinition<TConfig, TInstance>,
-): StateModuleDefinition<TConfig, TInstance> { return freezeReservedDefinition(definition) }
-export function defineTriggerModule<TConfig, TInstance extends Trigger>(
-  definition: TriggerModuleDefinition<TConfig, TInstance>,
-): TriggerModuleDefinition<TConfig, TInstance> { return freezeReservedDefinition(definition) }
-export function defineExporterModule<TConfig, TInstance extends Exporter>(
-  definition: ExporterModuleDefinition<TConfig, TInstance>,
-): ExporterModuleDefinition<TConfig, TInstance> { return freezeReservedDefinition(definition) }
-export function defineSandboxModule<TConfig, TInstance extends Sandbox>(
-  definition: SandboxModuleDefinition<TConfig, TInstance>,
-): SandboxModuleDefinition<TConfig, TInstance> { return freezeReservedDefinition(definition) }
-function freezeReservedDefinition<
-  T extends { readonly manifest: ReservedModuleManifest; readonly schema: ModuleSchema<unknown> },
->(definition: T): T {
-  const manifest = Object.freeze({
-    ...definition.manifest,
-    capabilities: Object.freeze([...definition.manifest.capabilities]),
-  });
-  return Object.freeze({ ...definition, manifest }) as T;
-}
