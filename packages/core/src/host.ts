@@ -238,6 +238,7 @@ class AgentHostImplementation implements AgentHost {
   readonly #conversationTails = new Map<string, Promise<void>>();
   readonly #idleWaiters = new Set<() => void>();
   readonly #semaphore: Semaphore;
+  readonly #redactionValues: readonly string[];
   #mcp: ConnectedMcpTools = { tools: [], async close() {} };
   #memory: Memory | undefined;
   #stateStore: StateStore | undefined;
@@ -264,6 +265,10 @@ class AgentHostImplementation implements AgentHost {
       throw new RangeError("maxPendingTurns must be greater than or equal to maxConcurrentTurns");
     }
     this.#semaphore = new Semaphore(this.#options.maxConcurrentTurns);
+    this.#redactionValues = referencedEnvironmentValues(
+      [config.raw, config.mcp],
+      environmentFor(config),
+    );
     this.#startInfo = {
       agentId: config.raw.agent.id,
       configPath: config.configPath,
@@ -2026,9 +2031,7 @@ class AgentHostImplementation implements AgentHost {
 
   #redact(message: string): string {
     let redacted = message;
-    for (const value of Object.values(environmentFor(this.config))) {
-      if (typeof value === "string" && value.length >= 4) redacted = redacted.replaceAll(value, "[REDACTED]");
-    }
+    for (const value of this.#redactionValues) redacted = redacted.replaceAll(value, "[REDACTED]");
     return redacted;
   }
 
@@ -3148,6 +3151,29 @@ function positiveInteger(value: number | undefined, fallback: number, name: stri
   const resolved = value ?? fallback;
   if (!Number.isSafeInteger(resolved) || resolved <= 0) throw new RangeError(`${name} must be a positive safe integer`);
   return resolved;
+}
+
+function referencedEnvironmentValues(
+  roots: readonly unknown[],
+  environment: Readonly<Record<string, string | undefined>>,
+): readonly string[] {
+  const names = new Set<string>();
+  const pending = [...roots];
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (Array.isArray(value)) {
+      pending.push(...value);
+      continue;
+    }
+    if (!isRecord(value)) continue;
+    if (typeof value.$env === "string") names.add(value.$env);
+    pending.push(...Object.values(value));
+  }
+  return Object.freeze(
+    [...names]
+      .map((name) => environment[name])
+      .filter((value): value is string => typeof value === "string" && value.length >= 4),
+  );
 }
 
 async function waitWithAbort(promise: Promise<unknown>, signal: AbortSignal): Promise<void> {

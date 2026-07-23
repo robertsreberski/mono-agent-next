@@ -580,6 +580,38 @@ describe("agent host lifecycle", () => {
     expect(message).not.toContain(secret);
   });
 
+  it("does not redact unrelated ambient environment values from diagnostics", async () => {
+    const events: string[] = [];
+    const runtime = `@fixture/runtime-${randomUUID().toLowerCase()}`;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create() {
+          return runtimeInstance(async () => completed("ok"), {
+            start() {
+              events.push("start");
+              return new Promise<void>(() => {});
+            },
+            stop() {
+              events.push("stop");
+            },
+          });
+        },
+      },
+    }]);
+    await project.writeConfig(minimalConfig(runtime));
+
+    await expect(settleWithin(
+      createAgentHost(project.configPath, {
+        environment: { GITHUB_REF_NAME: "main" },
+        lifecycleTimeoutMs: 20,
+      }),
+      500,
+    )).rejects.toThrow(/main start timed out after 20ms/u);
+    expect(events).toEqual(["start", "stop"]);
+  });
+
   it("reports bounded module health without starting work during inspection", async () => {
     const runtime = `@fixture/runtime-${randomUUID().toLowerCase()}`;
     const project = await fixture([{
