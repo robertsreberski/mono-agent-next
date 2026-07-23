@@ -12,10 +12,14 @@ import {
   chmod,
   link,
   lstat,
+  mkdtemp,
   mkdir,
   open,
+  readFile,
   realpath,
+  rm,
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -522,7 +526,7 @@ export async function acquireProcessLease(
   let created = false;
   if (identity === undefined) {
     try {
-      identity = await createSecureFile(path, createLeaseDatabase());
+      identity = await createSecureFile(path, await createLeaseDatabase());
       created = true;
     } catch (error) {
       if (!isAlreadyExists(error)) throw error;
@@ -785,15 +789,27 @@ interface IndexEntry {
   readonly valueBytes: number;
 }
 
-function createLeaseDatabase(): Buffer {
-  const database = new DatabaseSync(":memory:");
+async function createLeaseDatabase(): Promise<Buffer> {
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "mono-agent-state-lease-"));
+  const temporaryDatabase = join(temporaryDirectory, "lease.sqlite");
+  let database: DatabaseSync | undefined;
   try {
+    database = new DatabaseSync(temporaryDatabase);
+    database.exec("PRAGMA journal_mode = OFF;");
     database.exec(`PRAGMA application_id = ${String(STATE_INDEX_APPLICATION_ID)};`);
-    return Buffer.from(
-      (database as DatabaseSync & { serialize(): Uint8Array }).serialize(),
-    );
-  } finally {
     database.close();
+    database = undefined;
+    const bytes = await readFile(temporaryDatabase);
+    if (bytes.byteLength === 0 || bytes.byteLength > 1024 * 1024) {
+      throw new StateLocalError(
+        "STATE_CORRUPT",
+        "The local state process lease template has an invalid size.",
+      );
+    }
+    return bytes;
+  } finally {
+    database?.close();
+    await rm(temporaryDirectory, { recursive: true, force: true });
   }
 }
 
