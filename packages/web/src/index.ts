@@ -9,17 +9,29 @@ export type {
 
 export { WEB_API_VERSION } from "./contracts.js";
 export type {
+  AnswerWebAskInput,
   CreateWebThreadInput,
+  OfferWebLiveInput,
   StartWebTurnInput,
   WebAgent,
+  WebAskAnswerResult,
   WebBootstrap,
+  WebConfigView,
+  WebHealthView,
+  WebLiveInputResult,
   WebMessage,
+  WebReplayView,
   WebThread,
   WebThreadDetail,
+  WebTurnTelemetry,
   WebTurnStatus,
 } from "./contracts.js";
 
 export { startWebServer } from "./server.js";
 export type { StartWebServerOptions, WebServerHandle } from "./server.js";
-export type { WebOperatorGateway, WebOperatorTurnInput } from "./service.js";
+export type {
+  WebOperatorGateway,
+  WebOperatorTurnInput,
+  WebProactiveConversation,
+} from "./service.js";
 export { WebProductError } from "./errors.js";

@@ -36,6 +36,11 @@ export class MemoryStateStore implements StateStore {
   readonly executionFixture = new InMemoryStateExecution(this);
   readonly execution: StateExecution = this.executionFixture;
   shouldFailExecution: (operation: string, input: unknown) => boolean = () => false;
+  shouldFailExecutionAfter:
+    (operation: string, input: unknown, result: unknown) => boolean = () => false;
+  mapExecutionResult:
+    (operation: string, input: unknown, result: unknown) => unknown =
+      (_operation, _input, result) => result;
   onArtifact:
     | ((request: StatePutArtifactRequest, ref: ArtifactRef) => void)
     | undefined;
@@ -223,6 +228,12 @@ export class MemoryStateStore implements StateStore {
   beforeExecutionOperation(operation: string, input: unknown): void {
     if (this.shouldFailExecution(operation, input)) {
       throw new Error("injected execution failure");
+    }
+  }
+
+  afterExecutionOperation(operation: string, input: unknown, result: unknown): void {
+    if (this.shouldFailExecutionAfter(operation, input, result)) {
+      throw new Error("injected post-commit execution failure");
     }
   }
 

@@ -20,8 +20,11 @@ Communication channel.
 Own one Socket Mode consumer, enforce exact workspace/channel authorization,
 durably admit and deduplicate authorized envelopes before acknowledgement,
 normalize bounded files, dispatch queued thread-bound turns, project supported
-live-input, cancellation, and AskUser controls, and provide idempotent proactive
-Slack delivery.
+live-input, cancellation, AskUser, per-thread runtime controls, and transient
+assistant status, publish configured App Home actions, dispatch configured
+global/message shortcuts, and provide idempotent proactive Slack delivery. The
+selected instance contributes `SlackSendMessage` under Core's ordinary tool
+policy without widening its configured channel allowlist.
 
 ## Install / Usage
 
@@ -40,9 +43,37 @@ an explicit broad-access decision:
   "botToken": { "$env": "SLACK_BOT_TOKEN" },
   "allowedTeamIds": ["T012345"],
   "allowedChannelIds": ["C012345"],
-  "defaultDestination": "C012345"
+  "defaultDestination": "C012345",
+  "shortcuts": [
+    {
+      "callbackId": "triage_request",
+      "prompt": "Prepare the support triage checklist.",
+      "ackText": "Triage started.",
+      "threadReply": true
+    }
+  ],
+  "homeTab": {
+    "enabled": true,
+    "headerText": "*Quick actions*",
+    "buttons": [
+      {
+        "actionId": "build_digest",
+        "label": "Build digest",
+        "prompt": "Build today's team digest."
+      }
+    ]
+  }
 }
 ```
+
+Shortcut callback ids and App Home action ids are exact, bounded configuration.
+Every resolved destination is checked against the channel allowlist. A message
+shortcut uses its source thread unless it is explicitly redirected; a global
+shortcut or Home action uses its configured channel, `defaultDestination`, or
+the first exact allowed channel. With `allowAllChannels` and no such destination,
+the action is acknowledged but ignored rather than selecting an arbitrary
+channel. App Home publication is best-effort and never makes the message
+consumer unhealthy.
 
 ## Architecture
 
@@ -51,8 +82,20 @@ an explicit broad-access decision:
 Socket Mode envelope -> exact authorization -> owner-private atomic inbox ->
 acknowledgement -> serial queued processing -> normalized request -> Core ->
 final-only thread reply. Supported Core controls route `/cancel`, live steering,
-and bounded AskUser action/free-text answers. Core proactive delivery -> exact
-channel/thread -> in-process idempotent Web API send.
+and bounded AskUser action/free-text answers. `/model` and `/effort` maintain
+bounded, process-local per-thread overrides. Activity uses
+`assistant.threads.setStatus` in assistant threads and falls back to one eyes
+reaction in ordinary channels. Activity entries remain a transient in-memory
+ledger and are never posted as durable chat messages. Shortcut/App Home
+envelopes pass through the same durable admission boundary before a configured
+prompt runs. Core proactive delivery -> durable Core/state receipt -> exact
+channel/thread -> fingerprint-guarded Web API send. The instance-bound
+`SlackSendMessage` contribution prepares that same outbound contract; a thread
+keeps its exact history identity, while a new top-level post resolves
+destination history from Slack's confirmed message timestamp.
+For a channel-only notification, the selected adapter resolves
+`defaultDestination` to canonical `slack:<channel>[:thread]` form before
+Core's durable admission and the adapter never receives an empty destination.
 
 ### Durable inbox
 
@@ -76,11 +119,12 @@ the next start creates an empty v1 inbox. There is no online purge.
 
 | Source | Responsibility |
 | --- | --- |
-| `config.ts` | Strict env-only credentials and allowlists. |
-| `socket.ts` | Injectable single-consumer Socket Mode lifecycle. |
+| `config.ts` | Strict env-only credentials, allowlists, shortcuts, and App Home actions. |
+| `socket.ts` | Injectable single-consumer Socket Mode lifecycle and interaction normalization. |
 | `inbox.ts` | Owner-private atomic admission queue and bounded envelope dedupe. |
 | `client.ts` | Bounded Slack Web API and attachment operations. |
 | `delivery.ts` | Exact-destination idempotent delivery. |
+| `send-tools.ts` | Strict message-tool schema and receipt-backed destination resolution. |
 | `index.ts` | Normalization, module lifecycle, capabilities, and health. |
 
 ## Public API
@@ -105,17 +149,27 @@ Every symbol exported by each public code entrypoint is listed below.
 CreateSlackChannelOptions
 DEFAULT_SLACK_MAX_ATTACHMENT_BYTES
 MAX_SLACK_ATTACHMENT_BYTES
+MAX_SLACK_HOME_BUTTONS
+MAX_SLACK_SHORTCUTS
 SlackActionEvent
 SlackApiClient
 SlackApiClientFactory
 SlackChannel
 SlackConfig
 SlackConfigError
+SlackConfiguredAction
 SlackDelivery
 SlackFilePostRequest
+SlackHomeActionEvent
+SlackHomeButtonConfig
+SlackHomeOpenedEvent
+SlackHomeTabConfig
+SlackHomeView
 SlackMessageEvent
 SlackPostRequest
 SlackRemoteFile
+SlackShortcutConfig
+SlackShortcutEvent
 SlackSocketEvent
 SlackSocketEventHandler
 SlackSocketFailure
@@ -141,9 +195,14 @@ Depends only on `@mono-agent/module-sdk` and platform HTTP/WebSocket primitives.
 It does not persist conversation transcripts or outbound delivery receipts,
 create Slack apps, select models, or claim a delivered result after an
 ambiguous Slack failure. Its durable records are limited to the bounded inbound
-admission queue and envelope deduplication receipts. Slack replies are
-intentionally final-only and successful proactive-delivery deduplication is
-process-local.
+admission queue and envelope deduplication receipts. Core plus the selected
+state module is the only restart-safe outbound authority and records confirmed
+send-tool receipts in exact destination history. The adapter retains a bounded
+fingerprint-aware live-instance guard, keeps ambiguous outcomes unknown,
+rejects conflicting key reuse, and fails closed instead of evicting the guard
+at capacity. Slack replies are intentionally final-only. Slack exposes no
+bot-controlled silent-post field, so the package does not claim to enforce
+silent delivery or quiet hours.
 
 ## Related Documentation
 

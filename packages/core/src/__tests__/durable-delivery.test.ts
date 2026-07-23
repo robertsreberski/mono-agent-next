@@ -174,6 +174,24 @@ describe("durable proactive delivery", () => {
     expect(sends).toBe(1);
   });
 
+  it("treats an oversized adapter message id as sticky unknown", async () => {
+    let sends = 0;
+    const fixture = await createDurableDeliveryFixture({
+      notify: async (message) => {
+        sends += 1;
+        return {
+          status: "delivered", idempotencyKey: message.idempotencyKey,
+          messageId: "m".repeat(513),
+        };
+      },
+    });
+    const host = await fixture.start();
+    const message = outboundMessage("delivery-message-id-bound", "hello");
+    await expect(host.deliver("notify", message)).resolves.toMatchObject({ status: "unknown" });
+    await expect(host.deliver("notify", message)).resolves.toMatchObject({ status: "unknown" });
+    expect(sends).toBe(1);
+  });
+
   it("rejects idempotency-key reuse with a different channel or message before channel execution", async () => {
     const sends = { primary: 0, secondary: 0 };
     const fixture = await createDurableDeliveryFixture({
@@ -214,6 +232,82 @@ describe("durable proactive delivery", () => {
       diagnostic: { code: "channel_delivery_idempotency_conflict" },
     });
     expect(sends).toEqual({ primary: 1, secondary: 0 });
+  });
+
+  it("canonicalizes only an exact configured-default request before durable admission", async () => {
+    let configuredDefault = "telegram:42";
+    let resolverCalls = 0;
+    const deliveredDestinations: string[] = [];
+    let plainSends = 0;
+    const fixture = await createDurableDeliveryFixture({
+      notify: async (message) => {
+        deliveredDestinations.push(message.conversationId);
+        return {
+          status: "delivered",
+          idempotencyKey: message.idempotencyKey,
+          messageId: "default-message",
+        };
+      },
+      plain: async (message) => {
+        plainSends += 1;
+        return { status: "delivered", idempotencyKey: message.idempotencyKey };
+      },
+    }, {
+      notify: () => {
+        resolverCalls += 1;
+        return configuredDefault;
+      },
+    });
+    const host = await fixture.start();
+    const defaultMessage = {
+      ...outboundMessage("configured-default", "hello"),
+      conversationId: "",
+    };
+
+    await expect(host.deliver("notify", defaultMessage)).resolves.toMatchObject({
+      status: "delivered",
+      idempotencyKey: "configured-default",
+    });
+    expect(deliveredDestinations).toEqual(["telegram:42"]);
+
+    configuredDefault = "telegram:43";
+    await expect(host.deliver("notify", defaultMessage)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "channel_delivery_idempotency_conflict" },
+    });
+    expect(deliveredDestinations).toEqual(["telegram:42"]);
+
+    for (const conversationId of [" ", "telegram:\0unsafe"]) {
+      await expect(host.deliver("notify", {
+        ...outboundMessage(`invalid-${String(conversationId.length)}`, "hello"),
+        conversationId,
+      })).rejects.toThrow(/conversationId/u);
+    }
+    await expect(host.deliver("plain", {
+      ...outboundMessage("missing-default", "hello"),
+      conversationId: "",
+    })).rejects.toThrow(/adapter-owned default/u);
+    expect(resolverCalls).toBe(2);
+    expect(plainSends).toBe(0);
+  });
+
+  it("never confirms an adapter delivery when durable settlement returns conflict", async () => {
+    let sends = 0;
+    const fixture = await createDurableDeliveryFixture({
+      notify: async (message) => {
+        sends += 1;
+        return { status: "delivered", idempotencyKey: message.idempotencyKey };
+      },
+    });
+    fixture.state.mapExecutionResult = (operation, _input, result) =>
+      operation === "delivery.settle" ? { status: "conflict" } : result;
+    const host = await fixture.start();
+    await expect(host.deliver("notify", outboundMessage("settlement-conflict", "hello")))
+      .resolves.toMatchObject({
+        status: "unknown",
+        diagnostic: { code: "channel_delivery_settlement_unknown" },
+      });
+    expect(sends).toBe(1);
   });
 
   it("joins concurrent in-process duplicates onto one channel send", async () => {
@@ -264,6 +358,7 @@ describe("durable proactive delivery", () => {
 
 async function createDurableDeliveryFixture(
   handlers: Readonly<Record<string, DeliveryHandler>>,
+  defaultResolvers: Readonly<Record<string, () => string | undefined>> = {},
 ): Promise<DurableDeliveryFixture> {
   const suffix = randomUUID().toLowerCase();
   const runtimeName = `@fixture/runtime-delivery-${suffix}`;
@@ -286,25 +381,31 @@ async function createDurableDeliveryFixture(
       kind: "state",
       controller: { create: () => state },
     },
-    ...Object.entries(handlers).map(([instanceId, handler]) => ({
-      name: channelIds[instanceId]!,
-      kind: "channel" as const,
-      controller: {
-        create: () => ({
-          capabilities: {
-            attachments: true,
-            liveInput: false,
-            askUser: false,
-            approvals: false,
-            proactive: true,
-            runtimeControl: false,
-            verbatim: true,
-            cancellation: false,
-          },
-          deliver: handler,
-        }),
-      },
-    })),
+    ...Object.entries(handlers).map(([instanceId, handler]) => {
+      const resolveDefaultDeliveryConversationId = defaultResolvers[instanceId];
+      return {
+        name: channelIds[instanceId]!,
+        kind: "channel" as const,
+        controller: {
+          create: () => ({
+            capabilities: {
+              attachments: true,
+              liveInput: false,
+              askUser: false,
+              approvals: false,
+              proactive: true,
+              runtimeControl: false,
+              verbatim: true,
+              cancellation: false,
+            },
+            ...(resolveDefaultDeliveryConversationId === undefined
+              ? {}
+              : { resolveDefaultDeliveryConversationId }),
+            deliver: handler,
+          }),
+        },
+      };
+    }),
   ]);
   projects.push(project);
   await project.writeConfig(minimalConfig(runtimeName, {

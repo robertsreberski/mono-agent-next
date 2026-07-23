@@ -17,6 +17,7 @@ import {
   artifactIntentStateKey,
   conversationChunkPrefix,
   conversationChunkStateKey,
+  conversationDeliveryEntryStateKey,
   conversationStateKey,
   describeExecutionArtifact,
   deliveryStateKey,
@@ -30,12 +31,14 @@ import {
   type ExecutionRecord,
 } from "./execution-store.js";
 import {
+  appendCanonicalTranscript,
   assertCanonicalTranscriptAppendOnly,
   decodeCanonicalTranscript,
   encodeCanonicalTranscript,
   parseCanonicalTranscript,
   parseInteractionEvidence,
   type CanonicalTranscript,
+  type CanonicalTranscriptEntry,
 } from "./execution-transcript.js";
 import type {
   AgentInteractionEvidence,
@@ -64,7 +67,8 @@ const RETENTION_SCAN_PAGE_SIZE = 1_000;
 const RETENTION_REFERENCE_SCAN_MAX_RECORDS = 100_000;
 const FINGERPRINT_MAX_ITEMS = 20_000;
 const FINGERPRINT_MAX_BYTES = 16 * 1024 * 1024;
-const IDENTIFIER_MAX_BYTES = 4_096;
+const IDENTIFIER_MAX_BYTES = 512;
+const CONVERSATION_ID_MAX_BYTES = 4_096;
 const CODE_MAX_BYTES = 512;
 const SESSION_METADATA_MAX_ITEMS = 10_000;
 const SESSION_METADATA_MAX_BYTES = 64 * 1024;
@@ -128,6 +132,20 @@ interface ConversationRecord {
   readonly updatedAt: string;
   readonly title?: string;
   readonly metadata?: JsonObject;
+}
+
+interface ConversationDeliveryEntryRecord {
+  readonly schemaVersion: 1;
+  readonly kind: "mono-agent.conversation-delivery-entry";
+  readonly entryId: string;
+  readonly conversationId: string;
+  readonly deliveryIdempotencyKey: string;
+  readonly deliveryFingerprint: DurableFingerprint;
+  readonly fingerprint: DurableFingerprint;
+  readonly entryDigest: DurableFingerprint;
+  readonly revision: number;
+  readonly entryCount: number;
+  readonly createdAt: string;
 }
 
 interface TranscriptChunkDescriptor {
@@ -216,6 +234,10 @@ interface DeliveryRecord {
   readonly leaseExpiresAt?: string;
   readonly messageId?: string;
   readonly code?: string;
+  readonly historyEntryId?: string;
+  readonly historyConversationId?: string;
+  readonly historyEntryFingerprint?: DurableFingerprint;
+  readonly historyEntryDigest?: DurableFingerprint;
 }
 
 interface RunRetentionCheckpoint {
@@ -309,6 +331,43 @@ export interface DeliverySettlementInput {
   readonly signal: AbortSignal;
 }
 
+export interface DeliverySettlementWithHistoryInput {
+  readonly idempotencyKey: string;
+  readonly fingerprint: DurableFingerprint;
+  readonly attempt: number;
+  readonly token: string;
+  readonly messageId?: string;
+  readonly conversationId: string;
+  readonly entry: DeliveryTranscriptEntryInput;
+  readonly entryFingerprint: DurableFingerprint;
+  readonly signal: AbortSignal;
+}
+
+export type DeliveryTranscriptEntryInput =
+  | Omit<
+      Extract<CanonicalTranscriptEntry, { readonly kind: "message" }>,
+      "recordedAt"
+    >
+  | Omit<
+      Extract<CanonicalTranscriptEntry, { readonly kind: "verbatim" }>,
+      "recordedAt"
+    >;
+
+export type DeliverySettlementWithHistoryResult =
+  | {
+      readonly status: "appended" | "duplicate";
+      readonly conversationId: string;
+      readonly entryId: string;
+      readonly revision: number;
+      readonly entryCount: number;
+      readonly messageId?: string;
+    }
+  | {
+      readonly status: "conflict";
+      readonly conversationId: string;
+      readonly entryId: string;
+    };
+
 export interface DurableRunJournalOptions {
   readonly clock?: () => Date;
   readonly staleAfterMs?: number;
@@ -379,7 +438,10 @@ export class DurableRunJournal {
 
   async admit(input: RunAdmissionInput): Promise<RunAdmissionResult> {
     const requestId = boundedIdentifier(input.requestId, "requestId");
-    const conversationId = boundedIdentifier(input.conversationId, "conversationId");
+    const conversationId = boundedConversationId(
+      input.conversationId,
+      "conversationId",
+    );
     const fingerprint = parseFingerprint(input.fingerprint, "fingerprint");
     const admissionKey = admissionStateKey(requestId);
 
@@ -1061,13 +1123,14 @@ export class DurableRunJournal {
     conversationId: string,
     signal: AbortSignal,
   ): Promise<CanonicalTranscript | undefined> {
-    const normalizedId = boundedIdentifier(conversationId, "conversationId");
+    const normalizedId = boundedConversationId(conversationId, "conversationId");
     const record = await this.#store.read(
       conversationStateKey(normalizedId),
       parseConversationRecord,
       signal,
     );
     if (record === undefined) return undefined;
+    assertConversationKeyAuthority(record, normalizedId);
     const transcript = await this.#loadConversationTranscript(record.value, signal);
     if (
       transcript.revision !== record.value.revision
@@ -1171,17 +1234,342 @@ export class DurableRunJournal {
     throw new Error("proactive conversation identity did not converge");
   }
 
+  /**
+   * Atomically confirm one transport delivery and append its destination
+   * history. Neither the delivered receipt nor the transcript entry can become
+   * durable without the other.
+   */
+  async settleDeliveryWithHistory(
+    input: DeliverySettlementWithHistoryInput,
+  ): Promise<DeliverySettlementWithHistoryResult> {
+    const idempotencyKey = boundedIdentifier(
+      input.idempotencyKey,
+      "idempotencyKey",
+    );
+    const deliveryFingerprint = parseFingerprint(
+      input.fingerprint,
+      "fingerprint",
+    );
+    const attempt = boundedInteger(input.attempt, "attempt", 1, 10_000);
+    const token = boundedIdentifier(input.token, "delivery attempt token");
+    const messageId = input.messageId === undefined
+      ? undefined
+      : boundedIdentifier(input.messageId, "messageId");
+    const conversationId = boundedConversationId(
+      input.conversationId,
+      "conversationId",
+    );
+    const entryFingerprint = parseFingerprint(
+      input.entryFingerprint,
+      "entryFingerprint",
+    );
+    const entry = parseDeliveryTranscriptEntry(
+      input.entry,
+      conversationId,
+      "1970-01-01T00:00:00.000Z",
+    );
+    const entryDigest = deliveryEntryAuthorityDigest(entry);
+    const bindingKey = conversationDeliveryEntryStateKey(entry.entryId);
+    const deliveryKey = deliveryStateKey(idempotencyKey);
+
+    for (let retry = 0; retry < 5; retry += 1) {
+      const delivery = await this.#store.read(
+        deliveryKey,
+        parseDeliveryRecord,
+        input.signal,
+      );
+      if (delivery === undefined) {
+        throw new Error("delivery intent does not exist");
+      }
+      assertDeliveryKeyAuthority(delivery.value, idempotencyKey);
+      if (
+        delivery.value.fingerprint !== deliveryFingerprint
+        || delivery.value.attempts !== attempt
+        || delivery.value.attemptToken !== token
+      ) {
+        return Object.freeze({
+          status: "conflict",
+          conversationId,
+          entryId: entry.entryId,
+        });
+      }
+      if (
+        delivery.value.status === "delivered"
+        && delivery.value.messageId !== messageId
+      ) {
+        return Object.freeze({
+          status: "conflict",
+          conversationId,
+          entryId: entry.entryId,
+        });
+      }
+      if (
+        delivery.value.status !== "intent"
+        && delivery.value.status !== "delivered"
+      ) {
+        return Object.freeze({
+          status: "conflict",
+          conversationId,
+          entryId: entry.entryId,
+        });
+      }
+      if (delivery.value.status === "delivered") {
+        if (delivery.value.historyEntryId === undefined) {
+          throw new Error(
+            "delivered receipt exists without its atomic destination history",
+          );
+        }
+        if (
+          delivery.value.historyEntryId !== entry.entryId
+          || delivery.value.historyConversationId !== conversationId
+          || delivery.value.historyEntryFingerprint !== entryFingerprint
+          || delivery.value.historyEntryDigest !== entryDigest
+        ) {
+          return Object.freeze({
+            status: "conflict",
+            conversationId,
+            entryId: entry.entryId,
+          });
+        }
+      }
+      const binding = await this.#store.read(
+        bindingKey,
+        parseConversationDeliveryEntryRecord,
+        input.signal,
+      );
+      if (binding !== undefined) {
+        if (binding.value.entryId !== entry.entryId) {
+          throw new Error(
+            "conversation delivery binding key does not match its entry identity",
+          );
+        }
+        if (
+          binding.value.conversationId !== conversationId
+          || binding.value.deliveryIdempotencyKey !== idempotencyKey
+          || binding.value.deliveryFingerprint !== deliveryFingerprint
+          || binding.value.fingerprint !== entryFingerprint
+          || binding.value.entryDigest !== entryDigest
+        ) {
+          return Object.freeze({
+            status: "conflict",
+            conversationId,
+            entryId: entry.entryId,
+          });
+        }
+        const conversation = await this.#store.read(
+          conversationStateKey(conversationId),
+          parseConversationRecord,
+          input.signal,
+        );
+        if (conversation === undefined) {
+          throw new Error(
+            "conversation delivery binding points to missing destination history",
+          );
+        }
+        const transcript = await this.#loadConversationTranscript(
+          conversation.value,
+          input.signal,
+        );
+        const committedEntry = transcript.entries[binding.value.entryCount - 1];
+        if (
+          transcript.revision < binding.value.revision
+          || transcript.entries.length < binding.value.entryCount
+          || committedEntry === undefined
+          || committedEntry.recordedAt !== binding.value.createdAt
+          || deliveryEntryAuthorityDigest(committedEntry)
+            !== binding.value.entryDigest
+        ) {
+          throw new Error(
+            "conversation delivery binding does not match destination history",
+          );
+        }
+        if (delivery.value.status !== "delivered") {
+          throw new Error(
+            "destination history exists without its atomic delivery receipt",
+          );
+        }
+        return Object.freeze({
+          status: "duplicate",
+          conversationId,
+          entryId: entry.entryId,
+          revision: binding.value.revision,
+          entryCount: binding.value.entryCount,
+          ...(messageId === undefined ? {} : { messageId }),
+        });
+      }
+
+      if (delivery.value.status === "delivered") {
+        throw new Error(
+          "delivered receipt exists without its atomic destination history",
+        );
+      }
+
+      const conversation = await this.#store.read(
+        conversationStateKey(conversationId),
+        parseConversationRecord,
+        input.signal,
+      );
+      const loaded = conversation === undefined
+        ? undefined
+        : await this.#loadConversationTranscriptState(
+            conversation.value,
+            input.signal,
+          );
+      if (
+        loaded?.transcript.entries.some(
+          (candidate) => candidate.entryId === entry.entryId,
+        ) === true
+      ) {
+        return Object.freeze({
+          status: "conflict",
+          conversationId,
+          entryId: entry.entryId,
+        });
+      }
+      const now = canonicalNow(this.#clock);
+      const deliveryUpdatedAt = Date.parse(now) >= Date.parse(delivery.value.updatedAt)
+        ? now
+        : delivery.value.updatedAt;
+      const recordedAt = conversation === undefined
+        || Date.parse(now) >= Date.parse(conversation.value.updatedAt)
+        ? now
+        : conversation.value.updatedAt;
+      const committedEntry = Object.freeze({
+        ...entry,
+        recordedAt,
+      }) as CanonicalTranscriptEntry;
+      const transcript = appendCanonicalTranscript(
+        loaded?.transcript,
+        conversationId,
+        [committedEntry],
+      );
+      const chunked = chunkCanonicalTranscript(transcript);
+      const createdAt = conversation === undefined
+        ? recordedAt
+        : conversation.value.createdAt
+          ?? loaded?.transcript.entries[0]?.recordedAt
+          ?? conversation.value.updatedAt;
+      const conversationValue: ConversationRecord = Object.freeze({
+        schemaVersion: 1,
+        kind: "mono-agent.conversation",
+        conversationId,
+        revision: transcript.revision,
+        transcriptChunks: chunked.manifest,
+        entryCount: transcript.entries.length,
+        createdAt,
+        updatedAt: recordedAt,
+        ...(conversation?.value.title === undefined
+          ? {}
+          : { title: conversation.value.title }),
+        ...(conversation?.value.metadata === undefined
+          ? {}
+          : { metadata: conversation.value.metadata }),
+      });
+      const bindingValue: ConversationDeliveryEntryRecord = Object.freeze({
+        schemaVersion: 1,
+        kind: "mono-agent.conversation-delivery-entry",
+        entryId: entry.entryId,
+        conversationId,
+        deliveryIdempotencyKey: idempotencyKey,
+        deliveryFingerprint,
+        fingerprint: entryFingerprint,
+        entryDigest,
+        revision: transcript.revision,
+        entryCount: transcript.entries.length,
+        createdAt: recordedAt,
+      });
+      const deliveryValue: DeliveryRecord = Object.freeze({
+        schemaVersion: 1,
+        kind: "mono-agent.delivery",
+        idempotencyKey: delivery.value.idempotencyKey,
+        fingerprint: delivery.value.fingerprint,
+        channelInstanceId: delivery.value.channelInstanceId,
+        ...(delivery.value.runId === undefined
+          ? {}
+          : { runId: delivery.value.runId }),
+        status: "delivered",
+        attempts: delivery.value.attempts,
+        attemptToken: delivery.value.attemptToken,
+        createdAt: delivery.value.createdAt,
+        updatedAt: deliveryUpdatedAt,
+        ...(messageId === undefined ? {} : { messageId }),
+        historyEntryId: entry.entryId,
+        historyConversationId: conversationId,
+        historyEntryFingerprint: entryFingerprint,
+        historyEntryDigest: entryDigest,
+      });
+      const previousChunks = new Map(
+        (loaded?.chunks ?? []).map((chunk) => [chunk.key, chunk] as const),
+      );
+      const nextChunkKeys = new Set(
+        chunked.chunks.map((chunk) => chunk.descriptor.key),
+      );
+      const result = await this.#store.transaction({
+        checks: chunked.chunks.flatMap((chunk) => {
+          const previous = previousChunks.get(chunk.descriptor.key);
+          return previous === undefined
+            ? []
+            : [{ key: previous.key, expectedVersion: previous.version }];
+        }),
+        puts: [
+          {
+            key: deliveryKey,
+            expectedVersion: delivery.version,
+            value: deliveryValue,
+          },
+          {
+            key: conversationStateKey(conversationId),
+            expectedVersion: conversation?.version ?? null,
+            value: conversationValue,
+          },
+          {
+            key: bindingKey,
+            expectedVersion: null,
+            value: bindingValue,
+          },
+        ],
+        bytePuts: chunked.chunks.flatMap((chunk) =>
+          previousChunks.has(chunk.descriptor.key)
+            ? []
+            : [{
+                key: chunk.descriptor.key,
+                expectedVersion: null,
+                value: chunk.bytes,
+              }]),
+        deletes: (loaded?.chunks ?? []).flatMap((chunk) =>
+          nextChunkKeys.has(chunk.key)
+            ? []
+            : [{ key: chunk.key, expectedVersion: chunk.version }]),
+        signal: input.signal,
+      });
+      if (result.status === "applied") {
+        return Object.freeze({
+          status: "appended",
+          conversationId,
+          entryId: entry.entryId,
+          revision: transcript.revision,
+          entryCount: transcript.entries.length,
+          ...(messageId === undefined ? {} : { messageId }),
+        });
+      }
+    }
+    throw new Error(
+      "delivery settlement with destination history did not converge after contention",
+    );
+  }
+
   async loadConversation(
     conversationId: string,
     signal: AbortSignal,
   ): Promise<ConversationView | undefined> {
-    const normalizedId = boundedIdentifier(conversationId, "conversationId");
+    const normalizedId = boundedConversationId(conversationId, "conversationId");
     const record = await this.#store.read(
       conversationStateKey(normalizedId),
       parseConversationRecord,
       signal,
     );
     if (record === undefined) return undefined;
+    assertConversationKeyAuthority(record, normalizedId);
     const transcript = await this.#loadConversationTranscript(record.value, signal);
     const createdAt = record.value.createdAt
       ?? transcript.entries[0]?.recordedAt
@@ -1212,14 +1600,19 @@ export class DurableRunJournal {
       parseConversationRecord,
       signal,
     );
-    return Object.freeze({
-      conversations: Object.freeze(page.records.map(({ value }) => Object.freeze({
+    const conversations = page.records.map((record) => {
+      assertConversationKeyAuthority(record);
+      const { value } = record;
+      return Object.freeze({
         conversationId: value.conversationId,
         createdAt: value.createdAt ?? value.updatedAt,
         updatedAt: value.updatedAt,
         ...(value.title === undefined ? {} : { title: value.title }),
         ...(value.metadata === undefined ? {} : { metadata: value.metadata }),
-      }))),
+      });
+    });
+    return Object.freeze({
+      conversations: Object.freeze(conversations),
       ...(page.cursor === undefined ? {} : { nextCursor: page.cursor }),
     });
   }
@@ -1312,7 +1705,10 @@ export class DurableRunJournal {
     route: RouteIdentity,
     signal: AbortSignal,
   ): Promise<{ readonly value: RuntimeSession; readonly updatedAt: string } | undefined> {
-    const normalizedConversationId = boundedIdentifier(conversationId, "conversationId");
+    const normalizedConversationId = boundedConversationId(
+      conversationId,
+      "conversationId",
+    );
     const normalizedRoute = parseRouteIdentity(route);
     const record = await this.#store.read(
       sessionStateKey(
@@ -1351,7 +1747,10 @@ export class DurableRunJournal {
     },
     signal: AbortSignal,
   ): Promise<boolean> {
-    const normalizedConversationId = boundedIdentifier(conversationId, "conversationId");
+    const normalizedConversationId = boundedConversationId(
+      conversationId,
+      "conversationId",
+    );
     const normalizedRoute = parseRouteIdentity(route);
     const expectedInput = ownDataRecord(
       expected,
@@ -1510,6 +1909,7 @@ export class DurableRunJournal {
         }
         continue;
       }
+      assertDeliveryKeyAuthority(existing.value, idempotencyKey);
       if (
         existing.value.fingerprint !== fingerprint
         || existing.value.channelInstanceId !== channelInstanceId
@@ -1599,6 +1999,7 @@ export class DurableRunJournal {
     const key = deliveryStateKey(idempotencyKey);
     const existing = await this.#store.read(key, parseDeliveryRecord, input.signal);
     if (existing === undefined) throw new Error("delivery intent does not exist");
+    assertDeliveryKeyAuthority(existing.value, idempotencyKey);
     if (existing.value.fingerprint !== fingerprint) return { status: "conflict" };
     if (
       existing.value.attempts !== attempt
@@ -2842,7 +3243,7 @@ function parseAdmissionRecord(value: unknown): AdmissionRecord {
     schemaVersion: 1,
     kind: "mono-agent.admission",
     requestId: boundedIdentifier(input.requestId, "admission record.requestId"),
-    conversationId: boundedIdentifier(
+    conversationId: boundedConversationId(
       input.conversationId,
       "admission record.conversationId",
     ),
@@ -2941,7 +3342,7 @@ function parseConversationRecord(value: unknown): ConversationRecord {
   if (input.schemaVersion !== 1 || input.kind !== "mono-agent.conversation") {
     throw new TypeError("conversation record has an unsupported schema");
   }
-  const conversationId = boundedIdentifier(
+  const conversationId = boundedConversationId(
     input.conversationId,
     "conversation record.conversationId",
   );
@@ -3029,6 +3430,193 @@ function parseConversationRecord(value: unknown): ConversationRecord {
     ...(title === undefined ? {} : { title }),
     ...(metadata === undefined ? {} : { metadata }),
   });
+}
+
+function assertConversationKeyAuthority(
+  record: ExecutionRecord<ConversationRecord>,
+  requestedConversationId?: string,
+): void {
+  if (
+    record.key !== conversationStateKey(record.value.conversationId)
+    || (
+      requestedConversationId !== undefined
+      && record.value.conversationId !== requestedConversationId
+    )
+  ) {
+    throw new Error(
+      "conversation record key does not match its conversation identity",
+    );
+  }
+}
+
+function parseConversationDeliveryEntryRecord(
+  value: unknown,
+): ConversationDeliveryEntryRecord {
+  const input = ownDataRecord(
+    value,
+    "conversation delivery entry record",
+    [
+      "schemaVersion",
+      "kind",
+      "entryId",
+      "conversationId",
+      "deliveryIdempotencyKey",
+      "deliveryFingerprint",
+      "fingerprint",
+      "entryDigest",
+      "revision",
+      "entryCount",
+      "createdAt",
+    ],
+  );
+  if (
+    input.schemaVersion !== 1
+    || input.kind !== "mono-agent.conversation-delivery-entry"
+  ) {
+    throw new TypeError(
+      "conversation delivery entry record has an unsupported schema",
+    );
+  }
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: "mono-agent.conversation-delivery-entry",
+    entryId: boundedIdentifier(
+      input.entryId,
+      "conversation delivery entry record.entryId",
+    ),
+    conversationId: boundedConversationId(
+      input.conversationId,
+      "conversation delivery entry record.conversationId",
+    ),
+    deliveryIdempotencyKey: boundedIdentifier(
+      input.deliveryIdempotencyKey,
+      "conversation delivery entry record.deliveryIdempotencyKey",
+    ),
+    deliveryFingerprint: parseFingerprint(
+      input.deliveryFingerprint,
+      "conversation delivery entry record.deliveryFingerprint",
+    ),
+    fingerprint: parseFingerprint(
+      input.fingerprint,
+      "conversation delivery entry record.fingerprint",
+    ),
+    entryDigest: parseFingerprint(
+      input.entryDigest,
+      "conversation delivery entry record.entryDigest",
+    ),
+    revision: boundedInteger(
+      input.revision,
+      "conversation delivery entry record.revision",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
+    entryCount: boundedInteger(
+      input.entryCount,
+      "conversation delivery entry record.entryCount",
+      1,
+      50_000,
+    ),
+    createdAt: canonicalTimestamp(
+      input.createdAt,
+      "conversation delivery entry record.createdAt",
+    ),
+  });
+}
+
+function parseDeliveryTranscriptEntry(
+  value: unknown,
+  conversationId: string,
+  recordedAt: string,
+): CanonicalTranscriptEntry {
+  const kind = ownDataField(value, "kind");
+  const input = ownDataRecord(
+    value,
+    "conversation delivery entry",
+    kind === "message"
+      ? [
+          "kind",
+          "entryId",
+          "runId",
+          "requestId",
+          "conversationId",
+          "role",
+          "content",
+          "route",
+        ]
+      : kind === "verbatim"
+        ? [
+            "kind",
+            "entryId",
+            "runId",
+            "requestId",
+            "conversationId",
+            "role",
+            "text",
+          ]
+        : ["kind"],
+  );
+  const transcript = parseCanonicalTranscript({
+    schemaVersion: 1,
+    kind: "mono-agent.canonical-transcript",
+    conversationId,
+    revision: 1,
+    entries: [{ ...input, recordedAt }],
+  });
+  const entry = transcript.entries[0]!;
+  if (entry.kind === "interaction" || entry.role !== "assistant") {
+    throw new TypeError(
+      "conversation delivery entry must be an assistant message or verbatim entry",
+    );
+  }
+  return entry;
+}
+
+function deliveryEntryAuthorityDigest(
+  entry: CanonicalTranscriptEntry,
+): DurableFingerprint {
+  if (entry.kind === "interaction" || entry.role !== "assistant") {
+    throw new TypeError(
+      "conversation delivery entry must be an assistant message or verbatim entry",
+    );
+  }
+  const authority = entry.kind === "message"
+    ? {
+        kind: entry.kind,
+        entryId: entry.entryId,
+        runId: entry.runId,
+        requestId: entry.requestId,
+        conversationId: entry.conversationId,
+        role: entry.role,
+        content: entry.content,
+        ...(entry.route === undefined ? {} : { route: entry.route }),
+      }
+    : {
+        kind: entry.kind,
+        entryId: entry.entryId,
+        runId: entry.runId,
+        requestId: entry.requestId,
+        conversationId: entry.conversationId,
+        role: entry.role,
+        text: entry.text,
+      };
+  const encoded = JSON.stringify(authority);
+  if (Buffer.byteLength(encoded, "utf8") > TRANSCRIPT_MAX_BYTES) {
+    throw new RangeError("conversation delivery entry exceeds its byte bound");
+  }
+  return `sha256:${createHash("sha256")
+    .update("mono-agent:conversation-delivery-entry:v1\0", "utf8")
+    .update(encoded, "utf8")
+    .digest("hex")}`;
+}
+
+function ownDataField(value: unknown, key: string): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor !== undefined && "value" in descriptor
+    ? descriptor.value
+    : undefined;
 }
 
 function chunkCanonicalTranscript(
@@ -3173,7 +3761,7 @@ function parseProviderSessionRecord(value: unknown): ProviderSessionRecord {
   if (input.schemaVersion !== 1 || input.kind !== "mono-agent.provider-session") {
     throw new TypeError("provider session record has an unsupported schema");
   }
-  const conversationId = boundedIdentifier(
+  const conversationId = boundedConversationId(
     input.conversationId,
     "provider session record.conversationId",
   );
@@ -3338,7 +3926,10 @@ function parseRuntimeSession(value: unknown, path: string): RuntimeSession {
     : parseSessionMetadata(input.metadata, `${path}.metadata`);
   return Object.freeze({
     id: boundedIdentifier(input.id, `${path}.id`),
-    conversationId: boundedIdentifier(input.conversationId, `${path}.conversationId`),
+    conversationId: boundedConversationId(
+      input.conversationId,
+      `${path}.conversationId`,
+    ),
     route: parseRouteIdentity(input.route),
     ...(createdAt === undefined ? {} : { createdAt }),
     ...(expiresAt === undefined ? {} : { expiresAt }),
@@ -3422,6 +4013,10 @@ function parseDeliveryRecord(value: unknown): DeliveryRecord {
       "leaseExpiresAt",
       "messageId",
       "code",
+      "historyEntryId",
+      "historyConversationId",
+      "historyEntryFingerprint",
+      "historyEntryDigest",
     ],
   );
   if (input.schemaVersion !== 1 || input.kind !== "mono-agent.delivery") {
@@ -3441,6 +4036,33 @@ function parseDeliveryRecord(value: unknown): DeliveryRecord {
   const code = input.code === undefined
     ? undefined
     : boundedCode(input.code, "delivery record.code");
+  const historyEntryId = input.historyEntryId === undefined
+    ? undefined
+    : boundedIdentifier(input.historyEntryId, "delivery record.historyEntryId");
+  const historyConversationId = input.historyConversationId === undefined
+    ? undefined
+    : boundedConversationId(
+        input.historyConversationId,
+        "delivery record.historyConversationId",
+      );
+  const historyEntryFingerprint = input.historyEntryFingerprint === undefined
+    ? undefined
+    : parseFingerprint(
+        input.historyEntryFingerprint,
+        "delivery record.historyEntryFingerprint",
+      );
+  const historyEntryDigest = input.historyEntryDigest === undefined
+    ? undefined
+    : parseFingerprint(
+        input.historyEntryDigest,
+        "delivery record.historyEntryDigest",
+      );
+  const historyAuthorityCount = [
+    historyEntryId,
+    historyConversationId,
+    historyEntryFingerprint,
+    historyEntryDigest,
+  ].filter((part) => part !== undefined).length;
   if ((status === "intent") !== (leaseExpiresAt !== undefined)) {
     throw new TypeError("delivery intent lease fields are inconsistent");
   }
@@ -3449,6 +4071,14 @@ function parseDeliveryRecord(value: unknown): DeliveryRecord {
   }
   if ((status === "failed" || status === "unknown") !== (code !== undefined)) {
     throw new TypeError("delivery diagnostic fields are inconsistent");
+  }
+  if (
+    historyAuthorityCount !== 0
+    && (historyAuthorityCount !== 4 || status !== "delivered")
+  ) {
+    throw new TypeError(
+      "delivery destination-history authority fields are inconsistent",
+    );
   }
   return Object.freeze({
     schemaVersion: 1,
@@ -3476,7 +4106,24 @@ function parseDeliveryRecord(value: unknown): DeliveryRecord {
     ...(leaseExpiresAt === undefined ? {} : { leaseExpiresAt }),
     ...(messageId === undefined ? {} : { messageId }),
     ...(code === undefined ? {} : { code }),
+    ...(historyEntryId === undefined ? {} : {
+      historyEntryId,
+      historyConversationId: historyConversationId!,
+      historyEntryFingerprint: historyEntryFingerprint!,
+      historyEntryDigest: historyEntryDigest!,
+    }),
   });
+}
+
+function assertDeliveryKeyAuthority(
+  record: DeliveryRecord,
+  requestedIdempotencyKey: string,
+): void {
+  if (record.idempotencyKey !== requestedIdempotencyKey) {
+    throw new Error(
+      "delivery record key does not match its idempotency identity",
+    );
+  }
 }
 
 function parseRunRetentionCheckpoint(value: unknown): RunRetentionCheckpoint {
@@ -3595,7 +4242,7 @@ function parseRunSummary(value: unknown): AgentRunSummary {
   return Object.freeze({
     runId: boundedIdentifier(input.runId, "run summary.runId"),
     requestId: boundedIdentifier(input.requestId, "run summary.requestId"),
-    conversationId: boundedIdentifier(
+    conversationId: boundedConversationId(
       input.conversationId,
       "run summary.conversationId",
     ),
@@ -3999,6 +4646,18 @@ function boundedIdentifier(value: unknown, path: string): string {
     || value.trim().length === 0
     || value.includes("\0")
     || Buffer.byteLength(value, "utf8") > IDENTIFIER_MAX_BYTES
+  ) {
+    throw new TypeError(`${path} must be a bounded non-empty string`);
+  }
+  return value;
+}
+
+function boundedConversationId(value: unknown, path: string): string {
+  if (
+    typeof value !== "string"
+    || value.trim().length === 0
+    || value.includes("\0")
+    || Buffer.byteLength(value, "utf8") > CONVERSATION_ID_MAX_BYTES
   ) {
     throw new TypeError(`${path} must be a bounded non-empty string`);
   }

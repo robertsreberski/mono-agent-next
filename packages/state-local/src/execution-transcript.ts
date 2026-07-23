@@ -14,6 +14,7 @@ const TRANSCRIPT_MAX_ENTRIES = 50_000;
 const TRANSCRIPT_MAX_CONTENT_PARTS = 128;
 const TRANSCRIPT_MAX_TEXT_BYTES = 1024 * 1024;
 const TRANSCRIPT_MAX_IDENTIFIER_BYTES = 512;
+const TRANSCRIPT_MAX_CONVERSATION_ID_BYTES = 4_096;
 const TRANSCRIPT_MAX_SOURCE_BYTES = 4_096;
 
 /**
@@ -41,7 +42,7 @@ export function parseCanonicalTranscript(value: unknown): CanonicalTranscript {
   if (input.schemaVersion !== 1 || input.kind !== "mono-agent.canonical-transcript") {
     throw new TypeError("canonical transcript has an unsupported schema");
   }
-  const conversationId = boundedIdentifier(
+  const conversationId = boundedConversationId(
     input.conversationId,
     "canonical transcript.conversationId",
   );
@@ -106,7 +107,10 @@ export function appendCanonicalTranscript(
   conversationId: string,
   entries: readonly CanonicalTranscriptEntry[],
 ): CanonicalTranscript {
-  const normalizedConversationId = boundedIdentifier(conversationId, "conversationId");
+  const normalizedConversationId = boundedConversationId(
+    conversationId,
+    "conversationId",
+  );
   const existing = current === undefined
     ? undefined
     : parseCanonicalTranscript(current);
@@ -216,7 +220,10 @@ function parseTranscriptEntry(
   ) {
     throw new TypeError(`${path}.kind is invalid`);
   }
-  const entryConversationId = boundedIdentifier(base.conversationId, `${path}.conversationId`);
+  const entryConversationId = boundedConversationId(
+    base.conversationId,
+    `${path}.conversationId`,
+  );
   if (entryConversationId !== conversationId) {
     throw new TypeError(`${path}.conversationId does not match its transcript`);
   }
@@ -456,6 +463,15 @@ function valueKind(value: unknown): unknown {
 
 function boundedIdentifier(value: unknown, path: string): string {
   return boundedText(value, path, TRANSCRIPT_MAX_IDENTIFIER_BYTES, false);
+}
+
+function boundedConversationId(value: unknown, path: string): string {
+  return boundedText(
+    value,
+    path,
+    TRANSCRIPT_MAX_CONVERSATION_ID_BYTES,
+    false,
+  );
 }
 
 function boundedText(

@@ -1,3 +1,5 @@
+import { resolve } from "node:path";
+
 import {
   MODULE_API_VERSION,
   defineChannelModule,
@@ -23,6 +25,7 @@ import {
   type WebhookSubmit,
 } from "./server.js";
 import { WebhookDelivery } from "./delivery.js";
+import { loadWebhookRoutesFromDirectory } from "./routes.js";
 
 const PACKAGE_NAME = "@mono-agent/channel-webhook";
 const PACKAGE_VERSION = "0.15.0";
@@ -84,9 +87,16 @@ function createWebhookModuleChannel(
     }
     startPromise = (async () => {
       throwIfAborted(startContext.signal);
+      const routes = context.config.routesDirectory === undefined
+        ? undefined
+        : await loadWebhookRoutesFromDirectory(
+          resolve(context.configDirectory, context.config.routesDirectory),
+          context.config.defaultMode,
+        );
       transport = createWebhookChannel({
         config: context.config,
         submit,
+        ...(routes === undefined ? {} : { routes }),
       });
       info = await transport.start();
       context.logger.info("Webhook channel listening.", {
@@ -125,6 +135,7 @@ function createWebhookModuleChannel(
         activeRequests: channelHealth.activeRequests,
         storedRequests: channelHealth.storedRequests,
         ...(info === undefined ? {} : { endpoint: info.invokeUrl }),
+        ...(info === undefined ? {} : { routes: info.routes.length }),
       },
     };
   };
@@ -175,7 +186,14 @@ function toChannelInboundRequest(
     ...(request.model === undefined ? {} : { model: request.model }),
     ...(request.effort === undefined ? {} : { effort: request.effort }),
     signal: request.abortSignal,
-    ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
+    ...(request.metadata === undefined && request.routeName === undefined
+      ? {}
+      : {
+          metadata: {
+            ...(request.metadata ?? {}),
+            ...(request.routeName === undefined ? {} : { webhook: { route: request.routeName } }),
+          },
+        }),
   };
 }
 
@@ -186,4 +204,5 @@ function throwIfAborted(signal: AbortSignal): void {
 
 export * from "./config.js";
 export * from "./delivery.js";
+export * from "./routes.js";
 export * from "./server.js";

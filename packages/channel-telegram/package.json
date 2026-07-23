@@ -30,6 +30,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
-  "dependencies": { "@mono-agent/module-sdk": "workspace:0.15.0" },
+  "dependencies": {
+    "@mono-agent/module-sdk": "workspace:0.15.0",
+    "undici": "8.7.0"
+  },
   "publishConfig": { "access": "public" }
 }

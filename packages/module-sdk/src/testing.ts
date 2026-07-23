@@ -3,25 +3,15 @@ import {
   MODULE_SCHEMA_SLOT_REFERENCE,
   OPEN_MODULE_KINDS,
   readCrossSlotReference,
-  type Channel,
-  type ChannelModuleDefinition,
-  type Memory,
-  type MemoryModuleDefinition,
-  type ModuleKind,
-  type ModuleSchema,
-  type OpenModuleDefinition,
-  type Runtime,
-  type RuntimeModuleDefinition,
+  type Awaitable, type Channel, type ChannelOutboundMessage, type ChannelModuleDefinition,
+  type Memory, type MemoryModuleDefinition, type ModuleKind, type ModuleSchema,
+  type OpenModuleDefinition, type Runtime, type RuntimeModuleDefinition,
 } from "./index.js";
 const RESERVED_DIRECTIVES = new Set(["$schema", "$use", "$env"]);
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const INSTANCE_METHODS = ["start", "drain", "stop", "health", "diagnostics"] as const;
-const RUNTIME_CAPABILITIES = [
-  "tools", "mcp", "attachments", "approvals", "structuredOutput", "sandbox", "sessions",
-] as const;
-const CHANNEL_CAPABILITIES = [
-  "attachments", "liveInput", "askUser", "proactive", "runtimeControl", "verbatim", "cancellation",
-] as const;
+const RUNTIME_CAPABILITIES = ["tools", "mcp", "attachments", "approvals", "structuredOutput", "sandbox", "sessions"] as const;
+const CHANNEL_CAPABILITIES = ["attachments", "liveInput", "askUser", "proactive", "runtimeControl", "verbatim", "cancellation"] as const;
 export interface ModuleComplianceOptions {
   readonly expectedKind?: ModuleKind;
   readonly expectedPackageName?: string;
@@ -32,6 +22,50 @@ export class ModuleComplianceError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ModuleComplianceError";
+  }
+}
+export interface ChannelBehaviorComplianceOptions {
+  create(signal: AbortSignal): Awaitable<Channel>; exercise(instance: Channel, signal: AbortSignal): Awaitable<void>;
+  readonly delivery?: { readonly delivered: ChannelOutboundMessage; readonly conflicting: ChannelOutboundMessage;
+    readonly unknown: ChannelOutboundMessage };
+  readonly secrets?: readonly string[]; readonly timeoutMs?: number;
+}
+/** Reusable channel lane; adapter suites supply normalization/auth probes in `exercise`. */
+export async function assertChannelBehaviorCompliance(options: ChannelBehaviorComplianceOptions): Promise<void> {
+  const signal = AbortSignal.timeout(options.timeoutMs ?? 5_000);
+  const instance = await options.create(signal);
+  assertChannelInstanceCompliance(instance);
+  if ((options.delivery !== undefined) !== instance.capabilities.proactive)
+    fail("channel behavior delivery scenarios must exactly match proactive capability");
+  await instance.start?.({ signal });
+  try {
+    await options.exercise(instance, signal);
+    const results: unknown[] = [];
+    if (options.delivery !== undefined) {
+      const { delivered, conflicting, unknown } = options.delivery;
+      if (delivered.idempotencyKey !== conflicting.idempotencyKey
+        || delivered.idempotencyKey === unknown.idempotencyKey)
+        fail("channel behavior delivery keys must model conflict and unknown independently");
+      const deliver = instance.deliver!.bind(instance);
+      results.push(await deliver(delivered, signal), await deliver(delivered, signal),
+        await deliver(conflicting, signal), await deliver(unknown, signal), await deliver(unknown, signal));
+      const expected = ["delivered", "duplicate", "failed", "unknown", "unknown"];
+      for (const [index, result] of results.entries()) {
+        const receipt = requireRecord(result, `channel delivery result ${String(index)}`);
+        if (receipt.status !== expected[index]
+          || receipt.idempotencyKey !== (index < 3 ? delivered.idempotencyKey : unknown.idempotencyKey))
+          fail(`channel delivery result ${String(index)} violates idempotency semantics`);
+      }
+    }
+    if (instance.health === undefined) fail("channel behavior requires bounded health");
+    results.push(await instance.health({ signal }), ...(await instance.diagnostics?.({ signal, verbose: true }) ?? []));
+    const report = JSON.stringify(results);
+    if (new TextEncoder().encode(report).byteLength > 64 * 1024) fail("channel behavior reports exceed 64 KiB");
+    for (const secret of options.secrets ?? []) if (secret.length > 0 && report.includes(secret))
+      fail("channel behavior reports contain a configured secret");
+    await instance.drain?.({ signal });
+  } finally {
+    await instance.stop?.({ signal, reason: "shutdown" }); await instance.stop?.({ signal, reason: "shutdown" });
   }
 }
 export function assertModuleDefinitionCompliance(
@@ -88,8 +122,13 @@ export function assertChannelInstanceCompliance(value: unknown): asserts value i
   const instance = assertModuleInstance(value, "channel");
   const capabilities = assertInstanceCapabilities(instance, "channel", CHANNEL_CAPABILITIES, ["approvals"]);
   assertOptionalFunction(instance.deliver, "channel instance deliver");
-  if (capabilities.proactive === true && typeof instance.deliver !== "function")
-    fail("proactive channel instance deliver must be a function");
+  assertOptionalFunction(instance.resolveDefaultDeliveryConversationId,
+    "channel instance resolveDefaultDeliveryConversationId");
+  const sendTools = assertChannelSendTools(readOwnDataProperty(instance, "sendTools", "channel instance"));
+  if (capabilities.proactive !== (typeof instance.deliver === "function"))
+    fail("channel proactive capability and deliver function must match");
+  if (sendTools > 0 && capabilities.proactive !== true)
+    fail("channel sendTools require proactive capability and delivery");
 }
 export function assertMemoryInstanceCompliance(value: unknown): asserts value is Memory {
   const instance = assertModuleInstance(value, "memory");
@@ -125,6 +164,27 @@ function assertExpectedManifestProperty(
   if (expected !== undefined && manifest[property] !== expected) {
     fail(`manifest.${property} must be ${expected}, received ${String(manifest[property])}`);
   }
+}
+function assertChannelSendTools(value: unknown): number {
+  if (value === undefined) return 0;
+  if (!Array.isArray(value) || value.length > 64) fail("channel instance sendTools must be an array of at most 64 tools");
+  const names = new Set<string>();
+  for (const [index, raw] of value.entries()) {
+    const tool = requirePlainRecord(raw, `channel instance sendTools[${index}]`);
+    const name = readOwnDataProperty(tool, "name", `channel instance sendTools[${index}]`, true);
+    const description = readOwnDataProperty(tool, "description", `channel instance sendTools[${index}]`, true);
+    if (typeof name !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(name)) fail(`channel instance sendTools[${index}].name must be a portable tool name`);
+    if (names.has(name)) fail(`channel instance sendTools contains duplicate ${name}`);
+    names.add(name); requireNonEmptyString(description, `channel instance sendTools[${index}].description`);
+    const schema = requirePlainRecord(readOwnDataProperty(
+      tool, "inputSchema", `channel instance sendTools[${index}]`, true,
+    ), `channel instance sendTools[${index}].inputSchema`);
+    assertSchemaGraph(schema);
+    for (const method of ["prepare", "historyConversationId"] as const) if (typeof readOwnDataProperty(
+      tool, method, `channel instance sendTools[${index}]`, true,
+    ) !== "function") fail(`channel instance sendTools[${index}].${method} must be a function`);
+  }
+  return value.length;
 }
 function assertModuleInstance(value: unknown, kind: ModuleKind): Record<string, unknown> {
   const label = `${kind} instance`;

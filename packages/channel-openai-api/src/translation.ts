@@ -20,7 +20,11 @@ export class OpenAiRequestError extends Error {
   constructor(readonly code: string, message: string, readonly status = 400) { super(message); this.name = "OpenAiRequestError"; }
 }
 
-export function parseOpenAiChatRequest(value: unknown, config: OpenAiApiConfig): OpenAiChatRequest {
+export function parseOpenAiChatRequest(
+  value: unknown,
+  config: OpenAiApiConfig,
+  conversationHint?: string,
+): OpenAiChatRequest {
   const input = record(value, "request");
   const allowed = new Set(["model", "messages", "stream", "stream_options", "user", "conversation_id", "metadata", "temperature", "top_p", "max_tokens", "max_completion_tokens", "frequency_penalty", "presence_penalty", "stop", "seed", "n", "tools", "tool_choice", "parallel_tool_calls", "response_format"]);
   const unknown = Object.keys(input).filter((key) => !allowed.has(key)).sort();
@@ -32,20 +36,29 @@ export function parseOpenAiChatRequest(value: unknown, config: OpenAiApiConfig):
   if (input.n !== undefined && input.n !== 1) throw new OpenAiRequestError("unsupported_n", "Only n=1 is supported.");
   const warnings: string[] = [];
   for (const field of ["temperature", "top_p", "frequency_penalty", "presence_penalty", "stop", "seed", "tools", "tool_choice", "parallel_tool_calls", "response_format", "max_tokens", "max_completion_tokens"]) if (input[field] !== undefined) warnings.push(`${field}_ignored`);
-  const attachments: ChannelAttachment[] = [];
-  const transcript: string[] = [];
+  const messages: {
+    readonly role: "system" | "user" | "assistant" | "tool";
+    readonly text: string;
+    readonly attachments: readonly ChannelAttachment[];
+  }[] = [];
   for (const [index, raw] of input.messages.entries()) {
     const message = record(raw, `messages[${index}]`);
     const fields = Object.keys(message).filter((key) => !["role", "content", "name", "tool_call_id", "tool_calls"].includes(key));
     if (fields.length > 0) throw new OpenAiRequestError("invalid_message", `messages[${index}] contains unknown field(s): ${fields.join(", ")}.`);
     if (!isRole(message.role)) throw new OpenAiRequestError("invalid_message", `messages[${index}].role is invalid.`);
     if (message.name !== undefined || message.tool_call_id !== undefined || message.tool_calls !== undefined) throw new OpenAiRequestError("unsupported_message", `messages[${index}] uses tool/name fields this channel cannot represent.`);
-    const parts = parseContent(message.content, `messages[${index}].content`, config.maxImageBytes, attachments);
-    transcript.push(`[${message.role}]\n${parts}`);
+    const messageAttachments: ChannelAttachment[] = [];
+    const parts = parseContent(message.content, `messages[${index}].content`, config.maxImageBytes, messageAttachments);
+    messages.push({ role: message.role, text: parts, attachments: Object.freeze(messageAttachments) });
   }
   const user = input.user === undefined ? undefined : identifier(input.user, "user");
-  const authoredConversation = input.conversation_id === undefined ? user : identifier(input.conversation_id, "conversation_id");
   const metadataInput = input.metadata === undefined ? {} : jsonObject(input.metadata, "metadata");
+  const authoredConversation = conversationIdentity(input, metadataInput, conversationHint);
+  const selected = authoredConversation === undefined
+    ? messages
+    : [latestUserMessage(messages)];
+  const attachments = selected.flatMap((message) => message.attachments);
+  const transcript = selected.map((message) => `[${message.role}]\n${message.text}`);
   return Object.freeze({
     model: config.modelId,
     stream: input.stream === true,
@@ -57,6 +70,33 @@ export function parseOpenAiChatRequest(value: unknown, config: OpenAiApiConfig):
     warnings: Object.freeze(warnings),
     metadata: Object.freeze({ ...metadataInput, protocol: "openai-chat-completions" }),
   });
+}
+
+function latestUserMessage<T extends { readonly role: string }>(messages: readonly T[]): T {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === "user") return message;
+  }
+  return messages[messages.length - 1]!;
+}
+
+function conversationIdentity(
+  input: Record<string, unknown>,
+  metadata: JsonObject,
+  hint: string | undefined,
+): string | undefined {
+  const candidates = [
+    metadata.conversation_id,
+    metadata.conversationId,
+    metadata.chat_id,
+    metadata.chatId,
+    input.conversation_id,
+    hint,
+  ];
+  for (const candidate of candidates) {
+    if (candidate !== undefined) return identifier(candidate, "conversation identity");
+  }
+  return undefined;
 }
 
 export function toChannelRequest(parsed: OpenAiChatRequest, requestId: string, signal: AbortSignal): ChannelInboundRequest {

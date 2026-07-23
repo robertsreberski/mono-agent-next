@@ -1,8 +1,22 @@
 import { isEnvEligibleSchema, isSecretSchema, type ChannelHost, type ModuleLogger } from "@mono-agent/module-sdk";
-import { assertChannelInstanceCompliance, assertChannelModuleCompliance } from "@mono-agent/module-sdk/testing";
+import {
+  assertChannelBehaviorCompliance,
+  assertChannelInstanceCompliance,
+  assertChannelModuleCompliance,
+} from "@mono-agent/module-sdk/testing";
 import { describe, expect, it, vi } from "vitest";
 
-import { createTelegramChannel, monoAgentModule, parseTelegramConfig, telegramConfigSchema, type TelegramBotClient, type TelegramUpdate } from "../index.js";
+import {
+  createTelegramChannel,
+  createTelegramTranscriber,
+  isWithinQuietHours,
+  monoAgentModule,
+  parseTelegramConfig,
+  TelegramDelivery,
+  telegramConfigSchema,
+  type TelegramBotClient,
+  type TelegramUpdate,
+} from "../index.js";
 
 const TOKEN = "1234567890:telegram-token-long-enough";
 
@@ -14,6 +28,425 @@ describe("telegram channel", () => {
     expect(() => parseTelegramConfig({ botToken: TOKEN, allowedChatIds: [] })).toThrow(/at least one/u);
     expect(() => parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["1"], surprise: true })).toThrow(/unknown/u);
     expect(() => parseTelegramConfig({ botToken: { $env: "BOT" }, allowedChatIds: ["1"] })).toThrow(/resolved/u);
+    expect(() => parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42:shadow"] })).toThrow(/colon/u);
+    expect(parseTelegramConfig({ botToken: TOKEN, allowAllChats: true }).allowedChatIds).toEqual([]);
+    const config = parseTelegramConfig({
+      botToken: TOKEN,
+      allowedChatIds: ["1"],
+      quietHours: { start: "23:00", end: "07:00", timezone: "Europe/Rome" },
+      transport: { ipFamily: 4 },
+      transcription: {
+        endpoint: "http://127.0.0.1:50060/v1/audio/transcriptions",
+        model: "large-v3",
+      },
+    });
+    expect(config).toMatchObject({
+      quietHours: { start: "23:00", end: "07:00", timezone: "Europe/Rome" },
+      transport: { ipFamily: 4 },
+      transcription: {
+        endpoint: "http://127.0.0.1:50060/v1/audio/transcriptions",
+        model: "large-v3",
+        timeoutMs: 120_000,
+      },
+    });
+    expect(isWithinQuietHours(new Date("2026-01-01T23:30:00Z"), { start: "23:00", end: "07:00", timezone: "UTC" })).toBe(true);
+    expect(isWithinQuietHours(new Date("2026-01-01T12:00:00Z"), { start: "23:00", end: "07:00", timezone: "UTC" })).toBe(false);
+    expect(() => parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["1"], transport: { ipFamily: 5 } })).toThrow(/4 or 6/u);
+    expect(() => parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["1"], quietHours: { start: "9pm", end: "07:00", timezone: "UTC" } })).toThrow(/HH:MM/u);
+    expect(() => parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["1"], transcription: { endpoint: "file:///tmp/audio", model: "m" } })).toThrow(/HTTP/u);
+  });
+
+  it("contributes instance-bound message and file tools through the normal delivery allowlist", async () => {
+    const sendMessage = vi.fn<TelegramBotClient["sendMessage"]>(async () => ({
+      messageId: "message-1",
+    }));
+    const sendAttachment = vi.fn<TelegramBotClient["sendAttachment"]>(async () => ({
+      messageId: "file-1",
+    }));
+    const client: TelegramBotClient = {
+      async poll(_offset, _timeout, signal) {
+        await new Promise<void>((resolve) =>
+          signal.addEventListener("abort", () => resolve(), { once: true }));
+        return [];
+      },
+      async download() { throw new Error("unexpected download"); },
+      sendMessage,
+      sendAttachment,
+    };
+    const channel = createTelegramChannel({
+      context: context(
+        parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }),
+        async () => ({ status: "completed" }),
+      ),
+      clientFactory: () => client,
+    });
+    expect(channel.resolveDefaultDeliveryConversationId?.()).toBeUndefined();
+    expect(channel.sendTools.map((tool) => tool.name)).toEqual([
+      "TelegramSendMessage",
+      "TelegramSendFile",
+    ]);
+    const toolContext = {
+      requestId: "request-1",
+      conversationId: "producer",
+      callId: "call-1",
+      signal: new AbortController().signal,
+    };
+    const messageTool = channel.sendTools[0]!;
+    const preparedMessage = await messageTool.prepare({
+      chat_id: 42,
+      text: "Choose",
+      reply_options: ["Yes", "No"],
+    }, toolContext);
+    expect(preparedMessage).toEqual({
+      conversationId: "telegram:42",
+      text: "Choose",
+      metadata: { telegram: { replyOptions: ["Yes", "No"] } },
+    });
+    const messageResult = await channel.deliver!({
+      ...preparedMessage,
+      idempotencyKey: "tool-message",
+    }, toolContext.signal);
+    expect(messageResult).toMatchObject({
+      status: "delivered",
+      messageId: "message-1",
+    });
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      chatId: "42",
+      text: "Choose",
+      buttons: [
+        expect.objectContaining({ label: "Yes" }),
+        expect.objectContaining({ label: "No" }),
+      ],
+    }));
+    expect(messageTool.historyConversationId(
+      { ...preparedMessage, idempotencyKey: "tool-message" },
+      messageResult,
+    )).toBe("telegram:42");
+    expect(() => messageTool.historyConversationId(
+      { ...preparedMessage, idempotencyKey: "tool-unknown" },
+      {
+        status: "unknown",
+        idempotencyKey: "tool-unknown",
+      },
+    )).toThrow(/confirmed delivery/u);
+
+    const fileTool = channel.sendTools[1]!;
+    const preparedFile = await fileTool.prepare({
+      kind: "photo",
+      chat_id: "42",
+      data: Buffer.from([1, 2, 3]).toString("base64"),
+      filename: "photo.jpg",
+      media_type: "image/jpeg",
+      caption: "Rendered output",
+    }, { ...toolContext, callId: "call-2" });
+    const fileResult = await channel.deliver!({
+      ...preparedFile,
+      idempotencyKey: "tool-file",
+    }, toolContext.signal);
+    expect(fileResult).toMatchObject({ status: "delivered", messageId: "file-1" });
+    expect(sendAttachment).toHaveBeenCalledWith(expect.objectContaining({
+      chatId: "42",
+      caption: "Rendered output",
+      attachment: expect.objectContaining({
+        kind: "image",
+        name: "photo.jpg",
+        sizeBytes: 3,
+      }),
+    }));
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+
+    await expect(channel.deliver!({
+      ...await messageTool.prepare({ chat_id: "99", text: "forbidden" }, toolContext),
+      idempotencyKey: "tool-forbidden",
+    }, toolContext.signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "telegram_destination_forbidden" },
+    });
+    expect(() => messageTool.prepare({
+      chat_id: "42:shadow",
+      text: "ambiguous",
+    }, toolContext)).toThrow(/identifier/u);
+    expect(() => messageTool.prepare({
+      chat_id: "4 2",
+      text: "ambiguous",
+    }, toolContext)).toThrow(/identifier/u);
+    await expect(channel.deliver!({
+      conversationId: "telegram:42:shadow",
+      text: "ambiguous",
+      idempotencyKey: "tool-ambiguous",
+    }, toolContext.signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "telegram_destination_forbidden" },
+    });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(() => fileTool.prepare({
+      kind: "document",
+      chat_id: "42",
+      data: "not-base64",
+      filename: "../secret",
+    }, toolContext)).toThrow(/base64|filename/u);
+  });
+
+  it("coalesces exact payloads, rejects conflicting keys, and keeps unknown outcomes sticky", async () => {
+    const sendMessage = vi.fn<TelegramBotClient["sendMessage"]>(async (request) => {
+      if (request.text === "ambiguous") {
+        throw new Error("secret transport detail /private/token");
+      }
+      return { messageId: "message-1" };
+    });
+    const client: TelegramBotClient = {
+      async poll() { return []; },
+      async download() { throw new Error("unexpected download"); },
+      sendMessage,
+      async sendAttachment() { return { messageId: "attachment-1" }; },
+    };
+    const delivery = new TelegramDelivery(
+      parseTelegramConfig({
+        botToken: TOKEN,
+        allowedChatIds: ["42"],
+      }),
+      client,
+    );
+    const signal = new AbortController().signal;
+    const message = {
+      conversationId: "telegram:42",
+      text: "one",
+      idempotencyKey: "same",
+    };
+    await expect(Promise.all([
+      delivery.deliver(message, signal),
+      delivery.deliver(message, signal),
+    ])).resolves.toEqual([
+      expect.objectContaining({ status: "delivered" }),
+      expect.objectContaining({ status: "delivered" }),
+    ]);
+    await expect(delivery.deliver(message, signal)).resolves.toMatchObject({
+      status: "duplicate",
+    });
+    await expect(delivery.deliver({
+      ...message,
+      text: "different",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "telegram_delivery_idempotency_conflict" },
+    });
+
+    const ambiguous = {
+      conversationId: "telegram:42",
+      text: "ambiguous",
+      idempotencyKey: "ambiguous",
+    };
+    const first = await delivery.deliver(ambiguous, signal);
+    const second = await delivery.deliver(ambiguous, signal);
+    expect(first).toEqual(second);
+    expect(first).toEqual({
+      status: "unknown",
+      idempotencyKey: "ambiguous",
+      diagnostic: {
+        code: "telegram_delivery_unknown",
+        severity: "error",
+        message: "Telegram delivery outcome is unknown.",
+      },
+    });
+    expect(JSON.stringify(first)).not.toContain("secret transport");
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds and snapshots public delivery payloads before fingerprinting or transport", async () => {
+    let releaseAttachment!: () => void;
+    const attachmentGate = new Promise<void>((resolve) => {
+      releaseAttachment = resolve;
+    });
+    let postedAttachment: Parameters<TelegramBotClient["sendAttachment"]>[0]["attachment"] | undefined;
+    const sendMessage = vi.fn<TelegramBotClient["sendMessage"]>(async () => ({
+      messageId: "posted",
+    }));
+    const sendAttachment = vi.fn<TelegramBotClient["sendAttachment"]>(
+      async (request) => {
+        postedAttachment = request.attachment;
+        await attachmentGate;
+        return { messageId: "attachment" };
+      },
+    );
+    const delivery = new TelegramDelivery(
+      parseTelegramConfig({
+        botToken: TOKEN,
+        allowAllChats: true,
+      }),
+      {
+        async poll() { return []; },
+        async download() { throw new Error("unexpected download"); },
+        sendMessage,
+        sendAttachment,
+      },
+    );
+    const signal = new AbortController().signal;
+
+    for (const conversationId of [
+      "telegram:4 2",
+      `telegram:${"4".repeat(129)}`,
+      "telegram:42\u0007shadow",
+    ]) {
+      await expect(delivery.deliver({
+        conversationId,
+        text: "unsafe",
+        idempotencyKey: `bad-destination-${conversationId.length}`,
+      }, signal)).resolves.toMatchObject({
+        status: "failed",
+        diagnostic: { code: "telegram_destination_forbidden" },
+      });
+    }
+
+    await expect(delivery.deliver({
+      conversationId: "telegram:42",
+      text: "oversized metadata",
+      idempotencyKey: "retry-after-invalid",
+      metadata: { detail: "x".repeat(65_537) },
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "telegram_delivery_invalid" },
+    });
+    await expect(delivery.deliver({
+      conversationId: "telegram:42",
+      text: "valid retry",
+      idempotencyKey: "retry-after-invalid",
+    }, signal)).resolves.toMatchObject({ status: "delivered" });
+
+    const proxiedData = new Proxy(new Uint8Array([1]), {});
+    await expect(delivery.deliver({
+      conversationId: "telegram:42",
+      text: "",
+      attachments: [{
+        id: "proxy",
+        kind: "file",
+        name: "proxy.bin",
+        mediaType: "application/octet-stream",
+        sizeBytes: 1,
+        data: proxiedData,
+      }],
+      idempotencyKey: "proxy-data",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "telegram_delivery_invalid" },
+    });
+
+    const source = new Uint8Array([1, 2, 3]);
+    const pending = delivery.deliver({
+      conversationId: "telegram:42",
+      text: "",
+      attachments: [{
+        id: "snapshot",
+        kind: "file",
+        name: "snapshot.bin",
+        mediaType: "application/octet-stream",
+        sizeBytes: source.byteLength,
+        data: source,
+      }],
+      idempotencyKey: "snapshot",
+    }, signal);
+    await vi.waitFor(() => expect(sendAttachment).toHaveBeenCalledOnce());
+    source[0] = 9;
+    expect(postedAttachment?.data).not.toBe(source);
+    expect(postedAttachment?.data).toEqual(new Uint8Array([1, 2, 3]));
+    releaseAttachment();
+    await expect(pending).resolves.toMatchObject({ status: "delivered" });
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it("passes the reusable channel behavior compliance contract", async () => {
+    const sendMessage = vi.fn<TelegramBotClient["sendMessage"]>(
+      async (request) => {
+        if (request.text === "ambiguous compliance") {
+          throw new Error("secret Telegram transport failure /private/token");
+        }
+        return { messageId: "compliance-posted" };
+      },
+    );
+    await assertChannelBehaviorCompliance({
+      create: () => createTelegramChannel({
+        context: context(
+          parseTelegramConfig({
+            botToken: TOKEN,
+            allowedChatIds: ["42"],
+          }),
+          async () => ({ status: "completed" }),
+        ),
+        clientFactory: () => ({
+          async poll(_offset, _timeout, signal) {
+            await new Promise<void>((resolve) => {
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+            return [];
+          },
+          async download() { throw new Error("unexpected download"); },
+          sendMessage,
+          async sendAttachment() { return { messageId: "attachment" }; },
+        }),
+      }),
+      delivery: {
+        delivered: {
+          conversationId: "telegram:42",
+          text: "compliance",
+          idempotencyKey: "telegram-compliance",
+        },
+        conflicting: {
+          conversationId: "telegram:42",
+          text: "conflicting compliance",
+          idempotencyKey: "telegram-compliance",
+        },
+        unknown: {
+          conversationId: "telegram:42",
+          text: "ambiguous compliance",
+          idempotencyKey: "telegram-compliance-unknown",
+        },
+      },
+      secrets: [TOKEN, "secret Telegram"],
+      exercise(instance) {
+        expect(instance.capabilities.proactive).toBe(true);
+      },
+    });
+  });
+
+  it("fails closed instead of evicting receipt authority at the live-instance bound", async () => {
+    const sendMessage = vi.fn<TelegramBotClient["sendMessage"]>(async () => ({
+      messageId: "sent",
+    }));
+    const delivery = new TelegramDelivery(
+      parseTelegramConfig({
+        botToken: TOKEN,
+        allowedChatIds: ["42"],
+      }),
+      {
+        async poll() { return []; },
+        async download() { throw new Error("unexpected download"); },
+        sendMessage,
+        async sendAttachment() { return { messageId: "attachment" }; },
+      },
+    );
+    const signal = new AbortController().signal;
+    for (let index = 0; index < 1_000; index += 1) {
+      await delivery.deliver({
+        conversationId: "telegram:42",
+        text: `notice-${String(index)}`,
+        idempotencyKey: `key-${String(index)}`,
+      }, signal);
+    }
+    await expect(delivery.deliver({
+      conversationId: "telegram:42",
+      text: "one too many",
+      idempotencyKey: "capacity",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "telegram_delivery_receipt_capacity" },
+    });
+    expect(delivery.degraded).toBe(true);
+    expect(sendMessage).toHaveBeenCalledTimes(1_000);
+    await expect(delivery.deliver({
+      conversationId: "telegram:42",
+      text: "notice-0",
+      idempotencyKey: "key-0",
+    }, signal)).resolves.toMatchObject({ status: "duplicate" });
+    expect(sendMessage).toHaveBeenCalledTimes(1_000);
   });
 
   it("normalizes authorized media, ignores unauthorized chats, and deduplicates proactive delivery", async () => {
@@ -37,6 +470,7 @@ describe("telegram channel", () => {
     const channel = createTelegramChannel({ context: context(parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"], defaultDestination: "42" }), dispatch), clientFactory: () => client });
     expect(() => assertChannelModuleCompliance(monoAgentModule, { expectedPackageName: "@mono-agent/channel-telegram" })).not.toThrow();
     expect(() => assertChannelInstanceCompliance(channel)).not.toThrow();
+    expect(channel.resolveDefaultDeliveryConversationId?.()).toBe("telegram:42");
     await channel.start?.({ signal: new AbortController().signal });
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
     expect(dispatch.mock.calls[0]?.[0]).toMatchObject({ conversationId: "telegram:42", sender: { id: "u", displayName: "Ada" }, attachments: [{ name: "note.txt" }] });
@@ -83,7 +517,7 @@ describe("telegram channel", () => {
       context: context(parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }), dispatch, { offerLiveInput, answerAsk, cancel }),
       clientFactory: () => client,
     });
-    expect(channel.capabilities).toMatchObject({ liveInput: true, askUser: true, approvals: false, cancellation: true, runtimeControl: false });
+    expect(channel.capabilities).toMatchObject({ liveInput: true, askUser: true, approvals: false, cancellation: true, runtimeControl: true });
     await channel.start?.({ signal: new AbortController().signal });
     await vi.waitFor(() => {
       expect(answerAsk).toHaveBeenCalledOnce();
@@ -94,6 +528,125 @@ describe("telegram channel", () => {
     expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "telegram:42" }));
     expect(dispatch).toHaveBeenCalledOnce();
     await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("applies per-chat runtime controls, transcribes audio, and edits activity in place", async () => {
+    const now = new Date().toISOString();
+    let poll = 0;
+    const sent = vi.fn<TelegramBotClient["sendMessage"]>(async () => ({ messageId: "status-1" }));
+    const edit = vi.fn<NonNullable<TelegramBotClient["editMessage"]>>(async () => undefined);
+    const client: TelegramBotClient = {
+      async poll(_offset, _timeout, signal) {
+        poll += 1;
+        if (poll === 1) return [{ updateId: 1, kind: "message", chatId: "42", messageId: "1", senderId: "U", text: "/model runtime/model-a", attachments: [], receivedAt: now }];
+        if (poll === 2) return [{ updateId: 2, kind: "message", chatId: "42", messageId: "2", senderId: "U", text: "/effort high", attachments: [], receivedAt: now }];
+        if (poll === 3) return [{ updateId: 3, kind: "message", chatId: "42", messageId: "3", senderId: "U", text: "summarize", attachments: [{ fileId: "voice", name: "voice.ogg", mediaType: "audio/ogg", transcriptionEligible: true }], receivedAt: now }];
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+        return [];
+      },
+      async download() { return { id: "voice", kind: "audio", name: "voice.ogg", mediaType: "audio/ogg", sizeBytes: 3, data: new Uint8Array([1, 2, 3]) }; },
+      async transcribe() { return "spoken words"; },
+      sendMessage: sent,
+      editMessage: edit,
+      async sendAttachment() { return { messageId: "attachment" }; },
+    };
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async (_request, reply) => {
+      await reply.emit({ type: "activity", text: "Thinking" });
+      await reply.emit({ type: "activity", text: "Still thinking" });
+      return { status: "completed", text: "done" };
+    });
+    const channel = createTelegramChannel({
+      context: context(parseTelegramConfig({
+        botToken: TOKEN,
+        allowedChatIds: ["42"],
+        transcription: { endpoint: "http://127.0.0.1:50060/v1/audio/transcriptions", model: "large-v3" },
+      }), dispatch),
+      clientFactory: () => client,
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    expect(dispatch.mock.calls[0]?.[0]).toMatchObject({
+      conversationId: "telegram:42",
+      model: "runtime/model-a",
+      effort: "high",
+      text: "summarize\n\n[Transcript of voice.ogg]\nspoken words",
+      attachments: [{ name: "voice.ogg" }],
+    });
+    expect(edit).toHaveBeenCalledWith(expect.objectContaining({ messageId: "status-1", text: "Still thinking" }));
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("keeps non-blocking reply options distinct from AskUser and silences proactive delivery in quiet hours", async () => {
+    let callbackData: string | undefined;
+    let delivered: Parameters<TelegramBotClient["sendMessage"]>[0] | undefined;
+    const client: TelegramBotClient = {
+      async poll(_offset, _timeout, signal) {
+        if (callbackData !== undefined) {
+          const data = callbackData;
+          callbackData = undefined;
+          return [{ updateId: 2, kind: "callback", callbackId: "reply-callback", chatId: "42", messageId: "2", senderId: "U", data, receivedAt: new Date().toISOString() }];
+        }
+        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+        return [];
+      },
+      async download() { throw new Error("unexpected download"); },
+      async sendMessage(request) {
+        delivered = request;
+        callbackData = request.buttons?.[0]?.data;
+        return { messageId: "sent" };
+      },
+      async sendAttachment() { return { messageId: "attachment" }; },
+      async answerCallback() {},
+    };
+    const config = parseTelegramConfig({
+      botToken: TOKEN,
+      allowedChatIds: ["42"],
+      defaultDestination: "42",
+      quietHours: { start: "23:00", end: "07:00", timezone: "UTC" },
+    });
+    const delivery = new TelegramDelivery(config, client, () => new Date("2026-01-01T23:30:00Z"));
+    expect(await delivery.deliver({
+      conversationId: "telegram:42",
+      text: "Proceed?",
+      idempotencyKey: "reply-options",
+      metadata: { telegram: { replyOptions: ["Yes", "No"] } },
+    }, new AbortController().signal)).toMatchObject({ status: "delivered" });
+    expect(delivered).toMatchObject({
+      disableNotification: true,
+      buttons: [{ label: "Yes" }, { label: "No" }],
+    });
+
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async () => ({ status: "completed", text: "accepted" }));
+    const channel = createTelegramChannel({ context: context(config, dispatch), clientFactory: () => client });
+    await channel.start?.({ signal: new AbortController().signal });
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    expect(dispatch.mock.calls[0]?.[0]).toMatchObject({ text: "Yes", conversationId: "telegram:42" });
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("bounds OpenAI-compatible transcription responses", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (_input, init) => {
+      expect(init?.body).toBeInstanceOf(FormData);
+      const form = init?.body as FormData;
+      expect(form.get("model")).toBe("large-v3");
+      return new Response(JSON.stringify({ text: " transcript " }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const transcribe = createTelegramTranscriber({
+      endpoint: "http://127.0.0.1:50060/v1/audio/transcriptions",
+      model: "large-v3",
+      timeoutMs: 1_000,
+    }, fetchImpl);
+    await expect(transcribe({
+      id: "audio",
+      kind: "audio",
+      name: "voice.ogg",
+      mediaType: "audio/ogg",
+      sizeBytes: 1,
+      data: new Uint8Array([1]),
+    }, new AbortController().signal)).resolves.toBe("transcript");
   });
 });
 

@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { OperatorUsage } from "@mono-agent/operator";
+
 import { DurableWebStore } from "../store.js";
 import { cleanup, temporaryDirectory } from "./helpers.js";
 
@@ -30,6 +32,89 @@ describe("durable web state", () => {
       messages: [
         { role: "user", text: "hello", status: "complete" },
         { role: "assistant", text: "hello back", status: "complete" },
+      ],
+    });
+    await reopened.close();
+  });
+
+  it("migrates v1 state without text loss and durably retains bounded content-free telemetry", async () => {
+    const root = await temporaryDirectory();
+    const dataDirectory = join(root, "state");
+    const scaffold = await DurableWebStore.open(dataDirectory);
+    await scaffold.close();
+    const now = "2026-07-23T10:11:12.000Z";
+    const exactLegacyText = "<keep>& every\ncharacter — including telemetry-looking text";
+    await writeFile(join(dataDirectory, "state.json"), `${JSON.stringify({
+      schemaVersion: 1,
+      threads: [{
+        id: "legacy-thread",
+        agentId: "personal",
+        operatorConversationId: "web:legacy-thread",
+        title: "Legacy",
+        createdAt: now,
+        updatedAt: now,
+        status: "complete",
+      }],
+      messages: [{
+        id: "legacy-message",
+        threadId: "legacy-thread",
+        role: "assistant",
+        text: exactLegacyText,
+        createdAt: now,
+        updatedAt: now,
+        status: "complete",
+      }],
+    })}\n`, { mode: 0o600 });
+
+    const migrated = await DurableWebStore.open(dataDirectory);
+    expect(migrated.getThreadDetail("legacy-thread")?.messages[0]?.text).toBe(exactLegacyText);
+    expect(JSON.parse(await readFile(join(dataDirectory, "state.json"), "utf8"))).toMatchObject({
+      schemaVersion: 2,
+      messages: [{ text: exactLegacyText }],
+    });
+
+    const thread = await migrated.createThread("personal", "Telemetry");
+    const turn = await migrated.startTurn(thread.id, "measure");
+    const turnId = turn.assistant.turnId!;
+    const usageWithSecret: OperatorUsage & { readonly providerSecret: string } = {
+      inputTokens: 12,
+      outputTokens: 3,
+      contextWindow: 128_000,
+      contextUsed: 15,
+      compacted: true,
+      sessionEvicted: false,
+      providerSecret: "must-not-persist",
+    };
+    await migrated.updateAssistant(thread.id, turnId, "complete response", undefined, undefined, usageWithSecret);
+    await migrated.updateAssistant(thread.id, turnId, "complete response", undefined, undefined, {
+      inputTokens: 14,
+      outputTokens: 4,
+      contextWindow: 128_000,
+      contextUsed: 18,
+      compacted: false,
+      sessionEvicted: true,
+    });
+    await migrated.finishTurn(thread.id, turnId, "complete");
+    await migrated.close();
+
+    const raw = await readFile(join(dataDirectory, "state.json"), "utf8");
+    expect(raw).not.toContain("must-not-persist");
+    const reopened = await DurableWebStore.open(dataDirectory);
+    expect(reopened.getThreadDetail(thread.id)).toMatchObject({
+      messages: [
+        { role: "user", text: "measure" },
+        {
+          role: "assistant",
+          text: "complete response",
+          telemetry: {
+            inputTokens: 14,
+            outputTokens: 4,
+            contextWindow: 128_000,
+            contextUsed: 18,
+            compacted: true,
+            sessionEvicted: true,
+          },
+        },
       ],
     });
     await reopened.close();

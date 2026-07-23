@@ -55,6 +55,7 @@ const protocol = {
     "session.evict",
     "delivery.prepare",
     "delivery.settle",
+    "delivery.settle-with-history",
   ],
 } as const;
 
@@ -101,6 +102,10 @@ describe("StateExecutionClient", () => {
       true,
       { status: "send", attempt: 1, token: "token-1" },
       { status: "duplicate", messageId: "message-1" },
+      {
+        status: "appended", conversationId: "destination", entryId: "delivery:entry-1",
+        revision: 1, entryCount: 1,
+      },
     ]);
     const client = new StateExecutionClient(execution);
 
@@ -168,6 +173,20 @@ describe("StateExecutionClient", () => {
       status: "delivered",
       signal,
     });
+    await client.settleDeliveryWithHistory({
+      idempotencyKey: "delivery-1",
+      fingerprint: `sha256:${"c".repeat(64)}`,
+      attempt: 1,
+      token: "token-1",
+      messageId: "message-1",
+      conversationId: "destination",
+      entry: {
+        kind: "verbatim", entryId: "delivery:entry-1", runId: "delivery-1",
+        requestId: "request-1", conversationId: "destination", role: "assistant", text: "sent",
+      },
+      entryFingerprint: `sha256:${"d".repeat(64)}`,
+      signal,
+    });
 
     expect(execution.calls.map(({ operation }) => operation)).toEqual([
       "protocol.describe",
@@ -187,6 +206,7 @@ describe("StateExecutionClient", () => {
       "session.evict",
       "delivery.prepare",
       "delivery.settle",
+      "delivery.settle-with-history",
     ]);
     expect(execution.calls.every((call) => call.signal === signal)).toBe(true);
     expect(execution.calls.every((call) =>
@@ -247,6 +267,54 @@ describe("StateExecutionClient", () => {
       channelInstanceId: "channel-1",
       signal,
     })).rejects.toThrow(/malformed delivery/u);
+
+    outputs.push({
+      status: "appended", conversationId: "destination", entryId: "entry",
+      revision: 1,
+    });
+    await expect(client.settleDeliveryWithHistory({
+      idempotencyKey: "delivery-1", fingerprint: `sha256:${"a".repeat(64)}`,
+      attempt: 1, token: "token-1", conversationId: "destination",
+      entry: {
+        kind: "verbatim", entryId: "entry", runId: "delivery-1",
+        requestId: "request-1", conversationId: "destination", role: "assistant", text: "sent",
+      },
+      entryFingerprint: `sha256:${"b".repeat(64)}`, signal,
+    })).rejects.toThrow(/malformed delivery history entryCount/u);
+  });
+
+  it.each([
+    {
+      label: "requested identity",
+      value: {
+        conversationId: "other", createdAt: summary.startedAt, updatedAt: summary.updatedAt,
+        transcript: { ...transcript, conversationId: "other" },
+      },
+    },
+    {
+      label: "transcript identity",
+      value: {
+        conversationId: "conversation-1", createdAt: summary.startedAt, updatedAt: summary.updatedAt,
+        transcript: { ...transcript, conversationId: "other" },
+      },
+    },
+    {
+      label: "entry identity",
+      value: {
+        conversationId: "conversation-1", createdAt: summary.startedAt, updatedAt: summary.updatedAt,
+        transcript: {
+          ...transcript,
+          entries: [{
+            kind: "verbatim", entryId: "entry", runId: "run", requestId: "request",
+            conversationId: "other", recordedAt: summary.updatedAt, role: "assistant", text: "sent",
+          }],
+        },
+      },
+    },
+  ])("rejects a conversation view with mismatched $label", async ({ value }) => {
+    const client = new StateExecutionClient(new StubExecution([value]));
+    await expect(client.loadConversation("conversation-1", signal))
+      .rejects.toThrow(/malformed conversation identity/u);
   });
 
   it("detaches valid output and rejects hostile nested values without invoking accessors", async () => {
@@ -311,13 +379,14 @@ describe("StateExecutionClient", () => {
   });
 
   it("accepts attachment-only and empty assistant transcript text from durable state", async () => {
+    const conversationId = "c".repeat(4_096);
     const entries = [
       {
         kind: "message",
         entryId: "entry-user",
         runId: "run-1",
         requestId: "request-1",
-        conversationId: "conversation-1",
+        conversationId,
         recordedAt: "2026-07-23T10:00:00.000Z",
         role: "user",
         content: [{ type: "artifact", ref, name: "input.bin" }],
@@ -327,21 +396,32 @@ describe("StateExecutionClient", () => {
         entryId: "entry-assistant",
         runId: "run-1",
         requestId: "request-1",
-        conversationId: "conversation-1",
+        conversationId,
         recordedAt: "2026-07-23T10:00:00.001Z",
         role: "assistant",
         content: [{ type: "text", text: "" }],
       },
     ] as const;
-    const client = new StateExecutionClient(new StubExecution([{
-      conversationId: "conversation-1",
+    const outputs: unknown[] = [{
+      conversationId,
       createdAt: "2026-07-23T10:00:00.000Z",
       updatedAt: "2026-07-23T10:00:00.001Z",
-      transcript: { ...transcript, entries },
-    }]));
+      transcript: { ...transcript, conversationId, entries },
+    }];
+    const client = new StateExecutionClient(new StubExecution(outputs));
 
-    await expect(client.loadConversation("conversation-1", signal)).resolves.toMatchObject({
+    await expect(client.loadConversation(conversationId, signal)).resolves.toMatchObject({
       transcript: { entries },
     });
+    const oversized = "c".repeat(4_097);
+    outputs.push({
+      conversationId: oversized,
+      createdAt: "2026-07-23T10:00:00.000Z",
+      updatedAt: "2026-07-23T10:00:00.001Z",
+      transcript: { ...transcript, conversationId: oversized, entries: [] },
+    });
+    await expect(client.loadConversation(oversized, signal)).rejects.toThrow(
+      /malformed conversation conversationId/u,
+    );
   });
 });

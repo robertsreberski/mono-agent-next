@@ -11,6 +11,7 @@ import {
   type ModuleLogger,
 } from "@mono-agent/module-sdk";
 import {
+  OPERATOR_LIMITS,
   OperatorClient,
   parseOperatorFrame,
   parseOperatorHealth,
@@ -18,6 +19,7 @@ import {
   type OperatorFrame,
 } from "@mono-agent/operator";
 import {
+  assertChannelBehaviorCompliance,
   assertChannelInstanceCompliance,
   assertChannelModuleCompliance,
 } from "@mono-agent/module-sdk/testing";
@@ -241,6 +243,135 @@ describe("operator HTTP channel", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it("accepts materially larger canonical inline attachments and rejects body oversize", async () => {
+    let inbound: ChannelInboundRequest | undefined;
+    const channel = await startChannel(async (request) => {
+      inbound = request;
+      return { status: "completed", text: "received" };
+    });
+    const data = Buffer.alloc(64 * 1024, 0x61);
+    const accepted = await postJson(channel.startInfo.turnsUrl, {
+      conversationId: "large-attachment",
+      input: {
+        attachments: [{
+          id: "large",
+          name: "large.bin",
+          mediaType: "application/octet-stream",
+          sizeBytes: data.byteLength,
+          url: `data:application/octet-stream;base64,${data.toString("base64")}`,
+        }],
+      },
+    });
+    expect(accepted.status).toBe(200);
+    expect((await readFrames(accepted)).at(-1)).toMatchObject({ type: "completed" });
+    expect(inbound?.attachments).toEqual([expect.objectContaining({
+      id: "large",
+      name: "large.bin",
+      sizeBytes: data.byteLength,
+      data: new Uint8Array(data),
+    })]);
+
+    await expect(oversizedBodyStatus(channel.startInfo)).resolves.toBe(413);
+  });
+
+  it("resolves quotes from bounded replay and rejects foreign, missing, or mismatched references", async () => {
+    const now = new Date().toISOString();
+    const dispatch = vi.fn(async (
+      _request: ChannelInboundRequest,
+      _reply: ChannelReplySink,
+    ): Promise<ChannelTurnResult> => ({ status: "completed", text: "quoted" }));
+    const readReplay = vi.fn<NonNullable<ChannelHost["readReplay"]>>(async ({ conversationId }) => ({
+      entries: conversationId === "quoted-conversation"
+        ? [{
+            turnId: "turn-1",
+            createdAt: now,
+            message: {
+              id: "message-1",
+              role: "assistant",
+              content: [{ type: "text", text: "canonical quoted text" }],
+            },
+          }]
+        : [],
+    }));
+    const channel = await startChannel(dispatch, { readReplay });
+    await expect(authorizedJson(channel.startInfo.infoUrl)).resolves.toMatchObject({
+      capabilities: { quotes: true, replay: true },
+    });
+    const accepted = await postJson(channel.startInfo.turnsUrl, {
+      conversationId: "quoted-conversation",
+      input: {
+        text: "Respond to this.",
+        quote: {
+          conversationId: "quoted-conversation",
+          messageId: "message-1",
+          text: "canonical quoted text",
+        },
+      },
+    });
+    expect(accepted.status).toBe(200);
+    await readFrames(accepted);
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(dispatch.mock.calls[0]?.[0]).toMatchObject({
+      conversationId: "quoted-conversation",
+      metadata: {
+        operatorQuote: {
+          conversationId: "quoted-conversation",
+          messageId: "message-1",
+          role: "assistant",
+        },
+      },
+    });
+    expect(dispatch.mock.calls[0]?.[0].text).toContain("verified from conversation replay");
+    expect(dispatch.mock.calls[0]?.[0].text).toContain(JSON.stringify({
+      conversationId: "quoted-conversation",
+      messageId: "message-1",
+      role: "assistant",
+      text: "canonical quoted text",
+    }));
+    expect(dispatch.mock.calls[0]?.[0].text).toContain("User message:\nRespond to this.");
+
+    for (const quote of [
+      { conversationId: "foreign", messageId: "message-1", text: "canonical quoted text" },
+      { conversationId: "quoted-conversation", messageId: "missing", text: "canonical quoted text" },
+      { conversationId: "quoted-conversation", messageId: "message-1", text: "tampered" },
+    ]) {
+      const rejected = await postJson(channel.startInfo.turnsUrl, {
+        conversationId: "quoted-conversation",
+        input: { text: "Do not run.", quote },
+      });
+      expect(rejected.status).toBe(422);
+    }
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(readReplay).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "quoted-conversation",
+      limit: 10_000,
+    }));
+
+    const unavailable = await startChannel(dispatch, {
+      readReplay: async () => {
+        throw new Error("secret storage path");
+      },
+    });
+    const unavailableResponse = await postJson(unavailable.startInfo.turnsUrl, {
+      conversationId: "quoted-conversation",
+      input: {
+        text: "Do not run.",
+        quote: {
+          conversationId: "quoted-conversation",
+          messageId: "message-1",
+        },
+      },
+    });
+    expect(unavailableResponse.status).toBe(503);
+    await expect(unavailableResponse.json()).resolves.toEqual({
+      error: {
+        code: "replay_unavailable",
+        message: "Conversation replay is temporarily unavailable.",
+      },
+    });
+    expect(dispatch).toHaveBeenCalledOnce();
+  });
+
   it("aborts the exact Core dispatch when the stream client disconnects", async () => {
     let observedSignal: AbortSignal | undefined;
     let resolveAbort: (() => void) | undefined;
@@ -337,7 +468,32 @@ describe("operator HTTP channel", () => {
           questions: [{ id: "choice", prompt: "Choose", allowFreeText: false, multiple: false, choices: [{ value: "yes", label: "Yes" }] }],
         },
       });
-      await reply.emit({ type: "usage", usage: { inputTokens: 3, outputTokens: 5 } });
+      await reply.emit({
+        type: "usage",
+        usage: {
+          inputTokens: 3,
+          outputTokens: 5,
+          contextWindow: 128_000,
+          contextUsed: 8,
+        },
+      });
+      await reply.emit({
+        type: "compaction",
+        compaction: {
+          compacted: true,
+          tokensBefore: 8,
+          tokensAfter: 4,
+        },
+      });
+      await reply.emit({
+        type: "usage",
+        usage: {
+          inputTokens: 4,
+          outputTokens: 6,
+          contextUsed: 5,
+        },
+      });
+      await reply.emit({ type: "session-evicted" });
       return { status: "completed", text: "done" };
     }, host);
     const client = new OperatorClient({ endpoint: channel.startInfo.endpoint, token: TOKEN });
@@ -355,7 +511,20 @@ describe("operator HTTP channel", () => {
 
     const frames = await readFrames(await postJson(channel.startInfo.turnsUrl, { conversationId: "conversation-controls", input: { text: "run" } }));
     expect(frames).toContainEqual(expect.objectContaining({ type: "ask_user", ask: expect.objectContaining({ interactionId: "ask-1" }) }));
-    expect(frames).toContainEqual(expect.objectContaining({ type: "usage", usage: expect.objectContaining({ inputTokens: 3, outputTokens: 5 }) }));
+    const usageFrames = frames.filter((frame) => frame.type === "usage");
+    expect(usageFrames).toHaveLength(4);
+    expect(usageFrames.at(-1)).toEqual({
+      type: "usage",
+      turnId: expect.any(String),
+      usage: {
+        inputTokens: 4,
+        outputTokens: 6,
+        contextWindow: 128_000,
+        contextUsed: 5,
+        compacted: true,
+        sessionEvicted: true,
+      },
+    });
     await expect(client.getPendingAsk("conversation-controls")).resolves.toMatchObject({ ask: { interactionId: "ask-1" } });
     await expect(client.answerAsk("conversation-controls", { interactionId: "ask-1", answers: { choice: ["yes"] } })).resolves.toEqual({ status: "accepted" });
     expect(answerAsk).toHaveBeenCalledOnce();
@@ -413,6 +582,7 @@ describe("mono-agent operator channel module", () => {
         await reply.emit({ type: "text-delta", delta: "module reply" });
         return { status: "completed" };
       },
+      async readReplay() { return { entries: [] }; },
     };
     const lifecycle = new AbortController();
     const channel = await monoAgentModule.create({
@@ -439,7 +609,7 @@ describe("mono-agent operator channel module", () => {
         agent: operatorIdentity.agent,
         operator: { endpoint: channel.endpoint, tokenEnvironment: "OPERATOR_TOKEN" },
         process: { pid: process.pid, startedAt: channel.startInfo?.startedAt },
-        capabilities: { attachments: true, cancellation: true, health: true },
+        capabilities: { attachments: true, cancellation: true, health: true, quotes: true },
       },
     });
     const response = await postJson(`${channel.endpoint}/v1/turns`, {
@@ -459,6 +629,74 @@ describe("mono-agent operator channel module", () => {
     await channel.stop?.({ signal: lifecycle.signal, reason: "shutdown" });
   });
 
+  it("passes the reusable channel behavior compliance contract", async () => {
+    const operatorIdentity = identity("compliance-agent", "Compliance Agent");
+    const openConversation = vi.fn<NonNullable<ChannelHost["openConversation"]>>(
+      async (request) => {
+        if (request.initialText === "ambiguous compliance") {
+          throw new Error("secret operator storage failure /private/token");
+        }
+        return {
+          conversationId: "opened-compliance",
+          createdAt: new Date().toISOString(),
+        };
+      },
+    );
+    await assertChannelBehaviorCompliance({
+      async create(signal) {
+        const channel = await monoAgentModule.create({
+          instanceId: "operator-compliance",
+          config: monoAgentModule.schema.parse({ auth: { token: TOKEN } }),
+          provenance: {
+            "/auth/token": {
+              source: "environment",
+              environmentName: "OPERATOR_TOKEN",
+            },
+          },
+          configDirectory: "/config",
+          workspaceDirectory: "/workspace",
+          dataDirectory: "/data",
+          logger: noopLogger(),
+          host: {
+            grantedCapabilities: new Set(["operator.identity.v1"]),
+            getCapability<T>(name: string): T | undefined {
+              return (name === "operator.identity.v1"
+                ? operatorIdentity
+                : undefined) as T | undefined;
+            },
+            async dispatch() { return { status: "completed" }; },
+            openConversation,
+          },
+          signal,
+        });
+        moduleChannels.add(channel);
+        return channel;
+      },
+      delivery: {
+        delivered: {
+          conversationId: "trigger:cron:compliance",
+          text: "compliance",
+          idempotencyKey: "operator-compliance",
+        },
+        conflicting: {
+          conversationId: "trigger:cron:compliance",
+          text: "conflicting compliance",
+          idempotencyKey: "operator-compliance",
+        },
+        unknown: {
+          conversationId: "trigger:cron:compliance",
+          text: "ambiguous compliance",
+          idempotencyKey: "operator-compliance-unknown",
+        },
+      },
+      secrets: [TOKEN, "secret operator"],
+      exercise(instance) {
+        expect(instance.capabilities.proactive).toBe(true);
+      },
+    });
+    expect(openConversation).toHaveBeenCalledTimes(2);
+  });
+
   it("collapses concurrent proactive opens and reports later duplicates", async () => {
     const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
     const operatorIdentity = identity("module-agent", "Module Agent");
@@ -471,12 +709,181 @@ describe("mono-agent operator channel module", () => {
     };
     const channel = await monoAgentModule.create({ instanceId: "operator", config, provenance: {}, configDirectory: "/config", workspaceDirectory: "/workspace", dataDirectory: "/data", logger: noopLogger(), host, signal: new AbortController().signal });
     moduleChannels.add(channel);
-    const message = { conversationId: "", text: "proactive", idempotencyKey: "open-once" };
+    const defaultConversationId = channel.resolveDefaultDeliveryConversationId?.();
+    expect(defaultConversationId).toBe("operator:new-conversation");
+    const message = {
+      conversationId: defaultConversationId!,
+      text: "proactive",
+      idempotencyKey: "open-once",
+    };
     await expect(Promise.all([channel.deliver!(message, new AbortController().signal), channel.deliver!(message, new AbortController().signal)])).resolves.toEqual([
       { status: "delivered", idempotencyKey: "open-once", messageId: "opened-1" },
       { status: "delivered", idempotencyKey: "open-once", messageId: "opened-1" },
     ]);
     await expect(channel.deliver!(message, new AbortController().signal)).resolves.toEqual({ status: "duplicate", idempotencyKey: "open-once", messageId: "opened-1" });
+    await expect(channel.deliver!({
+      ...message,
+      text: "conflicting payload",
+    }, new AbortController().signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "operator_proactive_idempotency_conflict" },
+    });
+    expect(openConversation).toHaveBeenCalledOnce();
+  });
+
+  it("bounds proactive metadata before fingerprinting and allows a valid retry", async () => {
+    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
+    const operatorIdentity = identity("module-agent", "Module Agent");
+    const openConversation =
+      vi.fn<NonNullable<ChannelHost["openConversation"]>>(async () => ({
+        conversationId: "opened-valid",
+        createdAt: new Date().toISOString(),
+      }));
+    const channel = await monoAgentModule.create({
+      instanceId: "operator",
+      config,
+      provenance: {},
+      configDirectory: "/config",
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: {
+        grantedCapabilities: new Set(["operator.identity.v1"]),
+        getCapability<T>(name: string): T | undefined {
+          return (name === "operator.identity.v1"
+            ? operatorIdentity
+            : undefined) as T | undefined;
+        },
+        async dispatch() { return { status: "completed" }; },
+        openConversation,
+      },
+      signal: new AbortController().signal,
+    });
+    moduleChannels.add(channel);
+    await expect(channel.deliver!({
+      conversationId: "",
+      text: "oversized",
+      idempotencyKey: "retry-after-invalid",
+      metadata: { detail: "x".repeat(65_537) },
+    }, new AbortController().signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "operator_proactive_invalid" },
+    });
+    await expect(channel.deliver!({
+      conversationId: "",
+      text: "valid",
+      idempotencyKey: "retry-after-invalid",
+    }, new AbortController().signal)).resolves.toMatchObject({
+      status: "delivered",
+    });
+    expect(openConversation).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed at proactive receipt capacity without evicting authority", async () => {
+    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
+    const operatorIdentity = identity("module-agent", "Module Agent");
+    const openConversation =
+      vi.fn<NonNullable<ChannelHost["openConversation"]>>(async (request) => ({
+        conversationId: `opened-${request.initialText}`,
+        createdAt: new Date().toISOString(),
+      }));
+    const channel = await monoAgentModule.create({
+      instanceId: "operator",
+      config,
+      provenance: {},
+      configDirectory: "/config",
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: {
+        grantedCapabilities: new Set(["operator.identity.v1"]),
+        getCapability<T>(name: string): T | undefined {
+          return (name === "operator.identity.v1"
+            ? operatorIdentity
+            : undefined) as T | undefined;
+        },
+        async dispatch() { return { status: "completed" }; },
+        openConversation,
+      },
+      signal: new AbortController().signal,
+    });
+    moduleChannels.add(channel);
+    const signal = new AbortController().signal;
+    for (let index = 0; index < 1_000; index += 1) {
+      await channel.deliver!({
+        conversationId: "",
+        text: `notice-${String(index)}`,
+        idempotencyKey: `key-${String(index)}`,
+      }, signal);
+    }
+    await expect(channel.deliver!({
+      conversationId: "",
+      text: "one too many",
+      idempotencyKey: "capacity",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "operator_proactive_receipt_capacity" },
+    });
+    await expect(channel.health?.({ signal })).resolves.toMatchObject({
+      status: "degraded",
+      details: { deliveryReceiptCapacityExhausted: true },
+    });
+    await expect(channel.deliver!({
+      conversationId: "",
+      text: "notice-0",
+      idempotencyKey: "key-0",
+    }, signal)).resolves.toMatchObject({ status: "duplicate" });
+    expect(openConversation).toHaveBeenCalledTimes(1_000);
+  });
+
+  it("keeps an ambiguous proactive open unknown without replaying or leaking its cause", async () => {
+    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
+    const operatorIdentity = identity("module-agent", "Module Agent");
+    const openConversation = vi.fn<NonNullable<ChannelHost["openConversation"]>>(
+      async () => {
+        throw new Error("secret storage detail /private/operator-token");
+      },
+    );
+    const host: ChannelHost = {
+      grantedCapabilities: new Set(["operator.identity.v1"]),
+      getCapability<T>(name: string): T | undefined {
+        return (name === "operator.identity.v1"
+          ? operatorIdentity
+          : undefined) as T | undefined;
+      },
+      async dispatch() { return { status: "completed" }; },
+      openConversation,
+    };
+    const channel = await monoAgentModule.create({
+      instanceId: "operator",
+      config,
+      provenance: {},
+      configDirectory: "/config",
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host,
+      signal: new AbortController().signal,
+    });
+    moduleChannels.add(channel);
+    const message = {
+      conversationId: "trigger:cron:one",
+      text: "proactive",
+      idempotencyKey: "ambiguous-open",
+    };
+    const first = await channel.deliver!(message, new AbortController().signal);
+    const second = await channel.deliver!(message, new AbortController().signal);
+    expect(first).toEqual(second);
+    expect(first).toEqual({
+      status: "unknown",
+      idempotencyKey: "ambiguous-open",
+      diagnostic: {
+        code: "operator_proactive_unknown",
+        severity: "error",
+        message: "Operator proactive delivery outcome is unknown.",
+      },
+    });
+    expect(JSON.stringify(first)).not.toContain("secret storage");
     expect(openConversation).toHaveBeenCalledOnce();
   });
 });
@@ -528,6 +935,38 @@ async function authorizedJson(url: string): Promise<unknown> {
   const response = await fetch(url, { headers: { authorization: `Bearer ${TOKEN}` } });
   expect(response.status).toBe(200);
   return response.json() as Promise<unknown>;
+}
+
+async function oversizedBodyStatus(
+  info: NonNullable<OperatorChannel["startInfo"]>,
+): Promise<number> {
+  const endpoint = new URL(info.endpoint);
+  return new Promise<number>((resolve, reject) => {
+    const socket = createConnection({ host: info.host, port: info.port });
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk: string) => {
+      response += chunk;
+      const match = /^HTTP\/1\.1 (\d{3})/u.exec(response);
+      if (match !== null) {
+        resolve(Number(match[1]));
+        socket.destroy();
+      }
+    });
+    socket.once("connect", () => {
+      socket.write([
+        "POST /v1/turns HTTP/1.1",
+        `Host: ${endpoint.host}`,
+        `Authorization: Bearer ${TOKEN}`,
+        "Content-Type: application/json",
+        `Content-Length: ${String(OPERATOR_LIMITS.requestBytes + 1)}`,
+        "Connection: close",
+        "",
+        "{}",
+      ].join("\r\n"));
+    });
+  });
 }
 
 async function readFrames(response: Response): Promise<OperatorFrame[]> {

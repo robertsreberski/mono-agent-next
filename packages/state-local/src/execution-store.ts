@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
-import { parseArtifactRef, type ArtifactRef } from "@mono-agent/module-sdk";
+import {
+  parseArtifactRef,
+  parseRouteIdentity,
+  type ArtifactRef,
+} from "@mono-agent/module-sdk";
 import type {
   StateRecord,
   StateStore,
@@ -18,6 +22,7 @@ const MAX_DATE_MILLISECONDS = 8_640_000_000_000_000;
 export const EXECUTION_STATE_PREFIXES = Object.freeze({
   conversations: "core/conversations/",
   conversationChunks: "core/conversation-chunks/",
+  conversationDeliveryEntries: "core/conversation-delivery-entries/",
   sessions: "core/sessions/",
   admissions: "core/admissions/",
   artifactIntents: "core/artifact-intents/",
@@ -272,11 +277,11 @@ export class ExecutionStore {
 }
 
 export function conversationStateKey(conversationId: string): string {
-  return `${EXECUTION_STATE_PREFIXES.conversations}${identityDigest(conversationId, "conversationId")}`;
+  return `${EXECUTION_STATE_PREFIXES.conversations}${conversationIdentityDigest(conversationId)}`;
 }
 
 export function conversationChunkPrefix(conversationId: string): string {
-  return `${EXECUTION_STATE_PREFIXES.conversationChunks}${identityDigest(conversationId, "conversationId")}/`;
+  return `${EXECUTION_STATE_PREFIXES.conversationChunks}${conversationIdentityDigest(conversationId)}/`;
 }
 
 export function conversationChunkStateKey(
@@ -293,6 +298,10 @@ export function conversationChunkStateKey(
   return `${conversationChunkPrefix(conversationId)}${String(index).padStart(3, "0")}-${digest}`;
 }
 
+export function conversationDeliveryEntryStateKey(entryId: string): string {
+  return `${EXECUTION_STATE_PREFIXES.conversationDeliveryEntries}${identityDigest(entryId, "entryId")}`;
+}
+
 export function admissionStateKey(requestId: string): string {
   return `${EXECUTION_STATE_PREFIXES.admissions}${identityDigest(requestId, "requestId")}`;
 }
@@ -306,14 +315,18 @@ export function sessionStateKey(
   runtimeInstanceId: string,
   model: string,
 ): string {
-  const conversation = identityDigest(conversationId, "conversationId");
-  const runtime = identityDigest(runtimeInstanceId, "runtimeInstanceId");
-  const selectedModel = identityDigest(model, "model");
-  const route = createHash("sha256")
+  const route = parseRouteIdentity({ runtimeInstanceId, model });
+  const conversation = conversationIdentityDigest(conversationId);
+  const runtime = identityDigest(
+    route.runtimeInstanceId,
+    "runtimeInstanceId",
+  );
+  const selectedModel = routeModelIdentityDigest(route.model);
+  const routeDigest = createHash("sha256")
     .update(runtime, "ascii")
     .update(selectedModel, "ascii")
     .digest("hex");
-  return `${EXECUTION_STATE_PREFIXES.sessions}${conversation}/${route}`;
+  return `${EXECUTION_STATE_PREFIXES.sessions}${conversation}/${routeDigest}`;
 }
 
 export function runStateKey(runId: string): string {
@@ -519,9 +532,33 @@ function identityDigest(value: string, label: string): string {
     typeof value !== "string"
     || value.trim().length === 0
     || value.includes("\0")
-    || Buffer.byteLength(value, "utf8") > 4_096
+    || Buffer.byteLength(value, "utf8") > 512
   ) {
     throw new TypeError(`${label} must be a bounded non-empty string`);
+  }
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function conversationIdentityDigest(value: string): string {
+  if (
+    typeof value !== "string"
+    || value.trim().length === 0
+    || value.includes("\0")
+    || Buffer.byteLength(value, "utf8") > 4_096
+  ) {
+    throw new TypeError("conversationId must be a bounded non-empty string");
+  }
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function routeModelIdentityDigest(value: string): string {
+  if (
+    typeof value !== "string"
+    || value.trim().length === 0
+    || value.includes("\0")
+    || Buffer.byteLength(value, "utf8") > 4_096
+  ) {
+    throw new TypeError("model must be a bounded non-empty string");
   }
   return createHash("sha256").update(value, "utf8").digest("hex");
 }

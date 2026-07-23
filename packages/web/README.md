@@ -21,11 +21,19 @@ Catalog responsibility: Runs the standalone authenticated browser product with o
 - Discover owner-private operator registry entries through `@mono-agent/operator`.
 - Authenticate every browser API request and reject cross-origin mutations.
 - Persist conversations and messages through atomic owner-private state commits.
+- Discover agent-owned `proactive:*` conversations, import their replay once,
+  persist them durably, and retain dismissal tombstones so deleted notices do
+  not reappear.
 - Stream turns through the shared operator client and reducer, and cancel the
   exact active conversation only on explicit operator cancellation or product shutdown.
+- Persist and render per-turn numeric usage plus compaction and provider-session
+  eviction events without retaining thoughts, activities, or provider payloads.
+- Route live input, structured AskUser answers, bounded inline uploads, quotes,
+  replay, redacted config, and health through capability-gated shared client APIs.
 - Keep a service-owned turn running and durably settling when its browser stream
   disconnects or reloads.
-- Serve a small dependency-free browser UI from the same process.
+- Serve a small dependency-free browser UI with opt-in proactive notifications
+  from the same process.
 
 ## Install / Usage
 
@@ -88,6 +96,8 @@ web.config.json -> web server -> @mono-agent/operator directory
                                 -> shared reducer/action eligibility
                                 -> atomic owner-private conversation state
 browser UI       <- browser-state NDJSON snapshots <- web server
+browser actions  -> shared action policy/client -> one agent operator endpoint
+proactive replay -> durable import/tombstone -> notification hint -> browser UI
 ```
 
 Web never parses the agent wire or implements a second action reducer. Its
@@ -120,7 +130,19 @@ against reads and writes until close/reopen, preventing a stale in-memory
 snapshot from overwriting the visible commit. Turns left `running` by an
 unclean stop become explicitly `interrupted` on the next exclusive open.
 
-State schema version 1 has no automatic retention or purge. For backup, stop
+State schema version 2 adds optional content-free per-turn telemetry to
+assistant messages. On first exclusive open, a valid version 1 state is copied
+field-for-field into version 2 and atomically committed before serving reads;
+unknown or corrupt versions remain untouched. Usage stores safe non-negative
+integer counters only. Compaction and provider-session eviction flags are
+sticky within the turn so a later usage snapshot cannot erase an earlier
+event.
+
+State has no automatic retention or bulk purge. Deleting an
+ordinary thread atomically removes its local messages. Deleting an imported
+proactive thread removes its messages and keeps only an owner-private tombstone
+so the same agent conversation is not re-imported on the next discovery poll.
+For backup, stop
 the process and copy `state.json` plus `.mono-agent-web-state`; preserve modes.
 For restore, stop the process, restore those exact regular files into an empty
 `0700` data directory, enforce `0600`, and start. Corrupt or unknown-version
@@ -149,24 +171,33 @@ Every symbol exported by each public code entrypoint is listed below.
 **`@mono-agent/web`**
 
 ```text
+AnswerWebAskInput
 CreateWebThreadInput
 LoadWebConfigOptions
+OfferWebLiveInput
 ParseWebConfigOptions
 StartWebServerOptions
 StartWebTurnInput
 WEB_API_VERSION
 WebAgent
+WebAskAnswerResult
 WebBootstrap
 WebConfig
+WebConfigView
+WebHealthView
 WebListenConfig
+WebLiveInputResult
 WebMessage
 WebOperatorGateway
 WebOperatorTurnInput
+WebProactiveConversation
 WebProductError
+WebReplayView
 WebServerHandle
 WebThread
 WebThreadDetail
 WebTurnStatus
+WebTurnTelemetry
 loadWebConfig
 parseWebConfig
 startWebServer
@@ -180,8 +211,21 @@ The browser API is:
 - `GET /api/v1/bootstrap`
 - `POST /api/v1/threads`
 - `GET /api/v1/threads/:id`
+- `DELETE /api/v1/threads/:id`
 - `POST /api/v1/threads/:id/turns` (web-state NDJSON)
 - `POST /api/v1/threads/:id/cancel`
+- `POST /api/v1/threads/:id/live-input`
+- `POST /api/v1/threads/:id/ask`
+- `GET /api/v1/threads/:id/replay`
+- `GET /api/v1/agents/:id/config`
+- `GET /api/v1/agents/:id/health`
+
+Browser uploads use the operator protocol's bounded inline data URL contract.
+Web accepts files up to 512 KiB each and enforces the shared 1 MiB encoded
+request bound across attachments, text, quotes, and overrides.
+Quotes are shown only for messages carrying an authoritative agent transcript
+message id and only when the selected endpoint advertises quote support.
+The replay view exposes the same Quote action for replay-backed message ids.
 
 ## Dependency Boundary
 
@@ -195,8 +239,9 @@ agent-contracts, v0 config, or observability.
 - Agent lifecycle, agent config, runtime/provider behavior, or channel modules.
 - Operator wire decoding, capability negotiation, or action eligibility.
 - OS service installation or supervision.
-- Uploads, proactive browser notifications, and multi-user accounts in this
-  first runnable v1 product slice.
+- Multi-user accounts, PWA/TLS termination, or service management.
+- Arbitrary-size file storage or a second upload transport outside the shared
+  operator protocol.
 - Automatic data deletion, remote reset, release, deployment, or migration.
 
 ## Related Documentation
@@ -216,5 +261,7 @@ pnpm --filter @mono-agent/web test
 
 Focused tests cover strict secret resolution, body bounds, bearer auth,
 cross-origin rejection, real shared-client turn streaming, cancellation,
-restart persistence, exclusive ownership, atomic recovery, corruption
-preservation, modes, and symlink rejection.
+AskUser/live-input routing, uploads/quotes, proactive import and dismissal,
+browser view routes, v1-to-v2 migration, telemetry rendering and restart
+persistence, deletion, exclusive ownership,
+atomic recovery, corruption preservation, modes, and symlink rejection.

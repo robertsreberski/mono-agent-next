@@ -108,7 +108,7 @@ export function reduceOperatorFrame(state: OperatorConversationState, frame: Ope
       return { ...state, capabilities: frame.capabilities };
     case "usage":
       requireTurn(state, frame);
-      return { ...state, usage: frame.usage };
+      return { ...state, usage: mergeUsage(state.usage, frame.usage) };
     case "completed":
       requireTurn(state, frame);
       {
@@ -133,6 +133,28 @@ export function reduceOperatorFrame(state: OperatorConversationState, frame: Ope
       };
       }
   }
+}
+
+function mergeUsage(
+  previous: OperatorUsage | undefined,
+  next: OperatorUsage,
+): OperatorUsage {
+  return {
+    inputTokens: next.inputTokens,
+    outputTokens: next.outputTokens,
+    ...(next.contextWindow !== undefined
+      ? { contextWindow: next.contextWindow }
+      : previous?.contextWindow === undefined
+        ? {}
+        : { contextWindow: previous.contextWindow }),
+    ...(next.contextUsed !== undefined
+      ? { contextUsed: next.contextUsed }
+      : previous?.contextUsed === undefined
+        ? {}
+        : { contextUsed: previous.contextUsed }),
+    compacted: previous?.compacted === true || next.compacted,
+    sessionEvicted: previous?.sessionEvicted === true || next.sessionEvicted,
+  };
 }
 
 export function reduceOperatorFrames(

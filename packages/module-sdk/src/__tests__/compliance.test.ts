@@ -12,6 +12,7 @@ import {
 import * as internalApi from "../internal.js";
 import {
   ModuleComplianceError,
+  assertChannelBehaviorCompliance,
   assertChannelInstanceCompliance,
   assertChannelModuleCompliance,
   assertMemoryInstanceCompliance,
@@ -218,7 +219,104 @@ describe("public compliance assertions", () => {
         verbatim: false,
         cancellation: true,
       },
-    })).toThrow("proactive channel instance deliver must be a function");
+    })).toThrow("channel proactive capability and deliver function must match");
+    expect(() => assertChannelInstanceCompliance({
+      capabilities: {
+        attachments: false, liveInput: false, askUser: false, proactive: false,
+        runtimeControl: false, verbatim: false, cancellation: true,
+      },
+      deliver: async (message: { idempotencyKey: string }) => ({
+        status: "delivered" as const, idempotencyKey: message.idempotencyKey,
+      }),
+    })).toThrow("channel proactive capability and deliver function must match");
+    expect(() => assertChannelInstanceCompliance({
+      capabilities: {
+        attachments: false, liveInput: false, askUser: false, proactive: false,
+        runtimeControl: false, verbatim: false, cancellation: true,
+      },
+      resolveDefaultDeliveryConversationId: "telegram:42",
+    })).toThrow("resolveDefaultDeliveryConversationId must be a function");
+  });
+
+  it("runs reusable lifecycle, delivery, health, and redaction checks", async () => {
+    const calls: string[] = [];
+    const receipts = new Map<string, string>();
+    const capabilities = {
+      attachments: false, liveInput: false, askUser: false, approvals: false,
+      proactive: true, runtimeControl: false, verbatim: false, cancellation: true,
+    } as const;
+    const delivered = { conversationId: "chat", text: "hello", idempotencyKey: "known" };
+    await assertChannelBehaviorCompliance({
+      create: () => ({
+        capabilities,
+        start() { calls.push("start"); },
+        drain() { calls.push("drain"); },
+        stop() { calls.push("stop"); },
+        health: () => ({ status: "healthy", checkedAt: new Date().toISOString() }),
+        diagnostics: () => [{ code: "fixture", severity: "info", message: "safe" }],
+        async deliver(message) {
+          if (message.idempotencyKey === "unknown") {
+            return { status: "unknown", idempotencyKey: message.idempotencyKey };
+          }
+          const prior = receipts.get(message.idempotencyKey);
+          if (prior !== undefined && prior !== message.text) {
+            return { status: "failed", idempotencyKey: message.idempotencyKey };
+          }
+          if (prior !== undefined) return { status: "duplicate", idempotencyKey: message.idempotencyKey };
+          receipts.set(message.idempotencyKey, message.text);
+          return { status: "delivered", idempotencyKey: message.idempotencyKey };
+        },
+      }),
+      exercise: (_instance, signal) => { expect(signal.aborted).toBe(false); calls.push("exercise"); },
+      delivery: {
+        delivered,
+        conflicting: { ...delivered, text: "different" },
+        unknown: { ...delivered, idempotencyKey: "unknown" },
+      },
+      secrets: ["not-present"],
+    });
+    expect(calls).toEqual(["start", "exercise", "drain", "stop", "stop"]);
+
+    await expect(assertChannelBehaviorCompliance({
+      create: () => ({
+        capabilities: { ...capabilities, proactive: false },
+        health: () => ({ status: "healthy", checkedAt: new Date().toISOString(), summary: "secret" }),
+      }),
+      exercise() {},
+      secrets: ["secret"],
+    })).rejects.toThrow("reports contain a configured secret");
+  });
+
+  it("validates model-visible channel send tools", () => {
+    const capabilities = {
+      attachments: false, liveInput: false, askUser: false, proactive: true,
+      runtimeControl: false, verbatim: false, cancellation: true,
+    };
+    const sendTool = {
+      name: "SendMessage", description: "Send one message.",
+      inputSchema: { type: "object", additionalProperties: false },
+      prepare: () => ({ conversationId: "chat", text: "hello" }),
+      historyConversationId: () => "chat",
+    };
+    expect(() => assertChannelInstanceCompliance({
+      capabilities, deliver: async () => ({ status: "delivered", idempotencyKey: "key" }),
+      sendTools: [sendTool],
+    })).not.toThrow();
+    expect(() => assertChannelInstanceCompliance({
+      capabilities: { ...capabilities, proactive: false }, sendTools: [sendTool],
+    })).toThrow("channel sendTools require proactive capability and delivery");
+    expect(() => assertChannelInstanceCompliance({
+      capabilities, deliver: async () => ({ status: "delivered", idempotencyKey: "key" }),
+      sendTools: [sendTool, sendTool],
+    })).toThrow("duplicate SendMessage");
+    let reads = 0;
+    const accessor = { ...sendTool };
+    Object.defineProperty(accessor, "prepare", { get() { reads += 1; return () => ({}); } });
+    expect(() => assertChannelInstanceCompliance({
+      capabilities, deliver: async () => ({ status: "delivered", idempotencyKey: "key" }),
+      sendTools: [accessor],
+    })).toThrow("prepare must be a data property");
+    expect(reads).toBe(0);
   });
 
   it("requires truthful channel, memory, and runtime optional surfaces", () => {

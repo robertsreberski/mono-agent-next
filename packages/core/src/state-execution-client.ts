@@ -24,6 +24,10 @@ type SettlementInput = Signalled<{ readonly runId: string; readonly requestId: s
 type StagingInput = Signalled<{ readonly runId: string; readonly requestId: string; readonly artifacts: readonly { readonly slot: string; readonly data: Uint8Array; readonly mediaType: string; readonly fileName?: string }[] }>;
 type DeliveryInput = Signalled<{ readonly idempotencyKey: string; readonly fingerprint: DurableFingerprint; readonly channelInstanceId: string; readonly runId?: string }>;
 type DeliverySettlement = Signalled<{ readonly idempotencyKey: string; readonly fingerprint: DurableFingerprint; readonly attempt: number; readonly token: string; readonly status: "delivered" | "failed" | "unknown"; readonly messageId?: string; readonly code?: string }>;
+type DeliveryWithHistoryInput = Signalled<{ readonly idempotencyKey: string; readonly fingerprint: DurableFingerprint; readonly attempt: number; readonly token: string; readonly messageId?: string; readonly conversationId: string; readonly entry:
+  | Omit<Extract<AgentTranscriptEntry, { readonly kind: "message" }>, "recordedAt">
+  | Omit<Extract<AgentTranscriptEntry, { readonly kind: "verbatim" }>, "recordedAt">;
+readonly entryFingerprint: DurableFingerprint }>;
 type Admission = { readonly status: "accepted"; readonly summary: AgentRunSummary }
   | { readonly status: "join" | "conflict" | "uncertain"; readonly runId: string }
   | { readonly status: "cached"; readonly summary: AgentRunSummary; readonly responseRef?: ArtifactRef };
@@ -31,11 +35,16 @@ type Delivery = { readonly status: "send"; readonly attempt: number; readonly to
   | { readonly status: "join" } | { readonly status: "conflict" }
   | { readonly status: "duplicate"; readonly messageId?: string }
   | { readonly status: "unknown"; readonly code?: string };
+type DeliveryWithHistory =
+  | { readonly status: "conflict"; readonly conversationId: string; readonly entryId: string }
+  | { readonly status: "appended" | "duplicate"; readonly conversationId: string; readonly entryId: string;
+      readonly revision: number; readonly entryCount: number; readonly messageId?: string };
 const REQUIRED_OPERATIONS = [
   "transcript.append", "conversation.open", "conversation.load", "conversation.list",
   "run.admit", "run.record-attempt", "run.record-interaction", "run.stage-artifacts",
   "run.settle", "run.read-cached-response", "run.read", "run.list",
   "session.load", "session.evict", "delivery.prepare", "delivery.settle",
+  "delivery.settle-with-history",
 ] as const;
 const OUTPUT_MAX_BYTES = 96 * 1024 * 1024;
 const OUTPUT_MAX_ITEMS = 250_000;
@@ -60,7 +69,7 @@ export class StateExecutionClient {
 
   async appendTranscript(current: CanonicalTranscript | undefined, conversationId: string, entries: readonly AgentTranscriptEntry[], signal: AbortSignal): Promise<CanonicalTranscript> { return transcript(await this.call("transcript.append", { current, conversationId, entries }, signal)); }
   async openConversation(input: { readonly title?: string; readonly initialText?: string; readonly metadata?: JsonObject }, signal: AbortSignal): Promise<ConversationView> { return conversation(await this.call("conversation.open", input, signal), false)!; }
-  async loadConversation(id: string, signal: AbortSignal): Promise<ConversationView | undefined> { return conversation(await this.call("conversation.load", { conversationId: id }, signal), true); }
+  async loadConversation(id: string, signal: AbortSignal): Promise<ConversationView | undefined> { return conversation(await this.call("conversation.load", { conversationId: id }, signal), true, id); }
   async listConversations(cursor: string | undefined, signal: AbortSignal): Promise<ConversationPage> { return conversationPage(await this.call("conversation.list", { cursor }, signal)); }
   async admit(input: AdmissionInput): Promise<Admission> {
     const { signal, ...payload } = input;
@@ -103,6 +112,10 @@ export class StateExecutionClient {
     const { signal, ...payload } = input;
     return delivery(await this.call("delivery.settle", payload, signal));
   }
+  async settleDeliveryWithHistory(input: DeliveryWithHistoryInput): Promise<DeliveryWithHistory> {
+    const { signal, ...payload } = input;
+    return deliveryWithHistory(await this.call("delivery.settle-with-history", payload, signal));
+  }
 
   private async call(operation: string, input: unknown, signal: AbortSignal): Promise<unknown> {
     const value = await this.execution.perform({ operation, input, signal });
@@ -139,6 +152,7 @@ function keys(value: Record<string, unknown>, allowed: readonly string[], label:
 function text(value: unknown, label: string, maxBytes = 1_000_000, allowEmpty = false): string {
   if (typeof value !== "string"
     || (!allowEmpty && value.length === 0)
+    || value.includes("\0")
     || Buffer.byteLength(value, "utf8") > maxBytes) malformed(label);
   return value;
 }
@@ -190,7 +204,7 @@ function transcriptEntry(value: unknown): void {
     oneOf(entry.role, ["user", "assistant"], "verbatim role");
     text(entry.text, "verbatim text", 1_000_000, true);
   } else malformed("transcript entry");
-  textFields(entry, ["entryId", "runId", "requestId", "conversationId", "recordedAt"], "transcript entry");
+  textFields(entry, ["entryId", "runId", "requestId", "recordedAt"], "transcript entry"); text(entry.conversationId, "transcript entry conversationId", 4_096);
 }
 function transcriptContent(value: unknown): void {
   for (const partValue of array(value, "transcript entry content", 100_000)) {
@@ -233,17 +247,21 @@ function transcript(value: unknown): CanonicalTranscript {
   const out = object(value, "transcript");
   keys(out, ["schemaVersion", "kind", "conversationId", "revision", "entries"], "transcript");
   if (out.schemaVersion !== 1 || out.kind !== "mono-agent.canonical-transcript") malformed("transcript");
-  text(out.conversationId, "transcript conversationId", 512);
+  text(out.conversationId, "transcript conversationId", 4_096);
   integer(out.revision, "transcript revision", 1);
   for (const entry of array(out.entries, "transcript entries", 100_000)) transcriptEntry(entry);
   return value as CanonicalTranscript;
 }
-function conversation(value: unknown, optional: boolean): ConversationView | undefined {
+function conversation(value: unknown, optional: boolean, expectedId?: string): ConversationView | undefined {
   if (value === undefined && optional) return undefined;
   const out = object(value, "conversation");
   keys(out, ["conversationId", "createdAt", "updatedAt", "transcript", "title", "metadata"], "conversation");
-  textFields(out, ["conversationId", "createdAt", "updatedAt"], "conversation");
-  transcript(out.transcript);
+  textFields(out, ["createdAt", "updatedAt"], "conversation"); text(out.conversationId, "conversation conversationId", 4_096);
+  const history = transcript(out.transcript);
+  if (history.conversationId !== out.conversationId
+    || (expectedId !== undefined && out.conversationId !== expectedId)
+    || history.entries.some((entry) => entry.conversationId !== out.conversationId))
+    malformed("conversation identity");
   if (out.title !== undefined) text(out.title, "conversation title", 1_000_000);
   if (out.metadata !== undefined) jsonObject(out.metadata, "conversation metadata");
   return value as ConversationView;
@@ -254,7 +272,7 @@ function conversationPage(value: unknown): ConversationPage {
   for (const value of array(out.conversations, "conversation page conversations", 1_000)) {
     const item = object(value, "conversation summary");
     keys(item, ["conversationId", "createdAt", "updatedAt", "title", "metadata"], "conversation summary");
-    textFields(item, ["conversationId", "createdAt", "updatedAt"], "conversation");
+    textFields(item, ["createdAt", "updatedAt"], "conversation"); text(item.conversationId, "conversation conversationId", 4_096);
     if (item.title !== undefined) text(item.title, "conversation title", 1_000_000);
     if (item.metadata !== undefined) jsonObject(item.metadata, "conversation metadata");
   }
@@ -264,7 +282,7 @@ function conversationPage(value: unknown): ConversationPage {
 function runSummary(value: unknown): AgentRunSummary {
   const out = object(value, "run summary");
   keys(out, ["runId", "requestId", "conversationId", "status", "startedAt", "updatedAt", "endedAt", "attempts", "transcriptRevision", "failureCode"], "run summary");
-  textFields(out, ["runId", "requestId", "conversationId", "startedAt", "updatedAt"], "run");
+  textFields(out, ["runId", "requestId", "startedAt", "updatedAt"], "run"); text(out.conversationId, "run conversationId", 4_096);
   oneOf(out.status, ["running", "completed", "cancelled", "max-turns", "failed", "uncertain"], "run status");
   for (const key of ["endedAt", "transcriptRevision", "failureCode"]) if (out[key] !== undefined) text(out[key], `run ${key}`, 512);
   for (const value of array(out.attempts, "run attempts", 1_000)) runAttempt(value);
@@ -332,7 +350,7 @@ function session(value: unknown): { readonly value: RuntimeSession; readonly upd
   keys(out, ["value", "updatedAt"], "session");
   const runtime = object(out.value, "runtime session");
   keys(runtime, ["id", "conversationId", "route", "createdAt", "expiresAt", "metadata"], "runtime session");
-  textFields(runtime, ["id", "conversationId"], "runtime session");
+  textFields(runtime, ["id"], "runtime session"); text(runtime.conversationId, "runtime session conversationId", 4_096);
   routeIdentity(runtime.route, "runtime session route");
   if (runtime.createdAt !== undefined) text(runtime.createdAt, "runtime session createdAt", 512);
   if (runtime.expiresAt !== undefined) text(runtime.expiresAt, "runtime session expiresAt", 512);
@@ -355,5 +373,15 @@ function delivery(value: unknown): Delivery {
   } else if (out.status === "join" || out.status === "conflict") keys(out, ["status"], "delivery");
   else malformed("delivery");
   return value as Delivery;
+}
+function deliveryWithHistory(value: unknown): DeliveryWithHistory {
+  const out = object(value, "delivery with history");
+  const status = oneOf(out.status, ["appended", "duplicate", "conflict"], "delivery with history status");
+  keys(out, status === "conflict"
+    ? ["status", "conversationId", "entryId"]
+    : ["status", "conversationId", "entryId", "revision", "entryCount", "messageId"], "delivery with history");
+  text(out.conversationId, "delivery with history conversationId", 4_096); textFields(out, ["entryId"], "delivery with history");
+  if (status !== "conflict") { integer(out.revision, "delivery history revision", 1); integer(out.entryCount, "delivery history entryCount", 1); if (out.messageId !== undefined) text(out.messageId, "delivery history messageId", 512); }
+  return value as DeliveryWithHistory;
 }
 function malformed(label: string): never { throw new TypeError(`state execution returned malformed ${label}`); }

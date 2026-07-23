@@ -469,7 +469,22 @@ describe("agent host lifecycle", () => {
             cancellation: false,
           },
         },
-        expected: /proactive channel instance deliver must be a function/u,
+        expected: /channel proactive capability and deliver function must match/u,
+      },
+      {
+        kind: "channel" as const,
+        instance: {
+          capabilities: {
+            attachments: false, liveInput: false, askUser: false, approvals: false,
+            proactive: false, runtimeControl: false, verbatim: false, cancellation: false,
+          },
+          sendTools: [{
+            name: "Send", description: "Send.", inputSchema: { type: "object" },
+            prepare: () => ({ conversationId: "destination", text: "hello" }),
+            historyConversationId: () => "destination",
+          }],
+        },
+        expected: /channel sendTools require proactive capability and delivery/u,
       },
       {
         kind: "memory" as const,

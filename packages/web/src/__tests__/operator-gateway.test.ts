@@ -16,6 +16,45 @@ import { cleanup, temporaryDirectory } from "./helpers.js";
 afterEach(cleanup);
 
 describe("web operator gateway", () => {
+  it("discovers only replayable proactive conversations through the identity-bound shared client", async () => {
+    const root = await temporaryDirectory();
+    const registry = join(root, "registry");
+    await mkdir(registry, { mode: 0o700 });
+    const now = new Date().toISOString();
+    await writeDescriptor(join(registry, "agent.json"), "http://127.0.0.1:43210", process.pid, now);
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/v1/info")) {
+        return new Response(JSON.stringify({
+          ...operatorInfo(true, now),
+          capabilities: { ...capabilities(true), proactive: true, replay: true },
+        }), { headers: { "content-type": "application/json" } });
+      }
+      if (url.endsWith("/v1/conversations")) {
+        return new Response(JSON.stringify({ conversations: [
+          { id: "proactive:one", title: "Update", updatedAt: now },
+          { id: "web:ordinary", updatedAt: now },
+        ] }), { headers: { "content-type": "application/json" } });
+      }
+      if (url.endsWith("/v1/conversations/proactive%3Aone/replay")) {
+        return new Response(JSON.stringify({
+          conversationId: "proactive:one",
+          messages: [{ id: "m-1", role: "assistant", text: "Done", createdAt: now }],
+        }), { headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected operator request ${url}`);
+    };
+    const gateway = createOperatorGateway({ registryDirectories: [registry], environment: {}, fetch: fetchImpl });
+
+    await expect(gateway.discoverProactiveConversations?.()).resolves.toEqual([{
+      agentId: "personal",
+      conversationId: "proactive:one",
+      title: "Update",
+      updatedAt: now,
+      messages: [{ id: "m-1", role: "assistant", text: "Done", createdAt: now }],
+    }]);
+  });
+
   it("uses authoritative info and the shared override policy before forwarding overrides", async () => {
     const root = await temporaryDirectory();
     const registry = join(root, "registry");
@@ -136,6 +175,87 @@ describe("web operator gateway", () => {
     await expect(running).rejects.toMatchObject({ code: "operator_cancelled" });
     expect(requestedUrls).toContain("http://127.0.0.1:43210/v1/conversations/web%3Aswap/cancel");
     expect(requestedUrls.some((url) => url.includes(":43211"))).toBe(false);
+  });
+
+  it("gates live input and AskUser answers against the shared active state", async () => {
+    const root = await temporaryDirectory();
+    const registry = join(root, "registry");
+    await mkdir(registry, { mode: 0o700 });
+    const startedAt = new Date().toISOString();
+    await writeDescriptor(join(registry, "agent.json"), "http://127.0.0.1:43210", process.pid, startedAt);
+    const encoder = new TextEncoder();
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    let askReady!: () => void;
+    const ready = new Promise<void>((resolve) => { askReady = resolve; });
+    const bodies: Record<string, unknown> = {};
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/v1/info")) {
+        return new Response(JSON.stringify({
+          ...operatorInfo(true, startedAt),
+          capabilities: { ...capabilities(true), liveInput: true, askUser: true },
+        }), { headers: { "content-type": "application/json" } });
+      }
+      if (url.endsWith("/v1/turns")) {
+        return new Response(new ReadableStream({
+          start(controller) {
+            stream = controller;
+            controller.enqueue(encoder.encode([
+              { type: "accepted", turnId: "interactive-turn", conversationId: "web:interactive", startedAt },
+              { type: "capabilities", turnId: "interactive-turn", capabilities: { ...capabilities(true), liveInput: true, askUser: true } },
+              {
+                type: "ask_user",
+                turnId: "interactive-turn",
+                ask: {
+                  interactionId: "ask-1",
+                  requestedAt: startedAt,
+                  questions: [{ id: "continue", prompt: "Continue?", allowFreeText: false, multiple: false }],
+                },
+              },
+            ].map((frame) => JSON.stringify(frame)).join("\n") + "\n"));
+          },
+        }), { headers: { "content-type": "application/x-ndjson" } });
+      }
+      if (url.endsWith("/live-input")) {
+        bodies.live = JSON.parse(String(init?.body)) as unknown;
+        return new Response('{"status":"applied"}', { headers: { "content-type": "application/json" } });
+      }
+      if (url.endsWith("/ask")) {
+        bodies.ask = JSON.parse(String(init?.body)) as unknown;
+        return new Response('{"status":"accepted"}', { headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected operator request ${url}`);
+    };
+    const gateway = createOperatorGateway({ registryDirectories: [registry], environment: {}, fetch: fetchImpl });
+    const running = gateway.runTurn({
+      agentId: "personal",
+      conversationId: "web:interactive",
+      text: "hello",
+      signal: new AbortController().signal,
+      async onText() {},
+      async onState(state) {
+        if (state.pendingAsk !== undefined) askReady();
+      },
+    });
+    await ready;
+
+    await expect(gateway.offerLiveInput?.("personal", "web:interactive", "more")).resolves.toEqual({ status: "applied" });
+    await expect(gateway.answerAsk?.("personal", "web:interactive", {
+      interactionId: "ask-1",
+      answers: { continue: ["yes"] },
+    })).resolves.toEqual({ status: "accepted" });
+    expect(bodies.live).toMatchObject({ text: "more" });
+    expect(bodies.ask).toEqual({ interactionId: "ask-1", answers: { continue: ["yes"] } });
+
+    stream.enqueue(encoder.encode(`${JSON.stringify({
+      type: "completed",
+      turnId: "interactive-turn",
+      finalMessage: { role: "assistant", text: "done" },
+      finishedAt: new Date().toISOString(),
+      stopReason: "completed",
+    })}\n`));
+    stream.close();
+    await expect(running).resolves.toBeUndefined();
   });
 });
 

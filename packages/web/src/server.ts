@@ -4,16 +4,28 @@ import { isIP, type AddressInfo, type Socket } from "node:net";
 import { hostname as systemHostname } from "node:os";
 import { resolve } from "node:path";
 
+import {
+  OPERATOR_LIMITS,
+  parseAskAnswerRequest,
+  parseTurnRequest,
+} from "@mono-agent/operator";
+
 import type { WebConfig } from "./config.js";
 import { loadWebConfig } from "./config.js";
-import type { CreateWebThreadInput, StartWebTurnInput } from "./contracts.js";
+import type {
+  AnswerWebAskInput,
+  CreateWebThreadInput,
+  OfferWebLiveInput,
+  StartWebTurnInput,
+} from "./contracts.js";
 import { WebProductError } from "./errors.js";
 import { createOperatorGateway } from "./operator-gateway.js";
 import { WebService, type WebOperatorGateway } from "./service.js";
 import { DurableWebStore } from "./store.js";
 import { WEB_APP_JS, WEB_INDEX_HTML, WEB_STYLES } from "./ui.js";
 
-const MAX_BODY_BYTES = 256 * 1024;
+const MAX_BODY_BYTES = OPERATOR_LIMITS.requestBytes;
+const MAX_INLINE_ATTACHMENT_BYTES = 512 * 1_024;
 
 export interface StartWebServerOptions {
   readonly config?: WebConfig;
@@ -147,6 +159,12 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
     if (request.method === "GET" && detailMatch !== null) {
       return sendJson(response, 200, web.thread(decodePath(detailMatch[1]!)));
     }
+    if (request.method === "DELETE" && detailMatch !== null) {
+      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      await readJsonBody(request);
+      await web.deleteThread(decodePath(detailMatch[1]!));
+      return sendJson(response, 200, { deleted: true });
+    }
     const turnMatch = /^\/api\/v1\/threads\/([^/]+)\/turns$/u.exec(url.pathname);
     if (request.method === "POST" && turnMatch !== null) {
       requireMutationSafety(request, config.listen.host, listeningPort(server));
@@ -182,6 +200,31 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
       requireMutationSafety(request, config.listen.host, listeningPort(server));
       await readJsonBody(request);
       return sendJson(response, 200, await web.cancel(decodePath(cancelMatch[1]!)));
+    }
+    const askMatch = /^\/api\/v1\/threads\/([^/]+)\/ask$/u.exec(url.pathname);
+    if (request.method === "POST" && askMatch !== null) {
+      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      const input = parseAnswerAsk(await readJsonBody(request));
+      return sendJson(response, 200, await web.answerAsk(decodePath(askMatch[1]!), input));
+    }
+    const liveInputMatch = /^\/api\/v1\/threads\/([^/]+)\/live-input$/u.exec(url.pathname);
+    if (request.method === "POST" && liveInputMatch !== null) {
+      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      const input = parseOfferLiveInput(await readJsonBody(request));
+      return sendJson(response, 200, await web.offerLiveInput(decodePath(liveInputMatch[1]!), input.text));
+    }
+    const replayMatch = /^\/api\/v1\/threads\/([^/]+)\/replay$/u.exec(url.pathname);
+    if (request.method === "GET" && replayMatch !== null) {
+      return sendJson(response, 200, await web.replay(decodePath(replayMatch[1]!)));
+    }
+    const agentViewMatch = /^\/api\/v1\/agents\/([^/]+)\/(config|health)$/u.exec(url.pathname);
+    if (request.method === "GET" && agentViewMatch !== null) {
+      const agentId = decodePath(agentViewMatch[1]!);
+      return sendJson(
+        response,
+        200,
+        agentViewMatch[2] === "config" ? await web.config(agentId) : await web.health(agentId),
+      );
     }
     throw new WebProductError("not_found", "Not found.", 404);
   }
@@ -291,14 +334,16 @@ function rejectAuthority(): never {
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
   const declared = request.headers["content-length"];
   if (typeof declared === "string" && /^\d+$/u.test(declared) && Number(declared) > MAX_BODY_BYTES) {
-    throw new WebProductError("body_too_large", "Request body exceeds 256 KiB.", 413);
+    throw new WebProductError("body_too_large", `Request body exceeds ${String(MAX_BODY_BYTES)} bytes.`, 413);
   }
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of request) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
     total += bytes.length;
-    if (total > MAX_BODY_BYTES) throw new WebProductError("body_too_large", "Request body exceeds 256 KiB.", 413);
+    if (total > MAX_BODY_BYTES) {
+      throw new WebProductError("body_too_large", `Request body exceeds ${String(MAX_BODY_BYTES)} bytes.`, 413);
+    }
     chunks.push(bytes);
   }
   try {
@@ -316,12 +361,76 @@ function parseCreateThread(raw: unknown): CreateWebThreadInput {
 }
 
 function parseStartTurn(raw: unknown): StartWebTurnInput {
-  const value = strictObject(raw, ["text", "model", "effort"]);
-  return {
-    text: typeof value.text === "string" ? value.text : "",
-    ...(value.model === undefined ? {} : { model: value.model as string }),
-    ...(value.effort === undefined ? {} : { effort: value.effort as string }),
-  };
+  const value = strictObject(raw, ["text", "attachments", "quote", "model", "effort"]);
+  try {
+    const parsed = parseTurnRequest({
+      conversationId: "web-browser-request",
+      input: {
+        ...(value.text === undefined ? {} : { text: value.text }),
+        ...(value.attachments === undefined ? {} : { attachments: value.attachments }),
+        ...(value.quote === undefined ? {} : { quote: value.quote }),
+      },
+      ...(value.model === undefined ? {} : { model: value.model }),
+      ...(value.effort === undefined ? {} : { effort: value.effort }),
+    });
+    parsed.input.attachments?.forEach(validateWebAttachment);
+    return {
+      text: parsed.input.text ?? "",
+      ...(parsed.input.attachments === undefined ? {} : { attachments: parsed.input.attachments }),
+      ...(parsed.input.quote === undefined ? {} : { quote: parsed.input.quote }),
+      ...(parsed.model === undefined ? {} : { model: parsed.model }),
+      ...(parsed.effort === undefined ? {} : { effort: parsed.effort }),
+    };
+  } catch (error) {
+    if (error instanceof WebProductError) throw error;
+    throw new WebProductError("invalid_request", "Turn input does not satisfy the operator contract.");
+  }
+}
+
+function validateWebAttachment(attachment: NonNullable<StartWebTurnInput["attachments"]>[number]): void {
+  if (
+    attachment.name === "."
+    || attachment.name === ".."
+    || /[\\/\u0000-\u001f\u007f]/u.test(attachment.name)
+  ) {
+    throw new WebProductError("invalid_request", "Attachment filename is not safe.");
+  }
+  const match = attachment.url === undefined
+    ? null
+    : /^data:([^;,]+);base64,([A-Za-z0-9+/]+={0,2})$/u.exec(attachment.url);
+  if (match === null || match[1] !== attachment.mediaType) {
+    throw new WebProductError("invalid_request", "Web attachments require a matching inline base64 data URL.");
+  }
+  const size = Buffer.from(match[2]!, "base64").byteLength;
+  if (size > MAX_INLINE_ATTACHMENT_BYTES) {
+    throw new WebProductError("attachment_too_large", "Web attachments must not exceed 512 KiB.", 413);
+  }
+  if (attachment.sizeBytes !== undefined && attachment.sizeBytes !== size) {
+    throw new WebProductError("invalid_request", "Attachment size does not match its inline data.");
+  }
+}
+
+function parseAnswerAsk(raw: unknown): AnswerWebAskInput {
+  try {
+    return parseAskAnswerRequest(raw);
+  } catch {
+    throw new WebProductError("invalid_request", "AskUser answer does not satisfy the operator contract.");
+  }
+}
+
+function parseOfferLiveInput(raw: unknown): OfferWebLiveInput {
+  const value = strictObject(raw, ["text"]);
+  if (
+    typeof value.text !== "string"
+    || value.text.trim().length === 0
+    || value.text.length > OPERATOR_LIMITS.liveInputCharacters
+  ) {
+    throw new WebProductError(
+      "invalid_request",
+      `Live input must contain 1 through ${String(OPERATOR_LIMITS.liveInputCharacters)} characters.`,
+    );
+  }
+  return { text: value.text };
 }
 
 function strictObject(raw: unknown, fields: readonly string[]): Record<string, unknown> {

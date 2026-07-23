@@ -199,11 +199,10 @@ export interface TriggerEvent {
   readonly deliveryChannel?: string;
   readonly metadata?: JsonObject;
 }
-export interface TriggerReceipt {
-  readonly status: "accepted" | "rejected";
-  readonly runId?: string;
-  readonly reason?: string;
-}
+export type TriggerReceipt =
+  | { readonly status: "accepted"; readonly runId?: string }
+  | { readonly status: "rejected"; readonly code: "duplicate" | "execution_failed"; readonly reason?: string }
+  | { readonly status: "unknown"; readonly code: "delivery_unknown" | "execution_unknown"; readonly reason?: string };
 export interface TriggerHost extends ModuleHost {
   emit(event: TriggerEvent, signal: AbortSignal): Promise<TriggerReceipt>;
 }

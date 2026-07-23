@@ -450,15 +450,15 @@ function validateState(value: unknown): asserts value is SlackInboxState {
 function validateEvent(value: unknown): asserts value is SlackSocketEvent {
   if (!record(value) || !validEnvelopeId(value.envelopeId)
     || !boundedString(value.teamId, 512)
-    || !boundedString(value.channelId, 512)
-    || !boundedString(value.messageId, 512)
-    || !boundedString(value.threadId, 512)
     || !boundedString(value.userId, 512)
     || !validTimestamp(value.receivedAt)) {
     throw new SlackInboxError("corrupt", "Slack durable inbox contains an invalid event.");
   }
   if (value.kind === "message") {
     if (!exactKeys(value, ["kind", "envelopeId", "teamId", "channelId", "messageId", "threadId", "userId", "text", "files", "receivedAt"])
+      || !boundedString(value.channelId, 512)
+      || !boundedString(value.messageId, 512)
+      || !boundedString(value.threadId, 512)
       || typeof value.text !== "string"
       || value.text.length > 2 * 1024 * 1024
       || !Array.isArray(value.files)
@@ -470,9 +470,39 @@ function validateEvent(value: unknown): asserts value is SlackSocketEvent {
   }
   if (value.kind === "action") {
     if (!exactKeys(value, ["kind", "envelopeId", "teamId", "channelId", "messageId", "threadId", "userId", "actionId", "value", "receivedAt"])
+      || !boundedString(value.channelId, 512)
+      || !boundedString(value.messageId, 512)
+      || !boundedString(value.threadId, 512)
       || !boundedString(value.actionId, 512)
       || !boundedString(value.value, 4_096)) {
       throw new SlackInboxError("corrupt", "Slack durable inbox contains an invalid action event.");
+    }
+    return;
+  }
+  if (value.kind === "shortcut") {
+    if (!exactKeys(
+      value,
+      ["kind", "envelopeId", "teamId", "userId", "callbackId", "receivedAt"],
+      ["sourceChannelId", "sourceMessageId", "sourceThreadId"],
+    )
+      || !boundedString(value.callbackId, 512)
+      || (value.sourceChannelId !== undefined && !boundedString(value.sourceChannelId, 512))
+      || (value.sourceMessageId !== undefined && !boundedString(value.sourceMessageId, 512))
+      || (value.sourceThreadId !== undefined && !boundedString(value.sourceThreadId, 512))) {
+      throw new SlackInboxError("corrupt", "Slack durable inbox contains an invalid shortcut event.");
+    }
+    return;
+  }
+  if (value.kind === "home-opened") {
+    if (!exactKeys(value, ["kind", "envelopeId", "teamId", "userId", "receivedAt"])) {
+      throw new SlackInboxError("corrupt", "Slack durable inbox contains an invalid App Home event.");
+    }
+    return;
+  }
+  if (value.kind === "home-action") {
+    if (!exactKeys(value, ["kind", "envelopeId", "teamId", "userId", "actionId", "receivedAt"])
+      || !boundedString(value.actionId, 512)) {
+      throw new SlackInboxError("corrupt", "Slack durable inbox contains an invalid App Home action.");
     }
     return;
   }
@@ -515,11 +545,13 @@ function freezeState(state: SlackInboxState): SlackInboxState {
 }
 
 function cloneEvent(event: SlackSocketEvent): SlackSocketEvent {
-  if (event.kind === "action") return Object.freeze({ ...event });
-  return Object.freeze({
-    ...event,
-    files: Object.freeze(event.files.map((file) => Object.freeze({ ...file }))),
-  });
+  if (event.kind === "message") {
+    return Object.freeze({
+      ...event,
+      files: Object.freeze(event.files.map((file) => Object.freeze({ ...file }))),
+    });
+  }
+  return Object.freeze({ ...event });
 }
 
 function blockedReason(state: SlackInboxState): string | undefined {
