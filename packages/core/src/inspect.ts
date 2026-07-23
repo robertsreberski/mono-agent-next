@@ -1,5 +1,4 @@
-import { ensureLoadedAgentConfig, environmentFor } from "./config.js";
-import { loadProjectMcpConfig } from "./mcp.js";
+import { ensureLoadedAgentConfig } from "./config.js";
 import type { AgentInspection, AgentLoadOptions, LoadedAgentConfig } from "./types.js";
 
 export async function inspectAgent(
@@ -7,7 +6,6 @@ export async function inspectAgent(
   options: AgentLoadOptions = {},
 ): Promise<AgentInspection> {
   const loaded = await ensureLoadedAgentConfig(config, options);
-  const mcp = await loadProjectMcpConfig(loaded.paths.mcpConfig, environmentFor(loaded));
   return {
     agent: loaded.raw.agent,
     configPath: loaded.configPath,
@@ -22,6 +20,6 @@ export async function inspectAgent(
       kind: module.definition.manifest.kind,
     })),
     routing: loaded.raw.routing,
-    mcpServers: Object.keys(mcp.mcpServers).sort(),
+    mcpServers: Object.keys(loaded.mcp.mcpServers).sort(),
   };
 }

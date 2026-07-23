@@ -86,6 +86,7 @@ describe("complete agent plane", () => {
                 attachments: true,
                 liveInput: true,
                 askUser: true,
+                approvals: false,
                 proactive: true,
                 runtimeControl: true,
                 verbatim: false,
@@ -284,11 +285,19 @@ describe("complete agent plane", () => {
     }));
 
     const first = await createAgentHost(project.configPath);
-    await expect(first.submit({ conversationId: "durable", text: "first" })).resolves.toMatchObject({ text: "answer-1" });
+    await expect(first.submit({
+      requestId: "durable-first",
+      conversationId: "durable",
+      text: "first",
+    })).resolves.toMatchObject({ text: "answer-1" });
     await first.stop();
 
     const second = await createAgentHost(project.configPath);
-    await expect(second.submit({ conversationId: "durable", text: "second" })).resolves.toMatchObject({ text: "answer-2" });
+    await expect(second.submit({
+      requestId: "durable-second",
+      conversationId: "durable",
+      text: "second",
+    })).resolves.toMatchObject({ text: "answer-2" });
     const replay = await second.replay("durable");
     expect(replay.messages).toHaveLength(4);
     await second.stop();
@@ -326,6 +335,7 @@ describe("complete agent plane", () => {
               attachments: false,
               liveInput: false,
               askUser: false,
+              approvals: false,
               proactive: true,
               runtimeControl: false,
               verbatim: false,
@@ -462,6 +472,7 @@ describe("complete agent plane", () => {
               attachments: false,
               liveInput: false,
               askUser: false,
+              approvals: false,
               proactive: true,
               runtimeControl: false,
               verbatim: false,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import type { JsonObject } from "@mono-agent/module-sdk";
@@ -6,13 +7,19 @@ import type { ResolvedStateLocalDiscoveryConfig } from "./config.js";
 import { StateLocalError, throwIfAborted } from "./errors.js";
 import {
   ensureSecureDirectory,
-  inspectSecureFile,
-  readSecureFile,
-  replaceSecureFileAtomic,
+  inspectSecureFileDetails,
+  openOrCreateSingleLinkPinnedSecureFile,
   type AtomicReplaceHooks,
   type FileIdentity,
+  type PinnedSecureFile,
+  type ProcessLease,
   verifySecureDirectoryIdentity,
 } from "./secure-fs.js";
+
+const PRESENCE_FILE_BYTES = 64 * 1024;
+const PRESENCE_INDEX_BYTES = PRESENCE_FILE_BYTES + 4 * 1024;
+const PRESENCE_INDEX_PREFIX = "presence:";
+const PUBLICATION_METADATA_KEY = "_stateLocalPublication";
 
 export type StatePresenceStatus = "starting" | "ready" | "degraded" | "stopping" | "stopped";
 
@@ -40,6 +47,7 @@ export interface PresencePublisherOptions {
   readonly stateRoot: string;
   readonly startedAt: string;
   readonly clock: () => Date;
+  readonly index: ProcessLease;
   readonly hooks?: AtomicReplaceHooks;
 }
 
@@ -48,6 +56,8 @@ export class PresencePublisher {
   private readonly options: PresencePublisherOptions;
   private registryDirectory: string;
   private directoryIdentity: FileIdentity | undefined;
+  private pinned: PinnedSecureFile | undefined;
+  private publication: PresencePublication | undefined;
 
   constructor(options: PresencePublisherOptions) {
     this.options = options;
@@ -60,7 +70,59 @@ export class PresencePublisher {
     this.directoryIdentity = directory.identity;
     this.registryDirectory = directory.path;
     this.path = join(this.registryDirectory, `${this.options.config.sourceId}.json`);
-    await validateExistingDescriptor(this.path, this.options.config.sourceId);
+    const indexed = readPublication(
+      this.options.index.readIndex(
+        `${PRESENCE_INDEX_PREFIX}${this.options.config.sourceId}`,
+        PRESENCE_INDEX_BYTES,
+      ),
+      this.options.config.sourceId,
+    );
+    const targetBefore = await inspectSecureFileDetails(this.path);
+    if (indexed === undefined && targetBefore !== undefined) {
+      throw new StateLocalError(
+        "STATE_PATH_INSECURE",
+        `Presence target ${this.path} exists without its transactional ownership record.`,
+      );
+    }
+    if (indexed !== undefined && targetBefore === undefined) {
+      throw new StateLocalError(
+        "STATE_PATH_CHANGED",
+        `Presence target ${this.path} disappeared after its transactional publication.`,
+      );
+    }
+    const initial = indexed?.descriptor ?? this.descriptor({ status: "starting" }, 1);
+    const pinned = await openOrCreateSingleLinkPinnedSecureFile(
+      this.path,
+      encodeDescriptor(initial),
+    );
+    if (
+      indexed !== undefined &&
+      (
+        indexed.device !== pinned.identity.device ||
+        indexed.inode !== pinned.identity.inode
+      )
+    ) {
+      await pinned.close();
+      throw new StateLocalError(
+        "STATE_PATH_CHANGED",
+        `Presence target ${this.path} no longer has its published identity.`,
+      );
+    }
+    this.pinned = pinned;
+    if (indexed === undefined) {
+      const publication = publicationFor(initial, pinned.identity);
+      this.options.index.writeIndex(
+        `${PRESENCE_INDEX_PREFIX}${this.options.config.sourceId}`,
+        encodePublication(publication),
+      );
+      await this.options.index.verify();
+      this.publication = publication;
+    } else {
+      this.publication = indexed;
+      // The descriptor index record is authoritative. Replaying it through the pinned
+      // descriptor repairs a torn cache write without selecting partial bytes.
+      await pinned.replace(encodeDescriptor(indexed.descriptor));
+    }
   }
 
   async publish(update: StatePresenceUpdate, signal: AbortSignal): Promise<StatePresenceDescriptor> {
@@ -70,11 +132,52 @@ export class PresencePublisher {
       throw new StateLocalError("STATE_CLOSED", "Presence publication has not been prepared.");
     }
     await verifySecureDirectoryIdentity(this.registryDirectory, identity);
+    const pinned = this.pinned;
+    const publication = this.publication;
+    if (pinned === undefined || publication === undefined) {
+      throw new StateLocalError("STATE_CLOSED", "Presence publication has not been prepared.");
+    }
     validateUpdate(update);
-    await validateExistingDescriptor(this.path, this.options.config.sourceId);
+    const descriptor = this.descriptor(update, publication.generation + 1);
+    const next = publicationFor(descriptor, pinned.identity);
+    await pinned.replace(
+      encodeDescriptor(descriptor),
+      this.options.hooks,
+    );
+    await this.options.index.verify();
+    this.options.index.writeIndex(
+      `${PRESENCE_INDEX_PREFIX}${this.options.config.sourceId}`,
+      encodePublication(next),
+    );
+    await this.options.index.verify();
+    await this.options.hooks?.afterCommit?.(this.path);
+    await pinned.verify();
+    await verifySecureDirectoryIdentity(this.registryDirectory, identity);
+    await this.options.index.verify();
+    this.publication = next;
+    return descriptor;
+  }
+
+  async close(): Promise<void> {
+    const pinned = this.pinned;
+    this.pinned = undefined;
+    if (pinned !== undefined) await pinned.close();
+  }
+
+  private descriptor(
+    update: StatePresenceUpdate,
+    generation: number,
+  ): StatePresenceDescriptor {
     const now = this.options.clock().toISOString();
-    const descriptor: StatePresenceDescriptor = {
-      schema: "mono-agent.state-presence.v1",
+    const baseDetails = update.details === undefined ? {} : { ...update.details };
+    if (Object.hasOwn(baseDetails, PUBLICATION_METADATA_KEY)) {
+      throw new StateLocalError(
+        "STATE_INVALID_CONFIG",
+        `Presence details key ${PUBLICATION_METADATA_KEY} is reserved.`,
+      );
+    }
+    const checksumInput = {
+      schema: "mono-agent.state-presence.v1" as const,
       sourceId: this.options.config.sourceId,
       sourceLabel: this.options.config.sourceLabel,
       instanceId: this.options.instanceId,
@@ -83,33 +186,88 @@ export class PresencePublisher {
       status: update.status,
       startedAt: this.options.startedAt,
       heartbeatAt: now,
-      ...(update.details === undefined ? {} : { details: update.details }),
+      ...(update.details === undefined ? {} : { details: baseDetails }),
     };
-    const encoded = Buffer.from(`${JSON.stringify(descriptor)}\n`, "utf8");
-    if (encoded.byteLength > 64 * 1024) {
-      throw new StateLocalError("STATE_LIMIT_EXCEEDED", "Presence descriptor exceeds 64 KiB.");
-    }
-    await replaceSecureFileAtomic(
-      this.path,
-      encoded,
-      this.options.hooks,
-    );
-    return descriptor;
+    const checksum = sha256(Buffer.from(JSON.stringify({ generation, descriptor: checksumInput }), "utf8"));
+    return {
+      ...checksumInput,
+      details: {
+        ...baseDetails,
+        [PUBLICATION_METADATA_KEY]: { generation, checksum },
+      },
+    };
   }
 }
 
-async function validateExistingDescriptor(path: string, sourceId: string): Promise<void> {
-  const identity = await inspectSecureFile(path);
-  if (identity === undefined) return;
+interface PresencePublication {
+  readonly generation: number;
+  readonly checksum: string;
+  readonly device: number;
+  readonly inode: number;
+  readonly descriptor: StatePresenceDescriptor;
+}
+
+function publicationFor(
+  descriptor: StatePresenceDescriptor,
+  identity: FileIdentity,
+): PresencePublication {
+  const metadata = publicationMetadata(descriptor);
+  return {
+    generation: metadata.generation,
+    checksum: metadata.checksum,
+    device: identity.device,
+    inode: identity.inode,
+    descriptor,
+  };
+}
+
+function publicationMetadata(
+  descriptor: StatePresenceDescriptor,
+): { readonly generation: number; readonly checksum: string } {
+  const value = descriptor.details?.[PUBLICATION_METADATA_KEY];
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value) ||
+    !Number.isSafeInteger((value as { generation?: unknown }).generation) ||
+    ((value as { generation: number }).generation < 1) ||
+    typeof (value as { checksum?: unknown }).checksum !== "string" ||
+    !/^[a-f0-9]{64}$/u.test((value as { checksum: string }).checksum)
+  ) {
+    throw new StateLocalError("STATE_CORRUPT", "Presence publication metadata is invalid.");
+  }
+  return {
+    generation: (value as { generation: number }).generation,
+    checksum: (value as { checksum: string }).checksum,
+  };
+}
+
+function encodeDescriptor(descriptor: StatePresenceDescriptor): Buffer {
+  const json = Buffer.from(JSON.stringify(descriptor), "utf8");
+  if (json.byteLength > PRESENCE_FILE_BYTES) {
+    throw new StateLocalError("STATE_LIMIT_EXCEEDED", "Presence descriptor exceeds 64 KiB.");
+  }
+  const encoded = Buffer.alloc(PRESENCE_FILE_BYTES, 0x20);
+  json.copy(encoded);
+  return encoded;
+}
+
+function encodePublication(publication: PresencePublication): Buffer {
+  return Buffer.from(`${JSON.stringify(publication)}\n`, "utf8");
+}
+
+function readPublication(
+  bytes: Buffer | undefined,
+  sourceId: string,
+): PresencePublication | undefined {
+  if (bytes === undefined) return undefined;
   let value: unknown;
   try {
-    const loaded = await readSecureFile(path, 64 * 1024);
-    value = JSON.parse(loaded.bytes.toString("utf8")) as unknown;
+    value = JSON.parse(bytes.toString("utf8")) as unknown;
   } catch (error) {
-    if (error instanceof StateLocalError) throw error;
     throw new StateLocalError(
       "STATE_CORRUPT",
-      `Presence target ${path} is not a recognized descriptor; refusing to overwrite it.`,
+      "Presence transactional record is invalid.",
       error,
     );
   }
@@ -117,14 +275,49 @@ async function validateExistingDescriptor(path: string, sourceId: string): Promi
     typeof value !== "object" ||
     value === null ||
     Array.isArray(value) ||
-    (value as { schema?: unknown }).schema !== "mono-agent.state-presence.v1" ||
-    (value as { sourceId?: unknown }).sourceId !== sourceId
+    Object.keys(value).sort().join(",") !== "checksum,descriptor,device,generation,inode"
   ) {
-    throw new StateLocalError(
-      "STATE_CORRUPT",
-      `Presence target ${path} is not owned by this source; refusing to overwrite it.`,
-    );
+    throw new StateLocalError("STATE_CORRUPT", "Presence transactional record is invalid.");
   }
+  const record = value as Partial<PresencePublication>;
+  if (
+    !Number.isSafeInteger(record.generation) ||
+    (record.generation ?? 0) < 1 ||
+    typeof record.checksum !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(record.checksum) ||
+    !Number.isSafeInteger(record.device) ||
+    !Number.isSafeInteger(record.inode) ||
+    typeof record.descriptor !== "object" ||
+    record.descriptor === null ||
+    record.descriptor.sourceId !== sourceId
+  ) {
+    throw new StateLocalError("STATE_CORRUPT", "Presence transactional record is invalid.");
+  }
+  const publication = record as PresencePublication;
+  const metadata = publicationMetadata(publication.descriptor);
+  if (
+    metadata.generation !== publication.generation ||
+    metadata.checksum !== publication.checksum ||
+    checksumDescriptor(publication.descriptor, publication.generation) !== publication.checksum
+  ) {
+    throw new StateLocalError("STATE_CORRUPT", "Presence transactional checksum is invalid.");
+  }
+  return publication;
+}
+
+function checksumDescriptor(descriptor: StatePresenceDescriptor, generation: number): string {
+  const details = { ...(descriptor.details ?? {}) };
+  delete details[PUBLICATION_METADATA_KEY];
+  const base = {
+    ...descriptor,
+    ...(Object.keys(details).length === 0 ? {} : { details }),
+  };
+  if (Object.keys(details).length === 0) delete (base as { details?: JsonObject }).details;
+  return sha256(Buffer.from(JSON.stringify({ generation, descriptor: base }), "utf8"));
+}
+
+function sha256(value: Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function validateUpdate(update: StatePresenceUpdate): void {

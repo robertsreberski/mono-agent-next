@@ -7,6 +7,7 @@
  */
 
 import type {
+  ArtifactRef,
   Awaitable,
   JsonObject,
   JsonValue,
@@ -117,6 +118,35 @@ export interface StateHostPresenceRequest {
   readonly signal: AbortSignal;
 }
 
+export interface StatePutArtifactRequest {
+  readonly data: Uint8Array;
+  readonly mediaType: string;
+  readonly fileName?: string;
+  readonly signal: AbortSignal;
+}
+
+export interface StateReadArtifactRequest {
+  readonly ref: ArtifactRef;
+  readonly maxBytes: number;
+  readonly signal: AbortSignal;
+}
+
+export interface StateDeleteArtifactRequest {
+  readonly ref: ArtifactRef;
+  readonly signal: AbortSignal;
+}
+
+export interface StateListArtifactsRequest {
+  readonly cursor?: string;
+  readonly limit: number;
+  readonly signal: AbortSignal;
+}
+
+export interface StateListArtifactsResult {
+  readonly artifacts: readonly ArtifactRef[];
+  readonly cursor?: string;
+}
+
 export interface StateStore extends ModuleInstance {
   read(request: StateReadRequest): Promise<StateRecord | undefined>;
   write(request: StateWriteRequest): Promise<StateWriteResult>;
@@ -128,6 +158,11 @@ export interface StateStore extends ModuleInstance {
   listPresence(request: StatePresenceListRequest): Promise<readonly StatePresenceRecord[]>;
   /** Optionally publishes owner-private process discovery outside the key/value namespace. */
   publishHostPresence?(request: StateHostPresenceRequest): Promise<void>;
+  /** Optional content-addressed artifact plane used by Core for bounded large results. */
+  putArtifact?(request: StatePutArtifactRequest): Promise<ArtifactRef>;
+  readArtifact?(request: StateReadArtifactRequest): Promise<Uint8Array>;
+  deleteArtifact?(request: StateDeleteArtifactRequest): Promise<boolean>;
+  listArtifacts?(request: StateListArtifactsRequest): Promise<StateListArtifactsResult>;
 }
 
 export type StateHost = ModuleHost;

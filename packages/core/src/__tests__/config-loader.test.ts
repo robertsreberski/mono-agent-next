@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { access, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   AgentConfigError,
   composeAgentConfigSchema,
+  createAgentHost,
   explainAgentConfig,
   loadAgentConfig,
   validateAgentConfig,
@@ -54,6 +55,187 @@ describe("strict config and module loading", () => {
     expect(loaded.paths.schema).toBe(join(project.root, "schema.json"));
     expect(loaded.paths.skillRoots).toEqual([join(project.root, "skills")]);
     expect(loaded.paths.mcpConfig).toBe(join(project.root, ".mcp.json"));
+    expect(loaded.mcp).toEqual({ mcpServers: {} });
+    expect(loaded.sources.mcp).toMatchObject({
+      path: join(project.root, ".mcp.json"),
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    expect(Object.isFrozen(loaded)).toBe(true);
+    expect(Object.isFrozen(loaded.raw)).toBe(true);
+    expect(Object.isFrozen(loaded.mcp)).toBe(true);
+  });
+
+  it("returns an opaque immutable snapshot of the exact validated config and MCP bytes", async () => {
+    const project = await fixture({ kind: "runtime", controller: runtimeController(async () => ({})) });
+    const runtime = project.modules[0]!.name;
+    const config = minimalConfig(runtime, {
+      context: { mcp: { configPath: "./.mcp.json" } },
+    });
+    await project.writeConfig(config);
+    await project.writeMcp({
+      mcpServers: {
+        first: { type: "http", url: "http://127.0.0.1:3210/mcp" },
+      },
+    });
+    const configBytes = await readFile(project.configPath);
+    const loaded = await loadAgentConfig(project.configPath);
+
+    await project.writeConfig({ ...config, agent: { ...config.agent, name: "Changed" } });
+    await project.writeMcp({
+      mcpServers: {
+        replacement: { type: "http", url: "http://127.0.0.1:4321/mcp" },
+      },
+    });
+
+    expect(loaded.raw.agent.name).toBe("Fixture Agent");
+    expect(Object.keys(loaded.mcp.mcpServers)).toEqual(["first"]);
+    expect(loaded.sources.config).toMatchObject({
+      path: project.configPath,
+      sha256: createHash("sha256").update(configBytes).digest("hex"),
+      sizeBytes: configBytes.byteLength,
+    });
+    expect(Object.isFrozen(loaded.mcp.mcpServers.first)).toBe(true);
+    const explanation = await explainAgentConfig(loaded);
+    expect(explanation.entries).toContainEqual({
+      path: "routing.fallbacks",
+      owner: "@mono-agent/core",
+      source: "config",
+      value: [],
+    });
+    expect(explanation.entries).toContainEqual({
+      path: "policy.tools.allow",
+      owner: "@mono-agent/core",
+      source: "config",
+      value: [],
+    });
+
+    const clone = { ...loaded };
+    await expect(composeAgentConfigSchema(clone)).rejects.toMatchObject({
+      name: "AgentConfigError",
+      issues: [expect.objectContaining({ code: "unvalidated_snapshot" })],
+    });
+  });
+
+  it("detaches and freezes the exact parsed module config before creation", async () => {
+    let retained!: {
+      mode: string;
+      nested: { value: string };
+    };
+    let createdConfig: unknown;
+    const validRuntime = runtimeController(async () => ({ status: "cancelled" }));
+    const project = await fixture({
+      kind: "runtime",
+      schema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+      controller: {
+        parse() {
+          retained = {
+            mode: "validated",
+            nested: { value: "validated" },
+          };
+          return retained;
+        },
+        create(context) {
+          createdConfig = (context as { readonly config: unknown }).config;
+          return validRuntime.create(context);
+        },
+      },
+    });
+    await project.writeConfig(minimalConfig(project.modules[0]!.name));
+    const loaded = await loadAgentConfig(project.configPath);
+
+    retained.mode = "mutated";
+    retained.nested.value = "mutated";
+    const host = await createAgentHost(loaded);
+
+    expect(createdConfig).toEqual({
+      mode: "validated",
+      nested: { value: "validated" },
+    });
+    expect(createdConfig).not.toBe(retained);
+    expect(Object.isFrozen(createdConfig)).toBe(true);
+    expect(Object.isFrozen((createdConfig as { nested: object }).nested)).toBe(true);
+    await host.stop();
+  });
+
+  it("rejects accessor, proxy, exotic, and cyclic parsed module config graphs", async () => {
+    let accessorReads = 0;
+    let proxyTraps = 0;
+    const accessor = {};
+    Object.defineProperty(accessor, "mode", {
+      enumerable: true,
+      get() {
+        accessorReads += 1;
+        return "unsafe";
+      },
+    });
+    const proxy = new Proxy({ mode: "unsafe" }, {
+      getPrototypeOf(target) {
+        proxyTraps += 1;
+        return Reflect.getPrototypeOf(target);
+      },
+    });
+    const exotic = Object.assign(Object.create({ inherited: "unsafe" }), {
+      mode: "unsafe",
+    });
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+
+    for (const [value, pattern] of [
+      [accessor, /enumerable data property/u],
+      [proxy, /Proxy/u],
+      [exotic, /plain object/u],
+      [cyclic, /cycles/u],
+    ] as const) {
+      const project = await fixture({
+        kind: "runtime",
+        controller: {
+          parse: () => value,
+          create: () => {
+            throw new Error("host must not create a module from rejected config");
+          },
+        },
+      });
+      await project.writeConfig(minimalConfig(project.modules[0]!.name));
+      await expectConfigIssue(loadAgentConfig(project.configPath), pattern);
+    }
+    expect(accessorReads).toBe(0);
+    expect(proxyTraps).toBe(0);
+  });
+
+  it("validates referenced MCP syntax before importing selected module code", async () => {
+    const project = await fixture({
+      kind: "runtime",
+      entrySource: `
+import { writeFileSync } from "node:fs";
+writeFileSync(new URL("./IMPORT_MARKER", import.meta.url), "imported");
+export const monoAgentModule = {};
+`,
+    });
+    const marker = join(
+      project.root,
+      "node_modules",
+      ...project.modules[0]!.name.split("/"),
+      "IMPORT_MARKER",
+    );
+    await project.writeMcp({ mcpServers: { broken: { type: "unsupported" } } });
+    await project.writeConfig(minimalConfig(project.modules[0]!.name, {
+      context: { mcp: { configPath: "./.mcp.json" } },
+    }));
+
+    const result = await validateAgentConfig(project.configPath);
+
+    expect(result).toMatchObject({
+      ok: false,
+      issues: [expect.objectContaining({
+        path: "mcpServers.broken.type",
+        code: "enum",
+      })],
+    });
+    await expect(access(marker)).rejects.toThrow();
   });
 
   it("rejects unknown fields at every core-owned level", async () => {
@@ -119,6 +301,35 @@ describe("strict config and module loading", () => {
         message: "must be one of \"all\"",
       })],
     });
+  });
+
+  it("enforces the hard instruction and skill context ceiling in validation and schema", async () => {
+    const project = await fixture({ kind: "runtime", controller: runtimeController(async () => ({})) });
+    const runtime = project.modules[0]!.name;
+    await project.writeConfig(minimalConfig(runtime, {
+      context: { skills: { roots: ["./skills"], maxBytes: 1_000_001 } },
+    }));
+
+    await expect(validateAgentConfig(project.configPath)).resolves.toMatchObject({
+      ok: false,
+      issues: [expect.objectContaining({
+        path: "context.skills.maxBytes",
+        code: "range",
+      })],
+    });
+
+    await project.writeConfig(minimalConfig(runtime, {
+      context: { skills: { roots: ["./skills"], maxBytes: 1_000_000 } },
+    }));
+    const schema = await composeAgentConfigSchema(await loadAgentConfig(project.configPath));
+    expect(nested(schema, [
+      "properties",
+      "context",
+      "properties",
+      "skills",
+      "properties",
+      "maxBytes",
+    ])).toMatchObject({ minimum: 1, maximum: 1_000_000 });
   });
 
   it("loads an external open-slot module without any first-party catalog entry", async () => {

@@ -152,8 +152,24 @@ describe("OpenAI-compatible channel", () => {
     let call = 0;
     const dispatch = vi.fn(async (_request: ChannelInboundRequest, reply: ChannelReplySink) => {
       call += 1;
-      if (call === 1) await reply.emit({ type: "text-delta", delta: "x".repeat(8_000) });
-      else await reply.emit({ type: "activity", text: "working" });
+      if (call === 1) {
+        await reply.emit({ type: "text-delta", delta: "x".repeat(8_000) });
+      } else if (call === 2) {
+        await reply.emit({ type: "activity", text: "working" });
+      } else {
+        await reply.emit({
+          type: "approval",
+          approval: {
+            interactionId: "approval-1",
+            callId: "call-1",
+            toolId: "runtime__shell",
+            displayName: "Shell",
+            effects: ["execute"],
+            summary: "Run a command.",
+            requestedAt: "2026-07-23T12:00:00.000Z",
+          },
+        });
+      }
       return { status: "completed" as const };
     });
     const { info } = await start(dispatch, { maxResponseBytes: 4_096 });
@@ -165,6 +181,10 @@ describe("OpenAI-compatible channel", () => {
     const unsupported = await post(info, chatBody(false));
     expect(unsupported.status).toBe(502);
     expect(await errorCode(unsupported)).toBe("unsupported_reply_event");
+
+    const approval = await post(info, chatBody(false));
+    expect(approval.status).toBe(502);
+    expect(await errorCode(approval)).toBe("unsupported_reply_event");
   });
 });
 

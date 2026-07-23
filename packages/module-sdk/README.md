@@ -92,6 +92,10 @@ export const monoAgentModule = defineRuntimeModule({
 The import may construct static schema and manifest values. It must not read
 secrets, access the network, spawn processes, or mutate project or host state.
 Those operations belong after `create()` and require an explicit host grant.
+`schema.parse()` must return an acyclic graph of plain objects, dense arrays,
+and primitive config values. Core copies exact own data into a bounded frozen
+snapshot before validation and `create()`; accessors, proxies, symbol fields,
+and exotic prototypes fail closed.
 `create(context)` receives both `configDirectory`, the base for authored
 config-relative paths, and `workspaceDirectory`, the agent's execution
 workspace. Modules must not resolve config-relative files against the process
@@ -159,6 +163,14 @@ Every symbol exported by each public code entrypoint is listed below.
 **`@mono-agent/module-sdk`**
 
 ```text
+AGENT_INTERACTION_LIMITS
+ASK_USER_MAX_ANSWER_BYTES
+ASK_USER_MAX_CHOICES_PER_QUESTION
+ASK_USER_MAX_QUESTIONS
+AgentInteractionHandler
+ApprovalDecision
+ApprovalRequest
+ArtifactRef
 AskUserAnswer
 AskUserChoice
 AskUserQuestion
@@ -169,6 +181,7 @@ Awaitable
 BoundedHttpResponse
 Channel
 ChannelActor
+ChannelApprovalAnswerResult
 ChannelAskAnswerResult
 ChannelAttachment
 ChannelCancelRequest
@@ -191,6 +204,7 @@ ChannelReplayEntry
 ChannelReplayRequest
 ChannelReplayResult
 ChannelReplyActivityEvent
+ChannelReplyApprovalEvent
 ChannelReplyAskUserEvent
 ChannelReplyAttachmentEvent
 ChannelReplyEvent
@@ -207,6 +221,7 @@ ConfigProvenance
 ConfigProvenanceMap
 ConfigProvenanceSource
 CrossSlotReference
+DEFAULT_APPROVAL_TIMEOUT_MS
 DEFAULT_HTTP_MAX_REDIRECTS
 DEFAULT_HTTP_MAX_RESPONSE_BYTES
 DEFAULT_HTTP_TIMEOUT_MS
@@ -215,6 +230,7 @@ EnvEligibleSchemaOptions
 HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE
 HttpSafetyError
 HttpSafetyErrorCode
+InteractionContext
 JsonObject
 JsonPrimitive
 JsonSchema
@@ -274,7 +290,9 @@ OwnerPrivatePathError
 OwnerPrivatePathErrorCode
 OwnerPrivatePathIdentity
 ParseModuleConfigOptions
+RUNTIME_TOOL_ARTIFACT_PREVIEW_MAX_BYTES
 ReadOwnerPrivateFileOptions
+RouteIdentity
 Runtime
 RuntimeCapabilities
 RuntimeCompaction
@@ -286,9 +304,16 @@ RuntimeIncompleteTurnResult
 RuntimeLiveInput
 RuntimeLiveInputDisposition
 RuntimeLiveInputHandler
+RuntimeModelPreflightRequest
+RuntimeModelPreflightResult
 RuntimeModelValidation
+RuntimeModelValidationRequest
 RuntimeModuleCreateContext
 RuntimeModuleDefinition
+RuntimeNativeToolApprovalEnforcement
+RuntimeNativeToolDescriptor
+RuntimeNativeToolEffect
+RuntimeNativeToolSandboxEnforcement
 RuntimeRetryability
 RuntimeSession
 RuntimeSessionEvent
@@ -299,6 +324,7 @@ RuntimeToolCall
 RuntimeToolCallEvent
 RuntimeToolDefinition
 RuntimeToolResult
+RuntimeToolResultArtifactPart
 RuntimeToolResultEvent
 RuntimeToolResultFilePart
 RuntimeToolResultJsonPart
@@ -323,6 +349,13 @@ TurnRole
 TurnTextPart
 TurnToolCallPart
 TurnToolResultPart
+assertApprovalDecision
+assertApprovalRequest
+assertArtifactRef
+assertAskUserAnswer
+assertAskUserRequest
+assertRouteIdentity
+assertRuntimeNativeToolDescriptor
 assertSafeHttpUrl
 atomicReplaceOwnerPrivateFile
 checkedFetch
@@ -345,7 +378,14 @@ isLiteralLoopbackHostname
 isModuleConfigError
 isRuntimeTurnError
 isSecretSchema
+parseApprovalDecision
+parseApprovalRequest
+parseArtifactRef
+parseAskUserAnswer
+parseAskUserRequest
 parseModuleConfig
+parseRouteIdentity
+parseRuntimeNativeToolDescriptor
 provenanceAt
 readCrossSlotReference
 readOwnerPrivateFile
@@ -389,10 +429,13 @@ SandboxModuleDefinition
 SandboxResult
 StateCompareAndSwapRequest
 StateCompareAndSwapResult
+StateDeleteArtifactRequest
 StateDeleteRequest
 StateHost
 StateHostPresenceRequest
 StateHostPresenceStatus
+StateListArtifactsRequest
+StateListArtifactsResult
 StateListRequest
 StateListResult
 StateModuleCreateContext
@@ -401,6 +444,8 @@ StatePresenceListRequest
 StatePresenceRecord
 StatePresenceRemoveRequest
 StatePresenceUpsertRequest
+StatePutArtifactRequest
+StateReadArtifactRequest
 StateReadRequest
 StateRecord
 StateStore

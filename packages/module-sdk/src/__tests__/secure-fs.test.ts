@@ -96,4 +96,19 @@ describe("owner-private filesystem helpers", () => {
     });
     expect(new TextDecoder().decode(await readOwnerPrivateFile(path))).toBe("created");
   });
+
+  it("reads exactly the configured byte bound and rejects limit plus one", async () => {
+    const root = await privateRoot();
+    const directory = join(root, "state");
+    await ensureOwnerPrivateDirectory(directory);
+    const exactPath = join(directory, "exact.bin");
+    const oversizedPath = join(directory, "oversized.bin");
+    await createOwnerPrivateFile(exactPath, new Uint8Array(1024).fill(1));
+    await createOwnerPrivateFile(oversizedPath, new Uint8Array(1025).fill(2));
+
+    await expect(readOwnerPrivateFile(exactPath, { maxBytes: 1024 })).resolves.toHaveLength(1024);
+    await expect(readOwnerPrivateFile(oversizedPath, { maxBytes: 1024 })).rejects.toMatchObject({
+      code: "too_large",
+    });
+  });
 });

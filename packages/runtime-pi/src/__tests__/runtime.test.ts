@@ -167,6 +167,57 @@ describe("Pi-native runtime module", () => {
     await stop(runtime);
   });
 
+  it("projects artifact-backed tool results through their bounded preview and opaque reference", async () => {
+    const { runtime, faux } = fauxRuntime();
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("LargeResult", {}, { id: "call-artifact" })]),
+      (context) => {
+        const transcript = JSON.stringify(context.messages);
+        return fauxAssistantMessage([fauxText(
+          transcript.includes("bounded preview")
+            && transcript.includes("artifact-1")
+            && transcript.includes("sha256:")
+            ? "artifact visible"
+            : "artifact missing",
+        )]);
+      },
+    ]);
+    const executeTool = vi.fn(async (call: RuntimeToolCall) => ({
+      callId: call.id,
+      content: [{
+        type: "artifact" as const,
+        ref: {
+          id: "artifact-1",
+          sha256: `sha256:${"a".repeat(64)}` as const,
+          sizeBytes: 300_000,
+          mediaType: "application/json",
+          fileName: "result.json",
+        },
+        preview: "bounded preview",
+      }],
+    }));
+    const { context } = turnContext(executeTool);
+    await start(runtime);
+
+    const result = await runtime.runTurn(request("use the large-result tool", {
+      tools: [{
+        name: "LargeResult",
+        description: "Return one large result.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {},
+        },
+      }],
+    }), context);
+
+    expect(result.message?.content).toContainEqual({
+      type: "text",
+      text: "artifact visible",
+    });
+    await stop(runtime);
+  });
+
   it("maps external abort to a cancelled settled result", async () => {
     const { runtime, faux } = fauxRuntime();
     faux.setResponses([
@@ -195,11 +246,20 @@ describe("Pi-native runtime module", () => {
     await expect(runtime.runTurn(request("not started"), turnContext().context))
       .rejects.toMatchObject({ code: "RUNTIME_NOT_RUNNING" });
     await start(runtime);
-    expect(await runtime.validateModel?.("bad-reference", abortSignal())).toMatchObject({ supported: false });
-    expect(await runtime.validateModel?.("faux:faux-model", abortSignal())).toMatchObject({
+    expect(runtime.validateModel).toBeUndefined();
+    expect(await runtime.preflightModel?.({ model: "bad-reference", signal: abortSignal() }))
+      .toMatchObject({ supported: false });
+    expect(await runtime.preflightModel?.({ model: "faux:faux-model", signal: abortSignal() })).toMatchObject({
       supported: true,
       capabilities: { attachments: false, approvals: false, sandbox: false, sessions: true, liveInput: true },
+      nativeTools: [],
     });
+    const aborted = new AbortController();
+    aborted.abort(new Error("preflight cancelled"));
+    await expect(runtime.preflightModel?.({
+      model: "faux:faux-model",
+      signal: aborted.signal,
+    })).rejects.toThrow("preflight cancelled");
     await expect(runtime.runTurn(request("bad model", { model: "faux:missing" }), turnContext().context))
       .rejects.toMatchObject({ code: "MODEL_INVALID" });
     await expect(runtime.runTurn(request("opaque resume", {

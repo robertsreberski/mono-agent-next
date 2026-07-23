@@ -428,6 +428,7 @@ describe("mono-agent operator channel module", () => {
     });
     moduleChannels.add(channel);
     expect(() => assertChannelInstanceCompliance(channel)).not.toThrow();
+    expect(channel.capabilities.approvals).toBe(false);
     expect(channel.endpoint).toBeUndefined();
 
     await channel.start?.({ signal: lifecycle.signal });

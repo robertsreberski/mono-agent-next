@@ -15,80 +15,66 @@ The closest config-level lever is `runtime.permissionMode`, the declarative tool
 
 ## Human-in-the-loop approval gates
 
-Approval gates let your host pause a tool call, ask a human (or another system) to approve or deny it, and resume. They are configured by passing options to `createMonoRuntime`. There is **no config key** for these — the runtime cannot answer an approval prompt on its own, so a host UI (TUI, web app, Slack message, etc.) must supply the answer.
+Approval gates let your host pause a tool call, ask a human (or another system)
+to approve or deny it, and resume. Set `policy.approvals.default` to `ask` and
+provide an `AgentInteractionHandler` on the submitted request. The handler is
+the programmatic UI boundary for both approval and `AskUser` interactions.
 
 `code` — coverage type. See `runtime.approval-gates` in the [feature registry](/reference/feature-registry/).
 
-| Option | Purpose |
+| Surface | Purpose |
 | --- | --- |
-| `onToolApprovalRequest` | Async callback invoked per gated tool call; returns `{ decision: "approve" \| "deny" \| "always", reason? }`. This is the host UI hook. |
-| `toolRiskTiers` | Map of tool name → risk tier, used to decide which calls require approval. |
-| `approvalDefaultRiskTier` | Tier assigned to any tool not listed in `toolRiskTiers`. |
-| `approvalTimeoutMs` | How long to wait for `onToolApprovalRequest`; timeout always denies the call. |
-| `approvalAlwaysAllowTools` | Tool names that bypass the gate entirely (auto-approved). |
+| `policy.approvals.default` | Selects `allow`, `deny`, or interactive `ask`. |
+| `policy.approvals.timeoutMs` | Bounds an interactive request; timeout fails closed. |
+| `AgentInteractionHandler.requestApproval` | Returns one correlated `allow_once` or `deny` decision. |
+| `AgentInteractionHandler.askUser` | Answers a correlated bounded `AskUser` request. |
 
 <!-- doc-test:typescript -->
 
 ```ts
-import {
-  createMonoRuntime,
-  parseMonoRuntimeModelReference,
-} from "@mono-agent/runtime-adapter";
+import { createAgentHost } from "@mono-agent/core";
+import type { AgentInteractionHandler } from "@mono-agent/module-sdk";
 
-const runtime = createMonoRuntime({
-  workspace: process.cwd(),
-  toolRiskTiers: {
-    Bash: "high",
-    Edit: "high",
-    Read: "low",
+const interactionHandler: AgentInteractionHandler = {
+  async requestApproval(request) {
+    console.log(request.displayName, request.effects, request.summary);
+    return {
+      interactionId: request.interactionId,
+      decision: request.effects.includes("execute") ? "deny" : "allow_once",
+      decidedAt: new Date().toISOString(),
+    };
   },
-  approvalDefaultRiskTier: "medium",
-  approvalAlwaysAllowTools: ["Read", "Grep"],
-  approvalTimeoutMs: 60_000,
-  onToolApprovalRequest: async (req) => {
-    console.log(req.toolName, req.riskTier, req.argumentsSummary);
-    // Replace this policy with a prompt in your TUI, web UI, or chat adapter.
-    return req.toolName === "Bash"
-      ? { decision: "deny", reason: "Reviewer denied shell access." }
-      : { decision: "approve" };
+  async askUser(request) {
+    return {
+      interactionId: request.interactionId,
+      answers: Object.fromEntries(
+        request.questions.map((question) => [question.id, []]),
+      ),
+      answeredAt: new Date().toISOString(),
+    };
   },
-});
+};
 
-const result = await runtime.run("You are a careful repository assistant.", {
-  model: parseMonoRuntimeModelReference("claude:claude-sonnet-4-6"),
-  messages: [{ role: "user", content: "Inspect README.md." }],
-  abortSignal: new AbortController().signal,
-  cwd: process.cwd(),
-  allowedTools: ["Read", "Bash"],
-});
+const host = await createAgentHost("./mono-agent.config.json");
+try {
+  await host.submit({
+    requestId: "approval-example-1",
+    conversationId: "review",
+    text: "Inspect README.md.",
+    interactionHandler,
+  });
+} finally {
+  await host.stop();
+}
 ```
 
-Approval fallback is deterministic, but it is backend-specific:
-
-| Situation | Claude SDK and Pi managed tools | Direct OpenCode permission events |
-| --- | --- | --- |
-| No callback configured | No shared approval manager is installed; the backend's normal tool-permission behavior applies. | An explicit permission request is denied in `default` mode. `plan`, `acceptEdits`, and `bypassPermissions` apply their documented native rules. |
-| Low-risk request with a callback | The shared manager auto-approves it without calling the callback. | OpenCode's explicit permission request always reaches the callback. |
-| Callback times out or throws | Deny. | Deny. |
-| Callback returns an invalid value | Approve low/medium risk; deny high risk. | Deny at every risk tier. |
-
-`{ decision: "always" }` approves the current call and adds that tool to the
-current run's allowlist. A timeout or callback exception for a gated call is
-always reported as `tool_approval_denied`; it never falls back to approval.
-When using the exported low-level `createApprovalManager()` directly without a
-callback, its own defaults are low/medium approve and high deny. The Pi and
-Claude SDK bridges do not construct that manager unless a callback is present,
-so those low-level no-callback defaults are not bridge policy.
-
-Bridge coverage is capability-specific. Claude SDK and Pi gate managed tool
-dispatch through the shared approval manager when a callback is present.
-Direct OpenCode translates its native permission events through an isolated
-provider server and deliberately rejects invalid callback answers. Claude CLI
-and Codex app-server use their backend-native permission or approval posture
-rather than the shared per-call gate.
+Approval fallback is deterministic: malformed answers, handler failures, and
+timeouts become `deny`, and `allow_once` authorizes only the correlated call.
+Core never widens the configured tool allow/deny intersection.
 
 :::tip
-Use `approvalAlwaysAllowTools` for read-only tools so reviewers are only interrupted for genuinely risky actions. Pair it with `toolRiskTiers` so the bulk of your approval policy is declarative and `onToolApprovalRequest` only handles the cases that actually reach a human.
+Keep low-risk tools in the configured allowlist and use `ask` for governed tools
+whose effects need a human decision.
 :::
 
 ### When to use `runtime.permissionMode` instead
@@ -107,39 +93,35 @@ Env var: `MONO_AGENT_PERMISSION_MODE` (`default` / `plan` / `acceptEdits` / `byp
 
 ## Structured output
 
-`RuntimeRunOptions.outputSchema` supplies a JSON schema to capable backends.
-Provide it directly to `run()` or through harness request options.
+`AgentSubmitInput.responseSchema` supplies a JSON schema to capable runtimes.
 
 `code` — coverage type. See `runtime.structured-output` in the [feature registry](/reference/feature-registry/).
 
 <!-- doc-test:typescript -->
 
 ```ts
-import {
-  createMonoRuntime,
-  parseMonoRuntimeModelReference,
-} from "@mono-agent/runtime-adapter";
+import { createAgentHost } from "@mono-agent/core";
 
-const runtime = createMonoRuntime();
-const result = await runtime.run("Return only the requested structured result.", {
-  model: parseMonoRuntimeModelReference("claude:claude-sonnet-4-6"),
-  messages: [{ role: "user", content: "Summarize the incident and assign low or high priority." }],
-  abortSignal: new AbortController().signal,
-  outputSchema: {
-    type: "object",
-    properties: {
-      summary: { type: "string" },
-      priority: { type: "string", enum: ["low", "high"] },
+const host = await createAgentHost("./mono-agent.config.json");
+try {
+  const response = await host.submit({
+    requestId: "structured-example-1",
+    conversationId: "incident",
+    text: "Summarize the incident and assign low or high priority.",
+    responseSchema: {
+      type: "object",
+      properties: {
+        summary: { type: "string" },
+        priority: { type: "string", enum: ["low", "high"] },
+      },
+      required: ["summary", "priority"],
+      additionalProperties: false,
     },
-    required: ["summary", "priority"],
-    additionalProperties: false,
-  },
-});
-
-if (result.structuredResult === undefined) {
-  throw new Error("The selected bridge did not return captured structured output.");
+  });
+  console.log(response.message ?? response.text);
+} finally {
+  await host.stop();
 }
-console.log(result.structuredResult);
 ```
 
 :::caution
@@ -154,40 +136,37 @@ For per-request schemas in a hosted responder, set `outputSchema` from `runtimeO
 
 ## Live input steering
 
-`RuntimeRunOptions.liveInput` accepts an async iterable of
-`RuntimeLiveInputMessage` values that inject additional user messages while a
-turn is running — useful for "stop, also do X" guidance from a host UI without
-cancelling and restarting the turn. An optional `acknowledge()` callback runs
-only after the provider's native steering boundary accepts the message;
-`reject(error)` reports a per-attempt failure so a router can replay it on a
-later capable route.
+`AgentHost.offerLiveInput()` injects an additional user message while a turn is
+running. It reports whether the active runtime applied the message, whether the
+caller should requeue it as a normal turn, or whether it was unavailable or
+discarded.
 
 `auto + code` — coverage type. See `runtime.live-input` in the [feature registry](/reference/feature-registry/).
 
 <!-- doc-test:typescript -->
 
 ```ts
-import {
-  createMonoRuntime,
-  parseMonoRuntimeModelReference,
-  type RuntimeLiveInputMessage,
-} from "@mono-agent/runtime-adapter";
+import { createAgentHost } from "@mono-agent/core";
 
-async function* steeringMessages(): AsyncIterable<RuntimeLiveInputMessage> {
-  yield {
+const host = await createAgentHost("./mono-agent.config.json");
+try {
+  const turn = host.submit({
+    requestId: "analysis-example-1",
+    conversationId: "incident",
+    text: "Analyze this incident.",
+  });
+  const status = await host.offerLiveInput("incident", {
     id: "steer-1",
-    body: "Also list any unresolved questions.",
-    acknowledge: () => console.log("Applied to the active run."),
-  };
+    text: "Also list any unresolved questions.",
+    receivedAt: new Date().toISOString(),
+  });
+  if (status === "requeue") {
+    console.log("Submit the guidance as the next normal turn.");
+  }
+  await turn;
+} finally {
+  await host.stop();
 }
-
-const runtime = createMonoRuntime();
-const result = await runtime.run("You are a careful analyst.", {
-  model: parseMonoRuntimeModelReference("claude:claude-sonnet-4-6"),
-  messages: [{ role: "user", content: "Analyze this incident." }],
-  abortSignal: new AbortController().signal,
-  liveInput: steeringMessages(),
-});
 ```
 
 The generator above demonstrates the provider-facing shape. A custom host

@@ -1,7 +1,7 @@
 {
   "name": "@mono-agent/runtime-opencode",
   "version": "0.15.0",
-  "description": "OpenCode JSONL runtime module for mono-agent v1.",
+  "description": "Authenticated, tool-free OpenCode server runtime module for mono-agent v1.",
   "type": "module",
   "license": "GPL-3.0-only",
   "repository": {
@@ -14,7 +14,7 @@
     "packageName": "@mono-agent/runtime-opencode",
     "apiVersion": 1,
     "kind": "runtime",
-    "responsibility": "Runs OpenCode JSONL process attempts with version preflight and bounded native session handling."
+    "responsibility": "Runs an authenticated loopback OpenCode server with fail-closed tool containment and bounded native sessions."
   },
   "private": false,
   "engines": { "node": ">=22.19.0" },

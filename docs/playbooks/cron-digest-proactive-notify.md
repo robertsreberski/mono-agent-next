@@ -110,4 +110,4 @@ Run a one-off cron tick; verify the agent's final answer is the digest and it la
 - [Delivery and Send Tools](/channels/delivery-and-send-tools/)
 - [Capture and Recall](/memory/capture-and-recall/)
 - [Tool Policy](/tools/policy/)
-- [mono-agent-composer skill](https://github.com/robertsreberski/mono-agent/blob/main/packages/agent-app/skills/mono-agent-composer/SKILL.md)
+- [Quickstart](/getting-started/quickstart/)

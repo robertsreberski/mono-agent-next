@@ -59,10 +59,10 @@ List cursors are opaque, prefix-bound, and stable over the user-record snapshot
 from which each page is read.
 
 The store creates its root and discovery registry with mode `0700`; its marker,
-lease, snapshot, and presence descriptors use mode `0600`. Existing paths with
-different owners, modes, link counts, types, or device/inode identities are
-rejected. After an uncertain commit or path-identity change, the instance is
-poisoned and must be closed and reopened.
+transactional index, immutable artifact blobs, and presence descriptors use
+mode `0600`. Existing paths with different owners, modes, link counts, types,
+or device/inode identities are rejected. After an uncertain commit or
+path-identity change, the instance is poisoned and must be closed and reopened.
 
 ## Architecture
 
@@ -70,13 +70,19 @@ poisoned and must be closed and reopened.
 
 1. Core resolves config-relative paths and creates one state module instance.
 2. The module verifies or creates an owner-private root and acquires an
-   OS-released exclusive SQLite process lease. A second writer fails immediately.
-3. Startup reads the snapshot through an `O_NOFOLLOW` descriptor, checks the
-   descriptor and path identities, and validates every bound, version, key,
+   OS-released exclusive lock on a prebuilt SQLite file. The connection holds a
+   read-only transaction and never writes database pages; rollback, WAL, and
+   shared-memory sidecar paths are reserved and must remain absent. A second
+   writer fails immediately.
+3. Startup streams a descriptor-bound framed index log through a pinned
+   two-link inode, verifies every frame digest and commit footer, repairs only an
+   incomplete final frame, and validates every snapshot bound, version, key,
    timestamp, base64 value, ordering invariant, and duplicate constraint.
-4. Each mutation rechecks the root, lease, and snapshot identities, applies CAS
-   to an isolated draft, writes and syncs a private temporary file, verifies the
-   target did not change, renames atomically, and syncs the parent directory.
+4. Each mutation rechecks the root and index identity, applies CAS to an
+   isolated draft, appends and syncs a length-bounded frame and digest, syncs its
+   commit footer separately, rechecks every path witness, and advances in-memory
+   state only after durable commit and post-check success. Commits never reopen,
+   rename, unlink, or truncate a pathname.
 5. Presence contract records share the same atomic snapshot under a reserved
    collision-proof namespace. Ordinary keys cannot address or enumerate that
    namespace; expiry and agent filtering happen through `listPresence` only.
@@ -85,13 +91,20 @@ poisoned and must be closed and reopened.
    not invalidate an in-progress user-key page.
 7. When discovery is configured, `start` publishes a heartbeat descriptor and
    `stop` publishes a terminal `stopped` descriptor before releasing the lease.
+   A transactional checksum/generation record is authoritative; the public
+   fixed-size descriptor is updated through a pinned single-link inode and repaired
+   after a torn write without renaming or clobbering a replacement pathname.
+8. Artifact bytes are fsynced under immutable random blob names before their
+   digest metadata is committed to a transactional index. Readers and listings
+   expose only indexed blobs and rehash them; bounded crash orphans remain
+   private and unaddressable.
 
 ### Package structure
 
 | Source | Responsibility |
 | --- | --- |
 | `config.ts` | Strict bounded module config and config-directory path resolution. |
-| `secure-fs.ts` | Owner/mode/link checks, no-follow reads, identity checks, atomic replacement, and process lease. |
+| `secure-fs.ts` | Owner/mode/link checks, no-follow reads, pinned framed index log, reserved-sidecar checks, and process lease. |
 | `snapshot.ts` | Canonical snapshot validation, serialization, keys, versions, and record copies. |
 | `presence.ts` | Private lifecycle heartbeat descriptors. |
 | `store.ts` | Linearized StateStore operations, CAS, pagination, poisoning, and lifecycle. |
@@ -117,17 +130,25 @@ Every symbol exported by each public code entrypoint is listed below.
 
 ```text
 ResolvedStateLocalConfig
+ResolvedStateLocalRunsConfig
+StateArtifactRef
+StateDeleteArtifactRequest
+StateListArtifactsRequest
+StateListArtifactsResult
 StateLocalConfig
 StateLocalConfigError
 StateLocalDiscoveryConfig
 StateLocalError
 StateLocalErrorCode
+StateLocalRunsConfig
 StateLocalStore
 StateLocalStoreHooks
 StateLocalStoreOpenOptions
 StatePresenceDescriptor
 StatePresenceStatus
 StatePresenceUpdate
+StatePutArtifactRequest
+StateReadArtifactRequest
 default
 monoAgentModule
 parseStateLocalConfig
@@ -165,8 +186,10 @@ pnpm --filter @mono-agent/state-local run build
 pnpm --filter @mono-agent/state-local test
 ```
 
-The focused suite covers CAS conflicts, persistence, crash-after-rename
-recovery, generic and presence corruption preservation, duplicate writer
-exclusion, exact/create-only CAS, hidden presence expiry and instance-safe
-removal, deterministic cursors, owner-private modes, symlink and hard-link
-rejection, and final directory/snapshot device-inode swaps.
+The focused suite covers CAS conflicts, persistence, crash/post-check recovery,
+immutable artifact publication and rehashing, bounded invisible artifact
+orphans, torn presence-cache repair, operator-replacement preservation, generic
+and presence corruption preservation, duplicate writer exclusion,
+exact/create-only CAS, hidden presence expiry and instance-safe removal,
+deterministic cursors, owner-private modes, symlink and hard-link rejection, and
+final directory/index device-inode swaps.

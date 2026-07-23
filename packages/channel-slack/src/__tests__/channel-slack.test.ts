@@ -66,7 +66,7 @@ describe("slack channel", () => {
       socketFactory: () => socket,
       clientFactory: () => client,
     });
-    expect(channel.capabilities).toMatchObject({ liveInput: true, askUser: true, cancellation: true, runtimeControl: false });
+    expect(channel.capabilities).toMatchObject({ liveInput: true, askUser: true, approvals: false, cancellation: true, runtimeControl: false });
     await channel.start?.({ signal: new AbortController().signal });
     await handler?.({ kind: "message", envelopeId: "e1", teamId: "T1", channelId: "C1", messageId: "1", threadId: "1", userId: "U", text: "start", files: [], receivedAt: now });
     await vi.waitFor(() => expect(postMessage).toHaveBeenCalled());

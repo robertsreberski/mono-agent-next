@@ -51,7 +51,7 @@ export function assertPackResult(pkg, packed, packDestination) {
   const files = new Set((packed.files || []).map((file) => file.path));
   const requiredFiles = ["package.json", "README.md"];
   if (pkg.name === "@mono-agent/web") {
-    requiredFiles.push("webapp/dist/index.html");
+    requiredFiles.push("dist/index.js");
   }
   const missing = requiredFiles.filter((file) => !files.has(file));
   if (missing.length > 0) {

@@ -1,8 +1,9 @@
 # @mono-agent/core
 
-The strict, provider-neutral mono-agent v1 kernel. It loads one JSON agent
-configuration, verifies every selected package before import, and owns bounded
-turn routing and module lifecycle.
+The strict, provider-neutral mono-agent v1 kernel. It reads one JSON agent
+configuration and its referenced MCP configuration through bounded no-follow
+descriptors, freezes the validated authority snapshot, verifies every selected
+package before import, and owns bounded turn routing and module lifecycle.
 
 ## Category
 
@@ -82,16 +83,19 @@ settings such as `NODE_ENV`, `Accept`, or tenant identifiers:
 
 ### Data flow
 
-`mono-agent.config.json` is parsed and core-owned fields are checked first.
-Selected package manifests are then preflighted before side-effect-free module
-imports. Module-owned schemas validate inline leaves. `createAgentHost` starts
-the validated runtime and channel instances and routes normalized requests.
+`mono-agent.config.json` and its referenced `.mcp.json` are parsed and checked
+without opening a connection or starting a process. Their descriptor identities
+and digests are retained in one opaque immutable snapshot. Selected package
+manifests are then preflighted before module imports, and module-owned schemas
+validate inline leaves. `createAgentHost` starts that exact validated snapshot
+and routes normalized requests.
 
 ### Package structure
 
 | Module | Purpose |
 | --- | --- |
 | `config.ts` | Strict core envelope and selected-slot discovery. |
+| `authority-read.ts` | Bounded descriptor reads, stable file identity, UTF-8 decoding, and source digests. |
 | `module-loader.ts` | Dependency, lockfile, manifest, kind, and API checks. |
 | `schema.ts` | Exact schema composition and redacted explanation. |
 | `mcp.ts` | Ordinary project stdio and HTTP MCP clients plus Core tool identity. |
@@ -119,6 +123,8 @@ Every symbol exported by each public code entrypoint is listed below.
 
 ```text
 AgentAdmissionError
+AgentApprovalAnswer
+AgentApprovalAnswerStatus
 AgentAskAnswer
 AgentAskAnswerStatus
 AgentConfig
@@ -147,6 +153,7 @@ EnvReference
 JsonSchema
 LoadedAgentConfig
 LoadedAgentModule
+LoadedAuthoritySource
 ModuleKind
 ResolvedAgentPaths
 RuntimeRoute

@@ -178,7 +178,10 @@ describe("runtime-claude transports", () => {
       async executeTool(call) { return { callId: call.id, content: [] }; },
       registerLiveInput(value) {
         handler = value;
-        void value({ id: "input", text: "steer", receivedAt: "2026-01-01T00:00:00.000Z" });
+        void value(
+          { id: "input", text: "steer", receivedAt: "2026-01-01T00:00:00.000Z" },
+          new AbortController().signal,
+        );
         return () => { unregistered = true; };
       },
     });
@@ -186,6 +189,36 @@ describe("runtime-claude transports", () => {
     expect(handler).toBeDefined();
     expect(sendInput).toHaveBeenCalledWith("steer", "2026-01-01T00:00:00.000Z");
     expect(unregistered).toBe(true);
+  });
+
+  it("preflights the created instance without retaining deprecated validation", async () => {
+    const runtime = createRuntimeClaude({
+      config: parseRuntimeClaudeConfig({ mode: "cli" }),
+      instanceId: "claude-runtime",
+      workspaceDirectory: process.cwd(),
+      cliTransport: {
+        async run() {
+          throw new Error("preflight must not execute a turn");
+        },
+      },
+    });
+
+    expect(runtime.validateModel).toBeUndefined();
+    expect(await runtime.preflightModel?.({
+      model: "claude-opus-4-8",
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      supported: true,
+      capabilities: { liveInput: false },
+      nativeTools: [],
+    });
+    expect(await runtime.preflightModel?.({
+      model: "not-a-claude-model",
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      supported: false,
+      diagnostics: [{ code: "runtime-claude.model", severity: "error" }],
+    });
   });
 
   it("keeps auth token fields environment-only and parses strictly", () => {

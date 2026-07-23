@@ -1,15 +1,34 @@
 import { describe, expect, it, vi } from "vitest";
 
 describe("runtime-pi module import", () => {
-  it("does not access the network or process environment while importing the definition", async () => {
+  it("validates model syntax synchronously before create without network access", async () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network access during import"));
     const module = await import("../index.js");
+    const config = module.monoAgentModule.schema.parse({});
+    const validation = module.monoAgentModule.validateModel?.({
+      model: "openai:gpt-5",
+      config,
+    });
+
     expect(module.monoAgentModule.manifest).toMatchObject({
       packageName: "@mono-agent/runtime-pi",
       apiVersion: 1,
       kind: "runtime",
       capabilities: [],
     });
+    expect(validation).toEqual({ supported: true, nativeTools: [] });
+    expect(validation).not.toBeInstanceOf(Promise);
+    expect(module.monoAgentModule.validateModel?.({
+      model: "openai/gpt-5",
+      config,
+    })).toMatchObject({
+      supported: false,
+      diagnostics: [{ code: "runtime-pi.model", severity: "error" }],
+    });
+    expect(() => module.monoAgentModule.validateModel?.({
+      model: "openai:gpt-5",
+      config: { unexpected: true },
+    })).toThrow("is not a supported field");
     expect(fetch).not.toHaveBeenCalled();
     fetch.mockRestore();
   });

@@ -1,8 +1,11 @@
 import type {
+  AgentInteractionHandler,
+  ApprovalDecision,
   ChannelAttachment,
   ChannelDeliveryResult,
   ChannelModuleDefinition,
   ChannelOutboundMessage,
+  JsonSchema,
   JsonObject,
   JsonValue,
   MemoryModuleDefinition,
@@ -11,6 +14,7 @@ import type {
 } from "@mono-agent/module-sdk";
 
 import type { AgentConfigIssue } from "./errors.js";
+import type { ProjectMcpConfig } from "./mcp.js";
 
 export type ModuleKind = "runtime" | "channel" | "memory" | "state" | "trigger" | "exporter" | "sandbox";
 
@@ -43,6 +47,7 @@ export interface AgentPolicyConfig {
   };
   readonly approvals: {
     readonly default: "allow" | "ask" | "deny";
+    readonly timeoutMs?: number;
   };
   readonly sandbox: { readonly mode: "off" } | SelectedModuleConfig;
 }
@@ -93,6 +98,15 @@ export interface ResolvedAgentPaths {
   readonly mcpConfig?: string;
 }
 
+export interface LoadedAuthoritySource {
+  readonly path: string;
+  readonly sha256: string;
+  readonly sizeBytes: number;
+  readonly device: string;
+  readonly inode: string;
+  readonly modifiedAtNs: string;
+}
+
 export type SupportedModuleDefinition = RuntimeModuleDefinition | ChannelModuleDefinition | MemoryModuleDefinition;
 
 export interface LoadedAgentModule {
@@ -128,6 +142,11 @@ export interface LoadedAgentConfig {
   readonly projectRoot: string;
   readonly raw: AgentConfig;
   readonly paths: ResolvedAgentPaths;
+  readonly sources: {
+    readonly config: LoadedAuthoritySource;
+    readonly mcp?: LoadedAuthoritySource;
+  };
+  readonly mcp: ProjectMcpConfig;
   readonly modules: readonly LoadedAgentModule[];
 }
 
@@ -174,12 +193,18 @@ export interface AgentInspection {
 }
 
 export interface AgentSubmitInput {
+  /** Stable idempotency identity; Core generates a unique identity when omitted. */
+  readonly requestId?: string;
   readonly conversationId: string;
   readonly text: string;
   readonly attachments?: readonly ChannelAttachment[];
   readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
+  readonly maxTurns?: number;
+  readonly maxOutputTokens?: number;
+  readonly responseSchema?: JsonSchema;
+  readonly interactionHandler?: AgentInteractionHandler;
   readonly signal?: AbortSignal;
   readonly metadata?: Readonly<Record<string, unknown>>;
   readonly requiredCapabilities?: readonly string[];
@@ -195,6 +220,8 @@ export interface AgentResponse {
   readonly model: string;
   readonly status: "completed" | "cancelled" | "max-turns";
   readonly text: string;
+  /** Canonical assistant response. `text` remains a compatibility projection. */
+  readonly message?: TurnMessage;
   readonly output: unknown;
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
@@ -227,6 +254,10 @@ export interface AgentAskAnswer {
 }
 
 export type AgentAskAnswerStatus = "accepted" | "expired" | "mismatch";
+
+export type AgentApprovalAnswer = ApprovalDecision;
+
+export type AgentApprovalAnswerStatus = "accepted" | "expired" | "mismatch";
 
 export interface AgentConfigView {
   readonly revision: string;
@@ -273,6 +304,10 @@ export interface AgentHost {
   cancel(conversationId: string, reason?: string): Promise<boolean>;
   offerLiveInput(conversationId: string, input: AgentLiveInput): Promise<AgentLiveInputStatus>;
   answerAsk(conversationId: string, answer: AgentAskAnswer): Promise<AgentAskAnswerStatus>;
+  answerApproval(
+    conversationId: string,
+    decision: AgentApprovalAnswer,
+  ): Promise<AgentApprovalAnswerStatus>;
   conversations(): Promise<readonly AgentConversationSummary[]>;
   replay(conversationId: string): Promise<AgentConversationReplay>;
   configView(): Promise<AgentConfigView>;

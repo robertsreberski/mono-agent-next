@@ -16,39 +16,10 @@ const expectedCounts = {
   alias: aliasTierCount,
 };
 
-const releaseLockstepSkillPath = "skills/release-lockstep/SKILL.md";
-const releaseLockstepPackageCountReferences = [
-  {
-    filePath: releaseLockstepSkillPath,
-    description: "the release lockstep total",
-    pattern: /all \*\*(?<count>\d+) `publishable: true` packages\*\*/u,
-    tier: "total",
-  },
-  {
-    filePath: releaseLockstepSkillPath,
-    description: "the release lockstep core count",
-    pattern: /release together: (?<count>\d+) core packages/u,
-    tier: "core",
-  },
-  {
-    filePath: releaseLockstepSkillPath,
-    description: "the release lockstep alias count",
-    pattern: /(?<count>\d+) `tier: "alias"` package/u,
-    tier: "alias",
-  },
-  {
-    filePath: releaseLockstepSkillPath,
-    description: "the release lockstep plugin-tier count",
-    pattern: /(?<count>\d+) `tier: "plugin"` extras/u,
-    tier: "plugin",
-  },
-];
-
-// The total and all three tier counts are guarded so prose that splits
-// "N core + M plugin-tier extras + K unscoped alias" cannot silently drift
-// from the catalog when the tiers change.
+// PACKAGES.md is generated from the package catalog and remains the source-beta
+// package-count surface. Release procedure prose is updated only in the
+// separately authorized release/cutover phase.
 const guardedPackageCountReferences = [
-  ...releaseLockstepPackageCountReferences,
   {
     filePath: "PACKAGES.md",
     description: "the generated catalog summary (core count)",
@@ -81,28 +52,8 @@ describe("package count drift guard", () => {
     },
   );
 
-  test("the release-lockstep package-set prose has no unguarded numeric count", () => {
-    const contents = readRepositoryFile(releaseLockstepSkillPath);
-    const paragraph = /\*\*Lockstep set:\*\*(?<prose>[\s\S]*?published alongside core\.)/u.exec(contents)?.groups?.prose;
-    if (paragraph === undefined) {
-      throw new Error(`${releaseLockstepSkillPath} must retain the guarded Lockstep set paragraph.`);
-    }
-
-    const proseCounts = [...paragraph.matchAll(/\b\d+\b/gu)].map((match) => Number(match[0]));
-    const guardedCounts = releaseLockstepPackageCountReferences.map(
-      (reference) => readGuardedPackageCount(reference, contents),
-    );
-
-    if (proseCounts.length !== guardedCounts.length
-      || proseCounts.some((count, index) => count !== guardedCounts[index])) {
-      throw new Error(
-        `${releaseLockstepSkillPath} has an unguarded or reordered numeric package count in the Lockstep set paragraph.`,
-      );
-    }
-  });
-
-  test.each(releaseLockstepPackageCountReferences)(
-    "a discriminating $tier package-count mutation fails and the restored release-lockstep prose passes",
+  test.each(guardedPackageCountReferences)(
+    "a discriminating $tier package-count mutation fails and the restored generated summary passes",
     (reference) => {
       const contents = readRepositoryFile(reference.filePath);
       const expected = expectedCounts[reference.tier];

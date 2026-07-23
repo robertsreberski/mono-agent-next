@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, link, mkdtemp, open as openFile, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { ResolvedStateLocalConfig } from "../config.js";
 import { StateLocalError } from "../errors.js";
+import { acquireProcessLease } from "../secure-fs.js";
 import { StateLocalStore, type StateLocalStoreHooks } from "../store.js";
 
 const roots: string[] = [];
@@ -133,6 +134,145 @@ describe("StateLocalStore", () => {
     await store.close();
   });
 
+  it("never overwrites a post-check operator replacement of the transactional snapshot path", async () => {
+    const config = await createConfig();
+    const operatorBytes = Buffer.from("operator-owned snapshot replacement", "utf8");
+    let swap = true;
+    let moved = "";
+    const store = await open(config, {
+      snapshot: {
+        afterCheck: async (target) => {
+          if (!swap) return;
+          swap = false;
+          moved = `${target}.owned`;
+          await rename(target, moved);
+          await writeFile(target, operatorBytes, { mode: 0o600, flag: "wx" });
+        },
+      },
+    });
+
+    await expect(store.write({ key: "turns/one", value: bytes("value"), signal }))
+      .rejects.toMatchObject({ code: "STATE_PATH_CHANGED" });
+    expect(await readFile(join(config.root, "lease.sqlite.index"))).toEqual(operatorBytes);
+    await expect(store.read({ key: "turns/one", signal }))
+      .rejects.toMatchObject({ code: "STATE_POISONED" });
+    await store.close();
+    expect(await readFile(join(config.root, "lease.sqlite.index"))).toEqual(operatorBytes);
+    expect(moved).not.toBe("");
+  });
+
+  it("never touches a rollback-journal hardlink injected during a state transaction", async () => {
+    const config = await createConfig();
+    const external = join(config.root, "..", "operator-journal");
+    const operatorBytes = Buffer.from("external bytes behind injected journal hardlink", "utf8");
+    await writeFile(external, operatorBytes, { mode: 0o600 });
+    let injected = false;
+    let sidecar = "";
+    const store = await open(config, {
+      snapshot: {
+        afterCheck: async (target) => {
+          if (injected) return;
+          injected = true;
+          sidecar = `${target.slice(0, -".index".length)}-journal`;
+          await link(external, sidecar);
+        },
+      },
+    });
+
+    await expect(store.write({ key: "turns/one", value: bytes("committed"), signal }))
+      .rejects.toMatchObject({ code: "STATE_PATH_INSECURE" });
+    expect(await readFile(external)).toEqual(operatorBytes);
+    expect(await readFile(sidecar)).toEqual(operatorBytes);
+    await expect(store.close()).rejects.toMatchObject({ code: "STATE_PATH_INSECURE" });
+    expect(await readFile(external)).toEqual(operatorBytes);
+    expect(await readFile(sidecar)).toEqual(operatorBytes);
+  });
+
+  it("truncates only an incomplete descriptor-log tail and retains committed state", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    const lockPath = join(config.root, "lease.sqlite");
+    const lockBytes = await readFile(lockPath);
+    await store.write({ key: "turns/one", value: bytes("committed"), signal });
+    await store.close();
+    expect(await readFile(lockPath)).toEqual(lockBytes);
+    expect((await readdir(config.root)).filter((name) =>
+      /^lease\.sqlite-(?:journal|wal|shm)$/u.test(name))).toEqual([]);
+    const indexPath = join(config.root, "lease.sqlite.index");
+    const committedSize = (await stat(indexPath)).size;
+    await appendFile(indexPath, Buffer.from([0, 0, 0]));
+    expect((await stat(indexPath)).size).toBe(committedSize + 3);
+
+    const reopened = await open(config);
+    expect(text((await reopened.read({ key: "turns/one", signal }))?.value)).toBe("committed");
+    expect((await stat(indexPath)).size).toBe(committedSize);
+    await reopened.close();
+  });
+
+  it("rejects a full-length frame with a damaged commit footer without truncating it", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    await store.write({ key: "turns/one", value: bytes("committed"), signal });
+    await store.close();
+    const indexPath = join(config.root, "lease.sqlite.index");
+    const size = (await stat(indexPath)).size;
+    const handle = await openFile(indexPath, "r+");
+    try {
+      await handle.write(Buffer.from([0]), 0, 1, size - 1);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+
+    await expect(open(config)).rejects.toMatchObject({ code: "STATE_CORRUPT" });
+    expect((await stat(indexPath)).size).toBe(size);
+  });
+
+  it("rejects a committed frame whose four-byte length is corrupted without truncating it", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    await store.write({ key: "turns/one", value: bytes("committed"), signal });
+    await store.close();
+    const indexPath = join(config.root, "lease.sqlite.index");
+    const size = (await stat(indexPath)).size;
+    const frameOffset = Buffer.byteLength("mono-agent-state-index-v2\n", "utf8");
+    const corruptLength = Buffer.allocUnsafe(4);
+    corruptLength.writeUInt32BE(0x7fff_ffff);
+    const handle = await openFile(indexPath, "r+");
+    try {
+      await handle.write(corruptLength, 0, corruptLength.byteLength, frameOffset);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+
+    await expect(open(config)).rejects.toMatchObject({ code: "STATE_CORRUPT" });
+    expect((await stat(indexPath)).size).toBe(size);
+  });
+
+  it("uses a committed footer to reject coherently corrupted header lengths", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    await store.write({ key: "turns/one", value: bytes("committed"), signal });
+    await store.close();
+    const indexPath = join(config.root, "lease.sqlite.index");
+    const size = (await stat(indexPath)).size;
+    const frameOffset = Buffer.byteLength("mono-agent-state-index-v2\n", "utf8");
+    const corruptHeader = Buffer.allocUnsafe(8);
+    corruptHeader.writeUInt32BE(0x7fff_ffff, 0);
+    corruptHeader.writeUInt32BE(0x8000_0000, 4);
+    const handle = await openFile(indexPath, "r+");
+    try {
+      await handle.write(corruptHeader, 0, corruptHeader.byteLength, frameOffset);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+
+    await expect(open(config)).rejects.toMatchObject({ code: "STATE_CORRUPT" });
+    expect((await stat(indexPath)).size).toBe(size);
+  });
+
   it("rejects a directory device/inode swap while open", async () => {
     const config = await createConfig();
     const store = await open(config);
@@ -151,11 +291,11 @@ describe("StateLocalStore", () => {
     await store.write({ key: "one", value: bytes("one"), signal });
     await store.close();
 
-    const path = join(config.root, "records.json");
+    const path = join(config.root, "lease.sqlite");
     const corrupt = Buffer.from('{"not":"a snapshot"}\n', "utf8");
-    await writeFile(path, corrupt, { mode: 0o600 });
+    await writeIndexedSnapshot(path, corrupt);
     await expect(open(config)).rejects.toMatchObject({ code: "STATE_CORRUPT" });
-    expect(await readFile(path)).toEqual(corrupt);
+    expect(await readIndexedSnapshot(path)).toEqual(corrupt);
   });
 
   it("publishes owner-private presence and a stopped terminal descriptor", async () => {
@@ -173,10 +313,40 @@ describe("StateLocalStore", () => {
     expect((await stat(registry!)).mode & 0o777).toBe(0o700);
     const path = join(registry!, "agent-one.json");
     expect((await stat(path)).mode & 0o777).toBe(0o600);
+    expect((await stat(path)).nlink).toBe(1);
+    expect(await readdir(registry!)).toEqual(["agent-one.json"]);
 
     await store.close();
     const terminal = JSON.parse(await readFile(path, "utf8")) as { status: string };
     expect(terminal.status).toBe("stopped");
+  });
+
+  it("repairs a torn fixed-size presence cache from its committed publication", async () => {
+    const config = await createConfig(true);
+    const registry = config.discovery?.registryDirectory;
+    expect(registry).toBeDefined();
+    const path = join(registry!, "agent-one.json");
+
+    const first = await open(config);
+    await first.start({ signal });
+    await first.close();
+    await writeFile(path, '{"schema":"mono-agent.state-presence.v1","status":', {
+      mode: 0o600,
+    });
+    await expect(readFile(path, "utf8")).resolves.not.toMatch(/\}$/u);
+
+    const reopened = await open(config);
+    await reopened.start({ signal });
+    const repairedBytes = await readFile(path);
+    expect(repairedBytes.byteLength).toBe(64 * 1024);
+    const repaired = JSON.parse(repairedBytes.toString("utf8")) as {
+      status: string;
+      details: { _stateLocalPublication: { generation: number; checksum: string } };
+    };
+    expect(repaired.status).toBe("ready");
+    expect(repaired.details._stateLocalPublication.generation).toBeGreaterThan(1);
+    expect(repaired.details._stateLocalPublication.checksum).toMatch(/^[a-f0-9]{64}$/u);
+    await reopened.close();
   });
 
   it("accepts optional host presence when discovery is not configured", async () => {
@@ -333,4 +503,24 @@ function bytes(value: string): Uint8Array {
 
 function text(value: Uint8Array | undefined): string | undefined {
   return value === undefined ? undefined : Buffer.from(value).toString("utf8");
+}
+
+async function readIndexedSnapshot(path: string): Promise<Buffer> {
+  const lease = await acquireProcessLease(path);
+  try {
+    const bytes = lease.readIndex("snapshot", 1024 * 1024);
+    if (bytes === undefined) throw new Error("Expected indexed snapshot bytes.");
+    return bytes;
+  } finally {
+    await lease.release();
+  }
+}
+
+async function writeIndexedSnapshot(path: string, bytes: Uint8Array): Promise<void> {
+  const lease = await acquireProcessLease(path);
+  try {
+    lease.writeIndex("snapshot", bytes);
+  } finally {
+    await lease.release();
+  }
 }

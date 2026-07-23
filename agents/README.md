@@ -39,5 +39,5 @@ template encodes the corresponding discipline.
 
 Select the narrowest template that owns the requested outcome. Runtime-agent
 composition belongs in an agent folder or the
-[`mono-agent-composer`](../packages/agent-app/skills/mono-agent-composer/SKILL.md)
-skill instead.
+[`create-mono-agent`](../packages/create-mono-agent/README.md) scaffolder
+instead.

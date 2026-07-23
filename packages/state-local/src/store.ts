@@ -1,3 +1,4 @@
+import { opendir } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { ModuleHealth, ModuleStopContext } from "@mono-agent/module-sdk";
@@ -20,6 +21,17 @@ import type {
 } from "@mono-agent/module-sdk/internal";
 
 import type { ResolvedStateLocalConfig } from "./config.js";
+import { DEFAULT_ARTIFACT_RETENTION_DAYS } from "./config.js";
+import {
+  StateLocalArtifacts,
+  type StateLocalArtifactHooks,
+  type StateArtifactRef,
+  type StateDeleteArtifactRequest,
+  type StateListArtifactsRequest,
+  type StateListArtifactsResult,
+  type StatePutArtifactRequest,
+  type StateReadArtifactRequest,
+} from "./artifacts.js";
 import { StateLocalError, throwIfAborted } from "./errors.js";
 import {
   PresencePublisher,
@@ -32,13 +44,11 @@ import {
   ensureSecureDirectory,
   inspectSecureFile,
   readSecureFile,
-  replaceSecureFileAtomic,
   type AtomicReplaceHooks,
   type FileIdentity,
   type LeaseHooks,
   type ProcessLease,
   verifySecureDirectoryIdentity,
-  verifySecureFileIdentity,
 } from "./secure-fs.js";
 import {
   emptySnapshot,
@@ -60,12 +70,15 @@ import {
   validateStatePrefix,
 } from "./snapshot.js";
 
-const SNAPSHOT_FILE = "records.json";
 const MARKER_FILE = ".mono-agent-state";
 const LEASE_FILE = "lease.sqlite";
 const MARKER_CONTENT = '{"kind":"mono-agent-state-local","schemaVersion":1}\n';
+const SNAPSHOT_INDEX_KEY = "snapshot";
+const PRESENCE_INDEX_PREFIX = "presence:";
+const STATE_INDEX_MAX_ENTRIES = 1_024;
 
 export interface StateLocalStoreHooks {
+  readonly artifacts?: StateLocalArtifactHooks;
   readonly lease?: LeaseHooks;
   readonly snapshot?: AtomicReplaceHooks;
   readonly presence?: AtomicReplaceHooks;
@@ -84,11 +97,11 @@ export class StateLocalStore implements StateStore {
   private readonly config: ResolvedStateLocalConfig;
   private readonly rootIdentity: FileIdentity;
   private readonly lease: ProcessLease;
+  private readonly artifacts: StateLocalArtifacts;
   private readonly clock: () => Date;
   private readonly snapshotHooks: AtomicReplaceHooks | undefined;
   private readonly presence: PresencePublisher | undefined;
   private snapshot: StateSnapshot;
-  private snapshotIdentity: FileIdentity;
   private operation: Promise<void> = Promise.resolve();
   private heartbeat: ReturnType<typeof setInterval> | undefined;
   private presenceUpdate: StatePresenceUpdate = { status: "ready" };
@@ -101,17 +114,17 @@ export class StateLocalStore implements StateStore {
     config: ResolvedStateLocalConfig,
     rootIdentity: FileIdentity,
     lease: ProcessLease,
+    artifacts: StateLocalArtifacts,
     snapshot: StateSnapshot,
-    snapshotIdentity: FileIdentity,
     options: StateLocalStoreOpenOptions,
   ) {
     this.root = config.root;
-    this.snapshotPath = join(config.root, SNAPSHOT_FILE);
+    this.snapshotPath = `${lease.path}.index`;
     this.config = config;
     this.rootIdentity = rootIdentity;
     this.lease = lease;
+    this.artifacts = artifacts;
     this.snapshot = snapshot;
-    this.snapshotIdentity = snapshotIdentity;
     this.clock = options.clock ?? (() => new Date());
     this.snapshotHooks = options.hooks?.snapshot;
     const discovery = config.discovery;
@@ -123,6 +136,7 @@ export class StateLocalStore implements StateStore {
           stateRoot: config.root,
           startedAt: canonicalNow(this.clock),
           clock: this.clock,
+          index: lease,
           ...(options.hooks?.presence === undefined ? {} : { hooks: options.hooks.presence }),
         });
   }
@@ -135,39 +149,53 @@ export class StateLocalStore implements StateStore {
     const secureRoot = await ensureSecureDirectory(config.root);
     const effectiveConfig: ResolvedStateLocalConfig = { ...config, root: secureRoot.path };
     const rootIdentity = secureRoot.identity;
-    const lease = await acquireProcessLease(join(effectiveConfig.root, LEASE_FILE), options.hooks?.lease);
+    await prepareMarker(effectiveConfig.root);
+    const lease = await acquireProcessLease(
+      join(effectiveConfig.root, LEASE_FILE),
+      options.hooks?.lease,
+    );
+    let artifacts: StateLocalArtifacts | undefined;
     try {
       throwIfAborted(options.signal);
-      await prepareMarker(effectiveConfig.root);
-      const snapshotPath = join(effectiveConfig.root, SNAPSHOT_FILE);
-      let snapshotIdentity = await inspectSecureFile(snapshotPath);
-      let snapshot: StateSnapshot;
-      if (snapshotIdentity === undefined) {
-        snapshot = emptySnapshot();
-        snapshotIdentity = await replaceSecureFileAtomic(
-          snapshotPath,
-          serializeSnapshot(snapshot),
+      const maximumSnapshotBytes = Math.min(
+        2_147_483_647,
+        effectiveConfig.maxTotalBytes * 2 + effectiveConfig.maxRecords * 256 + 4_096,
+      );
+      const indexedKeys = lease.listIndexKeys("", STATE_INDEX_MAX_ENTRIES);
+      if (indexedKeys.some((key) =>
+        key !== SNAPSHOT_INDEX_KEY && !key.startsWith(PRESENCE_INDEX_PREFIX))) {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          "The local state transactional index contains an unexpected entry.",
         );
-      } else {
-        const maximumSnapshotBytes = Math.min(
-          2_147_483_647,
-          effectiveConfig.maxTotalBytes * 2 + effectiveConfig.maxRecords * 256 + 4_096,
-        );
-        const loaded = await readSecureFile(snapshotPath, maximumSnapshotBytes);
-        snapshotIdentity = loaded.identity;
-        snapshot = parseSnapshot(loaded.bytes, effectiveConfig);
       }
+      const encodedSnapshot = lease.readIndex(SNAPSHOT_INDEX_KEY, maximumSnapshotBytes);
+      let snapshot: StateSnapshot;
+      if (encodedSnapshot === undefined) {
+        snapshot = emptySnapshot();
+        lease.writeIndex(SNAPSHOT_INDEX_KEY, serializeSnapshot(snapshot));
+        await lease.verify();
+      } else {
+        snapshot = parseSnapshot(encodedSnapshot, effectiveConfig);
+      }
+      artifacts = await StateLocalArtifacts.open(
+        effectiveConfig.runs?.artifactsDirectory ?? join(effectiveConfig.root, "artifacts"),
+        rootIdentity,
+        options.signal,
+        options.hooks?.artifacts,
+      );
       throwIfAborted(options.signal);
       return new StateLocalStore(
         effectiveConfig,
         rootIdentity,
         lease,
+        artifacts,
         snapshot,
-        snapshotIdentity,
         options,
       );
     } catch (error) {
-      lease.release();
+      await artifacts?.close();
+      await lease.release();
       throw error;
     }
   }
@@ -322,6 +350,38 @@ export class StateLocalStore implements StateStore {
       });
       return { status: "applied", record: toStateRecord(stored) };
     });
+  }
+
+  putArtifact(request: StatePutArtifactRequest): Promise<StateArtifactRef> {
+    return this.runExclusive(request.signal, async () => {
+      await this.guardPaths();
+      return this.artifacts.put(request);
+    });
+  }
+
+  readArtifact(request: StateReadArtifactRequest): Promise<Uint8Array> {
+    return this.runExclusive(request.signal, async () => {
+      await this.guardPaths();
+      return this.artifacts.read(request);
+    });
+  }
+
+  deleteArtifact(request: StateDeleteArtifactRequest): Promise<boolean> {
+    return this.runExclusive(request.signal, async () => {
+      await this.guardPaths();
+      return this.artifacts.delete(request);
+    });
+  }
+
+  listArtifacts(request: StateListArtifactsRequest): Promise<StateListArtifactsResult> {
+    return this.runExclusive(request.signal, async () => {
+      await this.guardPaths();
+      return this.artifacts.list(request);
+    });
+  }
+
+  get artifactRetentionDays(): number {
+    return this.config.runs?.retentionDays ?? DEFAULT_ARTIFACT_RETENTION_DAYS;
   }
 
   upsertPresence(request: StatePresenceUpsertRequest): Promise<StatePresenceRecord> {
@@ -491,7 +551,18 @@ export class StateLocalStore implements StateStore {
       } finally {
         this.started = false;
         this.closed = true;
-        this.lease.release();
+        const cleanup = [
+          async () => this.presence?.close(),
+          async () => this.artifacts.close(),
+          async () => this.lease.release(),
+        ];
+        for (const close of cleanup) {
+          try {
+            await close();
+          } catch (error) {
+            if (failure === undefined) failure = error;
+          }
+        }
       }
     });
     this.operation = finalization.then(() => undefined, () => undefined);
@@ -524,7 +595,7 @@ export class StateLocalStore implements StateStore {
     try {
       await verifySecureDirectoryIdentity(this.root, this.rootIdentity);
       await this.lease.verify();
-      await verifySecureFileIdentity(this.snapshotPath, this.snapshotIdentity);
+      await this.artifacts.verify();
     } catch (error) {
       const failure = error instanceof StateLocalError
         ? error
@@ -540,13 +611,14 @@ export class StateLocalStore implements StateStore {
 
   private async commit(draft: StateSnapshot): Promise<void> {
     try {
-      const identity = await replaceSecureFileAtomic(
-        this.snapshotPath,
-        serializeSnapshot(draft),
-        this.snapshotHooks,
-      );
+      const bytes = serializeSnapshot(draft);
+      await this.snapshotHooks?.beforeRename?.(this.snapshotPath);
+      await this.lease.verify();
+      await this.snapshotHooks?.afterCheck?.(this.snapshotPath);
+      this.lease.writeIndex(SNAPSHOT_INDEX_KEY, bytes);
+      await this.snapshotHooks?.afterRename?.(this.snapshotPath);
+      await this.lease.verify();
       this.snapshot = draft;
-      this.snapshotIdentity = identity;
     } catch (error) {
       this.poisoned = new StateLocalError(
         "STATE_POISONED",
@@ -580,6 +652,12 @@ async function prepareMarker(root: string): Promise<void> {
   const path = join(root, MARKER_FILE);
   const existing = await inspectSecureFile(path);
   if (existing === undefined) {
+    for await (const entry of await opendir(root)) {
+      throw new StateLocalError(
+        "STATE_CORRUPT",
+        `Refusing to claim non-empty state root containing ${entry.name}.`,
+      );
+    }
     await createSecureFile(path, Buffer.from(MARKER_CONTENT, "utf8"));
     return;
   }

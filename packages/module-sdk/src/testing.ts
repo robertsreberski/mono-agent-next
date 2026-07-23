@@ -16,6 +16,7 @@ import {
 } from "./index.js";
 
 const RESERVED_DIRECTIVES = new Set(["$schema", "$use", "$env"]);
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 export interface ModuleComplianceOptions {
   readonly expectedKind?: ModuleKind;
@@ -82,6 +83,11 @@ export function assertRuntimeModuleCompliance(
   options: Omit<ModuleComplianceOptions, "expectedKind"> = {},
 ): asserts value is RuntimeModuleDefinition {
   assertModuleDefinitionCompliance(value, { ...options, expectedKind: "runtime" });
+  const definition = value as unknown as Record<string, unknown>;
+  assertOptionalFunction(
+    definition.validateModel,
+    "runtime module definition validateModel",
+  );
 }
 
 export function assertChannelModuleCompliance(
@@ -100,33 +106,41 @@ export function assertMemoryModuleCompliance(
 
 export function assertRuntimeInstanceCompliance(value: unknown): asserts value is Runtime {
   const instance = assertModuleInstance(value, "runtime instance");
-  const capabilities = assertBooleanCapabilities(instance.capabilities, [
-    "tools",
-    "mcp",
-    "attachments",
-    "approvals",
-    "structuredOutput",
-    "sandbox",
-    "sessions",
-  ], "runtime capabilities");
-  if (capabilities.liveInput !== undefined && typeof capabilities.liveInput !== "boolean") {
-    fail("runtime capabilities.liveInput must be a boolean when present");
-  }
+  assertBooleanCapabilities(
+    requireOwnDataProperty(instance, "capabilities", "runtime instance"),
+    [
+      "tools",
+      "mcp",
+      "attachments",
+      "approvals",
+      "structuredOutput",
+      "sandbox",
+      "sessions",
+    ],
+    ["artifactResults", "liveInput"],
+    "runtime capabilities",
+  );
   if (typeof instance.runTurn !== "function") fail("runtime instance runTurn must be a function");
   assertOptionalFunction(instance.validateModel, "runtime instance validateModel");
+  assertOptionalFunction(instance.preflightModel, "runtime instance preflightModel");
 }
 
 export function assertChannelInstanceCompliance(value: unknown): asserts value is Channel {
   const instance = assertModuleInstance(value, "channel instance");
-  const capabilities = assertBooleanCapabilities(instance.capabilities, [
-    "attachments",
-    "liveInput",
-    "askUser",
-    "proactive",
-    "runtimeControl",
-    "verbatim",
-    "cancellation",
-  ], "channel capabilities");
+  const capabilities = assertBooleanCapabilities(
+    requireOwnDataProperty(instance, "capabilities", "channel instance"),
+    [
+      "attachments",
+      "liveInput",
+      "askUser",
+      "proactive",
+      "runtimeControl",
+      "verbatim",
+      "cancellation",
+    ],
+    ["approvals"],
+    "channel capabilities",
+  );
   assertOptionalFunction(instance.deliver, "channel instance deliver");
   if (capabilities.proactive === true && typeof instance.deliver !== "function") {
     fail("proactive channel instance deliver must be a function");
@@ -135,10 +149,21 @@ export function assertChannelInstanceCompliance(value: unknown): asserts value i
 
 export function assertMemoryInstanceCompliance(value: unknown): asserts value is Memory {
   const instance = assertModuleInstance(value, "memory instance");
-  assertBooleanCapabilities(instance.capabilities, ["capture", "forget"], "memory capabilities");
+  const capabilities = assertBooleanCapabilities(
+    requireOwnDataProperty(instance, "capabilities", "memory instance"),
+    ["capture", "forget"],
+    [],
+    "memory capabilities",
+  );
   if (typeof instance.recall !== "function") fail("memory instance recall must be a function");
   assertOptionalFunction(instance.capture, "memory instance capture");
   assertOptionalFunction(instance.forget, "memory instance forget");
+  if (capabilities.capture === true && typeof instance.capture !== "function") {
+    fail("capture-capable memory instance capture must be a function");
+  }
+  if (capabilities.forget === true && typeof instance.forget !== "function") {
+    fail("forget-capable memory instance forget must be a function");
+  }
 }
 
 export function assertMonoAgentModuleExport(
@@ -193,14 +218,32 @@ function assertCapabilities(value: unknown): void {
 
 function assertBooleanCapabilities(
   value: unknown,
-  names: readonly string[],
+  requiredNames: readonly string[],
+  optionalNames: readonly string[],
   label: string,
 ): Record<string, unknown> {
-  const capabilities = requireRecord(value, label);
-  for (const name of names) {
-    if (typeof capabilities[name] !== "boolean") fail(`${label}.${name} must be a boolean`);
+  const capabilities = requirePlainRecord(value, label);
+  const allowedNames = new Set([...requiredNames, ...optionalNames]);
+  for (const key of Reflect.ownKeys(capabilities)) {
+    if (typeof key !== "string") fail(`${label} contains an unknown symbol key`);
+    if (UNSAFE_KEYS.has(key)) fail(`${label} contains unsafe key ${JSON.stringify(key)}`);
+    if (!allowedNames.has(key)) fail(`${label} contains unknown key ${JSON.stringify(key)}`);
   }
-  return capabilities;
+
+  const detached: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const name of requiredNames) {
+    const capability = requireOwnDataProperty(capabilities, name, label);
+    if (typeof capability !== "boolean") fail(`${label}.${name} must be a boolean`);
+    detached[name] = capability;
+  }
+  for (const name of optionalNames) {
+    const capability = optionalOwnDataProperty(capabilities, name, label);
+    if (capability !== undefined && typeof capability !== "boolean") {
+      fail(`${label}.${name} must be a boolean when present`);
+    }
+    if (capability !== undefined) detached[name] = capability;
+  }
+  return detached;
 }
 
 function assertSchemaAnnotations(jsonSchema: Record<string, unknown>): void {
@@ -260,6 +303,37 @@ function requireRecord(value: unknown, label: string): Record<string, unknown> {
     fail(`${label} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function requirePlainRecord(value: unknown, label: string): Record<string, unknown> {
+  const record = requireRecord(value, label);
+  const prototype = Object.getPrototypeOf(record);
+  if (prototype !== Object.prototype && prototype !== null) {
+    fail(`${label} must be a plain object`);
+  }
+  return record;
+}
+
+function requireOwnDataProperty(
+  value: Record<string, unknown>,
+  key: string,
+  label: string,
+): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined) fail(`${label}.${key} is required`);
+  if (!("value" in descriptor)) fail(`${label}.${key} must be a data property`);
+  return descriptor.value;
+}
+
+function optionalOwnDataProperty(
+  value: Record<string, unknown>,
+  key: string,
+  label: string,
+): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  if (descriptor === undefined) return undefined;
+  if (!("value" in descriptor)) fail(`${label}.${key} must be a data property`);
+  return descriptor.value;
 }
 
 function requireNonEmptyString(value: unknown, label: string): asserts value is string {

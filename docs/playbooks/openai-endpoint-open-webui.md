@@ -78,4 +78,4 @@ The same settings can be supplied via environment variables (`MONO_AGENT_*`); se
 - [Sessions & concurrency](/runtime/sessions-concurrency/)
 - [Runtime backends](/runtime/backends/)
 - [Environment variables](/config/env-vars/)
-- [mono-agent composer skill](https://github.com/robertsreberski/mono-agent/blob/main/packages/agent-app/skills/mono-agent-composer/SKILL.md)
+- [Quickstart](/getting-started/quickstart/)

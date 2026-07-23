@@ -225,6 +225,7 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
             case "activity":
             case "attachment":
             case "ask-user":
+            case "approval":
               throw new HttpError(502, "unsupported_reply_event", `OpenAI Chat Completions cannot represent the ${event.type} reply event.`);
             default:
               rejectUnknownReplyEvent(event);

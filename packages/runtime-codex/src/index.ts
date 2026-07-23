@@ -1,6 +1,7 @@
 import { defineRuntimeModule } from "@mono-agent/module-sdk";
 
 import { parseRuntimeCodexConfig, runtimeCodexJsonSchema, type RuntimeCodexConfig } from "./config.js";
+import { validateRuntimeCodexModel } from "./model.js";
 import { createRuntimeCodex } from "./runtime.js";
 
 export type { RuntimeCodexConfig } from "./config.js";
@@ -16,6 +17,7 @@ export const monoAgentModule = defineRuntimeModule({
     capabilities: [],
   },
   schema: { jsonSchema: runtimeCodexJsonSchema, parse: parseRuntimeCodexConfig },
+  validateModel: validateRuntimeCodexModel,
   create(context) {
     return createRuntimeCodex({
       config: context.config,

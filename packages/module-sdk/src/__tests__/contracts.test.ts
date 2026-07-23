@@ -65,6 +65,7 @@ const channel: Channel = {
     attachments: true,
     liveInput: true,
     askUser: true,
+    approvals: true,
     proactive: true,
     runtimeControl: true,
     verbatim: true,

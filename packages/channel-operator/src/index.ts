@@ -58,6 +58,7 @@ function createOperatorModuleChannel(
     attachments: true,
     liveInput: context.host.offerLiveInput !== undefined,
     askUser: context.host.answerAsk !== undefined,
+    approvals: false,
     proactive: context.host.openConversation !== undefined,
     runtimeControl: true,
     verbatim: false,

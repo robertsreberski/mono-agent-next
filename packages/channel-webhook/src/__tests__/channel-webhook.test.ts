@@ -411,6 +411,7 @@ describe("mono-agent channel module", () => {
     });
     moduleChannels.add(channel);
     expect(() => assertChannelInstanceCompliance(channel)).not.toThrow();
+    expect(channel.capabilities.approvals).toBe(false);
 
     await channel.start?.({ signal: lifecycle.signal });
     expect(channel.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/webhook\/invoke$/u);

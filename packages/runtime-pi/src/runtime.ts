@@ -43,6 +43,7 @@ import type {
 import type { RuntimePiConfig } from "./config.js";
 import { parsePiModelReference } from "./config.js";
 import { ReadOnlyPiCredentialStore, redactRuntimePiText, resolveRuntimePiPath } from "./credentials.js";
+import { runtimePiNativeTools } from "./model.js";
 import { createRuntimePiModelRegistry, type RuntimePiModelRegistry } from "./models.js";
 import {
   RuntimePiSessionManager,
@@ -243,7 +244,16 @@ function runtimeToolResultToPiContent(content: readonly RuntimeToolResultPart[])
   for (const part of content) {
     if (part.type === "text") result.push({ type: "text", text: part.text });
     else if (part.type === "json") result.push({ type: "text", text: JSON.stringify(part.value) });
-    else if (part.mediaType.startsWith("image/")) {
+    else if (part.type === "artifact") {
+      const reference = [
+        `[Tool artifact ${JSON.stringify(part.ref.id)}`,
+        `(${part.ref.mediaType}, ${String(part.ref.sizeBytes)} bytes, ${part.ref.sha256})]`,
+      ].join(" ");
+      result.push({
+        type: "text",
+        text: part.preview === undefined ? reference : `${part.preview}\n${reference}`,
+      });
+    } else if (part.mediaType.startsWith("image/")) {
       result.push({
         type: "image",
         data: typeof part.data === "string" ? part.data : Buffer.from(part.data).toString("base64"),
@@ -336,6 +346,7 @@ function exactCapabilities(attachments: boolean): RuntimeCapabilities {
     structuredOutput: false,
     sandbox: false,
     sessions: true,
+    artifactResults: true,
     liveInput: true,
   };
 }
@@ -405,6 +416,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
       structuredOutput: false,
       sandbox: false,
       sessions: true,
+      artifactResults: true,
       liveInput: true,
     },
 
@@ -469,10 +481,15 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
       return diagnostics;
     },
 
-    async validateModel(model, signal) {
+    async preflightModel({ model, signal }) {
+      signal.throwIfAborted();
       try {
         const capabilities = await registry.capabilities(model, signal);
-        return { supported: true, capabilities: exactCapabilities(capabilities.attachments) };
+        return {
+          supported: true,
+          capabilities: exactCapabilities(capabilities.attachments),
+          nativeTools: runtimePiNativeTools,
+        };
       } catch (error) {
         if (signal.aborted) throw signal.reason ?? error;
         return {

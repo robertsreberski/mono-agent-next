@@ -1,8 +1,25 @@
-import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 
+import {
+  type RuntimeModelValidation,
+  type RuntimeModuleDefinition,
+} from "@mono-agent/module-sdk";
+
+import {
+  AuthorityReadError,
+  decodeAuthorityText,
+  DEFAULT_AUTHORITY_MAX_BYTES,
+  readAuthorityFile,
+  type AuthorityFileSnapshot,
+} from "./authority-read.js";
 import { AgentConfigError, type AgentConfigIssue, errorMessage } from "./errors.js";
-import { loadSelectedModules, validateLoadedModuleReferences } from "./module-loader.js";
+import {
+  loadSelectedModules,
+  moduleConfigFor,
+  validateLoadedModuleReferences,
+} from "./module-loader.js";
+import { parseProjectMcpConfig, type ProjectMcpConfig } from "./mcp.js";
+import { normalizeRuntimeModelValidation } from "./runtime-result-normalizer.js";
 import type {
   AgentConfig,
   AgentLoadOptions,
@@ -30,7 +47,10 @@ const TOP_LEVEL_KEYS = new Set([
   "policy",
 ]);
 
+export const MAX_CONTEXT_BYTES = 1_000_000;
+
 const environments = new WeakMap<LoadedAgentConfig, Readonly<Record<string, string | undefined>>>();
+const validatedConfigs = new WeakSet<LoadedAgentConfig>();
 
 export async function loadAgentConfig(
   configPath: string,
@@ -39,12 +59,24 @@ export async function loadAgentConfig(
   const absoluteConfigPath = resolve(configPath);
   const configDirectory = dirname(absoluteConfigPath);
   const projectRoot = resolve(options.projectRoot ?? configDirectory);
-  let source: string;
+  let configSnapshot: AuthorityFileSnapshot;
   try {
-    source = await readFile(absoluteConfigPath, "utf8");
+    configSnapshot = await readAuthorityFile(absoluteConfigPath, {
+      maxBytes: DEFAULT_AUTHORITY_MAX_BYTES,
+      requireSingleLink: true,
+    });
   } catch (error) {
     throw new AgentConfigError(`Could not read agent config ${absoluteConfigPath}`, [
       { path: "$", message: errorMessage(error), code: "config_read" },
+    ]);
+  }
+
+  let source: string;
+  try {
+    source = decodeAuthorityText(configSnapshot);
+  } catch (error) {
+    throw new AgentConfigError(`Agent config is not valid UTF-8: ${absoluteConfigPath}`, [
+      { path: "$", message: errorMessage(error), code: "invalid_utf8" },
     ]);
   }
 
@@ -62,8 +94,10 @@ export async function loadAgentConfig(
     throw new AgentConfigError(`Agent config is invalid: ${absoluteConfigPath}`, issues);
   }
   const raw = candidate as AgentConfig;
+  const paths = resolveAgentPaths(raw, configDirectory);
+  const environment = snapshotEnvironment(options.environment ?? process.env);
+  const projectMcp = await loadProjectMcpSnapshot(paths.mcpConfig, environment);
   const selections = collectModuleSelections(raw);
-  const environment = options.environment ?? process.env;
   let modules: readonly LoadedAgentModule[];
   try {
     modules = await loadSelectedModules({ projectRoot, selections, environment });
@@ -77,18 +111,90 @@ export async function loadAgentConfig(
   if (referenceIssues.length > 0) {
     throw new AgentConfigError(`Selected module references are invalid: ${absoluteConfigPath}`, referenceIssues);
   }
+  const routeIssues = validateRuntimeRoutes(raw, modules);
+  if (routeIssues.length > 0) {
+    throw new AgentConfigError(`Configured runtime routes are invalid: ${absoluteConfigPath}`, routeIssues);
+  }
 
-  const paths = resolveAgentPaths(raw, configDirectory);
   const loaded: LoadedAgentConfig = deepFreeze({
     configPath: absoluteConfigPath,
     configDirectory,
     projectRoot,
     raw,
     paths,
+    sources: {
+      config: configSnapshot.source,
+      ...(projectMcp.source === undefined ? {} : { mcp: projectMcp.source }),
+    },
+    mcp: projectMcp.config,
     modules,
   });
+  validatedConfigs.add(loaded);
   environments.set(loaded, environment);
   return loaded;
+}
+
+function validateRuntimeRoutes(
+  config: AgentConfig,
+  modules: readonly LoadedAgentModule[],
+): readonly AgentConfigIssue[] {
+  const issues: AgentConfigIssue[] = [];
+  const seen = new Set<string>();
+  const routes = [config.routing.primary, ...config.routing.fallbacks];
+  for (const [index, route] of routes.entries()) {
+    const routePath = index === 0 ? "routing.primary" : `routing.fallbacks.${index - 1}`;
+    const key = `${route.runtime}\0${route.model}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const loaded = modules.find((module) =>
+      module.slot === "runtime" && module.instanceId === route.runtime);
+    if (loaded === undefined) continue;
+    const definition = loaded.definition as RuntimeModuleDefinition;
+    if (definition.validateModel === undefined) continue;
+    let validation: RuntimeModelValidation;
+    try {
+      const rawValidation = definition.validateModel({
+        model: route.model,
+        config: moduleConfigFor(loaded),
+      });
+      if (isPromiseLike(rawValidation)) {
+        throw new TypeError("runtime definition validateModel must be synchronous");
+      }
+      validation = normalizeRuntimeModelValidation(
+        rawValidation,
+        "runtime definition validateModel result",
+      );
+    } catch (error) {
+      issues.push({
+        path: `${routePath}.model`,
+        message: errorMessage(error),
+        code: "runtime_model_validation",
+      });
+      continue;
+    }
+    if (!validation.supported) {
+      issues.push({
+        path: `${routePath}.model`,
+        message: `${loaded.packageName} does not support model ${JSON.stringify(route.model)}`,
+        code: "unsupported_model",
+      });
+      continue;
+    }
+    if ((validation.nativeTools?.length ?? 0) > 0) {
+      issues.push({
+        path: `${routePath}.model`,
+        message: `${loaded.packageName} advertises native tools that Core cannot yet govern`,
+        code: "unsupported_native_tools",
+      });
+    }
+  }
+  return issues;
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return typeof value === "object"
+    && value !== null
+    && typeof Reflect.get(value, "then") === "function";
 }
 
 export async function validateAgentConfig(
@@ -111,15 +217,22 @@ export function environmentFor(config: LoadedAgentConfig): Readonly<Record<strin
 }
 
 export function isLoadedAgentConfig(value: unknown): value is LoadedAgentConfig {
-  if (!isRecord(value)) return false;
-  return typeof value.configPath === "string" && isRecord(value.raw) && Array.isArray(value.modules);
+  return isRecord(value) && validatedConfigs.has(value as unknown as LoadedAgentConfig);
 }
 
 export async function ensureLoadedAgentConfig(
   value: string | LoadedAgentConfig,
   options: AgentLoadOptions = {},
 ): Promise<LoadedAgentConfig> {
-  return typeof value === "string" ? loadAgentConfig(value, options) : value;
+  if (typeof value === "string") return loadAgentConfig(value, options);
+  if (isLoadedAgentConfig(value)) return value;
+  throw new AgentConfigError("Loaded agent config is not a validated Core snapshot", [
+    {
+      path: "$",
+      message: "pass the exact object returned by loadAgentConfig or validateAgentConfig",
+      code: "unvalidated_snapshot",
+    },
+  ]);
 }
 
 export interface ModuleSelection {
@@ -247,7 +360,19 @@ function validateContext(value: unknown, issues: AgentConfigIssue[]): void {
       if (value.skills.disclosure !== undefined) {
         expectEnum(value.skills.disclosure, ["full", "index"], "context.skills.disclosure", issues);
       }
-      if (value.skills.maxBytes !== undefined) expectPositiveInteger(value.skills.maxBytes, "context.skills.maxBytes", issues);
+      if (value.skills.maxBytes !== undefined) {
+        expectPositiveInteger(value.skills.maxBytes, "context.skills.maxBytes", issues);
+        if (typeof value.skills.maxBytes === "number"
+          && Number.isSafeInteger(value.skills.maxBytes)
+          && value.skills.maxBytes > MAX_CONTEXT_BYTES) {
+          issue(
+            issues,
+            "context.skills.maxBytes",
+            `must not exceed the hard context ceiling of ${MAX_CONTEXT_BYTES} bytes`,
+            "range",
+          );
+        }
+      }
     }
   }
   if (value.mcp !== undefined && expectRecord(value.mcp, "context.mcp", issues)) {
@@ -279,8 +404,22 @@ function validatePolicy(value: unknown, issues: AgentConfigIssue[]): void {
     }
   }
   if (expectRecord(value.approvals, "policy.approvals", issues)) {
-    rejectUnknown(value.approvals, new Set(["default"]), "policy.approvals", issues);
+    rejectUnknown(value.approvals, new Set(["default", "timeoutMs"]), "policy.approvals", issues);
     expectEnum(value.approvals.default, ["allow", "ask", "deny"], "policy.approvals.default", issues);
+    if (value.approvals.timeoutMs !== undefined) {
+      expectPositiveInteger(value.approvals.timeoutMs, "policy.approvals.timeoutMs", issues);
+      if (
+        typeof value.approvals.timeoutMs === "number"
+        && value.approvals.timeoutMs > 3_600_000
+      ) {
+        issue(
+          issues,
+          "policy.approvals.timeoutMs",
+          "must be at most 3600000",
+          "range",
+        );
+      }
+    }
   }
   if (!expectRecord(value.sandbox, "policy.sandbox", issues)) return;
   if (value.sandbox.mode === "off") {
@@ -410,6 +549,59 @@ function expectIanaTimeZone(value: unknown, path: string, issues: AgentConfigIss
 
 function issue(issues: AgentConfigIssue[], path: string, message: string, code: string): void {
   issues.push({ path, message, code });
+}
+
+function snapshotEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+): Readonly<Record<string, string | undefined>> {
+  const snapshot: Record<string, string | undefined> = Object.create(null) as Record<string, string | undefined>;
+  for (const [name, value] of Object.entries(environment)) snapshot[name] = value;
+  return Object.freeze(snapshot);
+}
+
+async function loadProjectMcpSnapshot(
+  path: string | undefined,
+  environment: Readonly<Record<string, string | undefined>>,
+): Promise<{
+  readonly source?: AuthorityFileSnapshot["source"];
+  readonly config: ProjectMcpConfig;
+}> {
+  if (path === undefined) {
+    return { config: deepFreeze({ mcpServers: {} }) };
+  }
+  let snapshot: AuthorityFileSnapshot;
+  try {
+    snapshot = await readAuthorityFile(path, {
+      maxBytes: DEFAULT_AUTHORITY_MAX_BYTES,
+      requireSingleLink: true,
+    });
+  } catch (error) {
+    throw new AgentConfigError(`Could not read project MCP config ${path}`, [
+      {
+        path: "context.mcp.configPath",
+        message: errorMessage(error),
+        code: error instanceof AuthorityReadError && error.code === "too_large"
+          ? "mcp_config_size"
+          : "mcp_config",
+      },
+    ]);
+  }
+  let candidate: unknown;
+  try {
+    candidate = JSON.parse(decodeAuthorityText(snapshot)) as unknown;
+  } catch (error) {
+    throw new AgentConfigError(`Project MCP config is not strict JSON: ${path}`, [
+      {
+        path: "context.mcp.configPath",
+        message: errorMessage(error),
+        code: error instanceof AuthorityReadError ? error.code : "invalid_json",
+      },
+    ]);
+  }
+  return {
+    source: snapshot.source,
+    config: deepFreeze(parseProjectMcpConfig(candidate, environment, path)),
+  };
 }
 
 function deepFreeze<T>(value: T): T {

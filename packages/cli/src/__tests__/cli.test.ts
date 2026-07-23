@@ -20,7 +20,11 @@ const temporaryDirectories: string[] = [];
 
 beforeEach(() => {
   vi.clearAllMocks();
-  core.validateAgentConfig.mockResolvedValue({ ok: true, issues: [] });
+  core.validateAgentConfig.mockResolvedValue({
+    ok: true,
+    issues: [],
+    loaded: { configPath: "/agent/config.json", immutable: true },
+  });
   core.composeAgentConfigSchema.mockResolvedValue({ type: "object", additionalProperties: false });
   core.explainAgentConfig.mockResolvedValue({ path: "routing.primary", source: "config" });
   core.inspectAgent.mockResolvedValue({ agent: { id: "fixture" }, modules: [] });
@@ -92,10 +96,46 @@ describe("runCli", () => {
 
     await expect(result).resolves.toBe(0);
     expect(calls).toEqual(["start", "drain", "stop"]);
+    expect(core.createAgentHost).toHaveBeenCalledWith({
+      configPath: "/agent/config.json",
+      immutable: true,
+    });
     expect(JSON.parse(output.stdout[0]!)).toMatchObject({
       event: "started",
       channels: [{ endpoint: "http://127.0.0.1:3210" }],
     });
+  });
+
+  it("never reloads the config path after validation", async () => {
+    const loaded = Object.freeze({
+      configPath: "/agent/mono-agent.config.json",
+      sourceDigest: "sha256:captured",
+    });
+    core.validateAgentConfig.mockResolvedValue({ ok: true, issues: [], loaded });
+    const host = {
+      startInfo: {
+        agentId: "minimal-example",
+        configPath: loaded.configPath,
+        projectRoot: "/agent",
+        channels: [],
+      },
+      start: vi.fn(async () => undefined),
+      drain: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+    };
+    core.createAgentHost.mockResolvedValue(host);
+    const signals = new TestSignalSource();
+    const output = captureOutput();
+    const result = runCli(["start", "--config", loaded.configPath], {
+      ...output.io,
+      signalSource: signals,
+    });
+
+    await vi.waitFor(() => expect(host.start).toHaveBeenCalledOnce());
+    signals.emit("SIGTERM");
+    await expect(result).resolves.toBe(0);
+    expect(core.createAgentHost).toHaveBeenCalledWith(loaded);
+    expect(core.createAgentHost).not.toHaveBeenCalledWith(loaded.configPath);
   });
 
   it("still stops the host when draining fails", async () => {
