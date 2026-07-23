@@ -6,6 +6,10 @@ import type {
   ClaudeTransportRequest,
   ClaudeTransportResult,
 } from "./transport.js";
+import {
+  ClaudeSessionUnavailableError,
+  isClaudeSessionUnavailable,
+} from "./transport.js";
 
 interface QueryLike extends AsyncIterable<unknown> {
   interrupt(): Promise<unknown>;
@@ -105,24 +109,32 @@ export function createClaudeSdkTransport(options: ClaudeSdkTransportOptions = {}
       const input = new InputQueue();
       input.push(userMessage(request.prompt));
       const abortController = new AbortController();
-      const query = await createQuery({
-        prompt: input,
-        options: {
-          abortController,
-          cwd: request.cwd,
-          env: request.env,
-          model: request.model,
-          includePartialMessages: true,
-          permissionMode: "dontAsk",
-          settingSources: [],
-          tools: [],
-          ...(request.systemPrompt === undefined ? {} : { systemPrompt: request.systemPrompt }),
-          ...(request.sessionId === undefined ? {} : { resume: request.sessionId }),
-          ...(request.maxTurns === undefined ? {} : { maxTurns: request.maxTurns }),
-          ...(request.effort === undefined ? {} : { effort: request.effort }),
-          ...(request.responseSchema === undefined ? {} : { outputFormat: { type: "json_schema", schema: request.responseSchema } }),
-        },
-      });
+      let query: QueryLike;
+      try {
+        query = await createQuery({
+          prompt: input,
+          options: {
+            abortController,
+            cwd: request.cwd,
+            env: request.env,
+            model: request.model,
+            includePartialMessages: true,
+            permissionMode: "dontAsk",
+            settingSources: [],
+            tools: [],
+            ...(request.systemPrompt === undefined ? {} : { systemPrompt: request.systemPrompt }),
+            ...(request.sessionId === undefined ? {} : { resume: request.sessionId }),
+            ...(request.maxTurns === undefined ? {} : { maxTurns: request.maxTurns }),
+            ...(request.effort === undefined ? {} : { effort: request.effort }),
+            ...(request.responseSchema === undefined ? {} : { outputFormat: { type: "json_schema", schema: request.responseSchema } }),
+          },
+        });
+      } catch (error) {
+        if (isClaudeSessionUnavailable(error, request.sessionId)) {
+          throw new ClaudeSessionUnavailableError();
+        }
+        throw error;
+      }
       events.control({
         async interrupt() { await query.interrupt(); },
         async sendInput(text, receivedAt) { return input.push(userMessage(text, receivedAt)); },
@@ -170,11 +182,28 @@ export function createClaudeSdkTransport(options: ClaudeSdkTransportOptions = {}
             if (message.structured_output !== undefined) structuredOutput = message.structured_output as JsonValue;
             stopReason = typeof message.stop_reason === "string" ? message.stop_reason : typeof message.subtype === "string" ? message.subtype : undefined;
             if (message.subtype !== "success") {
-              const errors = Array.isArray(message.errors) ? message.errors.join("; ") : "Claude SDK turn failed";
-              throw new Error(errors);
+              const failures = Array.isArray(message.errors)
+                ? message.errors.filter((value): value is string => typeof value === "string")
+                : [];
+              if (
+                failures.length === 1
+                && isClaudeSessionUnavailable(failures[0], request.sessionId)
+              ) {
+                throw new ClaudeSessionUnavailableError();
+              }
+              throw new Error(
+                failures.length > 0
+                  ? failures.join("; ")
+                  : "Claude SDK turn failed",
+              );
             }
           }
         }
+      } catch (error) {
+        if (isClaudeSessionUnavailable(error, request.sessionId)) {
+          throw new ClaudeSessionUnavailableError();
+        }
+        throw error;
       } finally {
         request.signal.removeEventListener("abort", onAbort);
         input.close();

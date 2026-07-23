@@ -6,7 +6,14 @@ import { StringDecoder } from "node:string_decoder";
 
 import type { RuntimeUsage } from "@mono-agent/module-sdk";
 
-import type { ClaudeTransport, ClaudeTransportEvents, ClaudeTransportRequest, ClaudeTransportResult } from "./transport.js";
+import {
+  ClaudeSessionUnavailableError,
+  isClaudeSessionUnavailable,
+  type ClaudeTransport,
+  type ClaudeTransportEvents,
+  type ClaudeTransportRequest,
+  type ClaudeTransportResult,
+} from "./transport.js";
 
 export interface ProcessLike {
   readonly stdin: NodeJS.WritableStream;
@@ -102,6 +109,7 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
       let finalUsage: RuntimeUsage | undefined;
       let structuredOutput: unknown;
       let providerError: string | undefined;
+      let providerSessionUnavailable = false;
       let chain = Promise.resolve();
       const processLine = (line: string): void => {
         if (Buffer.byteLength(line) > options.maxLineBytes) throw new Error("Claude CLI output exceeds the configured line limit");
@@ -125,7 +133,16 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
             if (message.structured_output !== undefined) structuredOutput = message.structured_output;
             const measured = usage(message.usage);
             if (measured !== undefined) { finalUsage = measured; await events.usage(measured); }
-            if (message.subtype !== "success") providerError = Array.isArray(message.errors) ? message.errors.join("; ") : "Claude CLI turn failed";
+            if (message.subtype !== "success") {
+              const failures = Array.isArray(message.errors)
+                ? message.errors.filter((value): value is string => typeof value === "string")
+                : [];
+              providerSessionUnavailable = failures.length === 1
+                && isClaudeSessionUnavailable(failures[0], request.sessionId);
+              providerError = failures.length > 0
+                ? failures.join("; ")
+                : "Claude CLI turn failed";
+            }
           }
         });
       };
@@ -191,7 +208,20 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
         if (tail.trim() !== "") processLine(tail);
         await chain;
         if (request.signal.aborted) throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
-        if (settled.code !== 0 || providerError !== undefined) throw new Error(providerError ?? (stderr.trim() || `Claude CLI exited ${settled.signal ?? settled.code}`));
+        const processFailure = providerError
+          ?? (stderr.trim() || `Claude CLI exited ${settled.signal ?? settled.code}`);
+        if (
+          providerSessionUnavailable
+          || (
+            settled.code !== 0
+            && isClaudeSessionUnavailable(processFailure, request.sessionId)
+          )
+        ) {
+          throw new ClaudeSessionUnavailableError();
+        }
+        if (settled.code !== 0 || providerError !== undefined) {
+          throw new Error(processFailure);
+        }
         if (sessionId === undefined) throw new Error("Claude CLI completed without a session id");
         return {
           text: streamed === "" ? finalText : streamed,

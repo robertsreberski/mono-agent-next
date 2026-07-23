@@ -84,6 +84,79 @@ export type StateCompareAndSwapResult =
   | { readonly status: "applied"; readonly record: StateRecord }
   | { readonly status: "conflict"; readonly currentVersion?: string };
 
+/**
+ * A read-only precondition evaluated against the transaction's initial
+ * snapshot. `null` requires the key to be absent; a version requires an exact
+ * match.
+ */
+export interface StateTransactionCheck {
+  readonly key: string;
+  readonly expectedVersion: string | null;
+}
+
+/**
+ * An atomic write. Transaction mutations deliberately have no unconditional
+ * form: callers must state whether they expect absence or one exact version.
+ */
+export interface StateTransactionPut {
+  readonly key: string;
+  readonly expectedVersion: string | null;
+  readonly value: Uint8Array;
+}
+
+/**
+ * An atomic delete. `null` asserts absence and therefore applies as a no-op;
+ * a version removes only that exact record.
+ */
+export interface StateTransactionDelete {
+  readonly key: string;
+  readonly expectedVersion: string | null;
+}
+
+export interface StateTransactionRequest {
+  readonly checks: readonly StateTransactionCheck[];
+  readonly puts: readonly StateTransactionPut[];
+  readonly deletes: readonly StateTransactionDelete[];
+  readonly signal: AbortSignal;
+}
+
+export interface StateTransactionConflict {
+  readonly key: string;
+  /** Omitted when the conflicting key does not exist. */
+  readonly currentVersion?: string;
+}
+
+export type StateTransactionResult =
+  | {
+      readonly status: "applied";
+      /** Post-transaction copies for every put, in request order. */
+      readonly records: readonly StateRecord[];
+      /** Existing keys actually removed, in request order. */
+      readonly deletedKeys: readonly string[];
+    }
+  | {
+      readonly status: "conflict";
+      /** Every failed precondition, in checks/puts/deletes request order. */
+      readonly conflicts: readonly StateTransactionConflict[];
+    };
+
+/**
+ * Forward prefix scan. Its opaque cursor binds the exact prefix and last
+ * returned key rather than an offset or store generation, so callers can
+ * continue across intervening commits without repeating earlier keys.
+ */
+export interface StateScanRequest {
+  readonly prefix: string;
+  readonly cursor?: string;
+  readonly limit: number;
+  readonly signal: AbortSignal;
+}
+
+export interface StateScanResult {
+  readonly records: readonly StateRecord[];
+  readonly cursor?: string;
+}
+
 export interface StatePresenceRecord {
   readonly presenceId: string;
   readonly agentId: string;
@@ -153,6 +226,8 @@ export interface StateStore extends ModuleInstance {
   delete(request: StateDeleteRequest): Promise<boolean>;
   list(request: StateListRequest): Promise<StateListResult>;
   compareAndSwap(request: StateCompareAndSwapRequest): Promise<StateCompareAndSwapResult>;
+  transaction(request: StateTransactionRequest): Promise<StateTransactionResult>;
+  scan(request: StateScanRequest): Promise<StateScanResult>;
   upsertPresence(request: StatePresenceUpsertRequest): Promise<StatePresenceRecord>;
   removePresence(request: StatePresenceRemoveRequest): Promise<boolean>;
   listPresence(request: StatePresenceListRequest): Promise<readonly StatePresenceRecord[]>;

@@ -1,6 +1,7 @@
 import type {
   AgentInteractionHandler,
   ApprovalDecision,
+  ArtifactRef,
   ChannelAttachment,
   ChannelDeliveryResult,
   ChannelModuleDefinition,
@@ -9,7 +10,11 @@ import type {
   JsonObject,
   JsonValue,
   MemoryModuleDefinition,
+  RouteIdentity,
+  RuntimeNativeToolEffect,
   RuntimeModuleDefinition,
+  RuntimeRetryability,
+  RuntimeSideEffectStatus,
   TurnMessage,
 } from "@mono-agent/module-sdk";
 
@@ -215,15 +220,204 @@ export interface AgentSubmitInput {
 }
 
 export interface AgentResponse {
+  readonly requestId: string;
+  readonly runId: string;
   readonly conversationId: string;
   readonly runtime: string;
   readonly model: string;
   readonly status: "completed" | "cancelled" | "max-turns";
   readonly text: string;
-  /** Canonical assistant response. `text` remains a compatibility projection. */
-  readonly message?: TurnMessage;
+  /**
+   * Detached public assistant projection. Binary parts, tool internals, and
+   * provider-private session state are available only through their owning
+   * durable boundaries; `text` remains the compatibility projection.
+   */
+  readonly message?: AgentResponseMessage;
+  /** Safe provider-neutral result projection; it never includes a session. */
   readonly output: unknown;
   readonly metadata?: Readonly<Record<string, unknown>>;
+}
+
+/** Text-only, detached assistant message safe to cache and expose publicly. */
+export interface AgentResponseMessage {
+  readonly id?: string;
+  readonly role: "assistant";
+  readonly content: readonly {
+    readonly type: "text";
+    readonly text: string;
+  }[];
+  readonly name?: string;
+  readonly createdAt?: string;
+}
+
+/**
+ * The only durable message content exposed by Core's canonical transcript.
+ * Attachment and generated-file bytes are represented by immutable state
+ * artifacts, never copied into run or transcript records.
+ */
+export type AgentTranscriptContentPart =
+  | {
+      readonly type: "text";
+      readonly text: string;
+    }
+  | {
+      readonly type: "artifact";
+      readonly ref: ArtifactRef;
+      readonly name?: string;
+    };
+
+/**
+ * Compact interaction evidence. It intentionally excludes question prompts,
+ * answers, approval summaries/reasons, and live-input text.
+ */
+export type AgentInteractionEvidence =
+  | {
+      readonly kind: "ask-user";
+      readonly interactionId: string;
+      readonly phase: "requested" | "answered" | "expired" | "cancelled";
+      readonly requestedAt: string;
+      readonly settledAt?: string;
+      readonly questionCount: number;
+      readonly answeredQuestionCount?: number;
+    }
+  | {
+      readonly kind: "approval";
+      readonly interactionId: string;
+      readonly phase: "requested" | "answered" | "expired" | "cancelled";
+      readonly requestedAt: string;
+      readonly settledAt?: string;
+      readonly toolId: string;
+      readonly effects: readonly RuntimeNativeToolEffect[];
+      readonly decision?: "allow_once" | "deny";
+    }
+  | {
+      readonly kind: "live-input";
+      readonly interactionId: string;
+      readonly phase: "applied" | "requeued" | "discarded";
+      readonly receivedAt: string;
+      readonly settledAt: string;
+    };
+
+/**
+ * Provider-neutral evidence for one route attempt. Failure evidence is a
+ * bounded code and safety classification, never a raw provider error or stack.
+ */
+export interface AgentRunAttemptEvidence {
+  readonly attempt: number;
+  readonly route: RouteIdentity;
+  readonly status: "started" | "ineligible" | "failed" | "completed";
+  readonly startedAt: string;
+  readonly endedAt?: string;
+  readonly code?: string;
+  readonly retryability?: RuntimeRetryability;
+  readonly sideEffects?: RuntimeSideEffectStatus;
+}
+
+/**
+ * One canonical, settled transcript entry. Runtime tool arguments/results and
+ * provider-private session metadata belong to run-private state, not replay.
+ */
+export type AgentTranscriptEntry =
+  | {
+      readonly kind: "message";
+      readonly entryId: string;
+      readonly runId: string;
+      readonly requestId: string;
+      readonly conversationId: string;
+      readonly recordedAt: string;
+      readonly role: "user" | "assistant";
+      readonly content: readonly AgentTranscriptContentPart[];
+      readonly route?: RouteIdentity;
+    }
+  | {
+      readonly kind: "interaction";
+      readonly entryId: string;
+      readonly runId: string;
+      readonly requestId: string;
+      readonly conversationId: string;
+      readonly recordedAt: string;
+      readonly evidence: AgentInteractionEvidence;
+      /**
+       * Bounded user-visible question/answer text retained for neutral replay.
+       * The compact run event projection exposes only `evidence`.
+       */
+      readonly content: readonly AgentTranscriptContentPart[];
+    }
+  | {
+      readonly kind: "verbatim";
+      readonly entryId: string;
+      readonly runId: string;
+      readonly requestId: string;
+      readonly conversationId: string;
+      readonly recordedAt: string;
+      readonly role: "user" | "assistant";
+      readonly text: string;
+    };
+
+export type AgentRunStatus =
+  | "running"
+  | "completed"
+  | "cancelled"
+  | "max-turns"
+  | "failed"
+  | "uncertain";
+
+/** A safe, chronological event projection for programmatic run inspection. */
+export type AgentRunEvent =
+  | {
+      readonly type: "admitted";
+      readonly runId: string;
+      readonly sequence: number;
+      readonly recordedAt: string;
+    }
+  | {
+      readonly type: "attempt";
+      readonly runId: string;
+      readonly sequence: number;
+      readonly recordedAt: string;
+      readonly attempt: AgentRunAttemptEvidence;
+    }
+  | {
+      readonly type: "interaction";
+      readonly runId: string;
+      readonly sequence: number;
+      readonly recordedAt: string;
+      readonly evidence: AgentInteractionEvidence;
+    }
+  | {
+      readonly type: "settled";
+      readonly runId: string;
+      readonly sequence: number;
+      readonly recordedAt: string;
+      readonly status: Exclude<AgentRunStatus, "running">;
+      readonly transcriptRevision?: string;
+      readonly failureCode?: string;
+    };
+
+export interface AgentRunSummary {
+  readonly runId: string;
+  readonly requestId: string;
+  readonly conversationId: string;
+  readonly status: AgentRunStatus;
+  readonly startedAt: string;
+  readonly updatedAt: string;
+  readonly endedAt?: string;
+  readonly attempts: readonly AgentRunAttemptEvidence[];
+  readonly transcriptRevision?: string;
+  readonly failureCode?: string;
+}
+
+/** A fixed-size newest-first page. `nextCursor` is opaque to callers. */
+export interface AgentRunHistoryPage {
+  readonly runs: readonly AgentRunSummary[];
+  readonly nextCursor?: string;
+}
+
+export interface AgentRunRecord {
+  readonly summary: AgentRunSummary;
+  readonly events: readonly AgentRunEvent[];
+  /** Canonical entries owned by this run, not the whole conversation. */
+  readonly transcript: readonly AgentTranscriptEntry[];
 }
 
 export interface AgentConversationSummary {
@@ -310,6 +504,8 @@ export interface AgentHost {
   ): Promise<AgentApprovalAnswerStatus>;
   conversations(): Promise<readonly AgentConversationSummary[]>;
   replay(conversationId: string): Promise<AgentConversationReplay>;
+  listRuns(cursor?: string): Promise<AgentRunHistoryPage>;
+  readRun(runId: string): Promise<AgentRunRecord | undefined>;
   configView(): Promise<AgentConfigView>;
   deliver(channelInstanceId: string, message: ChannelOutboundMessage): Promise<ChannelDeliveryResult>;
   runModuleCommand(moduleInstanceId: string, commandName: string, input?: unknown): Promise<AgentModuleCommandResult>;

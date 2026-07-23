@@ -12,6 +12,7 @@ import {
   type RuntimeCapabilities,
   type RuntimeModelValidation,
   type RuntimeNativeToolDescriptor,
+  type RouteIdentity,
   type RuntimeSession,
   type RuntimeToolCall,
   type RuntimeToolResult,
@@ -23,6 +24,8 @@ import {
   type TurnContentPart,
   type TurnMessage,
 } from "@mono-agent/module-sdk";
+
+import { cloneIntrinsicUint8Array } from "./binary.js";
 
 export const RUNTIME_RESULT_MAX_BYTES = 64 * 1024 * 1024;
 export const RUNTIME_RESULT_MAX_ITEMS = 20_000;
@@ -68,6 +71,12 @@ export interface RuntimeTurnEventBoundary {
   violation: Error | undefined;
 }
 
+/** Core-owned identity that every provider-private session must match exactly. */
+export interface RuntimeSessionBoundaryAuthority {
+  readonly conversationId: string;
+  readonly route: RouteIdentity;
+}
+
 export function createRuntimeTurnEventBoundary(): RuntimeTurnEventBoundary {
   return {
     bytes: 0,
@@ -80,7 +89,10 @@ export function createRuntimeTurnEventBoundary(): RuntimeTurnEventBoundary {
  * Copy and validate one result returned across the public open-runtime seam.
  * The returned graph shares no mutable byte arrays or objects with the runtime.
  */
-export function normalizeRuntimeTurnResult(value: unknown): RuntimeTurnResult {
+export function normalizeRuntimeTurnResult(
+  value: unknown,
+  authority: RuntimeSessionBoundaryAuthority,
+): RuntimeTurnResult {
   const state = boundaryState(RUNTIME_RESULT_MAX_BYTES, "result");
   const result = record(value, "runtime turn result");
   assertKeys(
@@ -116,7 +128,13 @@ export function normalizeRuntimeTurnResult(value: unknown): RuntimeTurnResult {
     : normalizeUsage(result.usage, state);
   const session = result.session === undefined
     ? undefined
-    : normalizeSession(result.session, state);
+    : normalizeSession(result.session, state, authority);
+  if (usage?.sessionEvicted === true && session !== undefined) {
+    fail(
+      "runtime turn result.session",
+      "must be absent when usage.sessionEvicted is true",
+    );
+  }
   const metadata = result.metadata === undefined
     ? undefined
     : normalizeBoundedJsonObject(
@@ -154,6 +172,7 @@ export function normalizeRuntimeTurnResult(value: unknown): RuntimeTurnResult {
 export function normalizeRuntimeTurnEvent(
   value: unknown,
   boundary: RuntimeTurnEventBoundary,
+  authority: RuntimeSessionBoundaryAuthority,
 ): RuntimeTurnEvent {
   if (boundary.violation !== undefined) {
     throw new TypeError("runtime event stream boundary was already violated", {
@@ -170,7 +189,7 @@ export function normalizeRuntimeTurnEvent(
 
   try {
     const state = boundaryState(RUNTIME_EVENT_MAX_BYTES, "event");
-    const event = normalizeTurnEvent(value, state);
+    const event = normalizeTurnEvent(value, state, authority);
     if (boundary.bytes + state.bytes > RUNTIME_EVENT_STREAM_MAX_BYTES) {
       throw new RangeError(
         `runtime event stream exceeds the ${RUNTIME_EVENT_STREAM_MAX_BYTES}-byte cumulative boundary`,
@@ -328,6 +347,7 @@ export function normalizeRuntimeModelValidation(
 function normalizeTurnEvent(
   value: unknown,
   state: BoundaryState,
+  authority: RuntimeSessionBoundaryAuthority,
 ): RuntimeTurnEvent {
   const path = "runtime turn event";
   const input = record(value, path);
@@ -391,7 +411,7 @@ function normalizeTurnEvent(
     assertKeys(input, ["type", "session"], path);
     return {
       type,
-      session: normalizeSession(input.session, state, `${path}.session`),
+      session: normalizeSession(input.session, state, authority, `${path}.session`),
     };
   }
   assertKeys(input, ["type", "compaction"], path);
@@ -416,7 +436,11 @@ function normalizeRuntimeCapabilitiesValue(
     "sandbox",
     "sessions",
   ] as const;
-  assertKeys(input, [...required, "artifactResults", "liveInput"], path);
+  assertKeys(
+    input,
+    [...required, "artifactResults", "liveInput", "maxTurns", "maxOutputTokens"],
+    path,
+  );
   const normalized = {} as Record<(typeof required)[number], boolean>;
   for (const key of required) {
     const capability = ownDataProperty(input, key, path, true);
@@ -431,11 +455,21 @@ function normalizeRuntimeCapabilitiesValue(
   if (liveInput !== undefined && typeof liveInput !== "boolean") {
     fail(`${path}.liveInput`, "must be boolean when present");
   }
+  const maxTurns = ownDataProperty(input, "maxTurns", path);
+  if (maxTurns !== undefined && typeof maxTurns !== "boolean") {
+    fail(`${path}.maxTurns`, "must be boolean when present");
+  }
+  const maxOutputTokens = ownDataProperty(input, "maxOutputTokens", path);
+  if (maxOutputTokens !== undefined && typeof maxOutputTokens !== "boolean") {
+    fail(`${path}.maxOutputTokens`, "must be boolean when present");
+  }
   charge(state, 64, path);
   return {
     ...normalized,
     artifactResults: artifactResults === true,
     ...(liveInput === undefined ? {} : { liveInput }),
+    maxTurns: maxTurns === true,
+    maxOutputTokens: maxOutputTokens === true,
   };
 }
 
@@ -742,6 +776,7 @@ function normalizeToolResultPart(
 function normalizeSession(
   value: unknown,
   state: BoundaryState,
+  authority: RuntimeSessionBoundaryAuthority,
   path = "runtime turn result.session",
 ): RuntimeSession {
   const input = record(value, path);
@@ -749,19 +784,33 @@ function normalizeSession(
     input,
     [
       "id",
+      "conversationId",
       "route",
-      "runtimeInstanceId",
-      "provider",
-      "model",
       "createdAt",
       "expiresAt",
       "metadata",
     ],
     path,
   );
-  const route = input.route === undefined
-    ? undefined
-    : normalizeRoute(input.route, state, `${path}.route`);
+  const id = ownDataProperty(input, "id", path, true);
+  const conversation = ownDataProperty(input, "conversationId", path, true);
+  const routeValue = ownDataProperty(input, "route", path, true);
+  const conversationId = text(
+    conversation,
+    `${path}.conversationId`,
+    MAX_IDENTIFIER_BYTES,
+    state,
+  );
+  const route = normalizeRoute(routeValue, state, `${path}.route`);
+  if (conversationId !== authority.conversationId) {
+    fail(`${path}.conversationId`, "does not match the active conversation");
+  }
+  if (
+    route.runtimeInstanceId !== authority.route.runtimeInstanceId
+    || route.model !== authority.route.model
+  ) {
+    fail(`${path}.route`, "does not match the active runtime route");
+  }
   const metadata = input.metadata === undefined
     ? undefined
     : normalizeBoundedJsonObject(
@@ -770,55 +819,25 @@ function normalizeSession(
       `${path}.metadata`,
       RUNTIME_RESULT_MAX_METADATA_BYTES,
     );
+  const createdAt = input.createdAt === undefined
+    ? undefined
+    : canonicalTimestampValue(input.createdAt, `${path}.createdAt`, state);
+  const expiresAt = input.expiresAt === undefined
+    ? undefined
+    : canonicalTimestampValue(input.expiresAt, `${path}.expiresAt`, state);
+  if (
+    createdAt !== undefined
+    && expiresAt !== undefined
+    && Date.parse(expiresAt) <= Date.parse(createdAt)
+  ) {
+    fail(`${path}.expiresAt`, "must be later than createdAt");
+  }
   return {
-    id: text(input.id, `${path}.id`, MAX_IDENTIFIER_BYTES, state),
-    ...(route === undefined ? {} : { route }),
-    ...(input.runtimeInstanceId === undefined
-      ? {}
-      : {
-          runtimeInstanceId: text(
-            input.runtimeInstanceId,
-            `${path}.runtimeInstanceId`,
-            MAX_IDENTIFIER_BYTES,
-            state,
-          ),
-        }),
-    ...(input.provider === undefined
-      ? {}
-      : {
-          provider: text(
-            input.provider,
-            `${path}.provider`,
-            MAX_IDENTIFIER_BYTES,
-            state,
-            true,
-          ),
-        }),
-    ...(input.model === undefined
-      ? {}
-      : { model: text(input.model, `${path}.model`, MAX_IDENTIFIER_BYTES, state) }),
-    ...(input.createdAt === undefined
-      ? {}
-      : {
-          createdAt: text(
-            input.createdAt,
-            `${path}.createdAt`,
-            MAX_IDENTIFIER_BYTES,
-            state,
-            true,
-          ),
-        }),
-    ...(input.expiresAt === undefined
-      ? {}
-      : {
-          expiresAt: text(
-            input.expiresAt,
-            `${path}.expiresAt`,
-            MAX_IDENTIFIER_BYTES,
-            state,
-            true,
-          ),
-        }),
+    id: text(id, `${path}.id`, MAX_IDENTIFIER_BYTES, state),
+    conversationId,
+    route,
+    ...(createdAt === undefined ? {} : { createdAt }),
+    ...(expiresAt === undefined ? {} : { expiresAt }),
     ...(metadata === undefined ? {} : { metadata }),
   };
 }
@@ -1068,16 +1087,30 @@ function fileData(
   state: BoundaryState,
   requireBytes = false,
 ): Uint8Array | string {
-  if (value instanceof Uint8Array) {
-    if (value.byteLength > RUNTIME_RESULT_MAX_FILE_BYTES) {
-      fail(path, `exceeds the ${RUNTIME_RESULT_MAX_FILE_BYTES}-byte file boundary`);
+  if (typeof value !== "string") {
+    let bytes: Uint8Array;
+    try {
+      bytes = cloneIntrinsicUint8Array(
+        value,
+        path,
+        Math.min(
+          RUNTIME_RESULT_MAX_FILE_BYTES,
+          RUNTIME_RESULT_MAX_TOTAL_FILE_BYTES - state.fileBytes,
+          state.maxBytes - state.bytes,
+        ),
+      );
+    } catch (error) {
+      fail(
+        path,
+        error instanceof Error ? error.message : "must be stable Uint8Array byte data",
+      );
     }
-    state.fileBytes += value.byteLength;
+    state.fileBytes += bytes.byteLength;
     if (state.fileBytes > RUNTIME_RESULT_MAX_TOTAL_FILE_BYTES) {
       fail(path, `exceeds the ${RUNTIME_RESULT_MAX_TOTAL_FILE_BYTES}-byte total file boundary`);
     }
-    charge(state, value.byteLength, path);
-    return new Uint8Array(value);
+    charge(state, bytes.byteLength, path);
+    return bytes;
   }
   if (!requireBytes && typeof value === "string") {
     const bytes = utf8Bytes(value);
@@ -1137,6 +1170,19 @@ function text(
   if (bytes > maxBytes) fail(path, `exceeds the ${maxBytes}-byte boundary`);
   charge(state, bytes, path);
   return value;
+}
+
+function canonicalTimestampValue(
+  value: unknown,
+  path: string,
+  state: BoundaryState,
+): string {
+  const timestamp = text(value, path, MAX_IDENTIFIER_BYTES, state);
+  const parsed = new Date(timestamp);
+  if (!Number.isFinite(parsed.valueOf()) || parsed.toISOString() !== timestamp) {
+    fail(path, "must be a canonical ISO timestamp");
+  }
+  return timestamp;
 }
 
 function enumValue<const T extends readonly string[]>(

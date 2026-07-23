@@ -37,6 +37,8 @@ export function claudeRuntimeCapabilities(
     structuredOutput: true,
     sandbox: false,
     sessions: true,
+    maxTurns: true,
+    maxOutputTokens: false,
     liveInput: config.mode === "sdk",
   };
 }

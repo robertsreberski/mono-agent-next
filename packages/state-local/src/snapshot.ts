@@ -7,6 +7,12 @@ import type { ResolvedStateLocalConfig } from "./config.js";
 import { StateLocalError } from "./errors.js";
 
 const SNAPSHOT_SCHEMA = "mono-agent.state-local.v1";
+const STATE_SNAPSHOT_MAX_BYTES = 2_147_483_647;
+const STATE_SNAPSHOT_FIXED_BYTES = 4_096;
+const STATE_RECORD_FIXED_BYTES = 256;
+const STATE_KEY_MAX_CODE_UNITS = 1_024;
+const JSON_STRING_MAX_BYTES_PER_CODE_UNIT = 6;
+const INTERNAL_PRESENCE_SUFFIX_MAX_CODE_UNITS = 512;
 export const INTERNAL_STATE_PREFIX = "@mono-agent/internal/";
 export const INTERNAL_PRESENCE_PREFIX = `${INTERNAL_STATE_PREFIX}presence/`;
 
@@ -40,6 +46,29 @@ interface DiskSnapshot {
 
 export function emptySnapshot(): StateSnapshot {
   return { generation: 0, listGeneration: 0, records: new Map(), totalBytes: 0 };
+}
+
+/**
+ * Maximum encoded snapshot accepted by both the durable writer and startup
+ * reader for one configuration. The bound covers worst-case JSON escaping for
+ * every key and per-record base64 padding, then caps at the descriptor log's
+ * absolute byte ceiling.
+ */
+export function stateSnapshotByteLimit(limits: ResolvedStateLocalConfig): number {
+  const maximumBase64Bytes = 4 * (
+    Math.ceil(limits.maxTotalBytes / 3) +
+    Math.max(0, limits.maxRecords - 1)
+  );
+  const maximumKeyBytes =
+    limits.maxRecords * STATE_KEY_MAX_CODE_UNITS * JSON_STRING_MAX_BYTES_PER_CODE_UNIT;
+  const maximumRecordBytes = limits.maxRecords * STATE_RECORD_FIXED_BYTES;
+  return Math.min(
+    STATE_SNAPSHOT_MAX_BYTES,
+    STATE_SNAPSHOT_FIXED_BYTES +
+      maximumBase64Bytes +
+      maximumKeyBytes +
+      maximumRecordBytes,
+  );
 }
 
 export function parseSnapshot(bytes: Uint8Array, limits: ResolvedStateLocalConfig): StateSnapshot {
@@ -126,7 +155,7 @@ export function parseSnapshot(bytes: Uint8Array, limits: ResolvedStateLocalConfi
   };
 }
 
-export function serializeSnapshot(snapshot: StateSnapshot): Buffer {
+export function serializeSnapshot(snapshot: StateSnapshot, maximumBytes: number): Buffer {
   const records: DiskRecord[] = [...snapshot.records.values()]
     .sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0))
     .map((record) => ({
@@ -141,7 +170,14 @@ export function serializeSnapshot(snapshot: StateSnapshot): Buffer {
     listGeneration: snapshot.listGeneration,
     records,
   };
-  return Buffer.from(`${JSON.stringify(disk)}\n`, "utf8");
+  const bytes = Buffer.from(`${JSON.stringify(disk)}\n`, "utf8");
+  if (bytes.byteLength > maximumBytes) {
+    throw new StateLocalError(
+      "STATE_LIMIT_EXCEEDED",
+      "The encoded local state snapshot exceeds its durable byte bound.",
+    );
+  }
+  return bytes;
 }
 
 export function toStateRecord(record: StoredRecord): StateRecord {
@@ -157,7 +193,7 @@ export function validateStateKey(value: unknown): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
-    value.length > 1_024 ||
+    value.length > STATE_KEY_MAX_CODE_UNITS ||
     value.startsWith("/") ||
     value.endsWith("/") ||
     value.includes("//") ||
@@ -179,7 +215,7 @@ export function validateStatePrefix(value: unknown): string {
   if (value === undefined || value === "") return "";
   if (
     typeof value !== "string" ||
-    value.length > 1_024 ||
+    value.length > STATE_KEY_MAX_CODE_UNITS ||
     value.startsWith("/") ||
     value.includes("//") ||
     /[\u0000-\u001f\u007f\\]/u.test(value)
@@ -195,7 +231,12 @@ export function validateStatePrefix(value: unknown): string {
 
 export function validateExpectedVersion(value: unknown): string | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== "string" || !/^v[1-9][0-9]*$/u.test(value)) {
+  if (
+    typeof value !== "string" ||
+    value.length > 17 ||
+    !/^v[1-9][0-9]*$/u.test(value) ||
+    !Number.isSafeInteger(Number(value.slice(1)))
+  ) {
     throw new StateLocalError("STATE_VERSION_MISMATCH", "expectedVersion is not a valid state version.");
   }
   return value;
@@ -222,7 +263,14 @@ export function isInternalStateKey(key: string): boolean {
 
 export function presenceStorageKey(presenceId: string): string {
   const normalized = validatePresenceString(presenceId, "presenceId", 256);
-  return `${INTERNAL_PRESENCE_PREFIX}${Buffer.from(normalized, "utf8").toString("base64url")}`;
+  const suffix = Buffer.from(normalized, "utf8").toString("base64url");
+  if (suffix.length > INTERNAL_PRESENCE_SUFFIX_MAX_CODE_UNITS) {
+    throw new StateLocalError(
+      "STATE_LIMIT_EXCEEDED",
+      "Presence presenceId exceeds the durable key byte limit.",
+    );
+  }
+  return `${INTERNAL_PRESENCE_PREFIX}${suffix}`;
 }
 
 export function encodePresenceRecord(input: StatePresenceRecord): Buffer {
@@ -305,7 +353,11 @@ function validateStoredVersion(value: unknown, generation: number): string {
 function validateStoredStateKey(value: unknown): string {
   if (typeof value === "string" && value.startsWith(INTERNAL_PRESENCE_PREFIX)) {
     const suffix = value.slice(INTERNAL_PRESENCE_PREFIX.length);
-    if (suffix.length === 0 || suffix.length > 512 || !/^[A-Za-z0-9_-]+$/u.test(suffix)) {
+    if (
+      suffix.length === 0
+      || suffix.length > INTERNAL_PRESENCE_SUFFIX_MAX_CODE_UNITS
+      || !/^[A-Za-z0-9_-]+$/u.test(suffix)
+    ) {
       throw new StateLocalError("STATE_INVALID_KEY", "Internal presence key is invalid.");
     }
     return value;

@@ -117,7 +117,7 @@ export function assertRuntimeInstanceCompliance(value: unknown): asserts value i
       "sandbox",
       "sessions",
     ],
-    ["artifactResults", "liveInput"],
+    ["artifactResults", "liveInput", "maxTurns", "maxOutputTokens"],
     "runtime capabilities",
   );
   if (typeof instance.runTurn !== "function") fail("runtime instance runTurn must be a function");

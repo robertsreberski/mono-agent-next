@@ -1,12 +1,43 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 
+export type JsonRpcId = number | string;
+
 export interface JsonRpcMessage {
-  readonly id?: number;
+  readonly id?: JsonRpcId;
   readonly method?: string;
   readonly params?: unknown;
   readonly result?: unknown;
   readonly error?: unknown;
+}
+
+export interface JsonRpcServerRequest extends JsonRpcMessage {
+  readonly id: JsonRpcId;
+  readonly method: string;
+}
+
+export type JsonRpcServerRequestHandler = (
+  request: JsonRpcServerRequest,
+) => Promise<unknown>;
+
+export class JsonRpcRequestError extends Error {
+  readonly code: number | undefined;
+  readonly rpcMessage: string | undefined;
+
+  constructor(value: unknown) {
+    const error = value !== null && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+    const rpcMessage = typeof error.message === "string" ? error.message : undefined;
+    super(rpcMessage === undefined
+      ? "Codex app-server request failed"
+      : `Codex app-server request failed: ${rpcMessage}`);
+    this.name = "JsonRpcRequestError";
+    this.code = typeof error.code === "number" && Number.isSafeInteger(error.code)
+      ? error.code
+      : undefined;
+    this.rpcMessage = rpcMessage;
+  }
 }
 
 export interface ProcessLike {
@@ -36,6 +67,8 @@ export interface JsonRpcProcessOptions {
   readonly spawnProcess?: SpawnProcess;
 }
 
+const MAX_QUEUED_SERVER_REQUESTS = 16;
+
 function defaultSpawn(command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; shell: false }): ProcessLike {
   return spawn(command, [...args], { ...options, stdio: ["pipe", "pipe", "pipe"] }) as ChildProcessWithoutNullStreams;
 }
@@ -48,6 +81,9 @@ export class JsonRpcProcess {
   readonly #pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
   readonly #listeners = new Set<(message: JsonRpcMessage) => void>();
   readonly #decoder = new StringDecoder("utf8");
+  #serverRequestHandler: JsonRpcServerRequestHandler | undefined;
+  #serverRequestQueue: Promise<void> = Promise.resolve();
+  #queuedServerRequests = 0;
   #nextId = 1;
   #stdout = "";
   #stderr = "";
@@ -80,6 +116,16 @@ export class JsonRpcProcess {
   subscribe(listener: (message: JsonRpcMessage) => void): () => void {
     this.#listeners.add(listener);
     return () => this.#listeners.delete(listener);
+  }
+
+  handleServerRequests(handler: JsonRpcServerRequestHandler): () => void {
+    if (this.#serverRequestHandler !== undefined) {
+      throw new Error("Codex app-server request handler is already registered");
+    }
+    this.#serverRequestHandler = handler;
+    return () => {
+      if (this.#serverRequestHandler === handler) this.#serverRequestHandler = undefined;
+    };
   }
 
   async request(method: string, params: unknown): Promise<unknown> {
@@ -130,6 +176,7 @@ export class JsonRpcProcess {
   }
 
   async #write(message: JsonRpcMessage): Promise<void> {
+    if (this.#closed) throw new Error("Codex app-server is not running");
     const line = `${JSON.stringify(message)}\n`;
     if (Buffer.byteLength(line) > this.#maxLineBytes) throw new Error("Codex app-server request exceeds the configured line limit");
     await new Promise<void>((resolve, reject) => {
@@ -154,28 +201,106 @@ export class JsonRpcProcess {
         return;
       }
       if (line.trim() === "") continue;
-      let message: JsonRpcMessage;
+      let parsed: unknown;
       try {
-        message = JSON.parse(line) as JsonRpcMessage;
+        parsed = JSON.parse(line) as unknown;
       } catch {
         this.#fail(new Error("Codex app-server emitted malformed JSONL"));
         return;
       }
-      if (message.id !== undefined && ("result" in message || "error" in message) && message.method === undefined) {
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        this.#fail(new Error("Codex app-server emitted a malformed JSON-RPC message"));
+        return;
+      }
+      const message = parsed as JsonRpcMessage;
+      if (
+        message.id !== undefined
+        && !(
+          (typeof message.id === "number" && Number.isSafeInteger(message.id))
+          || (
+            typeof message.id === "string"
+            && message.id.length > 0
+            && message.id.length <= 256
+            && !/[\u0000-\u001f\u007f]/u.test(message.id)
+          )
+        )
+      ) {
+        this.#fail(new Error("Codex app-server emitted an invalid JSON-RPC id"));
+        return;
+      }
+      if (message.method !== undefined && typeof message.method !== "string") {
+        this.#fail(new Error("Codex app-server emitted an invalid JSON-RPC method"));
+        return;
+      }
+      if (
+        typeof message.id === "number"
+        && ("result" in message || "error" in message)
+        && message.method === undefined
+      ) {
         const pending = this.#pending.get(message.id);
         if (pending === undefined) continue;
         this.#pending.delete(message.id);
         clearTimeout(pending.timer);
-        if (message.error !== undefined) pending.reject(new Error(`Codex app-server request failed: ${JSON.stringify(message.error)}`));
+        if (message.error !== undefined) pending.reject(new JsonRpcRequestError(message.error));
         else pending.resolve(message.result);
         continue;
       }
       if (message.id !== undefined && message.method !== undefined) {
-        void this.#write({ id: message.id, error: { code: -32601, message: `Unsupported server request: ${message.method}` } })
-          .catch((error: unknown) => this.#fail(error instanceof Error ? error : new Error(String(error))));
+        const request: JsonRpcServerRequest = {
+          id: message.id,
+          method: message.method,
+          ...(message.params === undefined ? {} : { params: message.params }),
+        };
+        this.#enqueueServerRequest(request);
+        continue;
       }
       for (const listener of this.#listeners) listener(message);
     }
+  }
+
+  #enqueueServerRequest(request: JsonRpcServerRequest): void {
+    if (this.#queuedServerRequests >= MAX_QUEUED_SERVER_REQUESTS) {
+      this.#fail(new Error(
+        `Codex app-server exceeded the ${MAX_QUEUED_SERVER_REQUESTS}-request server queue limit`,
+      ));
+      return;
+    }
+    this.#queuedServerRequests += 1;
+    const run = async (): Promise<void> => {
+      try {
+        if (this.#closed) return;
+        const handler = this.#serverRequestHandler;
+        if (handler === undefined) {
+          await this.#write({
+            id: request.id,
+            error: {
+              code: -32601,
+              message: `Unsupported server request: ${request.method}`,
+            },
+          });
+          return;
+        }
+        try {
+          const result = await handler(request);
+          if (!this.#closed) await this.#write({ id: request.id, result });
+        } catch {
+          if (!this.#closed) {
+            await this.#write({
+              id: request.id,
+              error: {
+                code: -32000,
+                message: "Codex server request failed closed",
+              },
+            });
+          }
+        }
+      } catch (error) {
+        this.#fail(error instanceof Error ? error : new Error(String(error)));
+      } finally {
+        this.#queuedServerRequests -= 1;
+      }
+    };
+    this.#serverRequestQueue = this.#serverRequestQueue.then(run, run);
   }
 
   #onStderr(chunk: Buffer | string): void {

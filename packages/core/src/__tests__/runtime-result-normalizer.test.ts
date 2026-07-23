@@ -17,6 +17,22 @@ import {
   normalizeRuntimeTurnResult,
 } from "../runtime-result-normalizer.js";
 
+const SESSION_AUTHORITY = Object.freeze({
+  conversationId: "conversation-1",
+  route: Object.freeze({
+    runtimeInstanceId: "main",
+    model: "fixture:model",
+  }),
+});
+
+const normalizeResult = (value: unknown) =>
+  normalizeRuntimeTurnResult(value, SESSION_AUTHORITY);
+
+const normalizeEvent = (
+  value: unknown,
+  boundary: ReturnType<typeof createRuntimeTurnEventBoundary>,
+) => normalizeRuntimeTurnEvent(value, boundary, SESSION_AUTHORITY);
+
 describe("runtime result boundary", () => {
   it("copies a complete valid first-party result without sharing mutable bytes", () => {
     const file = new Uint8Array([1, 2, 3]);
@@ -52,13 +68,14 @@ describe("runtime result boundary", () => {
       },
       session: {
         id: "session-1",
+        conversationId: "conversation-1",
         route: { runtimeInstanceId: "main", model: "fixture:model" },
         metadata: { provider: "fixture" },
       },
       metadata: { stopReason: "end_turn" },
     };
 
-    const normalized = normalizeRuntimeTurnResult(value);
+    const normalized = normalizeResult(value);
     expect(normalized).toEqual(value);
     file[0] = 99;
     const part = normalized.message?.content[1];
@@ -67,22 +84,112 @@ describe("runtime result boundary", () => {
       : []).toEqual([1, 2, 3]);
   });
 
+  it("enforces intrinsic runtime file lengths and rejects typed-array proxies", () => {
+    const completedFile = (data: unknown) => ({
+      status: "completed",
+      message: {
+        role: "assistant",
+        content: [{
+          type: "file",
+          mediaType: "application/octet-stream",
+          data,
+          name: "result.bin",
+        }],
+      },
+    });
+    const oversized = new Uint8Array(RUNTIME_RESULT_MAX_FILE_BYTES + 1);
+    Object.defineProperty(oversized, "byteLength", {
+      configurable: true,
+      value: 0,
+    });
+
+    expect(() => normalizeResult(completedFile(oversized))).toThrow(
+      new RegExp(`${String(RUNTIME_RESULT_MAX_FILE_BYTES)}-byte boundary`, "u"),
+    );
+    expect(() => normalizeResult(
+      completedFile(new Proxy(new Uint8Array([1, 2, 3]), {})),
+    )).toThrow(/stable Uint8Array byte data/u);
+  });
+
+  it("requires an exact own-data conversation and route on every private session", () => {
+    const resultWithSession = (session: unknown) => ({
+      status: "completed",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+      },
+      session,
+    });
+    const valid = {
+      id: "session-1",
+      conversationId: SESSION_AUTHORITY.conversationId,
+      route: SESSION_AUTHORITY.route,
+    };
+
+    expect(() => normalizeResult(resultWithSession({ id: "legacy-session" })))
+      .toThrow(/conversationId.*required/u);
+    expect(() => normalizeResult(resultWithSession({
+      ...valid,
+      runtimeInstanceId: "main",
+    }))).toThrow(/unknown key "runtimeInstanceId"/u);
+    expect(() => normalizeResult(resultWithSession({
+      ...valid,
+      conversationId: "other-conversation",
+    }))).toThrow(/conversationId.*active conversation/u);
+    expect(() => normalizeResult(resultWithSession({
+      ...valid,
+      route: { runtimeInstanceId: "fallback", model: "fixture:model" },
+    }))).toThrow(/route.*active runtime route/u);
+    expect(() => normalizeResult(resultWithSession({
+      ...valid,
+      route: { runtimeInstanceId: "main", model: "fixture:other" },
+    }))).toThrow(/route.*active runtime route/u);
+
+    let conversationReads = 0;
+    const accessorSession = {
+      id: "session-1",
+      route: SESSION_AUTHORITY.route,
+      get conversationId() {
+        conversationReads += 1;
+        return SESSION_AUTHORITY.conversationId;
+      },
+    };
+    expect(() => normalizeResult(resultWithSession(accessorSession)))
+      .toThrow(/conversationId.*data property/u);
+    expect(conversationReads).toBe(0);
+
+    let routeReads = 0;
+    const accessorRoute = {
+      get runtimeInstanceId() {
+        routeReads += 1;
+        return "main";
+      },
+      model: "fixture:model",
+    };
+    expect(() => normalizeResult(resultWithSession({
+      id: "session-1",
+      conversationId: SESSION_AUTHORITY.conversationId,
+      route: accessorRoute,
+    }))).toThrow(/route\.runtimeInstanceId.*data property/u);
+    expect(routeReads).toBe(0);
+  });
+
   it("rejects oversized text, part collections, metadata, files, and whole results", () => {
     const completed = (content: readonly unknown[], metadata?: unknown) => ({
       status: "completed",
       message: { role: "assistant", content },
       ...(metadata === undefined ? {} : { metadata }),
     });
-    expect(() => normalizeRuntimeTurnResult(completed([
+    expect(() => normalizeResult(completed([
       { type: "text", text: "x".repeat(RUNTIME_RESULT_MAX_TEXT_BYTES + 1) },
     ]))).toThrow(/text.*byte boundary/u);
-    expect(() => normalizeRuntimeTurnResult(completed(
+    expect(() => normalizeResult(completed(
       Array.from(
         { length: RUNTIME_RESULT_MAX_MESSAGE_PARTS + 1 },
         () => ({ type: "text", text: "x" }),
       ),
     ))).toThrow(/content.*item boundary/u);
-    expect(() => normalizeRuntimeTurnResult(completed([{
+    expect(() => normalizeResult(completed([{
       type: "tool-result",
       result: {
         callId: "call-1",
@@ -92,19 +199,21 @@ describe("runtime result boundary", () => {
         ),
       },
     }]))).toThrow(/result\.content.*item boundary/u);
-    expect(() => normalizeRuntimeTurnResult(completed(
+    expect(() => normalizeResult(completed(
       [{ type: "text", text: "ok" }],
       { detail: "x".repeat(RUNTIME_RESULT_MAX_METADATA_BYTES + 1) },
     ))).toThrow(/metadata.*byte boundary/u);
-    expect(() => normalizeRuntimeTurnResult(completed([{
+    expect(() => normalizeResult(completed([{
       type: "file",
       mediaType: "application/octet-stream",
       data: new Uint8Array(RUNTIME_RESULT_MAX_FILE_BYTES + 1),
       name: "large.bin",
-    }]))).toThrow(/file boundary/u);
+    }]))).toThrow(
+      new RegExp(`${String(RUNTIME_RESULT_MAX_FILE_BYTES)}-byte boundary`, "u"),
+    );
 
     const repeated = "x".repeat(RUNTIME_RESULT_MAX_TEXT_BYTES);
-    expect(() => normalizeRuntimeTurnResult(completed(
+    expect(() => normalizeResult(completed(
       Array.from(
         { length: Math.floor(RUNTIME_RESULT_MAX_BYTES / repeated.length) + 1 },
         () => ({ type: "text", text: repeated }),
@@ -135,9 +244,9 @@ describe("runtime result boundary", () => {
         }],
       },
     });
-    expect(() => normalizeRuntimeTurnResult(result(unsafe))).toThrow(/unsafe key/u);
-    expect(() => normalizeRuntimeTurnResult(result(nested))).toThrow(/JSON depth boundary/u);
-    expect(() => normalizeRuntimeTurnResult({
+    expect(() => normalizeResult(result(unsafe))).toThrow(/unsafe key/u);
+    expect(() => normalizeResult(result(nested))).toThrow(/JSON depth boundary/u);
+    expect(() => normalizeResult({
       status: "completed",
       message: {
         role: "assistant",
@@ -163,7 +272,7 @@ describe("runtime result boundary", () => {
 
   it("rejects sparse and accessor-backed message or tool-result content", () => {
     const sparse = new Array<unknown>(1);
-    expect(() => normalizeRuntimeTurnResult({
+    expect(() => normalizeResult({
       status: "completed",
       message: { role: "assistant", content: sparse },
     })).toThrow(/content\.0.*required/u);
@@ -178,7 +287,7 @@ describe("runtime result boundary", () => {
         return { type: "text", text: "unsafe" };
       },
     });
-    expect(() => normalizeRuntimeTurnResult({
+    expect(() => normalizeResult({
       status: "completed",
       message: {
         role: "assistant",
@@ -199,7 +308,7 @@ describe("runtime result boundary", () => {
       mediaType: "image/png",
       data: "x",
     };
-    expect(() => normalizeRuntimeTurnResult({
+    expect(() => normalizeResult({
       status: "completed",
       message: { role: "assistant", content: [changingPart] },
     })).toThrow(/content(?:\.0|\[0\])\.type.*data property/u);
@@ -215,7 +324,7 @@ describe("runtime live boundary", () => {
       compaction: { compacted: false },
     };
     const boundary = createRuntimeTurnEventBoundary();
-    const normalized = normalizeRuntimeTurnEvent({
+    const normalized = normalizeEvent({
       type: "usage",
       usage,
     }, boundary);
@@ -233,13 +342,34 @@ describe("runtime live boundary", () => {
     expect(boundary).toMatchObject({ events: 1, violation: undefined });
   });
 
+  it("rejects and poisons a session event for another conversation or route", () => {
+    const boundary = createRuntimeTurnEventBoundary();
+    expect(() => normalizeEvent({
+      type: "session",
+      session: {
+        id: "session-1",
+        conversationId: "other-conversation",
+        route: SESSION_AUTHORITY.route,
+      },
+    }, boundary)).toThrow(/conversationId.*active conversation/u);
+    expect(boundary.violation).toBeInstanceOf(Error);
+    expect(() => normalizeEvent({
+      type: "session",
+      session: {
+        id: "session-1",
+        conversationId: SESSION_AUTHORITY.conversationId,
+        route: SESSION_AUTHORITY.route,
+      },
+    }, boundary)).toThrow(/already violated/u);
+  });
+
   it("poisons an event stream after a single, cumulative-byte, or count violation", () => {
     const oversized = createRuntimeTurnEventBoundary();
-    expect(() => normalizeRuntimeTurnEvent({
+    expect(() => normalizeEvent({
       type: "text-delta",
       delta: "x".repeat(RUNTIME_RESULT_MAX_TEXT_BYTES + 1),
     }, oversized)).toThrow(/delta.*byte boundary/u);
-    expect(() => normalizeRuntimeTurnEvent({
+    expect(() => normalizeEvent({
       type: "text-delta",
       delta: "valid",
     }, oversized)).toThrow(/already violated/u);
@@ -249,7 +379,7 @@ describe("runtime live boundary", () => {
     let cumulativeFailure: unknown;
     for (let index = 0; index < 100; index += 1) {
       try {
-        normalizeRuntimeTurnEvent({ type: "text-delta", delta: chunk }, cumulative);
+        normalizeEvent({ type: "text-delta", delta: chunk }, cumulative);
       } catch (error) {
         cumulativeFailure = error;
         break;
@@ -262,12 +392,12 @@ describe("runtime live boundary", () => {
 
     const count = createRuntimeTurnEventBoundary();
     for (let index = 0; index < RUNTIME_EVENT_STREAM_MAX_EVENTS; index += 1) {
-      normalizeRuntimeTurnEvent({
+      normalizeEvent({
         type: "compaction",
         compaction: { compacted: false },
       }, count);
     }
-    expect(() => normalizeRuntimeTurnEvent({
+    expect(() => normalizeEvent({
       type: "compaction",
       compaction: { compacted: false },
     }, count)).toThrow(/event boundary/u);
@@ -444,6 +574,8 @@ describe("runtime capability boundary", () => {
       sessions: true,
       artifactResults: false,
       liveInput: false,
+      maxTurns: false,
+      maxOutputTokens: false,
     });
     expect(normalized).not.toBe(capabilities);
     expect(normalizeRuntimeCapabilities({

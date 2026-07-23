@@ -7,7 +7,12 @@ import {
   RuntimeTurnError,
   type AgentInteractionHandler,
   type ApprovalDecision,
+  type ArtifactRef,
 } from "@mono-agent/module-sdk";
+import type {
+  StateScanRequest,
+  StateTransactionRequest,
+} from "@mono-agent/module-sdk/internal";
 
 const mcpMocks = vi.hoisted(() => ({
   close: undefined as (() => Promise<void>) | undefined,
@@ -30,6 +35,7 @@ import {
   completed,
   createFixtureProject,
   minimalConfig,
+  runtimeSession,
   type FixtureController,
   type FixtureProject,
 } from "./fixture.js";
@@ -984,8 +990,7 @@ describe("agent host lifecycle", () => {
       askError = error;
     }
     expect(askError).toMatchObject({ message: "Every eligible runtime route failed for conversation ask" });
-    expect(askError).toBeInstanceOf(AggregateError);
-    expect((askError as AggregateError).errors).toEqual([
+    expect(runExecutionRouteErrors(askError)).toEqual([
       expect.objectContaining({ message: expect.stringMatching(/approval interaction handler unavailable/u) }),
     ]);
     expect(turns).toBe(1);
@@ -1350,6 +1355,100 @@ describe("turn admission and routing", () => {
     await host.stop();
   });
 
+  it("snapshots nested admission authority before asynchronous execution", async () => {
+    const runtime = `@fixture/runtime-snapshot-${randomUUID().toLowerCase()}`;
+    let observedRequest: unknown;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create() {
+          return {
+            ...runtimeInstance(async (request, context) => {
+              observedRequest = request;
+              if (
+                !isRecord(context)
+                || typeof context.requestApproval !== "function"
+              ) {
+                throw new Error("native approval callback is unavailable");
+              }
+              const decision = await context.requestApproval({
+                interactionId: "snapshot-approval",
+                callId: "snapshot-call",
+                toolId: "runtime__shell",
+                displayName: "Shell",
+                effects: ["execute"],
+                summary: "Run a native command",
+                requestedAt: new Date().toISOString(),
+              }, new AbortController().signal);
+              return completed(
+                isRecord(decision) && decision.decision === "deny"
+                  ? "denied"
+                  : "unexpectedly allowed",
+              );
+            }),
+            preflightModel() {
+              return {
+                supported: true,
+                nativeTools: [{
+                  id: "runtime__shell",
+                  displayName: "Shell",
+                  effects: ["execute"],
+                  approval: "core-callback",
+                  sandbox: "runtime-enforced",
+                }],
+              };
+            },
+          };
+        },
+      },
+    }]);
+    await project.writeConfig(minimalConfig(runtime, {
+      policy: {
+        tools: { default: "allow", deny: [] },
+        approvals: { default: "allow" },
+        sandbox: { mode: "off" },
+      },
+    }));
+    const host = await createAgentHost(project.configPath);
+    const responseSchema = {
+      type: "object",
+      properties: { answer: { type: "string" } },
+    };
+    const metadata = { nested: { value: "original" } };
+    const requiredCapabilities = ["structuredOutput"];
+    const toolPolicy = { deny: ["runtime__shell"] };
+
+    const response = host.submit({
+      requestId: "nested-admission-snapshot",
+      conversationId: "nested-admission-snapshot",
+      text: "execute only under the admitted policy",
+      responseSchema,
+      metadata,
+      requiredCapabilities,
+      toolPolicy,
+    });
+    responseSchema.properties.answer.type = "number";
+    metadata.nested.value = "mutated";
+    requiredCapabilities.push("unknown-mutated-capability");
+    toolPolicy.deny.length = 0;
+
+    await expect(response).resolves.toMatchObject({
+      status: "completed",
+      text: "denied",
+    });
+    expect(observedRequest).toMatchObject({
+      options: {
+        responseSchema: {
+          type: "object",
+          properties: { answer: { type: "string" } },
+        },
+      },
+      metadata: { nested: { value: "original" } },
+    });
+    await host.stop();
+  });
+
   it("expires idle sessions and never retains provider sessions for isolated proactive runs", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-22T10:00:00.000Z"));
@@ -1363,7 +1462,10 @@ describe("turn admission and routing", () => {
         create: () => runtimeInstance(async (request) => {
           observedSessions.push(isRecord(request) ? request.session : undefined);
           sequence += 1;
-          return { ...(completed(`answer-${sequence}`) as Record<string, unknown>), session: { id: `session-${sequence}` } };
+          return {
+            ...(completed(`answer-${sequence}`) as Record<string, unknown>),
+            session: runtimeSession(`session-${sequence}`, request),
+          };
         }),
       },
     }]);
@@ -1383,6 +1485,17 @@ describe("turn admission and routing", () => {
     vi.setSystemTime(new Date("2026-07-22T10:00:02.000Z"));
     await host.submit({ requestId: "normal-3", conversationId: "normal", text: "three" });
     await host.submit({
+      requestId: "normal-proactive",
+      conversationId: "normal",
+      text: "isolated proactive turn",
+      metadata: { triggerId: "cron-normal" },
+    });
+    await host.submit({
+      requestId: "normal-4",
+      conversationId: "normal",
+      text: "resume normal lineage",
+    });
+    await host.submit({
       requestId: "proactive-1",
       conversationId: "trigger:cron:event",
       text: "proactive-one",
@@ -1395,8 +1508,18 @@ describe("turn admission and routing", () => {
 
     expect(observedSessions).toEqual([
       undefined,
-      { id: "session-1" },
+      {
+        id: "session-1",
+        conversationId: "normal",
+        route: { runtimeInstanceId: "main", model: "fixture:model" },
+      },
       undefined,
+      undefined,
+      {
+        id: "session-3",
+        conversationId: "normal",
+        route: { runtimeInstanceId: "main", model: "fixture:model" },
+      },
       undefined,
       undefined,
     ]);
@@ -1414,7 +1537,10 @@ describe("turn admission and routing", () => {
       controller: {
         create: () => runtimeInstance(async (request) => {
           observedSessions.push(isRecord(request) ? request.session : undefined);
-          return { ...(completed("ok") as Record<string, unknown>), session: { id: "daily-session" } };
+          return {
+            ...(completed("ok") as Record<string, unknown>),
+            session: runtimeSession("daily-session", request),
+          };
         }),
       },
     }]);
@@ -1507,6 +1633,90 @@ describe("turn admission and routing", () => {
     await host.stop();
   });
 
+  it("rejects an invalid submit signal without leaking pending capacity or the conversation tail", async () => {
+    const runtime = `@fixture/runtime-invalid-signal-${randomUUID().toLowerCase()}`;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create: () => runtimeInstance(async (request) => completed(requestText(request))),
+      },
+    }]);
+    await project.writeConfig(minimalConfig(runtime));
+    const host = await createAgentHost(project.configPath, {
+      maxConcurrentTurns: 1,
+      maxPendingTurns: 1,
+    });
+
+    await expect(host.submit({
+      requestId: "invalid-signal",
+      conversationId: "signal-cleanup",
+      text: "bad",
+      signal: {} as AbortSignal,
+    })).rejects.toThrow(/signal must be an AbortSignal/u);
+    await expect(host.health()).resolves.toMatchObject({ pending: 0, active: 0 });
+    await expect(host.submit({
+      requestId: "valid-after-invalid-signal",
+      conversationId: "signal-cleanup",
+      text: "good",
+    })).resolves.toMatchObject({ text: "good" });
+    await host.stop();
+  });
+
+  it("uses intrinsic submit attachment bytes and rejects typed-array proxies", async () => {
+    const runtime = `@fixture/runtime-hostile-bytes-${randomUUID().toLowerCase()}`;
+    let providerCalls = 0;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create: () => runtimeInstance(async () => {
+          providerCalls += 1;
+          return completed("unexpected");
+        }),
+      },
+    }]);
+    await project.writeConfig(minimalConfig(runtime));
+    const host = await createAgentHost(project.configPath);
+
+    const oversized = new Uint8Array(25_000_001);
+    Object.defineProperty(oversized, "byteLength", {
+      configurable: true,
+      value: 0,
+    });
+    await expect(host.submit({
+      requestId: "shadowed-attachment-length",
+      conversationId: "hostile-submit-bytes",
+      text: "",
+      attachments: [{
+        id: "shadowed",
+        kind: "file",
+        name: "shadowed.bin",
+        mediaType: "application/octet-stream",
+        sizeBytes: 0,
+        data: oversized,
+      }],
+    })).rejects.toThrow(/25000000-byte boundary/u);
+
+    const proxied = new Proxy(new Uint8Array([1, 2, 3]), {});
+    await expect(host.submit({
+      requestId: "proxied-attachment",
+      conversationId: "hostile-submit-bytes",
+      text: "",
+      attachments: [{
+        id: "proxy",
+        kind: "file",
+        name: "proxy.bin",
+        mediaType: "application/octet-stream",
+        sizeBytes: 3,
+        data: proxied,
+      }],
+    })).rejects.toThrow(/stable Uint8Array byte data/u);
+    expect(providerCalls).toBe(0);
+    await expect(host.health()).resolves.toMatchObject({ pending: 0, active: 0 });
+    await host.stop();
+  });
+
   it("uses ordered fallback and does not fallback after a committed effect", async () => {
     const suffix = randomUUID().toLowerCase();
     const primary = `@fixture/runtime-primary-${suffix}`;
@@ -1573,6 +1783,96 @@ describe("turn admission and routing", () => {
     await host.stop();
   });
 
+  it("classifies one accessor-free runtime-error snapshot and never re-reads it for fallback", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const primary = `@fixture/runtime-hostile-error-${suffix}`;
+    const fallback = `@fixture/runtime-hostile-error-fallback-${suffix}`;
+    let accessorReads = 0;
+    let fallbackCalls = 0;
+    const project = await fixture([
+      {
+        name: primary,
+        kind: "runtime",
+        controller: {
+          create: () => runtimeInstance(async () => {
+            const failure = new Error("hostile classification");
+            Object.defineProperties(failure, {
+              code: {
+                get() {
+                  accessorReads += 1;
+                  return "provider_failed";
+                },
+              },
+              retryability: {
+                get() {
+                  accessorReads += 1;
+                  return "retryable";
+                },
+              },
+              sideEffects: {
+                get() {
+                  accessorReads += 1;
+                  return accessorReads < 3 ? "committed" : "none";
+                },
+              },
+            });
+            throw failure;
+          }),
+        },
+      },
+      {
+        name: fallback,
+        kind: "runtime",
+        controller: {
+          create: () => runtimeInstance(async () => {
+            fallbackCalls += 1;
+            return completed("must not run");
+          }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(primary, {
+      runtimes: { primary: { $use: primary }, fallback: { $use: fallback } },
+      routing: {
+        primary: { runtime: "primary", model: "fixture:primary" },
+        fallbacks: [{ runtime: "fallback", model: "fixture:fallback" }],
+      },
+    }));
+    const host = await createAgentHost(project.configPath);
+
+    let failure: unknown;
+    try {
+      await host.submit({
+        requestId: "hostile-runtime-error",
+        conversationId: "hostile-runtime-error",
+        text: "go",
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      name: "RunExecutionError",
+      status: "uncertain",
+      failureCode: "runtime-effects-uncertain",
+    });
+    expect(accessorReads).toBe(0);
+    expect(fallbackCalls).toBe(0);
+    const runId = isRecord(failure) && typeof failure.runId === "string"
+      ? failure.runId
+      : "";
+    await expect(host.readRun(runId)).resolves.toMatchObject({
+      summary: {
+        attempts: [{
+          status: "failed",
+          code: "runtime-attempt-failed",
+          retryability: "unknown",
+          sideEffects: "unknown",
+        }],
+      },
+    });
+    await host.stop();
+  });
+
   it("fails closed instead of falling back when a runtime omits settlement metadata", async () => {
     const suffix = randomUUID().toLowerCase();
     const primary = `@fixture/runtime-unknown-${suffix}`;
@@ -1615,9 +1915,9 @@ describe("turn admission and routing", () => {
       name: runtime,
       kind: "runtime",
       controller: {
-        create: () => runtimeInstance(async () => ({
+        create: () => runtimeInstance(async (request) => ({
           ...(completed("must not settle") as Record<string, unknown>),
-          session: { id: "" },
+          session: runtimeSession("", request),
           usage: { inputTokens: -1, outputTokens: 1 },
         })),
       },
@@ -1629,9 +1929,11 @@ describe("turn admission and routing", () => {
       requestId: "invalid-result-1",
       conversationId: "invalid-result",
       text: "go",
-    })).rejects.toThrow(
-      /Every eligible runtime route failed/u,
-    );
+    })).rejects.toMatchObject({
+      name: "RunExecutionError",
+      status: "uncertain",
+      failureCode: "runtime-result-unsettled",
+    });
     expect((await host.replay("invalid-result")).messages).toEqual([]);
     await host.stop();
   });
@@ -1663,7 +1965,11 @@ describe("turn admission and routing", () => {
       requestId: "oversized-result-1",
       conversationId: "oversized-result",
       text: "go",
-    })).rejects.toThrow(/Every eligible runtime route failed/u);
+    })).rejects.toMatchObject({
+      name: "RunExecutionError",
+      status: "uncertain",
+      failureCode: "runtime-result-unsettled",
+    });
     expect([...state.records.keys()].filter((key) =>
       key.startsWith("core/conversations/"))).toEqual([]);
     expect((await host.replay("oversized-result")).messages).toEqual([]);
@@ -1717,7 +2023,11 @@ describe("turn admission and routing", () => {
       requestId: "event-boundary-1",
       conversationId: "event-boundary",
       text: "go",
-    })).rejects.toThrow(/Every eligible runtime route failed/u);
+    })).rejects.toMatchObject({
+      name: "RunExecutionError",
+      status: "uncertain",
+      failureCode: "runtime-result-unsettled",
+    });
     expect(fallbackCalls).toBe(0);
     expect((await host.replay("event-boundary")).messages).toEqual([]);
     await host.stop();
@@ -1795,7 +2105,7 @@ describe("turn admission and routing", () => {
             calls += 1;
             return {
               ...(completed(`answer-${calls}`) as Record<string, unknown>),
-              session: { id: `session-${calls}` },
+              session: runtimeSession(`session-${calls}`, request, "primary"),
             };
           }),
         },
@@ -1830,9 +2140,13 @@ describe("turn admission and routing", () => {
       requestId: "transaction-two",
       conversationId: "transaction",
       text: "two",
-    })).rejects.toThrow(
-      /Every eligible runtime route failed/u,
-    );
+    })).rejects.toMatchObject({
+      name: "RunExecutionError",
+      status: "uncertain",
+      failureCode: "settlement-failed",
+      message: "The runtime completed but durable settlement could not be proven",
+      cause: expect.any(Error),
+    });
     expect(fallbackCalls).toBe(0);
     expect(await host.replay("transaction")).toEqual(before);
 
@@ -1840,8 +2154,16 @@ describe("turn admission and routing", () => {
     await host.submit({ requestId: "transaction-three", conversationId: "transaction", text: "three" });
     expect(observedSessions).toEqual([
       undefined,
-      { id: "session-1" },
-      { id: "session-1" },
+      {
+        id: "session-1",
+        conversationId: "transaction",
+        route: { runtimeInstanceId: "primary", model: "fixture:primary" },
+      },
+      {
+        id: "session-1",
+        conversationId: "transaction",
+        route: { runtimeInstanceId: "primary", model: "fixture:primary" },
+      },
     ]);
     expect((await host.replay("transaction")).messages).toHaveLength(4);
     await host.stop();
@@ -1958,8 +2280,18 @@ describe("turn admission and routing", () => {
     });
 
     runtimeResult.message.content[0]!.data[0] = 55;
-    const output = response.output as typeof runtimeResult;
-    output.message.content[0]!.data[0] = 44;
+    expect(response.message).toEqual({
+      role: "assistant",
+      content: [],
+    });
+    expect(response.output).toEqual({
+      status: "completed",
+      message: {
+        role: "assistant",
+        content: [],
+      },
+    });
+    expect(Object.isFrozen(response.output)).toBe(true);
     const firstReplay = await host.replay("immutable");
     const userPart = firstReplay.messages[0]!.content[1];
     const assistantPart = firstReplay.messages[1]!.content[0];
@@ -2050,7 +2382,13 @@ describe("turn admission and routing", () => {
       text: "steer",
       receivedAt: new Date().toISOString(),
     })).resolves.toBe("requeue");
-    await expect(turn).rejects.toMatchObject({ name: "AbortError" });
+    await expect(turn).rejects.toMatchObject({
+      name: "RunExecutionError",
+      status: "uncertain",
+      failureCode: "live-input-disposition-invalid",
+      message: "Runtime live-input handler returned an invalid disposition",
+      cause: expect.any(TypeError),
+    });
     await host.stop();
   });
 
@@ -2143,7 +2481,13 @@ describe("turn admission and routing", () => {
       receivedAt: new Date().toISOString(),
     })).resolves.toBe("requeue");
     expect(acknowledgementSignals[0]?.aborted).toBe(true);
-    await expect(turn).rejects.toMatchObject({ name: "AbortError" });
+    await expect(turn).rejects.toMatchObject({
+      name: "RunExecutionError",
+      status: "uncertain",
+      failureCode: "live-input-acknowledgement-unknown",
+      message: "Runtime live-input acknowledgement failed after dispatch",
+      cause: expect.any(Error),
+    });
     await host.stop();
   });
 
@@ -2301,7 +2645,11 @@ describe("turn admission and routing", () => {
     });
     await started;
     await expect(host.cancel("direct-ask")).resolves.toBe(true);
-    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    await expect(first).rejects.toMatchObject({
+      name: "RunExecutionError",
+      status: "uncertain",
+      failureCode: "runtime-cancellation-outcome-unknown",
+    });
 
     releaseLate({
       interactionId: "direct-ask",
@@ -2338,27 +2686,43 @@ describe("turn admission and routing", () => {
       name: runtime,
       kind: "runtime",
       controller: {
-        create: () => runtimeInstance(async (request, context) => {
-          if (!isRecord(request) || !(request.signal instanceof AbortSignal)
-            || !isRecord(context) || typeof context.requestApproval !== "function") {
-            throw new Error("direct approval fixture is unavailable");
-          }
-          const decision = await context.requestApproval({
-            interactionId: "direct-approval",
-            callId: "native-call",
-            toolId: "runtime__native",
-            displayName: "Native action",
-            effects: ["execute"],
-            summary: "Run the native action",
-            requestedAt: new Date().toISOString(),
-          }, request.signal);
-          return completed(isRecord(decision) ? String(decision.decision) : "missing");
-        }),
+        create: () => runtimeInstance(
+          async (request, context) => {
+            if (!isRecord(request) || !(request.signal instanceof AbortSignal)
+              || !isRecord(context) || typeof context.requestApproval !== "function") {
+              throw new Error("direct approval fixture is unavailable");
+            }
+            const decision = await context.requestApproval({
+              interactionId: "direct-approval",
+              callId: "native-call",
+              toolId: "runtime__native",
+              displayName: "Native action",
+              effects: ["execute"],
+              summary: "Run the native action",
+              requestedAt: new Date().toISOString(),
+            }, request.signal);
+            return completed(isRecord(decision) ? String(decision.decision) : "missing");
+          },
+          {
+            preflightModel() {
+              return {
+                supported: true,
+                nativeTools: [{
+                  id: "runtime__native",
+                  displayName: "Native action",
+                  effects: ["execute"],
+                  approval: "core-callback",
+                  sandbox: "runtime-enforced",
+                }],
+              };
+            },
+          },
+        ),
       },
     }]);
     await project.writeConfig(minimalConfig(runtime, {
       policy: {
-        tools: { default: "deny", allow: [] },
+        tools: { default: "deny", allow: ["runtime__native"] },
         approvals: { default: "ask", timeoutMs: 3_600_000 },
         sandbox: { mode: "off" },
       },
@@ -2380,7 +2744,11 @@ describe("turn admission and routing", () => {
     });
     await started;
     await expect(host.cancel("direct-approval")).resolves.toBe(true);
-    await expect(first).rejects.toMatchObject({ name: "AbortError" });
+    await expect(first).rejects.toMatchObject({
+      name: "RunExecutionError",
+      status: "uncertain",
+      failureCode: "runtime-cancellation-outcome-unknown",
+    });
 
     await expect(host.submit({
       requestId: "direct-approval-next",
@@ -2399,6 +2767,149 @@ describe("turn admission and routing", () => {
         },
       },
     })).resolves.toMatchObject({ text: "deny" });
+    await host.stop();
+  });
+
+  it("projects runtime cancellation causes into bounded redacted plain errors", async () => {
+    const secret = "runtime-nested-secret-value";
+    const runtime = `@fixture/runtime-cause-projection-${randomUUID().toLowerCase()}`;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      schema: {
+        type: "object",
+        properties: {
+          apiKey: {
+            type: "string",
+            "x-mono-agent-env-eligible": true,
+            "x-mono-agent-secret": true,
+          },
+        },
+        required: ["apiKey"],
+        additionalProperties: false,
+      },
+      controller: {
+        create: () => runtimeInstance(async (request) => {
+          if (!isRecord(request) || !(request.signal instanceof AbortSignal)) {
+            throw new Error("invalid cause projection fixture");
+          }
+          const signal = request.signal;
+          entered();
+          await new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          throw new Error(`provider failed with ${secret}`, {
+            cause: new Error(`nested provider cause ${secret}`),
+          });
+        }),
+      },
+    }]);
+    const config = minimalConfig(runtime);
+    (config.runtimes as Record<string, unknown>).main = {
+      $use: runtime,
+      apiKey: { $env: "FIXTURE_RUNTIME_SECRET" },
+    };
+    await project.writeConfig(config);
+    const host = await createAgentHost(project.configPath, {
+      environment: { FIXTURE_RUNTIME_SECRET: secret },
+    });
+    const turn = host.submit({
+      requestId: "runtime-cause-projection",
+      conversationId: "runtime-cause-projection",
+      text: "wait",
+    });
+    await started;
+    await host.cancel("runtime-cause-projection");
+
+    let failure: unknown;
+    try {
+      await turn;
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      name: "RunExecutionError",
+      status: "uncertain",
+      failureCode: "runtime-cancellation-outcome-unknown",
+    });
+    const cause = isRecord(failure) ? failure.cause : undefined;
+    expect(cause).toBeInstanceOf(Error);
+    expect((cause as Error).message).toContain("[REDACTED]");
+    expect((cause as Error).message).not.toContain(secret);
+    expect((cause as Error & { cause?: unknown }).cause).toBeUndefined();
+    await host.stop();
+  });
+
+  it("projects model-preflight failures into bounded redacted plain errors", async () => {
+    const secret = "runtime-preflight-secret-value";
+    const runtime = `@fixture/runtime-preflight-cause-${randomUUID().toLowerCase()}`;
+    let providerCalls = 0;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      schema: {
+        type: "object",
+        properties: {
+          apiKey: {
+            type: "string",
+            "x-mono-agent-env-eligible": true,
+            "x-mono-agent-secret": true,
+          },
+        },
+        required: ["apiKey"],
+        additionalProperties: false,
+      },
+      controller: {
+        create: () => runtimeInstance(
+          async () => {
+            providerCalls += 1;
+            return completed("must not run");
+          },
+          {
+            preflightModel() {
+              throw new Error(`preflight failed with ${secret}`, {
+                cause: new Error(`nested preflight cause ${secret}`),
+              });
+            },
+          },
+        ),
+      },
+    }]);
+    const config = minimalConfig(runtime);
+    (config.runtimes as Record<string, unknown>).main = {
+      $use: runtime,
+      apiKey: { $env: "FIXTURE_RUNTIME_PREFLIGHT_SECRET" },
+    };
+    await project.writeConfig(config);
+    const host = await createAgentHost(project.configPath, {
+      environment: { FIXTURE_RUNTIME_PREFLIGHT_SECRET: secret },
+    });
+
+    let failure: unknown;
+    try {
+      await host.submit({
+        requestId: "runtime-preflight-cause-projection",
+        conversationId: "runtime-preflight-cause-projection",
+        text: "go",
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toMatchObject({
+      name: "RunExecutionError",
+      status: "failed",
+      failureCode: "core-execution-failed",
+    });
+    const cause = isRecord(failure) ? failure.cause : undefined;
+    expect(cause).toBeInstanceOf(Error);
+    expect((cause as Error).message).toContain("[REDACTED]");
+    expect((cause as Error).message).not.toContain(secret);
+    expect((cause as Error & { cause?: unknown }).cause).toBeUndefined();
+    expect(providerCalls).toBe(0);
     await host.stop();
   });
 
@@ -2511,35 +3022,51 @@ describe("turn admission and routing", () => {
         name: runtime,
         kind: "runtime",
         controller: {
-          create: () => runtimeInstance(async (request, context) => {
-            if (!isRecord(context) || !isRecord(request)
-              || !(request.signal instanceof AbortSignal)
-              || typeof context.askUser !== "function"
-              || typeof context.requestApproval !== "function") {
-              throw new Error("channel interactions are unavailable");
-            }
-            await context.askUser({
-              interactionId: `snapshot-ask-${String(request.conversationId)}`,
-              requestedAt: new Date().toISOString(),
-              questions: [{
-                id: "choice",
-                prompt: "Choose",
-                choices: [{ value: "yes", label: "Yes" }],
-                allowFreeText: false,
-                multiple: false,
-              }],
-            }, request.signal);
-            await context.requestApproval({
-              interactionId: `snapshot-approval-${String(request.conversationId)}`,
-              callId: "call-1",
-              toolId: "runtime__native",
-              displayName: "Native tool",
-              effects: ["execute"],
-              summary: "Run the native tool",
-              requestedAt: new Date().toISOString(),
-            }, request.signal);
-            return completed("completed");
-          }),
+          create: () => runtimeInstance(
+            async (request, context) => {
+              if (!isRecord(context) || !isRecord(request)
+                || !(request.signal instanceof AbortSignal)
+                || typeof context.askUser !== "function"
+                || typeof context.requestApproval !== "function") {
+                throw new Error("channel interactions are unavailable");
+              }
+              await context.askUser({
+                interactionId: `snapshot-ask-${String(request.conversationId)}`,
+                requestedAt: new Date().toISOString(),
+                questions: [{
+                  id: "choice",
+                  prompt: "Choose",
+                  choices: [{ value: "yes", label: "Yes" }],
+                  allowFreeText: false,
+                  multiple: false,
+                }],
+              }, request.signal);
+              await context.requestApproval({
+                interactionId: `snapshot-approval-${String(request.conversationId)}`,
+                callId: "call-1",
+                toolId: "runtime__native",
+                displayName: "Native tool",
+                effects: ["execute"],
+                summary: "Run the native tool",
+                requestedAt: new Date().toISOString(),
+              }, request.signal);
+              return completed("completed");
+            },
+            {
+              preflightModel() {
+                return {
+                  supported: true,
+                  nativeTools: [{
+                    id: "runtime__native",
+                    displayName: "Native tool",
+                    effects: ["execute"],
+                    approval: "core-callback",
+                    sandbox: "runtime-enforced",
+                  }],
+                };
+              },
+            },
+          ),
         },
       },
       {
@@ -2580,6 +3107,11 @@ describe("turn admission and routing", () => {
       channels: {
         disabled: { $use: channel },
         enabled: { $use: channel },
+      },
+      policy: {
+        tools: { default: "deny", allow: ["runtime__native"] },
+        approvals: { default: "ask" },
+        sandbox: { mode: "off" },
       },
     }));
     const host = await createAgentHost(project.configPath);
@@ -2684,8 +3216,7 @@ describe("turn admission and routing", () => {
     } catch (error) {
       attachmentError = error;
     }
-    expect(attachmentError).toBeInstanceOf(AggregateError);
-    expect((attachmentError as AggregateError).errors).toEqual([
+    expect(runExecutionRouteErrors(attachmentError)).toEqual([
       expect.objectContaining({ message: expect.stringMatching(/attachments unsupported/u) }),
     ]);
     expect(turns).toBe(0);
@@ -2742,8 +3273,7 @@ describe("turn admission and routing", () => {
     } catch (error) {
       snapshotError = error;
     }
-    expect(snapshotError).toBeInstanceOf(AggregateError);
-    expect((snapshotError as AggregateError).errors).toEqual([
+    expect(runExecutionRouteErrors(snapshotError)).toEqual([
       expect.objectContaining({ message: expect.stringMatching(/attachments unsupported/u) }),
     ]);
     expect(turns).toBe(0);
@@ -2794,7 +3324,122 @@ describe("turn admission and routing", () => {
     await host.stop();
   });
 
-  it("rejects advertised native tools until Core can govern their effects", async () => {
+  it("withholds runtime approval callbacks for undeclared native authority", async () => {
+    const runtime = `@fixture/runtime-undeclared-approval-${randomUUID().toLowerCase()}`;
+    let effectRan = false;
+    let handlerCalls = 0;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create() {
+          return {
+            ...runtimeInstance(async (request, context) => {
+              if (!isRecord(request) || !(request.signal instanceof AbortSignal)
+                || !isRecord(context)) {
+                throw new Error("invalid undeclared approval fixture");
+              }
+              if (typeof context.requestApproval !== "function") {
+                return completed("approval-withheld");
+              }
+              const decision = await context.requestApproval({
+                interactionId: "undeclared-approval",
+                callId: "undeclared-call",
+                toolId: "undeclared-shell",
+                displayName: "Undeclared shell",
+                effects: ["execute"],
+                summary: "Run undeclared native authority",
+                requestedAt: new Date().toISOString(),
+              }, request.signal);
+              effectRan = isRecord(decision) && decision.decision === "allow_once";
+              return completed(effectRan ? "executed" : "denied");
+            }),
+            preflightModel() {
+              return { supported: true, nativeTools: [] };
+            },
+          };
+        },
+      },
+    }]);
+    await project.writeConfig(minimalConfig(runtime, {
+      policy: {
+        tools: { default: "deny", allow: [] },
+        approvals: { default: "deny" },
+        sandbox: { mode: "off" },
+      },
+    }));
+    const host = await createAgentHost(project.configPath);
+
+    await expect(host.submit({
+      requestId: "undeclared-native-approval",
+      conversationId: "undeclared-native-approval",
+      text: "run",
+      interactionHandler: {
+        async askUser() {
+          throw new Error("AskUser is not expected");
+        },
+        async requestApproval(request) {
+          handlerCalls += 1;
+          return {
+            interactionId: request.interactionId,
+            decision: "allow_once",
+            decidedAt: new Date().toISOString(),
+          };
+        },
+      },
+    })).resolves.toMatchObject({ text: "approval-withheld" });
+    expect(effectRan).toBe(false);
+    expect(handlerCalls).toBe(0);
+    await host.stop();
+  });
+
+  it("withholds Core approval callbacks from runtime-enforced native tools", async () => {
+    const runtime = `@fixture/runtime-enforced-no-callback-${randomUUID().toLowerCase()}`;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create() {
+          return {
+            ...runtimeInstance(async (_request, context) => completed(
+              isRecord(context) && typeof context.requestApproval === "function"
+                ? "callback-exposed"
+                : "callback-withheld",
+            )),
+            preflightModel() {
+              return {
+                supported: true,
+                nativeTools: [{
+                  id: "runtime__native",
+                  displayName: "Runtime native",
+                  effects: ["execute"],
+                  approval: "runtime-enforced",
+                  sandbox: "runtime-enforced",
+                }],
+              };
+            },
+          };
+        },
+      },
+    }]);
+    await project.writeConfig(minimalConfig(runtime, {
+      policy: {
+        tools: { default: "allow", deny: [] },
+        approvals: { default: "allow" },
+        sandbox: { mode: "off" },
+      },
+    }));
+    const host = await createAgentHost(project.configPath);
+
+    await expect(host.submit({
+      requestId: "runtime-enforced-no-callback",
+      conversationId: "runtime-enforced-no-callback",
+      text: "run",
+    })).resolves.toMatchObject({ text: "callback-withheld" });
+    await host.stop();
+  });
+
+  it("rejects a runtime-enforced native tool Core cannot narrow", async () => {
     const runtime = `@fixture/runtime-native-tool-${randomUUID().toLowerCase()}`;
     let turns = 0;
     const project = await fixture([{
@@ -2835,10 +3480,174 @@ describe("turn admission and routing", () => {
     } catch (error) {
       nativeToolError = error;
     }
-    expect(nativeToolError).toBeInstanceOf(AggregateError);
-    expect((nativeToolError as AggregateError).errors).toEqual([
-      expect.objectContaining({ message: expect.stringMatching(/cannot govern/u) }),
+    expect(runExecutionRouteErrors(nativeToolError)).toEqual([
+      expect.objectContaining({
+        message: expect.stringMatching(/cannot enforce the effective Core tool policy/u),
+      }),
     ]);
+    expect(turns).toBe(0);
+    await host.stop();
+  });
+
+  it("denies a callback-governed native tool before its effect", async () => {
+    const runtime = `@fixture/runtime-native-deny-${randomUUID().toLowerCase()}`;
+    let effectRan = false;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create() {
+          return {
+            ...runtimeInstance(async (request, context) => {
+              if (!isRecord(request) || !(request.signal instanceof AbortSignal)
+                || !isRecord(context) || typeof context.requestApproval !== "function") {
+                throw new Error("native authorization callback is unavailable");
+              }
+              const decision = await context.requestApproval({
+                interactionId: "native-deny",
+                callId: "native-call",
+                toolId: "runtime__shell",
+                displayName: "Shell",
+                effects: ["execute"],
+                summary: "Run a native command",
+                requestedAt: new Date().toISOString(),
+              }, request.signal);
+              if (isRecord(decision) && decision.decision === "allow_once") {
+                effectRan = true;
+              }
+              return completed(isRecord(decision) ? String(decision.decision) : "missing");
+            }),
+            preflightModel() {
+              return {
+                supported: true,
+                nativeTools: [{
+                  id: "runtime__shell",
+                  displayName: "Shell",
+                  effects: ["execute"],
+                  approval: "core-callback",
+                  sandbox: "runtime-enforced",
+                }],
+              };
+            },
+          };
+        },
+      },
+    }]);
+    await project.writeConfig(minimalConfig(runtime));
+    const host = await createAgentHost(project.configPath);
+
+    await expect(host.submit({
+      requestId: "native-tool-denied",
+      conversationId: "native-tool-denied",
+      text: "run",
+    })).resolves.toMatchObject({ status: "completed", text: "deny" });
+    expect(effectRan).toBe(false);
+    await host.stop();
+  });
+
+  it("auto-allows a callback-governed native tool under permissive policy", async () => {
+    const runtime = `@fixture/runtime-native-allow-${randomUUID().toLowerCase()}`;
+    let effectRan = false;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create() {
+          return {
+            ...runtimeInstance(async (request, context) => {
+              if (!isRecord(request) || !(request.signal instanceof AbortSignal)
+                || !isRecord(context) || typeof context.requestApproval !== "function") {
+                throw new Error("native authorization callback is unavailable");
+              }
+              const decision = await context.requestApproval({
+                interactionId: "native-allow",
+                callId: "native-call",
+                toolId: "runtime__shell",
+                displayName: "Shell",
+                effects: ["execute"],
+                summary: "Run a native command",
+                requestedAt: new Date().toISOString(),
+              }, request.signal);
+              effectRan = isRecord(decision) && decision.decision === "allow_once";
+              return completed(effectRan ? "executed" : "denied");
+            }),
+            preflightModel() {
+              return {
+                supported: true,
+                nativeTools: [{
+                  id: "runtime__shell",
+                  displayName: "Shell",
+                  effects: ["execute"],
+                  approval: "core-callback",
+                  sandbox: "runtime-enforced",
+                }],
+              };
+            },
+          };
+        },
+      },
+    }]);
+    await project.writeConfig(minimalConfig(runtime, {
+      policy: {
+        tools: { default: "allow", deny: [] },
+        approvals: { default: "allow" },
+        sandbox: { mode: "off" },
+      },
+    }));
+    const host = await createAgentHost(project.configPath);
+
+    await expect(host.submit({
+      requestId: "native-tool-allowed",
+      conversationId: "native-tool-allowed",
+      text: "run",
+    })).resolves.toMatchObject({ status: "completed", text: "executed" });
+    expect(effectRan).toBe(true);
+    await host.stop();
+  });
+
+  it("rejects callback-governed ask policy before provider dispatch without an interaction surface", async () => {
+    const runtime = `@fixture/runtime-native-ask-${randomUUID().toLowerCase()}`;
+    let turns = 0;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create() {
+          return {
+            ...runtimeInstance(async () => {
+              turns += 1;
+              return completed("must not run");
+            }),
+            preflightModel() {
+              return {
+                supported: true,
+                nativeTools: [{
+                  id: "runtime__shell",
+                  displayName: "Shell",
+                  effects: ["execute"],
+                  approval: "core-callback",
+                  sandbox: "runtime-enforced",
+                }],
+              };
+            },
+          };
+        },
+      },
+    }]);
+    await project.writeConfig(minimalConfig(runtime, {
+      policy: {
+        tools: { default: "allow", deny: [] },
+        approvals: { default: "ask" },
+        sandbox: { mode: "off" },
+      },
+    }));
+    const host = await createAgentHost(project.configPath);
+
+    await expect(host.submit({
+      requestId: "native-tool-ask",
+      conversationId: "native-tool-ask",
+      text: "run",
+    })).rejects.toThrow(/Every eligible runtime route failed/u);
     expect(turns).toBe(0);
     await host.stop();
   });
@@ -2938,6 +3747,8 @@ function runtimeInstance(
       structuredOutput: true,
       sandbox: true,
       sessions: true,
+      maxTurns: true,
+      maxOutputTokens: true,
     },
     runTurn,
     ...lifecycleMethods,
@@ -2952,6 +3763,7 @@ function stateFixtureController(
   readonly records: Map<string, { value: Uint8Array; version: string; updatedAt: string }>;
 } {
   const records = new Map<string, { value: Uint8Array; version: string; updatedAt: string }>();
+  const artifacts = new Map<string, { readonly ref: ArtifactRef; readonly data: Uint8Array }>();
   let version = 0;
   const controller: FixtureController = {
     create() {
@@ -2990,12 +3802,117 @@ function stateFixtureController(
           records.set(request.key, { value: record.value, ...result });
           return { status: "applied", record };
         },
-        async delete(request: { key: string }) { return records.delete(request.key); },
-        async list(request: { prefix?: string }) {
+        async transaction(request: StateTransactionRequest) {
+          if (shouldFailWrite() && request.puts.length > 0) {
+            throw new RuntimeTurnError({
+              code: "fixture_state_write_failed",
+              message: "fixture state write failed",
+              retryability: "retryable",
+              sideEffects: "none",
+            });
+          }
+          const operations = [
+            ...request.checks,
+            ...request.puts,
+            ...request.deletes,
+          ];
+          const conflicts = operations.flatMap((operation) => {
+            const current = records.get(operation.key);
+            const matches = operation.expectedVersion === null
+              ? current === undefined
+              : current?.version === operation.expectedVersion;
+            return matches
+              ? []
+              : [{
+                  key: operation.key,
+                  ...(current === undefined ? {} : { currentVersion: current.version }),
+                }];
+          });
+          if (conflicts.length > 0) return { status: "conflict" as const, conflicts };
+          for (const put of request.puts) {
+            if (put.value.byteLength > 1024 * 1024) {
+              throw new Error("fixture state record exceeds 1 MiB");
+            }
+          }
+          const draft = new Map(records);
+          const written = request.puts.map((put) => {
+            const result = {
+              version: String(++version),
+              updatedAt: new Date().toISOString(),
+            };
+            const value = new Uint8Array(put.value);
+            draft.set(put.key, { value, ...result });
+            return { key: put.key, value: new Uint8Array(value), ...result };
+          });
+          const deletedKeys: string[] = [];
+          for (const deletion of request.deletes) {
+            if (draft.delete(deletion.key)) deletedKeys.push(deletion.key);
+          }
+          records.clear();
+          for (const [key, record] of draft) records.set(key, record);
+          return { status: "applied" as const, records: written, deletedKeys };
+        },
+        async scan(request: StateScanRequest) {
+          const after = request.cursor === undefined
+            ? undefined
+            : decodeFixtureStateCursor(request.cursor, request.prefix);
+          const matching = [...records.entries()]
+            .filter(([key]) =>
+              key.startsWith(request.prefix)
+              && (after === undefined || key > after))
+            .sort(([left], [right]) => left.localeCompare(right));
+          const selected = matching.slice(0, request.limit);
           return {
-            records: [...records.entries()]
-              .filter(([key]) => request.prefix === undefined || key.startsWith(request.prefix))
-              .map(([key, record]) => ({ key, ...record })),
+            records: selected.map(([key, record]) => ({
+              key,
+              ...record,
+              value: new Uint8Array(record.value),
+            })),
+            ...(matching.length > selected.length
+              ? {
+                  cursor: encodeFixtureStateCursor(
+                    request.prefix,
+                    selected[selected.length - 1]![0],
+                  ),
+                }
+              : {}),
+          };
+        },
+        async delete(request: { key: string; expectedVersion?: string }) {
+          const current = records.get(request.key);
+          if (
+            request.expectedVersion !== undefined
+            && current?.version !== request.expectedVersion
+          ) {
+            throw new Error("fixture state CAS mismatch");
+          }
+          return records.delete(request.key);
+        },
+        async list(request: { prefix?: string; cursor?: string; limit?: number }) {
+          const prefix = request.prefix ?? "";
+          const after = request.cursor === undefined
+            ? undefined
+            : decodeFixtureStateCursor(request.cursor, prefix);
+          const matching = [...records.entries()]
+            .filter(([key]) =>
+              key.startsWith(prefix)
+              && (after === undefined || key > after))
+            .sort(([left], [right]) => left.localeCompare(right));
+          const selected = matching.slice(0, request.limit ?? 100);
+          return {
+            records: selected.map(([key, record]) => ({
+              key,
+              ...record,
+              value: new Uint8Array(record.value),
+            })),
+            ...(matching.length > selected.length
+              ? {
+                  cursor: encodeFixtureStateCursor(
+                    prefix,
+                    selected[selected.length - 1]![0],
+                  ),
+                }
+              : {}),
           };
         },
         async upsertPresence(request: { presence: unknown }) { return request.presence; },
@@ -3008,19 +3925,37 @@ function stateFixtureController(
             fileName?: string;
           }) {
             const data = new Uint8Array(request.data);
-            artifactWrites.push(data);
             const digest = createHash("sha256").update(data).digest("hex");
-            return {
+            const ref = {
               id: `artifact:sha256:${digest}`,
               sha256: `sha256:${digest}` as const,
               sizeBytes: data.byteLength,
               mediaType: request.mediaType,
               ...(request.fileName === undefined ? {} : { fileName: request.fileName }),
             };
+            artifacts.set(ref.id, { ref, data });
+            if (
+              request.mediaType === "application/vnd.mono-agent.tool-result+json"
+              && request.fileName === "tool-result.json"
+            ) {
+              artifactWrites.push(new Uint8Array(data));
+            }
+            return ref;
           },
-          async readArtifact() { return undefined; },
-          async listArtifacts() { return { artifacts: [] }; },
-          async deleteArtifact() { return false; },
+          async readArtifact(request: { ref: ArtifactRef; maxBytes: number }) {
+            const artifact = artifacts.get(request.ref.id);
+            if (artifact === undefined) throw new Error("fixture artifact is missing");
+            if (artifact.data.byteLength > request.maxBytes) {
+              throw new Error("fixture artifact exceeds its read bound");
+            }
+            return new Uint8Array(artifact.data);
+          },
+          async listArtifacts() {
+            return { artifacts: [...artifacts.values()].map(({ ref }) => ref) };
+          },
+          async deleteArtifact(request: { ref: ArtifactRef }) {
+            return artifacts.delete(request.ref.id);
+          },
         }),
       };
     },
@@ -3028,8 +3963,33 @@ function stateFixtureController(
   return { controller, records };
 }
 
+function encodeFixtureStateCursor(prefix: string, key: string): string {
+  return Buffer.from(JSON.stringify({ prefix, key }), "utf8").toString("base64url");
+}
+
+function decodeFixtureStateCursor(cursor: string, expectedPrefix: string): string {
+  const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as {
+    readonly prefix: string;
+    readonly key: string;
+  };
+  if (decoded.prefix !== expectedPrefix) throw new Error("fixture state cursor prefix mismatch");
+  return decoded.key;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function runExecutionRouteErrors(error: unknown): readonly unknown[] {
+  expect(error).toMatchObject({
+    name: "RunExecutionError",
+    cause: expect.any(AggregateError),
+  });
+  const cause = error instanceof Error ? error.cause : undefined;
+  if (!(cause instanceof AggregateError)) {
+    throw new Error("RunExecutionError did not retain its provider-neutral route failures");
+  }
+  return cause.errors;
 }
 
 function requestText(value: unknown): string {

@@ -36,8 +36,49 @@ export interface ClaudeTransportResult {
   readonly stopReason?: string;
 }
 
+export class ClaudeSessionUnavailableError extends Error {
+  constructor() {
+    super("Claude provider session is unavailable");
+    this.name = "ClaudeSessionUnavailableError";
+  }
+}
+
 export interface ClaudeTransport {
   run(request: ClaudeTransportRequest, events: ClaudeTransportEvents): Promise<ClaudeTransportResult>;
+}
+
+function ownDataString(value: unknown, key: PropertyKey): string | undefined {
+  if (
+    value === null
+    || (typeof value !== "object" && typeof value !== "function")
+  ) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined
+      && "value" in descriptor
+      && typeof descriptor.value === "string"
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function isClaudeSessionUnavailable(
+  value: unknown,
+  sessionId: string | undefined,
+): boolean {
+  if (value instanceof ClaudeSessionUnavailableError) return true;
+  if (sessionId === undefined) return false;
+  const message = typeof value === "string"
+    ? value
+    : ownDataString(value, "message");
+  if (message === undefined) return false;
+  const prefix = `Session ${sessionId} not found`;
+  return message === prefix
+    || message === `${prefix} in any project directory`
+    || message === `${prefix} (no projects directory)`
+    || message.startsWith(`${prefix} in project directory for `);
 }
 
 export function claudeEnvironment(auth: { method: "oauth-token" | "api-key"; token: string } | undefined): NodeJS.ProcessEnv {

@@ -14,15 +14,58 @@ export const runtimeCodexCapabilities: RuntimeCapabilities = Object.freeze({
   tools: false,
   mcp: false,
   attachments: false,
-  approvals: false,
+  approvals: true,
   structuredOutput: true,
   sandbox: false,
   sessions: true,
+  maxTurns: false,
+  maxOutputTokens: false,
   liveInput: true,
 });
 
+export const runtimeCodexCommandExecutionTool: RuntimeNativeToolDescriptor =
+  Object.freeze({
+    id: "codex.command-execution",
+    displayName: "Codex command execution",
+    effects: Object.freeze(["read", "write", "execute"] as const),
+    approval: "runtime-enforced",
+    sandbox: "runtime-enforced",
+  });
+
+export const runtimeCodexImageViewTool: RuntimeNativeToolDescriptor =
+  Object.freeze({
+    id: "codex.image-view",
+    displayName: "Codex image view",
+    effects: Object.freeze(["read"] as const),
+    approval: "runtime-enforced",
+    sandbox: "runtime-enforced",
+  });
+
+export const runtimeCodexCommandEscalationTool: RuntimeNativeToolDescriptor =
+  Object.freeze({
+    id: "codex.command-escalation",
+    displayName: "Codex command escalation",
+    effects: Object.freeze(["read", "write", "execute", "network"] as const),
+    approval: "core-callback",
+    sandbox: "runtime-enforced",
+  });
+
+export const runtimeCodexFileChangeEscalationTool: RuntimeNativeToolDescriptor =
+  Object.freeze({
+    id: "codex.file-change-escalation",
+    displayName: "Codex file change escalation",
+    effects: Object.freeze(["write"] as const),
+    approval: "core-callback",
+    sandbox: "runtime-enforced",
+  });
+
 export const runtimeCodexNativeTools: readonly RuntimeNativeToolDescriptor[] =
-  Object.freeze([]);
+  Object.freeze([
+    runtimeCodexCommandExecutionTool,
+    runtimeCodexImageViewTool,
+    runtimeCodexCommandEscalationTool,
+    runtimeCodexFileChangeEscalationTool,
+  ]);
 
 function diagnostic(message: string): ModuleDiagnostic {
   return {

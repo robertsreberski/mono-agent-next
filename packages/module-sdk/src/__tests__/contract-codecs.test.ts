@@ -259,13 +259,18 @@ describe("route, artifact, and native tool contracts", () => {
       approval: "runtime-enforced",
       sandbox: "runtime-enforced",
     });
-    const session: RuntimeSession = { id: "session-1", route };
+    const session: RuntimeSession = {
+      id: "session-1",
+      conversationId: "conversation-1",
+      route,
+    };
     const result: RuntimeToolResult = {
       callId: "call-1",
       content: [{ type: "artifact", ref: artifact, preview: "{\"ok\":true}" }],
     };
 
     expect(session.route).toEqual(route);
+    expect(session.conversationId).toBe("conversation-1");
     expect(result.content[0]?.type).toBe("artifact");
     expect(tool.effects).toHaveLength(4);
     expect(RUNTIME_TOOL_ARTIFACT_PREVIEW_MAX_BYTES).toBe(16_384);

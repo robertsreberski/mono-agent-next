@@ -7,8 +7,36 @@ import type {
 
 import { parsePiModelReference, parseRuntimePiConfig } from "./config.js";
 
+export const runtimePiNodeReplTool: RuntimeNativeToolDescriptor = Object.freeze({
+  id: "NodeRepl",
+  displayName: "Node REPL",
+  effects: Object.freeze(["read", "write", "execute", "network"] as const),
+  approval: "core-callback",
+  sandbox: "unsupported",
+});
+
+export const runtimePiEditTool: RuntimeNativeToolDescriptor = Object.freeze({
+  id: "Edit",
+  displayName: "Edit",
+  effects: Object.freeze(["read", "write"] as const),
+  approval: "core-callback",
+  sandbox: "unsupported",
+});
+
+export const runtimePiWebSearchTool: RuntimeNativeToolDescriptor = Object.freeze({
+  id: "WebSearch",
+  displayName: "Web Search",
+  effects: Object.freeze(["network"] as const),
+  approval: "core-callback",
+  sandbox: "unsupported",
+});
+
 export const runtimePiNativeTools: readonly RuntimeNativeToolDescriptor[] =
-  Object.freeze([]);
+  Object.freeze([
+    runtimePiNodeReplTool,
+    runtimePiEditTool,
+    runtimePiWebSearchTool,
+  ]);
 
 function diagnostic(message: string): ModuleDiagnostic {
   return {

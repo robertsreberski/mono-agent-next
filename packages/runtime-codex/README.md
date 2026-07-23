@@ -18,8 +18,9 @@ Runtime module.
 ## Responsibility
 
 Own direct Codex app-server process lifecycle, bounded JSON-RPC framing, model
-validation, native thread continuation, same-turn steering, cancellation, and
-normalization into the public runtime contract.
+validation, native thread continuation, same-turn steering, fail-closed native
+approval bridging, cancellation, and normalization into the public runtime
+contract.
 
 ## Install / Usage
 
@@ -42,19 +43,67 @@ pnpm add @mono-agent/runtime-codex
 ```
 
 `auth.apiKey` is an environment-only secret. Omit it to use Codex's native
-login state. The runtime starts `codex app-server --listen stdio://` directly,
-without a shell, and fails closed on malformed or oversized protocol output.
+login state from the canonical `CODEX_HOME` (or `$HOME/.codex`) so native
+keyring credentials remain usable. Explicit API-key auth instead uses a
+deterministic owner-private `codex-home` under the runtime data directory.
+That home persists across process restarts so native thread continuation
+survives, but it must have mode `0700` and may not contain `config.toml`.
+
+The runtime requires exactly `codex-cli 0.145.0`. It starts
+`codex app-server --listen stdio:// --strict-config` directly, without a shell,
+from a fresh non-project process directory, and fails closed on malformed or
+oversized protocol output.
 
 ## Architecture
 
 ### Data flow
 
 1. Core validates the strict import-safe schema.
-2. Each attempt starts an isolated app-server process and negotiates protocol
-   initialization.
-3. A new thread is started or a runtime-owned thread is resumed.
-4. Text/reasoning notifications stream to Core; `turn/steer` carries live input.
-5. `turn/interrupt` handles cancellation and the process is always closed.
+2. Startup and every attempt re-check the exact Codex version, enumerate the
+   bounded effective MCP set after trusted authority overrides, replace every
+   entry with an inert disabled transport, and prove the same set is disabled.
+3. Each attempt starts an isolated strict-config app-server, negotiates protocol
+   initialization, and read-only verifies both its isolated-process and
+   requested-workspace effective configs still contain exactly the frozen
+   disabled MCP set.
+4. A new thread is started or a runtime-owned thread is resumed.
+5. When Core supplies an approval callback, the runtime selects Codex
+   `on-request` approval and maps every command/file escalation request to the
+   provider-neutral Core approval contract before replying to app-server.
+6. Text/reasoning notifications stream to Core; `turn/steer` carries live input.
+7. `turn/interrupt` handles cancellation and the process is always closed.
+
+Native thread ids are accepted only with the exact runtime-instance, model, and
+canonical-conversation binding that created them. A mismatch is rejected before
+an app-server process is spawned.
+
+Codex runs inside its intrinsic network-off read-only sandbox. Local command
+execution and image viewing are advertised separately as runtime-enforced
+native surfaces. Command execution is conservatively
+classified as read/write/execute even though the intrinsic sandbox remains
+read-only. Command and file-change escalations are advertised as exact
+Core-callback surfaces, so each app-server approval request maps one-to-one to
+the descriptor Core validates. This runtime-owned narrowing boundary is not an
+implementation of the selected Core sandbox slot, so the runtime advertises
+approval support but does not advertise Core sandbox support.
+
+Missing, invalid, timed-out, mismatched, or failed approval callbacks are
+denied. App-server permission-profile escalation requests always receive an
+empty turn-scoped grant and requested authority is never echoed back. Under
+Core `ask`, runtime-enforced base tools are not approval-eligible; only the two
+`core-callback` escalation descriptors can enter the callback. This keeps the
+policy monotonic instead of treating an absent callback as an implicit grant.
+
+Ambient MCP servers, apps/connectors, web/search tools, dynamic tools, hooks,
+skills, plugins, and multi-agent features are disabled before thread creation
+so `CODEX_HOME` cannot silently widen the advertised native surface. Codex's
+default local environment is deliberately retained because shell,
+`apply_patch`, and local image viewing rely on it; no remote or authored
+environment is selected.
+
+Native resume failures reported as a missing thread/rollout map to the shared
+`runtime_session_unavailable` code with `sideEffects: "none"`, allowing Core to
+apply the configured session-unavailable policy deterministically.
 
 ### Package structure
 
@@ -99,9 +148,9 @@ runtime.
 
 ## What This Package Does Not Own
 
-It does not choose fallback, execute Core tools, approve provider actions,
-claim a Core sandbox boundary, persist the canonical transcript, or migrate a
-Codex thread to another runtime.
+It does not choose fallback, execute Core tools, decide approval policy, claim a
+Core sandbox boundary, persist the canonical transcript, or migrate a Codex
+thread to another runtime.
 
 ## Related Documentation
 

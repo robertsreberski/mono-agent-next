@@ -1,14 +1,19 @@
 import { createServer, type RequestListener, type Server } from "node:http";
 
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { parseRuntimePiConfig } from "../config.js";
-import { createRuntimePiModelRegistry } from "../models.js";
+import {
+  createRuntimePiModelRegistry,
+  RuntimePiModelDiscoveryError,
+} from "../models.js";
+import { isCheckedTransientProviderFailure } from "../runtime.js";
 
 const servers: Server[] = [];
 
 afterEach(async () => {
+  vi.unstubAllGlobals();
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => {
     server.close((error) => error === undefined ? resolve() : reject(error));
   })));
@@ -23,6 +28,15 @@ async function fixtureServer(
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("fixture server did not bind TCP");
   return { baseUrl: `http://127.0.0.1:${address.port}/v1` };
+}
+
+async function rejection(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected promise to reject");
 }
 
 describe("runtime-pi model registry", () => {
@@ -62,7 +76,7 @@ describe("runtime-pi model registry", () => {
     });
     await expect(registry.capabilities("fixture:vision")).resolves.toMatchObject({
       attachments: true,
-      approvals: false,
+      approvals: true,
       sandbox: false,
     });
   });
@@ -99,6 +113,89 @@ describe("runtime-pi model registry", () => {
     }), new InMemoryCredentialStore());
 
     await expect(registry.resolve("fixture:model")).rejects.toThrow("HTTP 302");
+  });
+
+  it("preserves trusted HTTP status for transient model-discovery failures", async () => {
+    const { baseUrl } = await fixtureServer((_request, response) => {
+      response.writeHead(503);
+      response.end();
+    });
+    const registry = createRuntimePiModelRegistry(parseRuntimePiConfig({
+      localProviders: [{ id: "fixture", baseUrl }],
+    }), new InMemoryCredentialStore());
+
+    const error = await rejection(registry.resolve("fixture:model"));
+    expect(error).toBeInstanceOf(RuntimePiModelDiscoveryError);
+    expect(error).toMatchObject({ status: 503 });
+    expect(isCheckedTransientProviderFailure(error)).toBe(true);
+  });
+
+  it("preserves trusted HTTP status without retrying authentication failures", async () => {
+    const { baseUrl } = await fixtureServer((_request, response) => {
+      response.writeHead(401);
+      response.end();
+    });
+    const registry = createRuntimePiModelRegistry(parseRuntimePiConfig({
+      localProviders: [{ id: "fixture", baseUrl }],
+    }), new InMemoryCredentialStore());
+
+    const error = await rejection(registry.resolve("fixture:model"));
+    expect(error).toBeInstanceOf(RuntimePiModelDiscoveryError);
+    expect(error).toMatchObject({ status: 401 });
+    expect(isCheckedTransientProviderFailure(error)).toBe(false);
+  });
+
+  it("preserves an allowlisted transport timeout code for retry classification", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw Object.assign(new TypeError("socket timeout"), { code: "ETIMEDOUT" });
+    }));
+    const registry = createRuntimePiModelRegistry(parseRuntimePiConfig({
+      localProviders: [{ id: "fixture", baseUrl: "http://127.0.0.1:1/v1" }],
+    }), new InMemoryCredentialStore());
+
+    const error = await rejection(registry.resolve("fixture:model"));
+    expect(error).toBeInstanceOf(RuntimePiModelDiscoveryError);
+    expect(error).toMatchObject({ code: "ETIMEDOUT" });
+    expect(isCheckedTransientProviderFailure(error)).toBe(true);
+  });
+
+  it("does not invoke or trust accessor-backed transport classifications", async () => {
+    let accessorCalls = 0;
+    const failure = new TypeError("untrusted transport failure");
+    Object.defineProperty(failure, "code", {
+      get() {
+        accessorCalls += 1;
+        return "ETIMEDOUT";
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw failure;
+    }));
+    const registry = createRuntimePiModelRegistry(parseRuntimePiConfig({
+      localProviders: [{ id: "fixture", baseUrl: "http://127.0.0.1:1/v1" }],
+    }), new InMemoryCredentialStore());
+
+    const error = await rejection(registry.resolve("fixture:model"));
+    expect(error).toBeInstanceOf(RuntimePiModelDiscoveryError);
+    expect(error).toMatchObject({ code: undefined });
+    expect(isCheckedTransientProviderFailure(error)).toBe(false);
+    expect(accessorCalls).toBe(0);
+  });
+
+  it("keeps a valid but absent model non-retryable and unclassified", async () => {
+    const { baseUrl } = await fixtureServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "other-model" }] }));
+    });
+    const registry = createRuntimePiModelRegistry(parseRuntimePiConfig({
+      localProviders: [{ id: "fixture", baseUrl }],
+    }), new InMemoryCredentialStore());
+
+    const error = await rejection(registry.resolve("fixture:missing-model"));
+    expect(error).toBeInstanceOf(TypeError);
+    expect(Object.getOwnPropertyDescriptor(error, "status")).toBeUndefined();
+    expect(Object.getOwnPropertyDescriptor(error, "code")).toBeUndefined();
+    expect(isCheckedTransientProviderFailure(error)).toBe(false);
   });
 
   it("rejects oversized discovery responses before reading their body", async () => {

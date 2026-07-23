@@ -1,5 +1,10 @@
 export { loadAgentConfig, validateAgentConfig } from "./config.js";
-export { AgentAdmissionError, AgentConfigError, AgentModuleError } from "./errors.js";
+export {
+  AgentAdmissionError,
+  AgentConfigError,
+  AgentModuleError,
+  RunExecutionError,
+} from "./errors.js";
 export { createAgentHost } from "./host.js";
 export { inspectAgent } from "./inspect.js";
 export { composeAgentConfigSchema, explainAgentConfig } from "./schema.js";
@@ -26,7 +31,17 @@ export type {
   AgentModuleCommandResult,
   AgentPolicyConfig,
   AgentResponse,
+  AgentResponseMessage,
+  AgentInteractionEvidence,
+  AgentRunAttemptEvidence,
+  AgentRunEvent,
+  AgentRunHistoryPage,
+  AgentRunRecord,
+  AgentRunStatus,
+  AgentRunSummary,
   AgentSubmitInput,
+  AgentTranscriptContentPart,
+  AgentTranscriptEntry,
   AgentValidationResult,
   ConfigExplanationEntry,
   EnvReference,
@@ -38,4 +53,9 @@ export type {
   RuntimeRoute,
   SelectedModuleConfig,
 } from "./types.js";
-export type { AgentConfigIssue } from "./errors.js";
+export type {
+  AgentAdmissionErrorCode,
+  AgentConfigIssue,
+  RunExecutionErrorOptions,
+  RunExecutionStatus,
+} from "./errors.js";

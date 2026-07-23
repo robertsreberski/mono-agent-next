@@ -962,16 +962,10 @@ export interface RuntimeToolDefinition {
 export interface RuntimeSession {
   /** Runtime-owned opaque identifier. Core must not interpret it. */
   readonly id: string;
-  /**
-   * Route that created this private session. New implementations must provide
-   * it; optionality is retained only while API-version-1 runtimes migrate.
-   */
-  readonly route?: RouteIdentity;
-  /** @deprecated Use `route.runtimeInstanceId`. */
-  readonly runtimeInstanceId?: string;
-  readonly provider?: string;
-  /** @deprecated Use `route.model`. */
-  readonly model?: string;
+  /** Canonical conversation whose provider-native continuation this is. */
+  readonly conversationId: string;
+  /** Exact runtime instance and model route that created this private session. */
+  readonly route: RouteIdentity;
   readonly createdAt?: string;
   readonly expiresAt?: string;
   readonly metadata?: JsonObject;
@@ -1097,7 +1091,13 @@ export interface RuntimeTurnContext {
   registerLiveInput?(handler: RuntimeLiveInputHandler): () => void;
   /** Run one provider-neutral blocking human interaction through Core. */
   askUser?(request: AskUserRequest, signal: AbortSignal): Promise<AskUserAnswer>;
-  /** Run one provider-neutral, fail-closed approval through Core. */
+  /**
+   * Authorize one provider/native invocation through Core. A
+   * `core-callback` runtime must call this before every advertised native-tool
+   * effect; Core may answer immediately from policy or block on an interaction.
+   * This callback is absent unless the exact route advertises at least one
+   * `core-callback` descriptor, and every request must match one exactly.
+   */
   requestApproval?(
     request: ApprovalRequest,
     signal: AbortSignal,
@@ -1126,6 +1126,12 @@ export type RuntimeTurnResult = RuntimeCompletedTurnResult | RuntimeIncompleteTu
 export type RuntimeRetryability = "retryable" | "not-retryable" | "unknown";
 export type RuntimeSideEffectStatus = "none" | "committed" | "unknown";
 
+/** Exact typed failure code requesting one sessionless retry on the same route. */
+export const RUNTIME_SESSION_UNAVAILABLE_CODE = "runtime_session_unavailable";
+
+const RUNTIME_TURN_ERROR_CODE_MAX_CHARS = 256;
+const RUNTIME_TURN_ERROR_MESSAGE_MAX_CHARS = 65_536;
+
 export interface RuntimeTurnErrorOptions {
   readonly code: string;
   readonly message: string;
@@ -1133,6 +1139,19 @@ export interface RuntimeTurnErrorOptions {
   readonly sideEffects: RuntimeSideEffectStatus;
   readonly retryAfterMs?: number;
   readonly cause?: unknown;
+}
+
+/**
+ * An immutable, accessor-free classification captured from one runtime
+ * failure. Hosts must use this snapshot, rather than re-reading the thrown
+ * object, for fallback and settlement decisions.
+ */
+export interface RuntimeTurnErrorSnapshot {
+  readonly code: string;
+  readonly message: string;
+  readonly retryability: RuntimeRetryability;
+  readonly sideEffects: RuntimeSideEffectStatus;
+  readonly retryAfterMs?: number;
 }
 
 /** A runtime failure whose fallback safety can be decided without string matching. */
@@ -1144,6 +1163,12 @@ export class RuntimeTurnError extends Error {
 
   constructor(options: RuntimeTurnErrorOptions) {
     if (options.code.trim().length === 0) throw new TypeError("Runtime turn error code must not be empty");
+    if (options.code.length > RUNTIME_TURN_ERROR_CODE_MAX_CHARS) {
+      throw new RangeError("Runtime turn error code exceeds its character limit");
+    }
+    if (options.message.length > RUNTIME_TURN_ERROR_MESSAGE_MAX_CHARS) {
+      throw new RangeError("Runtime turn error message exceeds its character limit");
+    }
     if (!isRuntimeRetryability(options.retryability)) {
       throw new TypeError("Runtime turn error retryability is invalid");
     }
@@ -1164,18 +1189,66 @@ export class RuntimeTurnError extends Error {
   }
 }
 
+function ownDescriptorValue(descriptor: PropertyDescriptor | undefined): unknown {
+  return descriptor !== undefined && "value" in descriptor
+    ? descriptor.value
+    : undefined;
+}
+
+/**
+ * Capture a compatible runtime failure from own data properties only.
+ *
+ * Accessor-backed or inherited classification claims fail closed. The
+ * returned object is frozen so one captured classification can safely drive
+ * all host decisions for the failure.
+ */
+export function snapshotRuntimeTurnError(
+  value: unknown,
+): RuntimeTurnErrorSnapshot | undefined {
+  try {
+    if (!(value instanceof Error)) return undefined;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const code = ownDescriptorValue(descriptors.code);
+    const message = ownDescriptorValue(descriptors.message);
+    const retryability = ownDescriptorValue(descriptors.retryability);
+    const sideEffects = ownDescriptorValue(descriptors.sideEffects);
+    const retryAfterDescriptor = descriptors.retryAfterMs;
+    if (retryAfterDescriptor !== undefined && !("value" in retryAfterDescriptor)) {
+      return undefined;
+    }
+    const retryAfterMs = retryAfterDescriptor?.value;
+    if (
+      typeof code !== "string"
+      || code.trim().length === 0
+      || code.length > RUNTIME_TURN_ERROR_CODE_MAX_CHARS
+      || typeof message !== "string"
+      || !isRuntimeRetryability(retryability)
+      || !isRuntimeSideEffectStatus(sideEffects)
+      || (
+        retryAfterMs !== undefined
+        && (
+          typeof retryAfterMs !== "number"
+          || !Number.isSafeInteger(retryAfterMs)
+          || retryAfterMs < 0
+        )
+      )
+    ) {
+      return undefined;
+    }
+    return Object.freeze({
+      code,
+      message: message.slice(0, RUNTIME_TURN_ERROR_MESSAGE_MAX_CHARS),
+      retryability,
+      sideEffects,
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    });
+  } catch {
+    return undefined;
+  }
+}
+
 export function isRuntimeTurnError(value: unknown): value is RuntimeTurnError {
-  if (!(value instanceof Error)) return false;
-  const code = Reflect.get(value, "code");
-  const retryability = Reflect.get(value, "retryability");
-  const sideEffects = Reflect.get(value, "sideEffects");
-  const retryAfterMs = Reflect.get(value, "retryAfterMs");
-  return typeof code === "string"
-    && code.trim().length > 0
-    && isRuntimeRetryability(retryability)
-    && isRuntimeSideEffectStatus(sideEffects)
-    && (retryAfterMs === undefined
-      || (typeof retryAfterMs === "number" && Number.isSafeInteger(retryAfterMs) && retryAfterMs >= 0));
+  return snapshotRuntimeTurnError(value) !== undefined;
 }
 
 export interface RuntimeModelValidationRequest {
@@ -1213,6 +1286,10 @@ export interface RuntimeCapabilities {
   readonly structuredOutput: boolean;
   readonly sandbox: boolean;
   readonly sessions: boolean;
+  /** Absent means the runtime cannot honestly enforce a per-run turn ceiling. */
+  readonly maxTurns?: boolean;
+  /** Absent means the runtime cannot honestly enforce a per-request output-token ceiling. */
+  readonly maxOutputTokens?: boolean;
   /** Absent means artifact-backed tool results are unsupported by an API-version-1 runtime. */
   readonly artifactResults?: boolean;
   /** Absent means unsupported for API-version-1 source compatibility. */

@@ -36,6 +36,8 @@ describe("runtime-claude model definition", () => {
         structuredOutput: true,
         sandbox: false,
         sessions: true,
+        maxTurns: true,
+        maxOutputTokens: false,
         liveInput: true,
       },
       nativeTools: [],

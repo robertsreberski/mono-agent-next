@@ -117,6 +117,41 @@ working directory.
 5. The resulting kind-specific instance participates in host lifecycle,
    health, diagnostics, and normalized turn, delivery, or memory operations.
 
+`RuntimeSession` is provider-private continuation state with one exact public
+authority envelope: `{ id, conversationId, route: { runtimeInstanceId, model },
+createdAt?, expiresAt?, metadata? }`. A runtime must emit that exact
+conversation/runtime/model binding, and it must reject a mismatched supplied
+session before provider activity. Legacy provider or top-level route fields are
+not accepted. If a previously valid provider continuation disappears, the
+runtime throws `RuntimeTurnError` with the exact
+`RUNTIME_SESSION_UNAVAILABLE_CODE` and `sideEffects: "none"`; Core may then
+evict that exact pointer and retry the same route once without a session.
+
+Runtime failures cross the trust boundary through
+`snapshotRuntimeTurnError`. It copies only bounded own data properties into a
+frozen classification; accessors and inherited claims fail closed. Hosts use
+one snapshot for evidence, uncertainty, and fallback rather than re-reading a
+mutable thrown object.
+
+Model validation and preflight return the effective capabilities and native
+tools for that exact route. `maxTurns` and `maxOutputTokens` may be advertised
+only when the runtime enforces the corresponding request bound. Every native
+tool declares its effects plus approval and sandbox enforcement. A
+`core-callback` tool calls `RuntimeTurnContext.requestApproval` before every
+invocation using the exact advertised id, display name, and effect set; Core
+then applies global and request-local tool policy and either decides
+immediately or performs a bounded interaction. The callback is absent when the
+exact route advertises no `core-callback` descriptor. A `runtime-enforced`
+surface is eligible only while the effective Core policy does not require
+narrowing that the runtime cannot prove.
+
+The first-party reserved `StateStore` contract includes both ordinary
+generation-bound `list` pagination and mutation-tolerant prefix `scan`, plus a
+multi-key `transaction`. Every transaction precondition is explicit:
+`expectedVersion: null` means absent and a string means that exact version.
+Checks, puts, and deletes evaluate against one initial snapshot and apply
+all-or-none.
+
 ### Package structure
 
 | Entry point | Audience | Contents |
@@ -139,6 +174,7 @@ There is no generic plugin hook or discovery registry.
 | --- | --- |
 | Declare compatible module metadata | `MODULE_API_VERSION`, `ModuleManifest`, `ModuleSchema` |
 | Implement a runtime | `defineRuntimeModule`, `Runtime`, `RuntimeTurnRequest`, `RuntimeTurnContext`, `RuntimeTurnResult`, `RuntimeTurnError` |
+| Snapshot a typed runtime failure safely | `snapshotRuntimeTurnError`, `RuntimeTurnErrorSnapshot` |
 | Stream usage, compaction, sessions, and live input | `RuntimeTurnEvent`, `RuntimeUsage`, `RuntimeSession`, `RuntimeLiveInputHandler` |
 | Implement a channel | `defineChannelModule`, `Channel`, `ChannelHost`, `ChannelInboundRequest`, `ChannelReplySink`, `ChannelCapabilities` |
 | Normalize attachments and blocking questions | `NormalizedAttachment`, `AskUserRequest`, `AskUserAnswer` |
@@ -290,6 +326,7 @@ OwnerPrivatePathError
 OwnerPrivatePathErrorCode
 OwnerPrivatePathIdentity
 ParseModuleConfigOptions
+RUNTIME_SESSION_UNAVAILABLE_CODE
 RUNTIME_TOOL_ARTIFACT_PREVIEW_MAX_BYTES
 ReadOwnerPrivateFileOptions
 RouteIdentity
@@ -333,6 +370,7 @@ RuntimeToolResultTextPart
 RuntimeTurnContext
 RuntimeTurnError
 RuntimeTurnErrorOptions
+RuntimeTurnErrorSnapshot
 RuntimeTurnEvent
 RuntimeTurnOptions
 RuntimeTurnRequest
@@ -389,6 +427,7 @@ parseRuntimeNativeToolDescriptor
 provenanceAt
 readCrossSlotReference
 readOwnerPrivateFile
+snapshotRuntimeTurnError
 ```
 
 **`@mono-agent/module-sdk/http`**
@@ -448,7 +487,15 @@ StatePutArtifactRequest
 StateReadArtifactRequest
 StateReadRequest
 StateRecord
+StateScanRequest
+StateScanResult
 StateStore
+StateTransactionCheck
+StateTransactionConflict
+StateTransactionDelete
+StateTransactionPut
+StateTransactionRequest
+StateTransactionResult
 StateWriteRequest
 StateWriteResult
 Trigger

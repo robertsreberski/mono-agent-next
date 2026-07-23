@@ -3,7 +3,10 @@ import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { RuntimeTurnError } from "@mono-agent/module-sdk";
+import {
+  RUNTIME_SESSION_UNAVAILABLE_CODE,
+  RuntimeTurnError,
+} from "@mono-agent/module-sdk";
 import type {
   JsonObject,
   ModuleDiagnostic,
@@ -53,6 +56,8 @@ import {
 } from "./server.js";
 
 type RuntimeState = "created" | "starting" | "running" | "draining" | "stopped";
+const SAFE_CAUSE_MESSAGE_CHARS = 4_096;
+const SAFE_CAUSE_IDENTITY_CHARS = 128;
 
 interface ActiveOperation {
   readonly controller: AbortController;
@@ -72,6 +77,40 @@ interface PartState {
   readonly messageId: string;
 }
 
+function ownDataValue(value: unknown, key: PropertyKey): unknown {
+  if (
+    value === null
+    || (typeof value !== "object" && typeof value !== "function")
+  ) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined && "value" in descriptor
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function failureMessage(value: unknown): string {
+  const ownMessage = ownDataValue(value, "message");
+  if (typeof ownMessage === "string") return ownMessage;
+  if (
+    typeof value === "string"
+    || typeof value === "number"
+    || typeof value === "boolean"
+    || typeof value === "bigint"
+    || typeof value === "symbol"
+  ) return String(value);
+  return "OpenCode provider failure";
+}
+
+function bounded(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const suffix = "… [truncated]";
+  return `${value.slice(0, maxChars - suffix.length)}${suffix}`;
+}
+
 export class RuntimeOpenCodeError extends RuntimeTurnError {
   constructor(
     code: string,
@@ -82,12 +121,13 @@ export class RuntimeOpenCodeError extends RuntimeTurnError {
       readonly cause?: unknown;
     } = {},
   ) {
+    const cause = safeCause(options.cause, []);
     super({
       code,
       message,
       retryability: options.retryability ?? "unknown",
       sideEffects: options.sideEffects ?? "none",
-      ...(options.cause === undefined ? {} : { cause: options.cause }),
+      ...(cause === undefined ? {} : { cause }),
     });
     this.name = "RuntimeOpenCodeError";
   }
@@ -117,15 +157,45 @@ function diagnostic(
 }
 
 function redact(value: unknown, secrets: readonly string[]): string {
-  let message = value instanceof Error ? value.message : String(value);
+  let message = failureMessage(value);
   for (const secret of [...new Set(secrets)].filter(Boolean).sort(
     (left, right) => right.length - left.length,
   )) {
     message = message.split(secret).join("[REDACTED]");
   }
-  return message
-    .replace(/\bBearer\s+[^\s,;]+/giu, "Bearer [REDACTED]")
-    .replace(/\bBasic\s+[A-Za-z0-9+/=]+/giu, "Basic [REDACTED]");
+  return bounded(
+    message
+      .replace(/\bBearer\s+[^\s,;]+/giu, "Bearer [REDACTED]")
+      .replace(/\bBasic\s+[A-Za-z0-9+/=]+/giu, "Basic [REDACTED]"),
+    SAFE_CAUSE_MESSAGE_CHARS,
+  );
+}
+
+function safeCause(
+  value: unknown,
+  secrets: readonly string[],
+): Error | undefined {
+  if (value === undefined) return undefined;
+  const snapshot = new Error(redact(value, secrets));
+  const rawName = ownDataValue(value, "name");
+  snapshot.name = bounded(
+    redact(typeof rawName === "string" ? rawName : "Error", secrets),
+    SAFE_CAUSE_IDENTITY_CHARS,
+  );
+  const rawCode = ownDataValue(value, "code");
+  if (typeof rawCode === "string" || typeof rawCode === "number") {
+    Object.defineProperty(snapshot, "code", {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: bounded(
+        redact(String(rawCode), secrets),
+        SAFE_CAUSE_IDENTITY_CHARS,
+      ),
+    });
+  }
+  delete snapshot.stack;
+  return Object.freeze(snapshot);
 }
 
 function parseVersion(value: string): [number, number, number] | undefined {
@@ -177,15 +247,21 @@ function prompt(messages: readonly TurnMessage[], resumed: boolean): string {
     .join("\n\n");
 }
 
-function linkedSession(instanceId: string, id: string, model: string): RuntimeSession {
+function linkedSession(
+  instanceId: string,
+  id: string,
+  conversationId: string,
+  model: string,
+): RuntimeSession {
   return {
     id,
+    conversationId,
     route: { runtimeInstanceId: instanceId, model },
-    runtimeInstanceId: instanceId,
-    provider: "opencode",
-    model,
     createdAt: new Date().toISOString(),
-    metadata: { protocol: "opencode-authenticated-server-v1" },
+    metadata: {
+      provider: "opencode",
+      protocol: "opencode-authenticated-server-v1",
+    },
   };
 }
 
@@ -487,7 +563,11 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
             "SERVER_EXITED",
             `OpenCode server exited unexpectedly`
             + (exit.code === null ? "" : ` with code ${exit.code}`),
-            { retryability: "unknown", sideEffects: "unknown", cause: exit.error },
+            {
+              retryability: "unknown",
+              sideEffects: "unknown",
+              cause: safeCause(exit.error, secrets()),
+            },
           ));
         });
       } catch (error) {
@@ -514,11 +594,11 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           state = "draining";
           throw new RuntimeOpenCodeError(
             "PROCESS_TERMINATION_FAILED",
-            error.message,
+            redact(error, secrets()),
             {
               retryability: "not-retryable",
               sideEffects: "none",
-              cause: error,
+              cause: safeCause(error, secrets()),
             },
           );
         }
@@ -527,7 +607,11 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
         throw new RuntimeOpenCodeError(
           "START_FAILED",
           redact(error, secrets()),
-          { retryability: "unknown", sideEffects: "none", cause: error },
+          {
+            retryability: "unknown",
+            sideEffects: "none",
+            cause: safeCause(error, secrets()),
+          },
         );
       } finally {
         active.delete(operation);
@@ -576,11 +660,11 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
         state = "draining";
         throw new RuntimeOpenCodeError(
           "PROCESS_TERMINATION_FAILED",
-          terminationFailure.message,
+          redact(terminationFailure, secrets()),
           {
             retryability: "not-retryable",
             sideEffects: "unknown",
-            cause: terminationFailure,
+            cause: safeCause(terminationFailure, secrets()),
           },
         );
       }
@@ -592,7 +676,7 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           {
             retryability: "not-retryable",
             sideEffects: "unknown",
-            cause: shutdownFailure,
+            cause: safeCause(shutdownFailure, secrets()),
           },
         );
       }
@@ -674,11 +758,9 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
         );
       }
       const sessionRoute = request.session?.route;
-      const sessionRuntimeId = sessionRoute?.runtimeInstanceId
-        ?? request.session?.runtimeInstanceId;
       if (
-        sessionRuntimeId !== undefined
-        && sessionRuntimeId !== options.instanceId
+        request.session !== undefined
+        && sessionRoute?.runtimeInstanceId !== options.instanceId
       ) {
         throw new RuntimeOpenCodeError(
           "SESSION_INVALID",
@@ -687,12 +769,22 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
         );
       }
       if (
-        sessionRoute !== undefined
-        && sessionRoute.model !== request.model
+        request.session !== undefined
+        && sessionRoute?.model !== request.model
       ) {
         throw new RuntimeOpenCodeError(
           "SESSION_INVALID",
           "OpenCode session belongs to another model route",
+          { retryability: "not-retryable" },
+        );
+      }
+      if (
+        request.session !== undefined
+        && request.session.conversationId !== request.conversationId
+      ) {
+        throw new RuntimeOpenCodeError(
+          "SESSION_INVALID",
+          "OpenCode session belongs to another conversation",
           { retryability: "not-retryable" },
         );
       }
@@ -771,12 +863,12 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
       const onEvent = async (event: OpenCodeServerEvent): Promise<void> => {
         const observedSessionId = eventSessionId(event);
         const part = record(event.properties.part);
-        const isMatchingToolPart = event.type === "message.part.updated"
-          && part.type === "tool"
-          && observedSessionId === sessionId;
-        const isMatchingPermission = event.type === "permission.asked"
-          && observedSessionId === sessionId;
-        if (isMatchingToolPart || isMatchingPermission) {
+        const isNativeToolPart = event.type === "message.part.updated"
+          && part.type === "tool";
+        const isNativePermission = event.type === "permission.asked";
+        const nativeActivityApplies = observedSessionId === undefined
+          || observedSessionId === sessionId;
+        if ((isNativeToolPart || isNativePermission) && nativeActivityApplies) {
           const failure = quarantine(nativeToolViolation());
           fail(failure);
           throw failure;
@@ -892,7 +984,12 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           releaseSession = await acquireSession(sessionId, signal);
           await context.emit({
             type: "session",
-            session: linkedSession(options.instanceId, sessionId, request.model),
+            session: linkedSession(
+              options.instanceId,
+              sessionId,
+              request.conversationId,
+              request.model,
+            ),
           });
         } else {
           operation.sessionId = sessionId;
@@ -911,7 +1008,7 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
                 {
                   retryability: "unknown",
                   sideEffects: promptDispatchAttempted ? "unknown" : "none",
-                  cause: error,
+                  cause: safeCause(error, secrets()),
                 },
               );
           turnController.abort(failure);
@@ -946,7 +1043,12 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           ))
           .map((part) => part.text)
           .join("");
-        const linked = linkedSession(options.instanceId, sessionId, request.model);
+        const linked = linkedSession(
+          options.instanceId,
+          sessionId,
+          request.conversationId,
+          request.model,
+        );
         turnCompletedSafely = true;
         return {
           status: "completed",
@@ -971,7 +1073,12 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           return {
             status: "cancelled",
             ...(sessionId === undefined ? {} : {
-              session: linkedSession(options.instanceId, sessionId, request.model),
+              session: linkedSession(
+                options.instanceId,
+                sessionId,
+                request.conversationId,
+                request.model,
+              ),
             }),
           };
         }
@@ -979,7 +1086,11 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           throw new RuntimeOpenCodeError(
             "TURN_TIMEOUT",
             redact(abortReason(timeoutController.signal), secrets()),
-            { retryability: "unknown", sideEffects: "unknown", cause: error },
+            {
+              retryability: "unknown",
+              sideEffects: "unknown",
+              cause: safeCause(error, secrets()),
+            },
           );
         }
         if (
@@ -988,9 +1099,13 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           && request.session !== undefined
         ) {
           throw new RuntimeOpenCodeError(
-            "SESSION_INVALID",
+            RUNTIME_SESSION_UNAVAILABLE_CODE,
             "OpenCode session no longer exists",
-            { retryability: "not-retryable", sideEffects: "none", cause: error },
+            {
+              retryability: "not-retryable",
+              sideEffects: "none",
+              cause: safeCause(error, secrets()),
+            },
           );
         }
         if (quarantineFailure !== undefined) {
@@ -1000,14 +1115,23 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           return {
             status: "cancelled",
             ...(sessionId === undefined ? {} : {
-              session: linkedSession(options.instanceId, sessionId, request.model),
+              session: linkedSession(
+                options.instanceId,
+                sessionId,
+                request.conversationId,
+                request.model,
+              ),
             }),
           };
         }
         throw new RuntimeOpenCodeError(
           "PROVIDER_FAILED",
           redact(error, secrets()),
-          { retryability: "unknown", sideEffects: "unknown", cause: error },
+          {
+            retryability: "unknown",
+            sideEffects: "unknown",
+            cause: safeCause(error, secrets()),
+          },
         );
       } finally {
         clearTimeout(timeout);
@@ -1027,7 +1151,7 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
               {
                 retryability: "not-retryable",
                 sideEffects: "unknown",
-                cause: error,
+                cause: safeCause(error, secrets()),
               },
             );
             state = "draining";
@@ -1049,7 +1173,7 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
               {
                 retryability: "not-retryable",
                 sideEffects: "unknown",
-                cause: error,
+                cause: safeCause(error, secrets()),
               },
             );
             state = "draining";

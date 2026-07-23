@@ -18,9 +18,10 @@ First-party reserved state module in the execution layer.
 ## Responsibility
 
 Own the local `StateStore` implementation: atomic records, exact compare-and-swap
-(CAS), deterministic list cursors, a live process lease, corruption detection,
-and optional lifecycle presence publication. The on-disk directory and every
-file are private to the current operating-system owner.
+(CAS), bounded multi-key transactions, deterministic list and forward-scan
+cursors, a live process lease, corruption detection, and optional lifecycle
+presence publication. The on-disk directory and every file are private to the
+current operating-system owner.
 
 ## Install / Usage
 
@@ -58,6 +59,24 @@ operation uses `expectedVersion: null` for create-only writes and reports an
 List cursors are opaque, prefix-bound, and stable over the user-record snapshot
 from which each page is read.
 
+`transaction` evaluates every check, put, and delete against one initial
+snapshot. Every entry must explicitly use `expectedVersion: null` to require
+absence or provide one exact version; transaction writes have no unconditional
+mode. A conflict returns every failed precondition and changes nothing.
+Successful puts and deletes are serialized into one durable snapshot frame, so
+reopening observes either the complete prior state or the complete committed
+transaction. Requests are limited to 1,000 unique keys, and ordinary record,
+record-count, and total-byte limits still apply. Put data is copied through
+intrinsic `Uint8Array` slots before admission; caller-defined length accessors
+cannot understate it, and proxies without a typed-array internal slot fail
+closed.
+
+`scan` is the mutation-tolerant forward iterator for namespaced Core records.
+Its opaque cursor binds the exact prefix and last returned key, never an offset
+or mutable generation. Intervening commits therefore do not repeat previously
+returned keys; a cursor cannot be reused with another prefix. Use `list` when a
+page must instead be rejected after any intervening user-record mutation.
+
 The store creates its root and discovery registry with mode `0700`; its marker,
 transactional index, immutable artifact blobs, and presence descriptors use
 mode `0600`. Existing paths with different owners, modes, link counts, types,
@@ -78,16 +97,18 @@ path-identity change, the instance is poisoned and must be closed and reopened.
    two-link inode, verifies every frame digest and commit footer, repairs only an
    incomplete final frame, and validates every snapshot bound, version, key,
    timestamp, base64 value, ordering invariant, and duplicate constraint.
-4. Each mutation rechecks the root and index identity, applies CAS to an
-   isolated draft, appends and syncs a length-bounded frame and digest, syncs its
-   commit footer separately, rechecks every path witness, and advances in-memory
-   state only after durable commit and post-check success. Commits never reopen,
-   rename, unlink, or truncate a pathname.
+4. Each mutation rechecks the root and index identity, applies CAS or all
+   transaction preconditions to an isolated draft, and serializes it under the
+   same worst-case JSON/base64 byte ceiling used by startup reads. Only then
+   does it append and sync one frame and digest, sync its commit footer
+   separately, recheck every path witness, and advance in-memory state.
+   Commits never reopen, rename, unlink, or truncate a pathname.
 5. Presence contract records share the same atomic snapshot under a reserved
    collision-proof namespace. Ordinary keys cannot address or enumerate that
    namespace; expiry and agent filtering happen through `listPresence` only.
 6. Reads return byte copies. Lists sort by binary key order and issue a cursor
-   bound to the exact prefix and user-record generation. Presence heartbeats do
+   bound to the exact prefix and user-record generation. Forward scans bind the
+   prefix and last key without an offset or generation. Presence heartbeats do
    not invalidate an in-progress user-key page.
 7. When discovery is configured, `start` publishes a heartbeat descriptor and
    `stop` publishes a terminal `stopped` descriptor before releasing the lease.
@@ -186,7 +207,10 @@ pnpm --filter @mono-agent/state-local run build
 pnpm --filter @mono-agent/state-local test
 ```
 
-The focused suite covers CAS conflicts, persistence, crash/post-check recovery,
+The focused suite covers CAS and multi-key transaction conflicts, all-or-none
+transaction restart recovery, long escaped-key snapshot reopening,
+prefix-bound forward scans, strict hostile typed-array input, persistence,
+crash/post-check recovery,
 immutable artifact publication and rehashing, bounded invisible artifact
 orphans, torn presence-cache repair, operator-replacement preservation, generic
 and presence corruption preservation, duplicate writer exclusion,

@@ -2,13 +2,18 @@ import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { PassThrough, Writable } from "node:stream";
 
-import type { RuntimeLiveInputHandler, RuntimeTurnEvent } from "@mono-agent/module-sdk";
+import type {
+  RuntimeLiveInputHandler,
+  RuntimeSession,
+  RuntimeTurnEvent,
+} from "@mono-agent/module-sdk";
+import { RUNTIME_SESSION_UNAVAILABLE_CODE } from "@mono-agent/module-sdk";
 import { describe, expect, it, vi } from "vitest";
 
 import { createClaudeCliTransport, type ProcessLike, type SpawnProcess } from "../cli.js";
 import { parseRuntimeClaudeConfig, runtimeClaudeJsonSchema } from "../config.js";
 import { claudeProcessEnvironment } from "../environment.js";
-import { createRuntimeClaude } from "../runtime.js";
+import { createRuntimeClaude, RuntimeClaudeError } from "../runtime.js";
 import { createClaudeSdkTransport } from "../sdk.js";
 import type { ClaudeTransport, ClaudeTransportControl } from "../transport.js";
 
@@ -185,10 +190,245 @@ describe("runtime-claude transports", () => {
         return () => { unregistered = true; };
       },
     });
-    expect(result).toMatchObject({ status: "completed", session: { id: "native-session", runtimeInstanceId: "claude-runtime" } });
+    expect(result).toMatchObject({
+      status: "completed",
+      session: {
+        id: "native-session",
+        conversationId: "conversation",
+        route: {
+          runtimeInstanceId: "claude-runtime",
+          model: "claude-opus-4-8",
+        },
+      },
+    });
     expect(handler).toBeDefined();
     expect(sendInput).toHaveBeenCalledWith("steer", "2026-01-01T00:00:00.000Z");
     expect(unregistered).toBe(true);
+  });
+
+  it("rejects wrong session linkage before transport and resumes only the exact route", async () => {
+    const run = vi.fn<ClaudeTransport["run"]>(async (transportTurn) => ({
+      text: transportTurn.sessionId === undefined ? "first" : "continued",
+      sessionId: transportTurn.sessionId ?? "native-session",
+    }));
+    const runtime = createRuntimeClaude({
+      config: parseRuntimeClaudeConfig({ mode: "sdk" }),
+      instanceId: "claude-runtime",
+      workspaceDirectory: process.cwd(),
+      sdkTransport: { run },
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    const runtimeContext = {
+      emit() {},
+      async executeTool(call: { readonly id: string }) {
+        return { callId: call.id, content: [] };
+      },
+    };
+    const exactSession: RuntimeSession = {
+      id: "native-session",
+      conversationId: "conversation",
+      route: {
+        runtimeInstanceId: "claude-runtime",
+        model: "claude-opus-4-8",
+      },
+    };
+    const invalidSessions: RuntimeSession[] = [
+      {
+        ...exactSession,
+        route: { ...exactSession.route, runtimeInstanceId: "other-runtime" },
+      },
+      {
+        ...exactSession,
+        route: { ...exactSession.route, model: "claude-sonnet-4-7" },
+      },
+      {
+        ...exactSession,
+        conversationId: "other-conversation",
+      },
+    ];
+    for (const session of invalidSessions) {
+      await expect(runtime.runTurn({
+        turnId: "invalid",
+        conversationId: "conversation",
+        model: "claude-opus-4-8",
+        messages: [{ role: "user", content: [{ type: "text", text: "no call" }] }],
+        tools: [],
+        signal: new AbortController().signal,
+        session,
+      }, runtimeContext)).rejects.toMatchObject({ code: "SESSION_INVALID" });
+    }
+    expect(run).not.toHaveBeenCalled();
+
+    const first = await runtime.runTurn({
+      turnId: "first",
+      conversationId: "conversation",
+      model: "claude-opus-4-8",
+      messages: [{ role: "user", content: [{ type: "text", text: "first" }] }],
+      tools: [],
+      signal: new AbortController().signal,
+    }, runtimeContext);
+    const second = await runtime.runTurn({
+      turnId: "second",
+      conversationId: "conversation",
+      model: "claude-opus-4-8",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "first" }] },
+        { role: "assistant", content: [{ type: "text", text: "first" }] },
+        { role: "user", content: [{ type: "text", text: "follow up" }] },
+      ],
+      tools: [],
+      signal: new AbortController().signal,
+      session: first.session!,
+    }, runtimeContext);
+
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(run.mock.calls[1]?.[0]).toMatchObject({
+      sessionId: "native-session",
+      prompt: "follow up",
+    });
+    expect(second).toMatchObject({
+      status: "completed",
+      message: { content: [{ type: "text", text: "continued" }] },
+      session: exactSession,
+    });
+  });
+
+  it("maps only a genuinely missing native continuation to SESSION_UNAVAILABLE", async () => {
+    const missingSession = "11111111-1111-4111-8111-111111111111";
+    const transport = createClaudeSdkTransport({
+      query(input) {
+        const resumed = String(input.options.resume);
+        throw new Error(
+          resumed === missingSession
+            ? `Session ${missingSession} not found in any project directory`
+            : `Session ${missingSession} not found in any project directory`,
+        );
+      },
+    });
+    const runtime = createRuntimeClaude({
+      config: parseRuntimeClaudeConfig({ mode: "sdk" }),
+      instanceId: "claude-runtime",
+      workspaceDirectory: process.cwd(),
+      sdkTransport: transport,
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    const runtimeContext = {
+      emit() {},
+      async executeTool(call: { readonly id: string }) {
+        return { callId: call.id, content: [] };
+      },
+    };
+    const run = (sessionId: string) => runtime.runTurn({
+      turnId: `turn-${sessionId}`,
+      conversationId: "conversation",
+      model: "claude-opus-4-8",
+      messages: [{ role: "user", content: [{ type: "text", text: "resume" }] }],
+      tools: [],
+      signal: new AbortController().signal,
+      session: {
+        id: sessionId,
+        conversationId: "conversation",
+        route: {
+          runtimeInstanceId: "claude-runtime",
+          model: "claude-opus-4-8",
+        },
+      },
+    }, runtimeContext);
+
+    await expect(run(missingSession)).rejects.toMatchObject({
+      code: RUNTIME_SESSION_UNAVAILABLE_CODE,
+      retryability: "not-retryable",
+      sideEffects: "none",
+    });
+    await expect(
+      run("22222222-2222-4222-8222-222222222222"),
+    ).rejects.toMatchObject({
+      code: "PROVIDER_FAILED",
+    });
+  });
+
+  it("publishes only bounded accessor-free redacted provider causes", async () => {
+    const secret = "sk-secret";
+    let accessorReads = 0;
+    const providerCause = new Error(
+      `provider rejected ${secret} ${"x".repeat(8_192)}`,
+    ) as Error & { code?: string };
+    providerCause.name = `ClaudeProvider-${secret}`;
+    Object.defineProperty(providerCause, "code", {
+      configurable: true,
+      enumerable: true,
+      value: `AUTH_${secret}`,
+      writable: true,
+    });
+    Object.defineProperty(providerCause, "cause", {
+      configurable: true,
+      get() {
+        accessorReads += 1;
+        return new Error(`nested ${secret}`);
+      },
+    });
+    Object.defineProperty(providerCause, "danger", {
+      configurable: true,
+      get() {
+        accessorReads += 1;
+        return secret;
+      },
+    });
+    const runtime = createRuntimeClaude({
+      config: parseRuntimeClaudeConfig({
+        mode: "sdk",
+        auth: { method: "api-key", token: secret },
+      }),
+      instanceId: "claude-runtime",
+      workspaceDirectory: process.cwd(),
+      sdkTransport: {
+        async run() {
+          throw providerCause;
+        },
+      },
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+
+    let failure: unknown;
+    try {
+      await runtime.runTurn({
+        turnId: "secret-failure",
+        conversationId: "conversation",
+        model: "claude-opus-4-8",
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+        tools: [],
+        signal: new AbortController().signal,
+      }, {
+        emit() {},
+        async executeTool(call) {
+          return { callId: call.id, content: [] };
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(RuntimeClaudeError);
+    const typed = failure as RuntimeClaudeError;
+    expect(typed.message).not.toContain(secret);
+    expect(typed.message.length).toBeLessThanOrEqual(4_096);
+    expect(typed.cause).toBeInstanceOf(Error);
+    expect(typed.cause === providerCause).toBe(false);
+    const cause = typed.cause as Error & { readonly code?: string };
+    expect(cause.message).not.toContain(secret);
+    expect(cause.message.length).toBeLessThanOrEqual(4_096);
+    expect(cause.name).toBe("ClaudeProvider-[REDACTED]");
+    expect(cause.code).toBe("AUTH_[REDACTED]");
+    expect(Object.getOwnPropertyDescriptor(cause, "cause")).toBeUndefined();
+    const descriptors = Object.values(Object.getOwnPropertyDescriptors(cause));
+    expect(descriptors.every((descriptor) => !("get" in descriptor))).toBe(true);
+    expect(
+      descriptors
+        .filter((descriptor) => "value" in descriptor)
+        .map((descriptor) => String(descriptor.value))
+        .join("\n"),
+    ).not.toContain(secret);
+    expect(accessorReads).toBe(0);
   });
 
   it("preflights the created instance without retaining deprecated validation", async () => {

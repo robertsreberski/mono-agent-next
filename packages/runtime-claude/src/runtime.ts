@@ -1,4 +1,7 @@
-import { RuntimeTurnError } from "@mono-agent/module-sdk";
+import {
+  RUNTIME_SESSION_UNAVAILABLE_CODE,
+  RuntimeTurnError,
+} from "@mono-agent/module-sdk";
 import type {
   JsonObject,
   ModuleDiagnostic,
@@ -26,9 +29,50 @@ import {
   validateClaudeModel,
 } from "./model.js";
 import { createClaudeSdkTransport } from "./sdk.js";
-import { claudeEnvironment, type ClaudeTransport, type ClaudeTransportControl } from "./transport.js";
+import {
+  ClaudeSessionUnavailableError,
+  claudeEnvironment,
+  type ClaudeTransport,
+  type ClaudeTransportControl,
+} from "./transport.js";
 
 type RuntimeState = "created" | "running" | "draining" | "stopped";
+const SAFE_CAUSE_MESSAGE_CHARS = 4_096;
+const SAFE_CAUSE_IDENTITY_CHARS = 128;
+
+function ownDataValue(value: unknown, key: PropertyKey): unknown {
+  if (
+    value === null
+    || (typeof value !== "object" && typeof value !== "function")
+  ) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined && "value" in descriptor
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function failureMessage(value: unknown): string {
+  const ownMessage = ownDataValue(value, "message");
+  if (typeof ownMessage === "string") return ownMessage;
+  if (
+    typeof value === "string"
+    || typeof value === "number"
+    || typeof value === "boolean"
+    || typeof value === "bigint"
+    || typeof value === "symbol"
+  ) return String(value);
+  return "Claude provider failure";
+}
+
+function bounded(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const suffix = "… [truncated]";
+  return `${value.slice(0, maxChars - suffix.length)}${suffix}`;
+}
 
 export class RuntimeClaudeError extends RuntimeTurnError {
   constructor(
@@ -40,12 +84,13 @@ export class RuntimeClaudeError extends RuntimeTurnError {
       readonly cause?: unknown;
     } = {},
   ) {
+    const cause = safeCause(options.cause);
     super({
       code,
       message,
       retryability: options.retryability ?? "unknown",
       sideEffects: options.sideEffects ?? "none",
-      ...(options.cause === undefined ? {} : { cause: options.cause }),
+      ...(cause === undefined ? {} : { cause }),
     });
     this.name = "RuntimeClaudeError";
   }
@@ -65,9 +110,36 @@ function diagnostic(code: string, severity: ModuleDiagnostic["severity"], messag
 }
 
 function redact(value: unknown, secret: string | undefined): string {
-  let message = value instanceof Error ? value.message : String(value);
+  let message = failureMessage(value);
   if (secret !== undefined && secret.length > 0) message = message.split(secret).join("[REDACTED]");
-  return message.replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]");
+  return bounded(
+    message.replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]"),
+    SAFE_CAUSE_MESSAGE_CHARS,
+  );
+}
+
+function safeCause(value: unknown, secret?: string): Error | undefined {
+  if (value === undefined) return undefined;
+  const snapshot = new Error(redact(value, secret));
+  const rawName = ownDataValue(value, "name");
+  snapshot.name = bounded(
+    redact(typeof rawName === "string" ? rawName : "Error", secret),
+    SAFE_CAUSE_IDENTITY_CHARS,
+  );
+  const rawCode = ownDataValue(value, "code");
+  if (typeof rawCode === "string" || typeof rawCode === "number") {
+    Object.defineProperty(snapshot, "code", {
+      configurable: false,
+      enumerable: true,
+      writable: false,
+      value: bounded(
+        redact(String(rawCode), secret),
+        SAFE_CAUSE_IDENTITY_CHARS,
+      ),
+    });
+  }
+  delete snapshot.stack;
+  return Object.freeze(snapshot);
 }
 
 function messageText(message: TurnMessage): string {
@@ -97,15 +169,48 @@ function prompt(messages: readonly TurnMessage[], resumed: boolean): string {
     .map((message) => `${message.role.toUpperCase()}:\n${messageText(message)}`).join("\n\n");
 }
 
-function linkedSession(instanceId: string, id: string, model: string, mode: string): RuntimeSession {
+function linkedSession(
+  instanceId: string,
+  id: string,
+  conversationId: string,
+  model: string,
+  mode: string,
+): RuntimeSession {
   return {
     id,
-    runtimeInstanceId: instanceId,
-    provider: "claude",
-    model,
+    conversationId,
+    route: { runtimeInstanceId: instanceId, model },
     createdAt: new Date().toISOString(),
-    metadata: { transport: mode },
+    metadata: { provider: "claude", transport: mode },
   };
+}
+
+function assertSessionLinkage(
+  request: RuntimeTurnRequest,
+  instanceId: string,
+): void {
+  if (request.session === undefined) return;
+  if (request.session.route?.runtimeInstanceId !== instanceId) {
+    throw new RuntimeClaudeError(
+      "SESSION_INVALID",
+      "Claude session belongs to another runtime instance",
+      { retryability: "not-retryable" },
+    );
+  }
+  if (request.session.route.model !== request.model) {
+    throw new RuntimeClaudeError(
+      "SESSION_INVALID",
+      "Claude session belongs to another model route",
+      { retryability: "not-retryable" },
+    );
+  }
+  if (request.session.conversationId !== request.conversationId) {
+    throw new RuntimeClaudeError(
+      "SESSION_INVALID",
+      "Claude session belongs to another conversation",
+      { retryability: "not-retryable" },
+    );
+  }
 }
 
 export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtime {
@@ -165,9 +270,7 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
       if (state !== "running") throw new RuntimeClaudeError("RUNTIME_NOT_RUNNING", `runtime-claude is ${state}`, { retryability: "not-retryable" });
       if (!isClaudeModelIdentifier(request.model)) throw new RuntimeClaudeError("MODEL_INVALID", "Claude model identifier is invalid", { retryability: "not-retryable" });
       if (request.tools.length > 0) throw new RuntimeClaudeError("TOOLS_UNSUPPORTED", "runtime-claude does not expose Core tools", { retryability: "not-retryable" });
-      if (request.session?.runtimeInstanceId !== undefined && request.session.runtimeInstanceId !== options.instanceId) {
-        throw new RuntimeClaudeError("SESSION_INVALID", "Claude session belongs to another runtime instance", { retryability: "not-retryable" });
-      }
+      assertSessionLinkage(request, options.instanceId);
       if (request.signal.aborted) return { status: "cancelled" };
 
       let control: ClaudeTransportControl | undefined;
@@ -191,7 +294,16 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
           async thinking(delta) { await context.emit({ type: "thinking-delta", delta }); },
           async session(id) {
             nativeSessionId = id;
-            await context.emit({ type: "session", session: linkedSession(options.instanceId, id, request.model, options.config.mode) });
+            await context.emit({
+              type: "session",
+              session: linkedSession(
+                options.instanceId,
+                id,
+                request.conversationId,
+                request.model,
+                options.config.mode,
+              ),
+            });
           },
           async usage(value) { await context.emit({ type: "usage", usage: value }); },
           control(value) {
@@ -206,12 +318,29 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
           },
         });
         nativeSessionId = result.sessionId;
-        if (request.signal.aborted) return { status: "cancelled", session: linkedSession(options.instanceId, result.sessionId, request.model, options.config.mode) };
+        if (request.signal.aborted) {
+          return {
+            status: "cancelled",
+            session: linkedSession(
+              options.instanceId,
+              result.sessionId,
+              request.conversationId,
+              request.model,
+              options.config.mode,
+            ),
+          };
+        }
         return {
           status: "completed",
           message: { role: "assistant", content: [{ type: "text", text: result.text }] },
           ...(result.usage === undefined ? {} : { usage: result.usage }),
-          session: linkedSession(options.instanceId, result.sessionId, request.model, options.config.mode),
+          session: linkedSession(
+            options.instanceId,
+            result.sessionId,
+            request.conversationId,
+            request.model,
+            options.config.mode,
+          ),
           ...(result.structuredOutput === undefined ? {} : { structuredOutput: result.structuredOutput }),
           metadata: {
             provider: "claude",
@@ -222,13 +351,37 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
         };
       } catch (error) {
         if (request.signal.aborted) {
-          return { status: "cancelled", ...(nativeSessionId === undefined ? {} : { session: linkedSession(options.instanceId, nativeSessionId, request.model, options.config.mode) }) };
+          return {
+            status: "cancelled",
+            ...(nativeSessionId === undefined
+              ? {}
+              : {
+                  session: linkedSession(
+                    options.instanceId,
+                    nativeSessionId,
+                    request.conversationId,
+                    request.model,
+                    options.config.mode,
+                  ),
+                }),
+          };
         }
         if (error instanceof RuntimeClaudeError) throw error;
+        if (error instanceof ClaudeSessionUnavailableError) {
+          throw new RuntimeClaudeError(
+            RUNTIME_SESSION_UNAVAILABLE_CODE,
+            "Claude provider session is unavailable",
+            {
+              retryability: "not-retryable",
+              sideEffects: "none",
+              cause: safeCause(error, options.config.auth?.token),
+            },
+          );
+        }
         throw new RuntimeClaudeError("PROVIDER_FAILED", redact(error, options.config.auth?.token), {
           retryability: "unknown",
           sideEffects: "none",
-          cause: error,
+          cause: safeCause(error, options.config.auth?.token),
         });
       } finally {
         unregisterLiveInput?.();

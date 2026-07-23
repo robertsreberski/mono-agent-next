@@ -19,6 +19,7 @@ import {
   parseModuleConfig,
   provenanceAt,
   readCrossSlotReference,
+  snapshotRuntimeTurnError,
   type Channel,
   type AskUserRequest,
   type Memory,
@@ -264,6 +265,10 @@ describe("reserved module definitions", () => {
         async compareAndSwap() {
           return { status: "conflict" as const };
         },
+        async transaction() {
+          return { status: "applied" as const, records: [], deletedKeys: [] };
+        },
+        async scan() { return { records: [] }; },
         async upsertPresence(request) { return request.presence; },
         async removePresence() { return false; },
         async listPresence() { return []; },
@@ -344,6 +349,16 @@ describe("runtime interaction and failure primitives", () => {
       sideEffects: "none",
     });
     expect(isRuntimeTurnError(compatibleFailure)).toBe(true);
+    const snapshot = snapshotRuntimeTurnError(compatibleFailure);
+    expect(snapshot).toEqual({
+      code: "compatible_failed",
+      message: "Compatible runtime failed",
+      retryability: "retryable",
+      sideEffects: "none",
+    });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    compatibleFailure.sideEffects = "committed";
+    expect(snapshot?.sideEffects).toBe("none");
     expect(isRuntimeTurnError(Object.assign(new Error("Unsafe retry"), {
       code: "unsafe",
       retryability: "retryable",
@@ -356,5 +371,37 @@ describe("runtime interaction and failure primitives", () => {
       sideEffects: "unknown",
       retryAfterMs: -1,
     })).toThrow("retryAfterMs must be a non-negative safe integer");
+    expect(snapshotRuntimeTurnError(Object.assign(new Error("x".repeat(70_000)), {
+      code: "bounded_message",
+      retryability: "retryable",
+      sideEffects: "none",
+    }))?.message).toHaveLength(65_536);
+    expect(snapshotRuntimeTurnError(Object.assign(new Error("oversized code"), {
+      code: "x".repeat(257),
+      retryability: "retryable",
+      sideEffects: "none",
+    }))).toBeUndefined();
+  });
+
+  it("never invokes accessors while classifying runtime failures", () => {
+    const failure = new Error("hostile runtime failure");
+    let accessorReads = 0;
+    for (const [key, value] of Object.entries({
+      code: "provider_failed",
+      retryability: "retryable",
+      sideEffects: "none",
+    })) {
+      Object.defineProperty(failure, key, {
+        configurable: true,
+        get() {
+          accessorReads += 1;
+          return value;
+        },
+      });
+    }
+
+    expect(snapshotRuntimeTurnError(failure)).toBeUndefined();
+    expect(isRuntimeTurnError(failure)).toBe(false);
+    expect(accessorReads).toBe(0);
   });
 });

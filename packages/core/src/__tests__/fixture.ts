@@ -3,6 +3,8 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import type { RuntimeSession } from "@mono-agent/module-sdk";
+
 import type { AgentConfig, ModuleKind } from "../types.js";
 
 const REGISTRY_KEY = "__monoAgentCoreFixtureRegistry";
@@ -209,6 +211,29 @@ export function runtimeController(
 
 export function completed(text: string): unknown {
   return { status: "completed", message: { role: "assistant", content: [{ type: "text", text }] } };
+}
+
+export function runtimeSession(
+  id: string,
+  request: unknown,
+  runtimeInstanceId = "main",
+): RuntimeSession {
+  if (
+    typeof request !== "object"
+    || request === null
+    || typeof Reflect.get(request, "conversationId") !== "string"
+    || typeof Reflect.get(request, "model") !== "string"
+  ) {
+    throw new TypeError("Fixture runtime request is missing its session identity");
+  }
+  return {
+    id,
+    conversationId: Reflect.get(request, "conversationId") as string,
+    route: {
+      runtimeInstanceId,
+      model: Reflect.get(request, "model") as string,
+    },
+  };
 }
 
 export async function replacePackageEntryWithSymlink(
