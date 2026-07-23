@@ -334,7 +334,7 @@ describe("service-macos reconciliation", () => {
     const environmentFile = join(fixture.root, "web.env");
     const registry = join(fixture.root, "registry");
     await mkdir(registry, { mode: 0o700 });
-    await writeFile(environmentFile, "WEB_TOKEN=0123456789abcdef0123456789abcdef\n", { mode: 0o600 });
+    await writeFile(environmentFile, "WEB_TOKEN=web-test-token-placeholder-not-secret\n", { mode: 0o600 });
     await writeFile(webConfig, `${JSON.stringify({
       configVersion: 1,
       listen: { host: "127.0.0.1", port: 0 },
@@ -413,7 +413,7 @@ describe("service-macos reconciliation", () => {
     await mkdir(registry, { mode: 0o700 });
     await writeFile(
       environmentFile,
-      "WEB_TOKEN=0123456789abcdef0123456789abcdef\n",
+      "WEB_TOKEN=web-test-token-placeholder-not-secret\n",
       { mode: 0o600 },
     );
     await writeFile(webConfig, `${JSON.stringify({
