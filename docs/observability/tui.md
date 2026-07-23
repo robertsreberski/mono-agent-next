@@ -72,9 +72,10 @@ the capabilities and shared state returned from `@mono-agent/operator`.
 | --- | --- |
 | ordinary text | Start a turn when idle; during a compatible active turn, offer live input. |
 | `Escape` or `/cancel` | Request cancellation when the endpoint advertises it. |
+| `/runtime <instance\|default>` | Set or clear the next-turn runtime-instance override. |
 | `/model <ref\|default>` | Set or clear the next-turn model override. Advertised models are an allowlist. |
 | `/effort <level\|default>` | Set or clear the next-turn effort override. Advertised effort values are an allowlist. |
-| `/answer <question-id>=<value>[,<value>]` | Answer a pending AskUser question when supported. |
+| `/answer {"question":"value","other":["value-1","value-2"]}` | Losslessly answer every pending question, including punctuation-rich choices, free text, and multi-select values. |
 | `/help` | Show the in-product command summary. |
 | `/exit` or `/quit` | Close only this renderer. |
 

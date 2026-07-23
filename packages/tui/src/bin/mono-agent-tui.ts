@@ -32,6 +32,7 @@ async function main(): Promise<void> {
     ...(parsed.operatorId === undefined ? {} : { operatorId: parsed.operatorId }),
     ...(parsed.conversationId === undefined ? {} : { conversationId: parsed.conversationId }),
     ...(parsed.title === undefined ? {} : { title: parsed.title }),
+    ...(parsed.runtime === undefined ? {} : { runtime: parsed.runtime }),
     ...(parsed.model === undefined ? {} : { model: parsed.model }),
     ...(parsed.effort === undefined ? {} : { effort: parsed.effort }),
   });

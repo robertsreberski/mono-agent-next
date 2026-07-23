@@ -114,6 +114,20 @@ describe("OperatorClient", () => {
       input: { text: "x".repeat(128) },
     }))).rejects.toMatchObject({ code: "REQUEST_TOO_LARGE" });
     expect(fetch).not.toHaveBeenCalled();
+
+    const askFetch = vi.fn(async () => new Response('{"status":"accepted"}', {
+      headers: { "content-type": "application/json" },
+    }));
+    const askClient = new OperatorClient({
+      endpoint: "http://127.0.0.1:4321",
+      limits: { requestBytes: 64, askAnswerRequestBytes: 1_024 },
+      fetch: askFetch,
+    });
+    await expect(askClient.answerAsk("fixture-conversation", {
+      interactionId: "ask",
+      answers: { constructor: ["x".repeat(128)] },
+    })).resolves.toEqual({ status: "accepted" });
+    expect(askFetch).toHaveBeenCalledOnce();
   });
 
   it("keeps a normal turn body alive after the header timeout window", async () => {

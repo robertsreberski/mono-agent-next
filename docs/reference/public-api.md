@@ -18,29 +18,29 @@ pnpm run generate:source-beta-docs
 
 | Package | Public entrypoints | Named exports | Package API |
 | --- | ---: | ---: | --- |
-| `@mono-agent/module-sdk` | 5 | 325 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
-| `@mono-agent/core` | 1 | 56 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/core/README.md) |
+| `@mono-agent/module-sdk` | 5 | 331 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
+| `@mono-agent/core` | 1 | 59 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/core/README.md) |
 | `@mono-agent/cli` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/cli/README.md) |
 | `@mono-agent/runtime-pi` | 1 | 6 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-pi/README.md) |
 | `@mono-agent/runtime-claude` | 1 | 6 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-claude/README.md) |
 | `@mono-agent/runtime-codex` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-codex/README.md) |
 | `@mono-agent/runtime-opencode` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-opencode/README.md) |
-| `@mono-agent/channel-telegram` | 1 | 22 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-telegram/README.md) |
-| `@mono-agent/channel-slack` | 1 | 26 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-slack/README.md) |
-| `@mono-agent/channel-webhook` | 1 | 35 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-webhook/README.md) |
+| `@mono-agent/channel-telegram` | 1 | 31 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-telegram/README.md) |
+| `@mono-agent/channel-slack` | 1 | 36 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-slack/README.md) |
+| `@mono-agent/channel-webhook` | 1 | 42 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-webhook/README.md) |
 | `@mono-agent/channel-openai-api` | 1 | 25 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-openai-api/README.md) |
 | `@mono-agent/channel-operator` | 1 | 20 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-operator/README.md) |
-| `@mono-agent/trigger-cron` | 1 | 27 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/trigger-cron/README.md) |
-| `@mono-agent/memory-local` | 1 | 22 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/memory-local/README.md) |
-| `@mono-agent/state-local` | 1 | 24 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/state-local/README.md) |
+| `@mono-agent/trigger-cron` | 1 | 29 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/trigger-cron/README.md) |
+| `@mono-agent/memory-local` | 1 | 46 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/memory-local/README.md) |
+| `@mono-agent/state-local` | 1 | 26 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/state-local/README.md) |
 | `@mono-agent/exporter-otlp` | 1 | 13 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/exporter-otlp/README.md) |
 | `@mono-agent/sandbox-srt` | 1 | 14 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/sandbox-srt/README.md) |
-| `@mono-agent/operator` | 2 | 96 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/operator/README.md) |
+| `@mono-agent/operator` | 2 | 98 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/operator/README.md) |
 | `@mono-agent/tui` | 1 | 8 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/tui/README.md) |
-| `@mono-agent/web` | 1 | 22 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/web/README.md) |
-| `create-mono-agent` | 1 | 19 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/create-mono-agent/README.md) |
+| `@mono-agent/web` | 1 | 31 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/web/README.md) |
+| `create-mono-agent` | 1 | 24 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/create-mono-agent/README.md) |
 | `@mono-agent/docs-mcp` | 1 | 14 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/extras/docs-mcp/README.md) |
-| `@mono-agent/service-macos` | 1 | 55 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/service-macos/README.md) |
+| `@mono-agent/service-macos` | 1 | 59 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/service-macos/README.md) |
 
 ## Entrypoints and symbols
 
@@ -93,11 +93,17 @@ ChannelReplyActivityEvent
 ChannelReplyApprovalEvent
 ChannelReplyAskUserEvent
 ChannelReplyAttachmentEvent
+ChannelReplyCompactionEvent
 ChannelReplyEvent
+ChannelReplySessionEvictedEvent
 ChannelReplySink
 ChannelReplyTextDeltaEvent
 ChannelReplyTextReplaceEvent
+ChannelReplyToolCallEvent
+ChannelReplyToolResultEvent
 ChannelReplyUsageEvent
+ChannelSendTool
+ChannelSendToolContext
 ChannelTurnResult
 CheckedFetchOptions
 ConfigIssue
@@ -320,6 +326,8 @@ StateCompareAndSwapRequest
 StateCompareAndSwapResult
 StateDeleteArtifactRequest
 StateDeleteRequest
+StateExecution
+StateExecutionRequest
 StateHost
 StateHostPresenceRequest
 StateHostPresenceStatus
@@ -354,10 +362,6 @@ TriggerHost
 TriggerModuleCreateContext
 TriggerModuleDefinition
 TriggerReceipt
-defineExporterModule
-defineSandboxModule
-defineStateModule
-defineTriggerModule
 ```
 
 ### `@mono-agent/module-sdk/secure-fs`
@@ -383,8 +387,10 @@ readOwnerPrivateFile
 ### `@mono-agent/module-sdk/testing`
 
 ```text
+ChannelBehaviorComplianceOptions
 ModuleComplianceError
 ModuleComplianceOptions
+assertChannelBehaviorCompliance
 assertChannelInstanceCompliance
 assertChannelModuleCompliance
 assertMemoryInstanceCompliance
@@ -424,6 +430,7 @@ AgentLiveInput
 AgentLiveInputStatus
 AgentLoadOptions
 AgentModuleCommandResult
+AgentModuleDiagnostics
 AgentModuleError
 AgentPolicyConfig
 AgentResponse
@@ -453,9 +460,11 @@ RuntimeRoute
 SelectedModuleConfig
 composeAgentConfigSchema
 createAgentHost
+diagnoseAgent
 explainAgentConfig
 inspectAgent
 loadAgentConfig
+runAgentModuleCommand
 validateAgentConfig
 ```
 
@@ -526,7 +535,9 @@ monoAgentModule
 CreateTelegramChannelOptions
 DEFAULT_TELEGRAM_MAX_ATTACHMENT_BYTES
 DEFAULT_TELEGRAM_POLL_SECONDS
+DEFAULT_TELEGRAM_TRANSCRIPTION_TIMEOUT_MS
 MAX_TELEGRAM_ATTACHMENT_BYTES
+MAX_TELEGRAM_TRANSCRIPTION_TIMEOUT_MS
 TelegramBotClient
 TelegramBotClientFactory
 TelegramCallbackUpdate
@@ -534,14 +545,21 @@ TelegramChannel
 TelegramConfig
 TelegramConfigError
 TelegramDelivery
+TelegramEditMessageRequest
 TelegramMessageUpdate
+TelegramQuietHours
 TelegramReactionConfig
 TelegramRemoteAttachment
 TelegramSendAttachmentRequest
 TelegramSendMessageRequest
+TelegramTranscriber
+TelegramTranscriptionConfig
+TelegramTransportConfig
 TelegramUpdate
 createTelegramBotApiClient
 createTelegramChannel
+createTelegramTranscriber
+isWithinQuietHours
 monoAgentModule
 parseTelegramConfig
 telegramConfigSchema
@@ -555,17 +573,27 @@ telegramConfigSchema
 CreateSlackChannelOptions
 DEFAULT_SLACK_MAX_ATTACHMENT_BYTES
 MAX_SLACK_ATTACHMENT_BYTES
+MAX_SLACK_HOME_BUTTONS
+MAX_SLACK_SHORTCUTS
 SlackActionEvent
 SlackApiClient
 SlackApiClientFactory
 SlackChannel
 SlackConfig
 SlackConfigError
+SlackConfiguredAction
 SlackDelivery
 SlackFilePostRequest
+SlackHomeActionEvent
+SlackHomeButtonConfig
+SlackHomeOpenedEvent
+SlackHomeTabConfig
+SlackHomeView
 SlackMessageEvent
 SlackPostRequest
 SlackRemoteFile
+SlackShortcutConfig
+SlackShortcutEvent
 SlackSocketEvent
 SlackSocketEventHandler
 SlackSocketFailure
@@ -598,6 +626,8 @@ MAX_BODY_BYTES
 MAX_RETENTION_MS
 MAX_RUN_MS
 MAX_STORED_REQUESTS
+MAX_WEBHOOK_ROUTES
+MAX_WEBHOOK_ROUTE_BYTES
 WebhookChannel
 WebhookChannelHealth
 WebhookChannelStartInfo
@@ -612,13 +642,18 @@ WebhookMode
 WebhookModuleChannel
 WebhookOutboundConfig
 WebhookRequestStatus
+WebhookRoute
 WebhookSubmit
 WebhookTerminalStatus
 WebhookTurnResult
 createWebhookChannel
 isLoopbackHost
+loadWebhookRoutesFromDirectory
 monoAgentModule
 parseWebhookConfig
+parseWebhookMode
+parseWebhookPath
+parseWebhookRouteMarkdown
 webhookConfigSchema
 ```
 
@@ -690,6 +725,7 @@ CreateCronTriggerOptions
 CronClock
 CronInvocationResult
 CronInvocationSource
+CronInvocationStatus
 CronJob
 CronNotifyDestination
 CronOverflowPolicy
@@ -699,6 +735,7 @@ CronTrigger
 DEFAULT_CRON_TIMEZONE
 DEFAULT_MAX_QUEUE_DEPTH
 DEFAULT_MAX_RUN_MS
+MAX_CRON_CATCH_UP
 MAX_CRON_JOBS
 MAX_CRON_JOB_BYTES
 TriggerCronConfig
@@ -720,7 +757,10 @@ triggerCronConfigSchema
 ### `@mono-agent/memory-local`
 
 ```text
-DEFAULT_MEMORY_MAX_METADATA_BYTES
+DEFAULT_EMBEDDING_BREAKER_FAILURES
+DEFAULT_EMBEDDING_BREAKER_RESET_MS
+DEFAULT_EMBEDDING_TIMEOUT_MS
+DEFAULT_MEMORY_MAX_BYTES
 DEFAULT_MEMORY_MAX_RECALL_RESULTS
 DEFAULT_MEMORY_MAX_RECORDS
 DEFAULT_MEMORY_MAX_TEXT_BYTES
@@ -728,14 +768,35 @@ DEFAULT_MEMORY_MAX_TOTAL_BYTES
 DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_BYTES
 DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_TOKENS
 DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS
+DEFAULT_RUNTIME_CAPTURE_TIMEOUT_MS
 MEMORY_LOCAL_DATABASE_FILENAME
+MEMORY_LOCAL_FUTURE_LOG_FILENAME
+MEMORY_LOCAL_INDEX_FILENAME
 MEMORY_LOCAL_MARKER_FILENAME
+MEMORY_LOCAL_WRITER_LEASE_FILENAME
+MemoryEmbeddingProvider
 MemoryLocal
+MemoryLocalAudit
+MemoryLocalAuditRequest
+MemoryLocalBackupRequest
+MemoryLocalBackupResult
 MemoryLocalCaptureConfig
 MemoryLocalConfig
+MemoryLocalConsolidateRequest
+MemoryLocalConsolidateResult
+MemoryLocalEmbeddingsConfig
 MemoryLocalError
 MemoryLocalErrorCode
-MemoryLocalLimitsConfig
+MemoryLocalForgetPreview
+MemoryLocalModelRoute
+MemoryLocalProjectionAudit
+MemoryLocalProjectionStatus
+MemoryLocalRebuildRequest
+MemoryLocalRebuildResult
+MemoryLocalRecallToolConfig
+MemoryLocalRetryRequest
+MemoryLocalRetryResult
+OllamaMemoryEmbeddingProvider
 OpenMemoryLocalOptions
 default
 memoryLocalJsonSchema
@@ -760,6 +821,8 @@ StateLocalConfigError
 StateLocalDiscoveryConfig
 StateLocalError
 StateLocalErrorCode
+StateLocalMaintenanceRequest
+StateLocalMaintenanceResult
 StateLocalRunsConfig
 StateLocalStore
 StateLocalStoreHooks
@@ -918,6 +981,8 @@ serializeOperatorFrame
 ASK_USER_TURN_FRAMES
 FIXTURE_CAPABILITIES
 MALFORMED_OPERATOR_FRAMES
+MULTI_QUESTION_ASK_USER_ANSWER
+MULTI_QUESTION_ASK_USER_TURN_FRAMES
 VALID_OPERATOR_INFO
 VALID_TURN_FRAMES
 VALID_TURN_REQUEST
@@ -944,24 +1009,33 @@ startMonoAgentTui
 ### `@mono-agent/web`
 
 ```text
+AnswerWebAskInput
 CreateWebThreadInput
 LoadWebConfigOptions
+OfferWebLiveInput
 ParseWebConfigOptions
 StartWebServerOptions
 StartWebTurnInput
 WEB_API_VERSION
 WebAgent
+WebAskAnswerResult
 WebBootstrap
 WebConfig
+WebConfigView
+WebHealthView
 WebListenConfig
+WebLiveInputResult
 WebMessage
 WebOperatorGateway
 WebOperatorTurnInput
+WebProactiveConversation
 WebProductError
+WebReplayView
 WebServerHandle
 WebThread
 WebThreadDetail
 WebTurnStatus
+WebTurnTelemetry
 loadWebConfig
 parseWebConfig
 startWebServer
@@ -973,7 +1047,11 @@ webConfigJsonSchema
 ### `create-mono-agent`
 
 ```text
+COMPOSER_SKILL_TARGETS
+ComposerSkillInstallResult
+ComposerSkillTarget
 CreateMonoAgentCliOptions
+InstallComposerSkillOptions
 InstallPackageManager
 MinimalProjectOptions
 PROJECT_TEMPLATES
@@ -985,6 +1063,7 @@ RenderedProjectFile
 ScaffoldAgentOptions
 ScaffoldError
 ScaffoldResult
+installComposerSkill
 isProjectTemplate
 renderMinimalProject
 renderMultiRuntimeProject
@@ -1034,9 +1113,11 @@ MAX_SERVICE_CONFIG_BYTES
 PlanServiceMacosOptions
 PlanServiceMacosRemovalOptions
 ProtectedEnvironment
+RecoverServiceMacosOptions
 RemoveServiceMacosOptions
 SERVICE_MACOS_CONFIG_VERSION
 SERVICE_PLAN_SCHEMA_VERSION
+ServiceFileIdentity
 ServiceFileObservation
 ServiceMacosCliOptions
 ServiceMacosConfig
@@ -1055,6 +1136,7 @@ ServiceMacosTarget
 ServicePlanAction
 ServiceRemovalAction
 ServiceRestartPolicy
+ServiceRunnerBinding
 ServiceSignal
 ServiceSignalSource
 applyServiceMacosPlan
@@ -1070,6 +1152,7 @@ parseServiceMacosConfig
 planServiceMacos
 planServiceMacosRemoval
 processCommandRunner
+recoverServiceMacosTransactions
 removeServiceMacosPlan
 renderServicePlist
 runServiceMacosCli

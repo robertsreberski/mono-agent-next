@@ -1,11 +1,20 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import {
   SOURCE_BETA_LINE_BUDGETS,
   assertSourceBetaBudgets,
   classifySourcePath,
+  collectExecutableConfigReference,
+  collectSchemaFieldRows,
+  discoverTypedModulePackages,
+  renderSourceBetaConfigMarkdown,
 } from "../lib/source-beta-report.mjs";
 import { parseSourceBetaReportArgs } from "../source-beta-report.mjs";
+
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 describe("source-beta production budgets", () => {
   it("accepts both binding budgets at exact equality", () => {
@@ -88,6 +97,195 @@ describe("source-beta production budgets", () => {
   });
 });
 
+describe("executable config schema reference", () => {
+  it("traverses required/default/constraint/security/cross-slot annotations", () => {
+    const rows = collectSchemaFieldRows({
+      type: "object",
+      additionalProperties: false,
+      required: ["mode", "credentials", "runtime"],
+      properties: {
+        mode: { enum: ["safe", "fast"], default: "safe" },
+        credentials: {
+          type: "object",
+          "x-mono-agent-secret": true,
+          required: ["token"],
+          properties: {
+            token: {
+              type: "string",
+              minLength: 20,
+              maxLength: 4096,
+              pattern: "^\\S+$",
+              "x-mono-agent-env-eligible": true,
+            },
+          },
+        },
+        runtime: {
+          type: "string",
+          "x-mono-agent-slot-reference": {
+            slot: "runtime",
+            capability: "memory.runtime-capture",
+          },
+        },
+        roots: {
+          type: "array",
+          uniqueItems: true,
+          items: { type: "string", minLength: 1 },
+        },
+        auth: {
+          oneOf: [
+            {
+              type: "object",
+              required: ["method", "token"],
+              properties: {
+                method: { const: "token" },
+                token: { type: "string" },
+              },
+            },
+            {
+              type: "object",
+              required: ["method", "path"],
+              properties: {
+                method: { const: "file" },
+                path: { type: "string" },
+              },
+            },
+          ],
+        },
+      },
+    }, { prefix: "memory", rootRequired: "selected" });
+
+    expect(row(rows, "memory")).toMatchObject({
+      type: "object",
+      required: "selected",
+      constraints: "closed object",
+    });
+    expect(row(rows, "memory.mode")).toMatchObject({
+      type: "string",
+      required: "yes",
+      default: "\"safe\"",
+      constraints: "enum [\"safe\",\"fast\"]",
+    });
+    expect(row(rows, "memory.credentials.token")).toMatchObject({
+      required: "yes",
+      environmentEligible: "yes",
+      secret: "yes",
+      constraints: "maxLength 4096; minLength 20; pattern \"^\\\\S+$\"",
+    });
+    expect(row(rows, "memory.runtime")).toMatchObject({
+      required: "yes",
+      crossSlot: "runtime capability memory.runtime-capture",
+    });
+    expect(row(rows, "memory.roots")).toMatchObject({
+      required: "no",
+      constraints: "unique items",
+    });
+    expect(row(rows, "memory.roots[]")).toMatchObject({
+      required: "item",
+      constraints: "minLength 1",
+    });
+    expect(row(rows, "memory.auth")).toMatchObject({
+      type: "object",
+      required: "no",
+    });
+    expect(row(rows, "memory.auth.method").required).toBe("yes");
+    expect(row(rows, "memory.auth.token").required).toBe("conditional");
+    expect(row(rows, "memory.auth.path").required).toBe("conditional");
+  });
+
+  it("collapses selected Core subtrees and adds exact module selection rows", () => {
+    const reference = collectExecutableConfigReference({
+      coreSchema: {
+        type: "object",
+        required: ["runtimes"],
+        properties: {
+          runtimes: {
+            type: "object",
+            required: ["main"],
+            properties: {
+              main: {
+                type: "object",
+                required: ["$use"],
+                properties: {
+                  $use: { const: "@mono-agent/runtime-fixture" },
+                  internal: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+      },
+      selectedModules: [{ configPath: "runtimes.main", kind: "runtime" }],
+      typedModules: [{
+        packageName: "@mono-agent/runtime-fixture",
+        kind: "runtime",
+        jsonSchema: {
+          type: "object",
+          properties: { model: { type: "string", default: "fixture" } },
+        },
+      }],
+    });
+
+    expect(reference.core.rows.map(({ path }) => path)).toEqual([
+      "$",
+      "runtimes",
+      "runtimes.{id}",
+    ]);
+    expect(row(reference.core.rows, "runtimes.{id}").required).toBe("selected");
+    expect(reference.modules[0].rows.map(({ path }) => path)).toEqual([
+      "runtimes.{id}",
+      "runtimes.{id}.$use",
+      "runtimes.{id}.model",
+    ]);
+    expect(row(reference.modules[0].rows, "runtimes.{id}.$use").constraints).toBe(
+      "const \"@mono-agent/runtime-fixture\"",
+    );
+  });
+
+  it("covers every publishable typed module declared by the package catalog", () => {
+    expect(discoverTypedModulePackages(root).map(({ packageName }) => packageName)).toEqual([
+      "@mono-agent/channel-openai-api",
+      "@mono-agent/channel-operator",
+      "@mono-agent/channel-slack",
+      "@mono-agent/channel-telegram",
+      "@mono-agent/channel-webhook",
+      "@mono-agent/exporter-otlp",
+      "@mono-agent/memory-local",
+      "@mono-agent/runtime-claude",
+      "@mono-agent/runtime-codex",
+      "@mono-agent/runtime-opencode",
+      "@mono-agent/runtime-pi",
+      "@mono-agent/sandbox-srt",
+      "@mono-agent/state-local",
+      "@mono-agent/trigger-cron",
+    ]);
+  });
+
+  it("changes generated reference bytes when an executable module field changes", () => {
+    const render = (properties) => {
+      const configReference = collectExecutableConfigReference({
+        coreSchema: { type: "object", properties: {} },
+        selectedModules: [],
+        typedModules: [{
+          packageName: "@mono-agent/runtime-fixture",
+          kind: "runtime",
+          jsonSchema: { type: "object", properties },
+        }],
+      });
+      return renderSourceBetaConfigMarkdown({
+        templates: { rows: [], configPaths: [] },
+      }, [], configReference);
+    };
+
+    const before = render({ model: { type: "string" } });
+    const after = render({
+      model: { type: "string" },
+      timeoutMs: { type: "integer", minimum: 1, default: 1000 },
+    });
+    expect(after).not.toBe(before);
+    expect(after).toContain("`runtimes.{id}.timeoutMs`");
+  });
+});
+
 function budgetReport(actualLinesById) {
   return {
     budgets: SOURCE_BETA_LINE_BUDGETS.map((budget) => ({
@@ -96,4 +294,10 @@ function budgetReport(actualLinesById) {
       withinLimit: actualLinesById[budget.id] <= budget.maximumLines,
     })),
   };
+}
+
+function row(rows, path) {
+  const match = rows.find((entry) => entry.path === path);
+  expect(match, `missing schema row ${path}`).toBeDefined();
+  return match;
 }

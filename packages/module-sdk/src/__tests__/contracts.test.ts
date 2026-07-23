@@ -25,12 +25,6 @@ import {
   type Memory,
   type Runtime,
 } from "../index.js";
-import {
-  defineExporterModule,
-  defineSandboxModule,
-  defineStateModule,
-  defineTriggerModule,
-} from "../internal.js";
 
 const emptySchema = defineModuleSchema({
   jsonSchema: { type: "object", additionalProperties: false },
@@ -241,73 +235,6 @@ describe("schema and provenance helpers", () => {
         provenance: { source: "file", filePath: "/agent/config.json" },
       })],
     }));
-  });
-});
-
-describe("reserved module definitions", () => {
-  it("keeps every reserved factory on the internal entrypoint", () => {
-    const baseManifest = {
-      packageName: "@mono-agent/internal-fixture",
-      packageVersion: "1.0.0",
-      apiVersion: MODULE_API_VERSION,
-      responsibility: "Exercises a reserved contract.",
-      capabilities: [],
-    } as const;
-
-    const state = defineStateModule({
-      manifest: { ...baseManifest, kind: "state" },
-      schema: emptySchema,
-      create: () => ({
-        async read() { return undefined; },
-        async write() { return { version: "1", updatedAt: "2026-07-22T00:00:00.000Z" }; },
-        async delete() { return false; },
-        async list() { return { records: [] }; },
-        async compareAndSwap() {
-          return { status: "conflict" as const };
-        },
-        async transaction() {
-          return { status: "applied" as const, records: [], deletedKeys: [] };
-        },
-        async scan() { return { records: [] }; },
-        async upsertPresence(request) { return request.presence; },
-        async removePresence() { return false; },
-        async listPresence() { return []; },
-      }),
-    });
-    const trigger = defineTriggerModule({
-      manifest: { ...baseManifest, kind: "trigger" },
-      schema: emptySchema,
-      create: () => ({}),
-    });
-    const exporter = defineExporterModule({
-      manifest: { ...baseManifest, kind: "exporter" },
-      schema: emptySchema,
-      create: () => ({
-        async export() { return { accepted: 0, rejected: 0 }; },
-        async flush() {},
-      }),
-    });
-    const sandbox = defineSandboxModule({
-      manifest: { ...baseManifest, kind: "sandbox" },
-      schema: emptySchema,
-      create: () => ({
-        async execute() {
-          return {
-            exitCode: 0,
-            stdout: new Uint8Array(),
-            stderr: new Uint8Array(),
-            timedOut: false,
-          };
-        },
-      }),
-    });
-
-    expect([state, trigger, exporter, sandbox].map((item) => item.manifest.kind)).toEqual([
-      "state",
-      "trigger",
-      "exporter",
-      "sandbox",
-    ]);
   });
 });
 

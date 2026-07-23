@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -65,6 +65,80 @@ describe("check-apache-provenance", () => {
       `provenance entry does not name a tracked Apache package file: ${removedPath}`,
     );
     expect(result.issues.some((issue) => issue.startsWith(`${changedPath} has stale provenance hash:`))).toBe(true);
+  });
+
+  it("rejects missing and symlinked paths without following the symlink", async () => {
+    const fixture = await fixtureRepo();
+    const missingPath = "packages/module-sdk/src/alpha.ts";
+    const symlinkPath = "packages/operator/src/beta.ts";
+    const target = join(fixture.repoRoot, "outside.ts");
+    await writeFile(target, "export const outside = true;\n");
+    await rm(join(fixture.repoRoot, missingPath));
+    await rm(join(fixture.repoRoot, symlinkPath));
+    await symlink(target, join(fixture.repoRoot, symlinkPath));
+
+    const result = await checkApacheProvenance({ repoRoot: fixture.repoRoot });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.issues.some((issue) => issue.startsWith(`${missingPath} is missing or unreadable`))).toBe(true);
+    expect(result.issues).toContain(
+      `${symlinkPath} must be a regular file; symlinks and other file types are not accepted`,
+    );
+  });
+
+  it("accepts successor revisions after a reachable lineage commit and rejects unreachable lineage", async () => {
+    const fixture = await fixtureRepo();
+    const changedPath = "packages/module-sdk/src/alpha.ts";
+    const changedContents = "export const alpha = 2;\n";
+    await writeFile(join(fixture.repoRoot, changedPath), changedContents);
+    await git(fixture.repoRoot, "add", "--", changedPath);
+    await git(
+      fixture.repoRoot,
+      "-c",
+      "user.name=Provenance Test",
+      "-c",
+      "user.email=provenance@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "change successor bytes",
+    );
+    const entry = fixture.manifest.files.find(({ path }) => path === changedPath);
+    entry.sha256 = sha256(changedContents);
+    await writeManifest(fixture.repoRoot, fixture.manifest);
+
+    const revisedSuccessor = await checkApacheProvenance({ repoRoot: fixture.repoRoot });
+
+    expect(revisedSuccessor).toMatchObject({ exitCode: 0, issues: [] });
+
+    entry.origin.commit = "f".repeat(40);
+    await writeManifest(fixture.repoRoot, fixture.manifest);
+    const unreachableOrigin = await checkApacheProvenance({ repoRoot: fixture.repoRoot });
+
+    expect(unreachableOrigin.exitCode).toBe(1);
+    expect(unreachableOrigin.issues).toContain(
+      `${changedPath}.origin.commit is not reachable in successor history`,
+    );
+  });
+
+  it("rejects a successor origin with the wrong repository or path", async () => {
+    const fixture = await fixtureRepo();
+    const entry = fixture.manifest.files.find(
+      ({ path }) => path === "packages/module-sdk/src/alpha.ts",
+    );
+    entry.origin.repository = "mono-agent";
+    entry.origin.path = "packages/operator/src/beta.ts";
+    await writeManifest(fixture.repoRoot, fixture.manifest);
+
+    const result = await checkApacheProvenance({ repoRoot: fixture.repoRoot });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.issues).toContain(
+      "packages/module-sdk/src/alpha.ts.origin.repository must be mono-agent-next",
+    );
+    expect(result.issues).toContain(
+      "packages/module-sdk/src/alpha.ts.origin.path must match the successor file path",
+    );
   });
 
   it("does not allow the materially adapted operator client to be downgraded to original work", async () => {

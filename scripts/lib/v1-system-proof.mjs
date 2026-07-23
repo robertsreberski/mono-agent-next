@@ -26,12 +26,63 @@ export const V1_SYSTEM_PROOF_SCHEMA = "mono-agent.v1-system-proof.v1";
 export const V1_ARTIFACT_SET_SCHEMA = "mono-agent.v1-artifact-set.v1";
 export const V1_CLOSURE_SCHEMA = "mono-agent.v1-installed-closure.v1";
 export const V1_CONFIG_SET_SCHEMA = "mono-agent.v1-config-set.v1";
+export const V1_PUBLIC_EXPORT_SPECIFIERS = Object.freeze([
+  "@mono-agent/module-sdk",
+  "@mono-agent/module-sdk/http",
+  "@mono-agent/module-sdk/internal",
+  "@mono-agent/module-sdk/secure-fs",
+  "@mono-agent/module-sdk/testing",
+  "@mono-agent/core",
+  "@mono-agent/cli",
+  "@mono-agent/cli/package.json",
+  "@mono-agent/runtime-pi",
+  "@mono-agent/runtime-claude",
+  "@mono-agent/runtime-codex",
+  "@mono-agent/runtime-opencode",
+  "@mono-agent/channel-telegram",
+  "@mono-agent/channel-slack",
+  "@mono-agent/channel-webhook",
+  "@mono-agent/channel-openai-api",
+  "@mono-agent/channel-operator",
+  "@mono-agent/trigger-cron",
+  "@mono-agent/memory-local",
+  "@mono-agent/state-local",
+  "@mono-agent/exporter-otlp",
+  "@mono-agent/sandbox-srt",
+  "@mono-agent/operator",
+  "@mono-agent/operator/testing",
+  "@mono-agent/tui",
+  "@mono-agent/web",
+  "create-mono-agent",
+  "create-mono-agent/package.json",
+  "@mono-agent/docs-mcp",
+  "@mono-agent/docs-mcp/package.json",
+  "@mono-agent/service-macos",
+]);
 
 const GIT_SHA = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const PACKAGE_ROOT = /^(?:packages|extras)\/[a-z0-9][a-z0-9-]*$/u;
 const TARBALL = /^[0-9A-Za-z][0-9A-Za-z._+-]*\.tgz$/u;
 const workspaces = new WeakSet();
+
+export function assertV1PublicExportSpecifiers(specifiers) {
+  invariant(Array.isArray(specifiers), "Packed public export proof must be an array.");
+  const actual = [...specifiers];
+  invariant(
+    actual.every((specifier) => typeof specifier === "string"),
+    "Packed public export proof contains a non-string specifier.",
+  );
+  invariant(
+    new Set(actual).size === actual.length,
+    "Packed public export proof contains duplicate specifiers.",
+  );
+  invariant(
+    JSON.stringify(actual) === JSON.stringify(V1_PUBLIC_EXPORT_SPECIFIERS),
+    `Packed public export proof must cover the exact ordered ${String(V1_PUBLIC_EXPORT_SPECIFIERS.length)}-specifier surface.`,
+  );
+  return Object.freeze(actual);
+}
 
 export function assertProofNodeVersion(nodeVersion = process.versions.node) {
   assertSupportedNodeVersion(nodeVersion);

@@ -221,6 +221,7 @@ export class WebService {
           text: input.text,
           ...(input.attachments === undefined ? {} : { attachments: input.attachments }),
           ...(input.quote === undefined ? {} : { quote: input.quote }),
+          ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
           ...(input.model === undefined ? {} : { model: input.model }),
           ...(input.effort === undefined ? {} : { effort: input.effort }),
           signal: controller.signal,
@@ -337,6 +338,9 @@ function validateTurnInput(input: StartWebTurnInput): void {
     throw new WebProductError("invalid_turn", "Turn input requires text or an attachment.");
   }
   if (input.text.length > 200_000) throw new WebProductError("invalid_turn", "Turn text exceeds 200,000 characters.", 413);
+  if (input.runtime !== undefined && (typeof input.runtime !== "string" || input.runtime.length === 0 || input.runtime.length > 256)) {
+    throw new WebProductError("invalid_turn", "Runtime override is invalid.");
+  }
   if (input.model !== undefined && (typeof input.model !== "string" || input.model.length === 0 || input.model.length > 256)) {
     throw new WebProductError("invalid_turn", "Model override is invalid.");
   }

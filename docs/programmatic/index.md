@@ -8,21 +8,11 @@ sidebar:
 The CLI is an optional frontend. Programmatic consumers use the same public
 Core lifecycle:
 
+<!-- doc-test:typescript -->
 ```ts
-import {
-  createAgentHost,
-  inspectAgent,
-  loadAgentConfig,
-  validateAgentConfig,
-} from "@mono-agent/core";
+import { createAgentHost } from "@mono-agent/core";
 
-const loaded = await loadAgentConfig({
-  configPath: "./mono-agent.config.json",
-});
-
-const inspection = inspectAgent(loaded);
-const host = await createAgentHost({ loaded });
-
+const host = await createAgentHost("./mono-agent.config.json");
 try {
   const result = await host.submit({
     requestId: "example-1",

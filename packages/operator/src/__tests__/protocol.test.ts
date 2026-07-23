@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   OPERATOR_LIMITS,
   OperatorProtocolError,
+  parseAskAnswerRequest,
   parseOperatorFrame,
   parseOperatorInfo,
   parseTurnRequest,
@@ -76,5 +77,68 @@ describe("operator protocol", () => {
       target: "assistant",
       text: "x".repeat(OPERATOR_LIMITS.frameBytes),
     })).toThrow("limit");
+  });
+
+  it("enforces the canonical AskUser shape and UTF-8 bounds", () => {
+    const valid = {
+      type: "ask_user",
+      turnId: "fixture-turn",
+      ask: {
+        interactionId: "ask",
+        requestedAt: "2026-01-02T03:04:06.500Z",
+        questions: [{
+          id: "constructor",
+          prompt: "Choose",
+          choices: [{
+            value: "🧪".repeat(OPERATOR_LIMITS.askChoiceValueBytes / 4),
+            label: "Bounded value",
+          }],
+          allowFreeText: false,
+          multiple: false,
+        }],
+      },
+    } as const;
+    expect(parseOperatorFrame(valid)).toEqual(valid);
+    expect(() => parseOperatorFrame({
+      ...valid,
+      ask: {
+        ...valid.ask,
+        questions: [valid.ask.questions[0], valid.ask.questions[0]],
+      },
+    })).toThrow("must be unique");
+    expect(() => parseOperatorFrame({
+      ...valid,
+      ask: {
+        ...valid.ask,
+        questions: [{
+          ...valid.ask.questions[0],
+          choices: [],
+        }],
+      },
+    })).toThrow("must contain a choice");
+    expect(() => parseOperatorFrame({
+      ...valid,
+      ask: {
+        ...valid.ask,
+        questions: [{
+          ...valid.ask.questions[0],
+          choices: [{
+            ...valid.ask.questions[0].choices[0],
+            value: `${valid.ask.questions[0].choices[0].value}a`,
+          }],
+        }],
+      },
+    })).toThrow(`${String(OPERATOR_LIMITS.askChoiceValueBytes)} UTF-8 bytes`);
+    expect(parseAskAnswerRequest({
+      interactionId: "ask",
+      answers: { constructor: ["one"] },
+    })).toEqual({
+      interactionId: "ask",
+      answers: { constructor: ["one"] },
+    });
+    expect(() => parseAskAnswerRequest({
+      interactionId: "ask",
+      answers: { constructor: ["one", "one"] },
+    })).toThrow("unique answers");
   });
 });

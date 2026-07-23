@@ -55,9 +55,14 @@ Controls:
 - submit ordinary text to start a turn;
 - submit during an active turn to offer eligible live input;
 - `Escape` or `/cancel` cancels the active conversation when eligible;
-- `/model <ref|default>` and `/effort <level|default>` set the next-turn
-  override when permitted; advertised catalogs act as allowlists;
-- `/answer <question-id>=<value>` answers a pending AskUser interaction;
+- `/runtime <instance|default>`, `/model <ref|default>`, and
+  `/effort <level|default>` set next-turn overrides when permitted; advertised
+  model and effort catalogs act as allowlists;
+- `/answer {"question":"value","other":["value-1","value-2"]}` answers every
+  question in one pending AskUser interaction. JSON is the lossless grammar
+  for punctuation, backslashes, free text, and multi-select answers; the legacy
+  `question=value; other=value` form remains available for simple values. The
+  TUI prints exact ids, choices, multiplicity, and free-text availability;
 - `/attach <path>` queues up to four regular files (512 KiB per file and the
   shared 1 MiB total request bound still applies);
 - `/quote <message-id>[=<text>]` queues a quote when advertised; `/quote clear`

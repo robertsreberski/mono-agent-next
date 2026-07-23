@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { monoAgentModule } from "@mono-agent/channel-operator";
+import { parseAskUserAnswer } from "@mono-agent/module-sdk";
 import {
   OPERATOR_REGISTRY_SCHEMA,
   OperatorClient,
@@ -13,6 +14,10 @@ import {
   initialOperatorState,
   reduceOperatorFrame,
 } from "@mono-agent/operator";
+import {
+  MULTI_QUESTION_ASK_USER_ANSWER,
+  MULTI_QUESTION_ASK_USER_TURN_FRAMES,
+} from "@mono-agent/operator/testing";
 import { startMonoAgentTui } from "@mono-agent/tui";
 import { startWebServer } from "@mono-agent/web";
 
@@ -22,6 +27,7 @@ const WEB_TOKEN = "web-products-smoke-token-0123456789";
 const AGENT_ID = "operator-products-smoke";
 const AGENT_LABEL = "Operator Products Smoke";
 const EXPECTED_REPLY = "mono-agent-next operator products e2e ok";
+const INTERACTIVE_INPUT = "prove interactive operator parity";
 const WAIT_TIMEOUT_MS = 5_000;
 
 async function main() {
@@ -33,6 +39,8 @@ async function main() {
   const cancelStarted = deferred();
   const cancelObserved = deferred();
   const dispatched = [];
+  const interactiveAnswers = new Map();
+  const interactiveWaiters = new Map();
   let operatorChannel;
   let webServer;
   let tui;
@@ -80,10 +88,39 @@ async function main() {
             cancelObserved.resolve();
             return { status: "cancelled" };
           }
+          if (request.text === INTERACTIVE_INPUT) {
+            const ask = MULTI_QUESTION_ASK_USER_TURN_FRAMES.find(
+              (frame) => frame.type === "ask_user",
+            )?.ask;
+            assert.ok(ask, "shared AskUser fixture is missing its ask frame");
+            const waiter = deferred();
+            interactiveWaiters.set(request.conversationId, waiter);
+            await reply.emit({ type: "ask-user", ask });
+            await within(waiter.promise, `AskUser answer for ${request.conversationId}`);
+            return { status: "completed", text: "Answers recorded." };
+          }
           await reply.emit({ type: "text-delta", delta: "mono-agent-next " });
           await reply.emit({ type: "activity", text: "Proving the operator product path" });
           await reply.emit({ type: "text-delta", delta: "operator products e2e ok" });
           return { status: "completed", text: EXPECTED_REPLY };
+        },
+        async answerAsk(conversationId, answer) {
+          const ask = MULTI_QUESTION_ASK_USER_TURN_FRAMES.find(
+            (frame) => frame.type === "ask_user",
+          )?.ask;
+          assert.ok(ask, "shared AskUser fixture is missing its ask frame");
+          const parsed = parseAskUserAnswer(answer, ask);
+          const projected = {
+            interactionId: parsed.interactionId,
+            answers: Object.fromEntries(Object.entries(parsed.answers)),
+          };
+          assert.deepEqual(
+            projected,
+            MULTI_QUESTION_ASK_USER_ANSWER,
+          );
+          interactiveAnswers.set(conversationId, projected);
+          interactiveWaiters.get(conversationId)?.resolve();
+          return { status: "accepted" };
         },
       },
       signal: lifecycle.signal,
@@ -228,6 +265,45 @@ async function main() {
     );
     assert.deepEqual(detailAfterRestart, detailBeforeRestart);
 
+    const parityThreadResponse = await webFetch(webServer, "api/v1/threads", {
+      method: "POST",
+      json: { agentId: AGENT_ID, title: "Shared AskUser parity" },
+    });
+    assert.equal(parityThreadResponse.status, 201);
+    const parityThread = await parityThreadResponse.json();
+    const parityTurnResponse = await webFetch(
+      webServer,
+      `api/v1/threads/${encodeURIComponent(parityThread.id)}/turns`,
+      { method: "POST", json: { text: INTERACTIVE_INPUT } },
+    );
+    assert.equal(parityTurnResponse.status, 200);
+    const webPending = await eventuallyValue(async () => {
+      const detail = await webJson(
+        webServer,
+        `api/v1/threads/${encodeURIComponent(parityThread.id)}`,
+      );
+      return detail.thread.pendingAsk === undefined ? undefined : detail;
+    }, "web shared AskUser fixture");
+    const sharedAsk = MULTI_QUESTION_ASK_USER_TURN_FRAMES.find(
+      (frame) => frame.type === "ask_user",
+    )?.ask;
+    assert.ok(sharedAsk);
+    assert.deepEqual(webPending.thread.pendingAsk, sharedAsk);
+    const webAnswerResponse = await webFetch(
+      webServer,
+      `api/v1/threads/${encodeURIComponent(parityThread.id)}/ask`,
+      { method: "POST", json: MULTI_QUESTION_ASK_USER_ANSWER },
+    );
+    assert.equal(webAnswerResponse.status, 200);
+    assert.deepEqual(await webAnswerResponse.json(), { status: "accepted" });
+    const parityWebFrames = parseNdjson(await parityTurnResponse.text());
+    assert.equal(parityWebFrames.at(-1)?.type, "done");
+    assert.equal(parityWebFrames.at(-1)?.detail.thread.status, "complete");
+    assert.deepEqual(
+      interactiveAnswers.get(`web:${parityThread.id}`),
+      MULTI_QUESTION_ASK_USER_ANSWER,
+    );
+
     const terminal = new SmokeTerminal();
     let tuiInfoRequests = 0;
     const tuiFetch = async (input, init) => {
@@ -242,11 +318,57 @@ async function main() {
       token: OPERATOR_TOKEN,
       fetch: tuiFetch,
       terminal,
-      conversationId: "tui-connect-smoke",
+      conversationId: "tui-parity-smoke",
       requestTimeoutMs: WAIT_TIMEOUT_MS,
     });
     assert.equal(terminal.started, true);
     assert.equal(tuiInfoRequests, 1);
+    for (const command of [
+      "/runtime smoke-secondary",
+      "/model smoke:model-override",
+      "/effort high",
+      INTERACTIVE_INPUT,
+    ]) {
+      terminal.submit(command);
+      await tick();
+    }
+    await eventuallyValue(
+      () => terminal.output().includes("constructor") && terminal.output().includes("checks")
+        ? true
+        : undefined,
+      "TUI shared AskUser fixture",
+    );
+    const tuiDispatch = dispatched.find(
+      (request) => request.conversationId === "tui-parity-smoke",
+    );
+    assert.ok(tuiDispatch, "TUI did not submit an interactive turn");
+    assert.deepEqual(
+      {
+        text: tuiDispatch.text,
+        runtime: tuiDispatch.runtime,
+        model: tuiDispatch.model,
+        effort: tuiDispatch.effort,
+      },
+      {
+        text: INTERACTIVE_INPUT,
+        runtime: "smoke-secondary",
+        model: "smoke:model-override",
+        effort: "high",
+      },
+    );
+    terminal.submit(`/answer ${JSON.stringify(MULTI_QUESTION_ASK_USER_ANSWER.answers)}`);
+    await eventuallyValue(
+      () => interactiveAnswers.get("tui-parity-smoke"),
+      "TUI structured AskUser answer",
+    );
+    await eventuallyValue(
+      () => terminal.output().includes("Answers recorded.") ? true : undefined,
+      "TUI completed turn",
+    );
+    assert.deepEqual(
+      interactiveAnswers.get("tui-parity-smoke"),
+      MULTI_QUESTION_ASK_USER_ANSWER,
+    );
     await tui.stop();
     await within(tui.waitUntilExit(), "TUI exit");
     tui = undefined;
@@ -256,7 +378,7 @@ async function main() {
     assert.ok(dispatched.some((request) => request.conversationId === "stream-smoke"));
     assert.ok(dispatched.some((request) => request.conversationId === `web:${thread.id}`));
     console.log(
-      `Verified authenticated operator streaming/reduction/cancellation, durable web restart, and standalone TUI connection on Node.js ${process.versions.node}.`,
+      `Verified authenticated operator streaming/reduction/cancellation, durable web restart, and shared interactive Web/TUI AskUser + override parity on Node.js ${process.versions.node}.`,
     );
   } finally {
     await tui?.stop().catch(() => undefined);
@@ -312,6 +434,20 @@ async function within(promise, label) {
   }
 }
 
+async function eventuallyValue(read, label) {
+  const deadline = Date.now() + WAIT_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (value !== undefined) return value;
+    await tick();
+  }
+  throw new Error(`${label} exceeded ${String(WAIT_TIMEOUT_MS)}ms`);
+}
+
+async function tick() {
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+
 async function webFetch(server, path, options = {}) {
   const headers = new Headers({ authorization: `Bearer ${WEB_TOKEN}` });
   let body;
@@ -360,6 +496,12 @@ class SmokeTerminal {
     this.onInput = undefined;
     this.onResize = undefined;
     this.started = false;
+  }
+
+  submit(value) {
+    assert.ok(this.onInput, "terminal is not accepting input");
+    for (const character of value) this.onInput(character);
+    this.onInput("\r");
   }
 
   async drainInput() {}

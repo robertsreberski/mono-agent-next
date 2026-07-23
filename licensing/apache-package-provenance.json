@@ -38,11 +38,11 @@
     },
     {
       "path": "packages/module-sdk/README.md",
-      "sha256": "726ab6b672dbbb5812f5d19941167302b4ec63b35b5225e5d9bb97b9761ae459",
+      "sha256": "7143628347195e7cb966eb64fa1d74d27689ddc042e545a54bf5e130c63b818f",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "85504f8da1ed167b774754e0df1653f2eb730616",
+        "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/module-sdk/README.md"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -63,11 +63,11 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/compliance.test.ts",
-      "sha256": "96dc18239db70aa92bff19afbfa93650022a6fc8c01a12bbf646e3ada1b06cf5",
+      "sha256": "959de9b5f5260af22eeeb197697c6c6cd8eb32f2dd89d3af6bbf29b37a009cc1",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "85504f8da1ed167b774754e0df1653f2eb730616",
+        "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/module-sdk/src/__tests__/compliance.test.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -75,11 +75,11 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/contract-codecs.test.ts",
-      "sha256": "ae762e0b6382f917d67cbc79d97d94eb00cfc3a337bd46f038f6803bb4861219",
+      "sha256": "9d0e998091d61963d1bc1e3b4d0ed8d3954e02abfb78595aacc16a3279e26df3",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "b9d3c10b76eca4b30d14c4340b9c82ce7399a782",
+        "commit": "a04741aa7137ccdfff0fadf16aa6266eb69aa8ec",
         "path": "packages/module-sdk/src/__tests__/contract-codecs.test.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -87,11 +87,11 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/contracts.test.ts",
-      "sha256": "6328694844faa2b61bfe6b33614e26672f208898fcbea0a89c6f79ce7544afbb",
+      "sha256": "18aef4989cd2b3e971b480f9274ab0a3a003f26fafb19d21428512ceae07a73b",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "85504f8da1ed167b774754e0df1653f2eb730616",
+        "commit": "a04741aa7137ccdfff0fadf16aa6266eb69aa8ec",
         "path": "packages/module-sdk/src/__tests__/contracts.test.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -115,7 +115,7 @@
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "36f90ddf6a09f87163b43d28917ca334c9df4005",
+        "commit": "b9d3c10b76eca4b30d14c4340b9c82ce7399a782",
         "path": "packages/module-sdk/src/__tests__/secure-fs.test.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -123,11 +123,11 @@
     },
     {
       "path": "packages/module-sdk/src/http.ts",
-      "sha256": "6f15953549082f64087cbecffc2f662a34719e095ecb4290e56313a979a3816b",
+      "sha256": "a01663cc3a394c9b30ac0330b97d3488d5fc9beba88e7243fdce566c54c9ad8d",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "36f90ddf6a09f87163b43d28917ca334c9df4005",
+        "commit": "ec0476665bb43ed539d9276a4181f1f9caac81c0",
         "path": "packages/module-sdk/src/http.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -135,11 +135,11 @@
     },
     {
       "path": "packages/module-sdk/src/index.ts",
-      "sha256": "ed08aa0b623a21888efb73e837c24d43a6e03eceb3f644c471fca596cc9432c2",
+      "sha256": "f500146d805b0f9060c067c60a622132617be987a9ba2083d369149ed3888fdb",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "85504f8da1ed167b774754e0df1653f2eb730616",
+        "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/module-sdk/src/index.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -147,11 +147,11 @@
     },
     {
       "path": "packages/module-sdk/src/internal.ts",
-      "sha256": "e625948c1cbfe475afaed79aaffde4f3dd3d318a0745b59e816f20cd422cc8ee",
+      "sha256": "f2c47804ca4a241a98f256beb14ab20a1fba0e4a252f63cb0643d869568ecb75",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "85504f8da1ed167b774754e0df1653f2eb730616",
+        "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/module-sdk/src/internal.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -159,11 +159,11 @@
     },
     {
       "path": "packages/module-sdk/src/secure-fs.ts",
-      "sha256": "f2612f2a2b74c9d8b84ee95d3d2dcca7886d94d1158c36f7c91ed57e97e60174",
+      "sha256": "f83b4a1b60a58c0962f9fc21f77f4a64e796aa3244161f484de4f4691d9cf670",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "36f90ddf6a09f87163b43d28917ca334c9df4005",
+        "commit": "ec0476665bb43ed539d9276a4181f1f9caac81c0",
         "path": "packages/module-sdk/src/secure-fs.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -171,11 +171,11 @@
     },
     {
       "path": "packages/module-sdk/src/testing.ts",
-      "sha256": "eb33470083beebd2b0e820006e81a7e73f9433e72f8646394a34a65181caa779",
+      "sha256": "de70446bb44c1456cd7e4e7603588f279d3c33339ee17efaaf5e4fc6195ba66d",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "85504f8da1ed167b774754e0df1653f2eb730616",
+        "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/module-sdk/src/testing.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -221,11 +221,11 @@
     },
     {
       "path": "packages/operator/README.md",
-      "sha256": "9a24cb1e008fb3b6f3f72ddba76ae0ff6782459ddfcc897ff6e1cc5d7a43209b",
+      "sha256": "0265bafce497ebb0fef7b4f801085a40b5dd8db619eed21e9a8fa5a24553064b",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "47ba9c48c94c24a0bf96fd51fb1b0edf8584d124",
+        "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/operator/README.md"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -246,7 +246,7 @@
     },
     {
       "path": "packages/operator/src/__tests__/client.test.ts",
-      "sha256": "9ddae882f53ca5231c4aabfdd61c27a997f27f9ae8a1da4a020085269d90287f",
+      "sha256": "2d95039cd5439019c19d60a7662846c0bc2dba8f5d1201c93122c8e33db1deca",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -262,7 +262,7 @@
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "47ba9c48c94c24a0bf96fd51fb1b0edf8584d124",
+        "commit": "36f90ddf6a09f87163b43d28917ca334c9df4005",
         "path": "packages/operator/src/__tests__/directory.test.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -294,11 +294,11 @@
     },
     {
       "path": "packages/operator/src/__tests__/protocol.test.ts",
-      "sha256": "cde44a6f954e237c1e433122f8ca39f1964b517eb15b24646a89a6d38b231d65",
+      "sha256": "2ad9d90a04c3d32fc7dd6e5cd6530c13e1c462ef39f8eaa3b59459d92177e217",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "47ba9c48c94c24a0bf96fd51fb1b0edf8584d124",
+        "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/operator/src/__tests__/protocol.test.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -306,11 +306,11 @@
     },
     {
       "path": "packages/operator/src/__tests__/state.test.ts",
-      "sha256": "d408cd8c4b033fe31db9fbda257c732e1f52387da77df378b7fcddf33bfa13c6",
+      "sha256": "27b3130d9206136b9b2518d2c83776fcb73d1e00895c6b14aed35a11f36d4b8d",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "47ba9c48c94c24a0bf96fd51fb1b0edf8584d124",
+        "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/operator/src/__tests__/state.test.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -318,7 +318,7 @@
     },
     {
       "path": "packages/operator/src/client.ts",
-      "sha256": "de1d8fbaa243314a9a74f7d71811efee6c84eacc5cfafc5c79e3bd1818f2d6d2",
+      "sha256": "f463f65a642b2232da5006a5e5751b33caf6c0e5c0fbd23bdb06a5dc6c82ecc5",
       "origin": {
         "classification": "predecessor-authorized-adaptation",
         "repository": "mono-agent-predecessor",
@@ -341,7 +341,7 @@
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "47ba9c48c94c24a0bf96fd51fb1b0edf8584d124",
+        "commit": "36f90ddf6a09f87163b43d28917ca334c9df4005",
         "path": "packages/operator/src/directory.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -385,11 +385,11 @@
     },
     {
       "path": "packages/operator/src/protocol.ts",
-      "sha256": "08ebedf79898adbecd6d9035d9c5e301f726dd156420924900d06a12249fcd69",
+      "sha256": "0f93e28502e064626069906fc2aa31fea35911d99d77f9dd9a1ca0dc3aa53b97",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "47ba9c48c94c24a0bf96fd51fb1b0edf8584d124",
+        "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/operator/src/protocol.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -397,11 +397,11 @@
     },
     {
       "path": "packages/operator/src/state.ts",
-      "sha256": "b956e3002ccc2ec9ccd963027440dbb0ed35362a8d74fa1aaccda116368dffce",
+      "sha256": "4675a84453c7fae6da71c63b78e2c56efb461d56d8c0ffbf6d67aa9dd6b292c5",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "47ba9c48c94c24a0bf96fd51fb1b0edf8584d124",
+        "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/operator/src/state.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -409,7 +409,7 @@
     },
     {
       "path": "packages/operator/src/testing.ts",
-      "sha256": "a5e44dbd7e62c29e3c1fba64961bf33d190a426e028e6f3b903eea3cacd4124d",
+      "sha256": "2a831b0d8870007641c01e6b43fd9ac1a18326f0534428a8d7c0c23290d87ad2",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -421,11 +421,11 @@
     },
     {
       "path": "packages/operator/src/types.ts",
-      "sha256": "dbba6dcc3f908b50a2d73d845939041caf926d86451ede27d9add1aab7b576b3",
+      "sha256": "172c316bc769f5aa535ca737cb78e4ab1e7a70d61d5006c1523106188cdf9c7e",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "47ba9c48c94c24a0bf96fd51fb1b0edf8584d124",
+        "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/operator/src/types.ts"
       },
       "copyrightHolder": "Robert Sreberski",

@@ -493,6 +493,8 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
     async health(): Promise<ModuleHealth> {
       const snapshot = inbox?.snapshot();
       const deliveryDegraded = delivery.degraded;
+      const deliveryReceiptCapacityExhausted = delivery.receiptCapacityExhausted;
+      const deliveryAmbiguousOutcome = delivery.hasAmbiguousOutcome;
       return {
         status: failureSummary !== undefined
           ? "unhealthy"
@@ -503,7 +505,9 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
         ...(failureSummary !== undefined
           ? { summary: failureSummary }
           : deliveryDegraded
-            ? { summary: "Slack delivery receipt capacity is exhausted." }
+            ? { summary: deliveryReceiptCapacityExhausted
+                ? "Slack delivery receipt capacity is exhausted."
+                : "Slack delivery has an unresolved ambiguous outcome." }
             : {}),
         details: {
           activeEvents: active,
@@ -513,7 +517,8 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
           completedReceipts: snapshot?.completed ?? 0,
           transientActivityEntries: [...activityLedger.values()].reduce((total, entries) => total + entries.length, 0),
           deliveryMode: "final-only",
-          deliveryReceiptCapacityExhausted: deliveryDegraded,
+          deliveryReceiptCapacityExhausted,
+          deliveryAmbiguousOutcome,
         },
       };
     },

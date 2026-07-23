@@ -63,6 +63,13 @@ metadata source paths likewise name only Robert Sreberski (including the
 finding, together with the explicit authorization above, is the authority for
 the Apache successor adaptation.
 
+Every successor-original entry names this repository, the same successor path,
+and a reachable lineage commit. The entry's SHA-256 binds the exact current
+bytes independently, so later revisions and GitHub squash merges do not require
+a commit to contain its own provenance record. The predecessor-authorized
+entries retain their separately reviewed predecessor repository commit, path,
+and source hash rather than being rewritten as successor-original work.
+
 ## Machine gate
 
 Run:
@@ -81,8 +88,8 @@ The gate fails closed when:
 - a scoped path is a symlink or another non-regular file;
 - authority fields, origin classifications, predecessor hashes, or the
   operator-client material history are missing or changed;
-- a successor-original source commit and path do not resolve in the public
-  successor history.
+- a successor-original lineage commit is not reachable, or the entry names the
+  wrong successor repository or path.
 
 Adding or changing a file in either Apache package therefore requires an
 explicit provenance-record change. A new predecessor adaptation also requires

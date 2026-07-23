@@ -15,7 +15,8 @@ import { spawnSync } from "node:child_process";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { packageCatalog } from "../package-catalog.mjs";
+import { packageCatalog, packageRelativePath } from "../package-catalog.mjs";
+import { publicExportSpecifiers } from "../release/fixtures/packed-consumer/public-exports.mjs";
 import {
   V1_SYSTEM_PROOF_SCHEMA,
   assertArtifactSetEvidence,
@@ -25,6 +26,7 @@ import {
   assertProofNodeVersion,
   assertStableGitHead,
   assertTarballSnapshotsStable,
+  assertV1PublicExportSpecifiers,
   assertV1SystemProofEvidence,
   buildArtifactSetEvidence,
   buildConfigSetEvidence,
@@ -35,6 +37,7 @@ import {
   createFreshProofWorkspace,
   removeFreshProofWorkspace,
   snapshotTarball,
+  V1_PUBLIC_EXPORT_SPECIFIERS,
 } from "../lib/v1-system-proof.mjs";
 
 const temporaryDirectories = [];
@@ -55,6 +58,33 @@ afterEach(async () => {
 });
 
 describe("packed v1 proof Node and source authority", () => {
+  test("pins the complete 28-code plus 3-JSON packed public export surface", () => {
+    expect(V1_PUBLIC_EXPORT_SPECIFIERS).toHaveLength(31);
+    expect(V1_PUBLIC_EXPORT_SPECIFIERS.filter((specifier) =>
+      specifier.endsWith("/package.json"))).toHaveLength(3);
+    expect(V1_PUBLIC_EXPORT_SPECIFIERS).toContain("@mono-agent/module-sdk/http");
+    expect(V1_PUBLIC_EXPORT_SPECIFIERS).toContain("@mono-agent/module-sdk/internal");
+    expect(V1_PUBLIC_EXPORT_SPECIFIERS).toContain("@mono-agent/module-sdk/secure-fs");
+    expect(V1_PUBLIC_EXPORT_SPECIFIERS).toContain("@mono-agent/module-sdk/testing");
+    expect(V1_PUBLIC_EXPORT_SPECIFIERS).toContain("@mono-agent/operator/testing");
+    expect(assertV1PublicExportSpecifiers(V1_PUBLIC_EXPORT_SPECIFIERS))
+      .toEqual(V1_PUBLIC_EXPORT_SPECIFIERS);
+    expect(() => assertV1PublicExportSpecifiers(V1_PUBLIC_EXPORT_SPECIFIERS.slice(0, -1)))
+      .toThrow(/exact ordered 31-specifier/u);
+    expect(() => assertV1PublicExportSpecifiers([
+      ...V1_PUBLIC_EXPORT_SPECIFIERS,
+      V1_PUBLIC_EXPORT_SPECIFIERS[0],
+    ])).toThrow(/duplicate/u);
+    const derived = packageCatalog.flatMap((entry) => {
+      const manifest = JSON.parse(readFileSync(
+        join(process.cwd(), packageRelativePath(entry), "package.json"),
+        "utf8",
+      ));
+      return publicExportSpecifiers(entry.name, manifest);
+    });
+    expect(assertV1PublicExportSpecifiers(derived)).toEqual(V1_PUBLIC_EXPORT_SPECIFIERS);
+  });
+
   test("accepts the supported Node floor and records the exact runtime", () => {
     expect(assertProofNodeVersion("22.19.0")).toMatchObject({
       nodeVersion: "22.19.0",

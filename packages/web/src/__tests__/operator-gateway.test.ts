@@ -6,8 +6,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   OPERATOR_PROTOCOL,
   OPERATOR_REGISTRY_SCHEMA,
+  availableOperatorActions,
   type OperatorInfo,
+  type OperatorConversationState,
 } from "@mono-agent/operator";
+import {
+  MULTI_QUESTION_ASK_USER_ANSWER,
+  MULTI_QUESTION_ASK_USER_TURN_FRAMES,
+} from "@mono-agent/operator/testing";
 
 import { createOperatorGateway } from "../operator-gateway.js";
 import type { WebOperatorTurnInput } from "../service.js";
@@ -105,8 +111,8 @@ describe("web operator gateway", () => {
     await expect(gateway.runTurn(turn({ model: "approved:model", effort: "extreme" }))).rejects.toMatchObject({ code: "unsupported_effort" });
     expect(forwarded).toHaveLength(0);
 
-    await expect(gateway.runTurn(turn({ model: "approved:model", effort: "high" }))).resolves.toBeUndefined();
-    expect(forwarded).toMatchObject([{ model: "approved:model", effort: "high" }]);
+    await expect(gateway.runTurn(turn({ runtime: "pi-secondary", model: "approved:model", effort: "high" }))).resolves.toBeUndefined();
+    expect(forwarded).toMatchObject([{ runtime: "pi-secondary", model: "approved:model", effort: "high" }]);
 
     info = { ...operatorInfo(true, now), process: { pid: process.pid + 1, startedAt: now } };
     await expect(gateway.runTurn(turn({}))).rejects.toMatchObject({ code: "operator_identity_mismatch" });
@@ -188,6 +194,7 @@ describe("web operator gateway", () => {
     let askReady!: () => void;
     const ready = new Promise<void>((resolve) => { askReady = resolve; });
     const bodies: Record<string, unknown> = {};
+    let pendingState: OperatorConversationState | undefined;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
       if (url.endsWith("/v1/info")) {
@@ -200,19 +207,10 @@ describe("web operator gateway", () => {
         return new Response(new ReadableStream({
           start(controller) {
             stream = controller;
-            controller.enqueue(encoder.encode([
-              { type: "accepted", turnId: "interactive-turn", conversationId: "web:interactive", startedAt },
-              { type: "capabilities", turnId: "interactive-turn", capabilities: { ...capabilities(true), liveInput: true, askUser: true } },
-              {
-                type: "ask_user",
-                turnId: "interactive-turn",
-                ask: {
-                  interactionId: "ask-1",
-                  requestedAt: startedAt,
-                  questions: [{ id: "continue", prompt: "Continue?", allowFreeText: false, multiple: false }],
-                },
-              },
-            ].map((frame) => JSON.stringify(frame)).join("\n") + "\n"));
+            controller.enqueue(encoder.encode(
+              `${MULTI_QUESTION_ASK_USER_TURN_FRAMES.slice(0, -1)
+                .map((frame) => JSON.stringify(frame)).join("\n")}\n`,
+            ));
           },
         }), { headers: { "content-type": "application/x-ndjson" } });
       }
@@ -229,37 +227,41 @@ describe("web operator gateway", () => {
     const gateway = createOperatorGateway({ registryDirectories: [registry], environment: {}, fetch: fetchImpl });
     const running = gateway.runTurn({
       agentId: "personal",
-      conversationId: "web:interactive",
+      conversationId: "fixture-conversation",
       text: "hello",
       signal: new AbortController().signal,
       async onText() {},
       async onState(state) {
-        if (state.pendingAsk !== undefined) askReady();
+        if (state.pendingAsk !== undefined) {
+          pendingState = state;
+          askReady();
+        }
       },
     });
     await ready;
 
-    await expect(gateway.offerLiveInput?.("personal", "web:interactive", "more")).resolves.toEqual({ status: "applied" });
-    await expect(gateway.answerAsk?.("personal", "web:interactive", {
-      interactionId: "ask-1",
-      answers: { continue: ["yes"] },
-    })).resolves.toEqual({ status: "accepted" });
+    expect(pendingState?.pendingAsk).toEqual(
+      MULTI_QUESTION_ASK_USER_TURN_FRAMES.find((frame) => frame.type === "ask_user")?.ask,
+    );
+    expect(availableOperatorActions(pendingState!)).toContain("answer_ask");
+    await expect(gateway.offerLiveInput?.("personal", "fixture-conversation", "more")).resolves.toEqual({ status: "applied" });
+    await expect(gateway.answerAsk?.(
+      "personal",
+      "fixture-conversation",
+      MULTI_QUESTION_ASK_USER_ANSWER,
+    )).resolves.toEqual({ status: "accepted" });
     expect(bodies.live).toMatchObject({ text: "more" });
-    expect(bodies.ask).toEqual({ interactionId: "ask-1", answers: { continue: ["yes"] } });
+    expect(bodies.ask).toEqual(MULTI_QUESTION_ASK_USER_ANSWER);
 
-    stream.enqueue(encoder.encode(`${JSON.stringify({
-      type: "completed",
-      turnId: "interactive-turn",
-      finalMessage: { role: "assistant", text: "done" },
-      finishedAt: new Date().toISOString(),
-      stopReason: "completed",
-    })}\n`));
+    stream.enqueue(encoder.encode(
+      `${JSON.stringify(MULTI_QUESTION_ASK_USER_TURN_FRAMES.at(-1))}\n`,
+    ));
     stream.close();
     await expect(running).resolves.toBeUndefined();
   });
 });
 
-function turn(overrides: { readonly model?: string; readonly effort?: string }): WebOperatorTurnInput {
+function turn(overrides: { readonly runtime?: string; readonly model?: string; readonly effort?: string }): WebOperatorTurnInput {
   return {
     agentId: "personal",
     conversationId: `web:${Math.random()}`,
@@ -276,7 +278,7 @@ function operatorInfo(runtimeOverrides: boolean, startedAt: string): OperatorInf
     agent: { id: "personal", label: "Personal Agent" },
     process: { pid: process.pid, startedAt },
     capabilities: capabilities(runtimeOverrides),
-    defaults: { model: "approved:model", effort: "high" },
+    defaults: { runtime: "pi", model: "approved:model", effort: "high" },
     models: [{ id: "approved:model", efforts: ["low", "high"] }],
   };
 }

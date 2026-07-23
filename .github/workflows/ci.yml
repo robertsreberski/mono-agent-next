@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -59,6 +61,7 @@ jobs:
         run: |
           pnpm run check:oss-hygiene
           node scripts/check-license-consistency.mjs
+          pnpm run check:apache-provenance
           pnpm run check:architecture
 
       - name: Check generated documentation contracts
@@ -74,13 +77,16 @@ jobs:
           pnpm run build
           pnpm run typecheck
 
-      - name: Check built package exports
+      - name: Check built package exports and import safety
         run: pnpm run check:deep-imports
 
       - name: Test the complete v1 workspace
         run: |
           pnpm run scripts:test
           pnpm run test
+
+      - name: Prove standalone operator products
+        run: pnpm run verify:v1-operator-products
 
       - name: Prove packed complete v1 system
         if: ${{ matrix.node-version == '22.19.0' }}

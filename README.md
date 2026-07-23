@@ -38,7 +38,16 @@ The independent operator products have a separate integration proof:
 pnpm run verify:v1-operator-products
 ```
 
-Neither command publishes a package or touches a live consumer.
+The complete source-candidate proof requires a clean committed checkout. It
+clones that exact SHA into an owner-private temporary workspace, packs all 23
+packages, installs the three scaffold closures from those exact artifacts, and
+emits machine-readable digest evidence:
+
+```bash
+pnpm run verify:v1-system
+```
+
+None of these commands publishes a package or touches a live consumer.
 
 ## Architecture
 

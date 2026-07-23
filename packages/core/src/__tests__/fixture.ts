@@ -24,13 +24,15 @@ export interface FixtureModuleOptions {
   readonly capabilities?: readonly string[];
   readonly schema?: Readonly<Record<string, unknown>>;
   readonly controller?: FixtureController;
-  readonly dependencySpec?: string;
+  readonly dependencySpec?: unknown;
   readonly dependencyField?: "dependencies" | "optionalDependencies" | "devDependencies";
   readonly lockVersion?: string;
   readonly omitFromLock?: boolean;
   readonly packageMetadata?: false;
   readonly entrySource?: string;
   readonly importOnly?: boolean;
+  /** Keep a fake reserved identity only for tests that prove Core rejects it. */
+  readonly useFirstPartyReservedPackage?: boolean;
 }
 
 export interface FixtureModule {
@@ -52,16 +54,25 @@ export async function createFixtureProject(options: readonly FixtureModuleOption
   const root = await mkdtemp(join(tmpdir(), "mono-agent-core-"));
   const registry = fixtureRegistry();
   const modules: FixtureModule[] = [];
-  const dependencies: Record<string, string> = {};
-  const optionalDependencies: Record<string, string> = {};
-  const devDependencies: Record<string, string> = {};
-  const lockDependencies: Record<string, string> = {};
-  const lockOptional: Record<string, string> = {};
-  const lockDev: Record<string, string> = {};
+  const dependencies: Record<string, unknown> = {};
+  const optionalDependencies: Record<string, unknown> = {};
+  const devDependencies: Record<string, unknown> = {};
+  const lockDependencies: Record<string, unknown> = {};
+  const lockOptional: Record<string, unknown> = {};
+  const lockDev: Record<string, unknown> = {};
   const lockPackages: Record<string, unknown> = {};
+  const reservedAliases = new Map<string, string>();
+  const installedNames = new Set<string>();
 
   for (const option of options) {
-    const name = option.name ?? fixturePackageName(option.kind);
+    const requestedName = option.name ?? fixturePackageName(option.kind);
+    const name = option.useFirstPartyReservedPackage === false
+      ? requestedName
+      : firstPartyReservedPackage(option.kind) ?? requestedName;
+    if (name !== requestedName) reservedAliases.set(requestedName, name);
+    if (modules.some((module) => firstPartyReservedPackage(module.kind) === name)) {
+      throw new Error(`Fixture project may select only one implementation package for reserved kind ${option.kind}`);
+    }
     const version = option.version ?? "1.0.0";
     const responsibility = option.responsibility ?? `${name} fixture`;
     const packageRoot = join(root, "node_modules", ...name.split("/"));
@@ -109,6 +120,7 @@ export const monoAgentModule = {
 `;
     await writeFile(join(packageRoot, "index.js"), source);
     registry.set(name, option.controller ?? { create: () => ({}) });
+    installedNames.add(name);
 
     const field = option.dependencyField ?? "dependencies";
     const spec = option.dependencySpec ?? version;
@@ -120,7 +132,7 @@ export const monoAgentModule = {
       lockTarget[name] = spec;
       lockPackages[`node_modules/${name}`] = { version: option.lockVersion ?? version };
     }
-    modules.push({ name, kind: option.kind, version });
+    modules.push({ name: requestedName, kind: option.kind, version });
   }
 
   const rootPackage = {
@@ -149,7 +161,7 @@ export const monoAgentModule = {
     configPath,
     modules,
     async writeConfig(config) {
-      await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
+      await writeFile(configPath, `${JSON.stringify(replaceReservedAliases(config, reservedAliases), null, 2)}\n`);
     },
     async writeMcp(config) {
       const path = join(root, ".mcp.json");
@@ -157,7 +169,7 @@ export const monoAgentModule = {
       return path;
     },
     async cleanup() {
-      for (const module of modules) registry.delete(module.name);
+      for (const name of installedNames) registry.delete(name);
       await rm(root, { recursive: true, force: true });
     },
   };
@@ -251,6 +263,27 @@ export async function replacePackageEntryWithSymlink(
 
 function fixturePackageName(kind: ModuleKind): string {
   return `@fixture/${kind}-${randomUUID().toLowerCase()}`;
+}
+
+function firstPartyReservedPackage(kind: ModuleKind): string | undefined {
+  const packages: Partial<Record<ModuleKind, string>> = {
+    state: "@mono-agent/state-local",
+    trigger: "@mono-agent/trigger-cron",
+    exporter: "@mono-agent/exporter-otlp",
+    sandbox: "@mono-agent/sandbox-srt",
+  };
+  return packages[kind];
+}
+
+function replaceReservedAliases(value: unknown, aliases: ReadonlyMap<string, string>): unknown {
+  if (Array.isArray(value)) return value.map((entry) => replaceReservedAliases(entry, aliases));
+  if (value === null || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [
+    key,
+    key === "$use" && typeof entry === "string"
+      ? aliases.get(entry) ?? entry
+      : replaceReservedAliases(entry, aliases),
+  ]));
 }
 
 function fixtureRegistry(): Map<string, FixtureController> {

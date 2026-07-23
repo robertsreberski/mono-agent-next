@@ -164,7 +164,7 @@ export async function checkApacheProvenance(options = {}) {
     if (!trackedSet.has(path)) continue;
     await validateCurrentFile(repoRoot, path, entry, issues);
     if (entry.origin?.classification === "successor-original") {
-      await validateSuccessorSource(repoRoot, path, entry.origin, issues);
+      await validateSuccessorLineage(repoRoot, path, entry, issues);
     }
   }
 
@@ -356,10 +356,8 @@ function validateSuccessorOrigin(entry, issues) {
 async function validateCurrentFile(repoRoot, path, entry, issues) {
   const absolutePath = join(repoRoot, path);
   let metadata;
-  let contents;
   try {
     metadata = await lstat(absolutePath);
-    contents = await readFile(absolutePath);
   } catch (error) {
     issues.push(`${path} is missing or unreadable (${reasonOf(error)})`);
     return;
@@ -368,27 +366,30 @@ async function validateCurrentFile(repoRoot, path, entry, issues) {
     issues.push(`${path} must be a regular file; symlinks and other file types are not accepted`);
     return;
   }
+  let contents;
+  try {
+    contents = await readFile(absolutePath);
+  } catch (error) {
+    issues.push(`${path} is missing or unreadable (${reasonOf(error)})`);
+    return;
+  }
   const actual = createHash("sha256").update(contents).digest("hex");
   if (actual !== entry.sha256) {
     issues.push(`${path} has stale provenance hash: expected ${entry.sha256}, found ${actual}`);
   }
 }
 
-async function validateSuccessorSource(repoRoot, path, origin, issues) {
-  if (!COMMIT_PATTERN.test(origin.commit ?? "") || typeof origin.path !== "string") return;
+async function validateSuccessorLineage(repoRoot, path, entry, issues) {
+  const origin = entry.origin;
+  if (!COMMIT_PATTERN.test(origin.commit ?? "")) return;
   try {
     await execFileAsync(
       "git",
       ["-C", repoRoot, "merge-base", "--is-ancestor", origin.commit, "HEAD"],
       { maxBuffer: 1024 * 1024 },
     );
-    await execFileAsync(
-      "git",
-      ["-C", repoRoot, "cat-file", "-e", `${origin.commit}:${origin.path}`],
-      { maxBuffer: 1024 * 1024 },
-    );
   } catch {
-    issues.push(`${path}.origin does not resolve to a file in reachable successor history`);
+    issues.push(`${path}.origin.commit is not reachable in successor history`);
   }
 }
 

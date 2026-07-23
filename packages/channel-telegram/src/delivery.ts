@@ -38,6 +38,7 @@ interface PreparedTelegramDelivery {
 export class TelegramDelivery {
   private readonly receipts = new Map<string, DeliveryReceipt>();
   private capacityExhausted = false;
+  private ambiguousOutcome = false;
 
   constructor(
     private readonly config: TelegramConfig,
@@ -46,7 +47,15 @@ export class TelegramDelivery {
   ) {}
 
   get degraded(): boolean {
+    return this.capacityExhausted || this.ambiguousOutcome;
+  }
+
+  get receiptCapacityExhausted(): boolean {
     return this.capacityExhausted;
+  }
+
+  get hasAmbiguousOutcome(): boolean {
+    return this.ambiguousOutcome;
   }
 
   deliver(message: ChannelOutboundMessage, signal: AbortSignal): Promise<ChannelDeliveryResult> {
@@ -87,8 +96,10 @@ export class TelegramDelivery {
     })).then((result) => {
       if (result.status === "delivered" || result.status === "duplicate" || result.status === "unknown") {
         receipt.result = result;
+        if (result.status === "unknown") this.ambiguousOutcome = true;
       } else {
         this.receipts.delete(key);
+        this.capacityExhausted = this.receipts.size >= MAX_DELIVERY_RECEIPTS;
       }
       return result;
     });
@@ -320,7 +331,7 @@ function deliveryFingerprint(message: ChannelOutboundMessage): string {
     replyToMessageId: message.replyToMessageId ?? null,
     metadata: message.metadata ?? null,
   }, (_key, value: unknown) => isRecord(value)
-    ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)))
+    ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
     : value);
   return createHash("sha256").update(encoded).digest("hex");
 }

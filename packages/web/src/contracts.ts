@@ -92,6 +92,7 @@ export interface StartWebTurnInput {
   readonly text: string;
   readonly attachments?: readonly OperatorAttachment[];
   readonly quote?: OperatorQuote;
+  readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
 }

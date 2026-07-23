@@ -222,7 +222,11 @@ The browser API is:
 
 Browser uploads use the operator protocol's bounded inline data URL contract.
 Web accepts files up to 512 KiB each and enforces the shared 1 MiB encoded
-request bound across attachments, text, quotes, and overrides.
+request bound across attachments, text, quotes, and runtime-instance, model,
+and effort overrides. The AskUser endpoint separately accepts the canonical
+bounded answer shape up to 8 MiB after JSON escaping. Browser controls embed the shared
+`availableOperatorActions` implementation and derive eligibility from the
+selected thread plus authoritative endpoint capabilities.
 Quotes are shown only for messages carrying an authoritative agent transcript
 message id and only when the selected endpoint advertises quote support.
 The replay view exposes the same Quote action for replay-backed message ids.

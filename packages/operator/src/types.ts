@@ -15,14 +15,29 @@ export const OPERATOR_ROUTES = Object.freeze({
 
 export const OPERATOR_LIMITS = Object.freeze({
   requestBytes: 1_048_576,
+  /** Maximum JSON expansion of a canonical 3 × 20 AskUser answer. */
+  askAnswerRequestBytes: 8_388_608,
   /** Inline data URLs share the request body budget; the HTTP body cap remains authoritative. */
   attachmentUrlCharacters: 1_048_576,
   quoteCharacters: 32_768,
   jsonResponseBytes: 1_048_576,
-  frameBytes: 262_144,
+  /**
+   * A maximally populated canonical AskUser request can expand while JSON
+   * escapes control characters. Four MiB keeps that valid frame representable
+   * while the complete stream remains independently bounded.
+   */
+  frameBytes: 4_194_304,
   streamBytes: 8_388_608,
   liveInputCharacters: 8_000,
   identifierCharacters: 256,
+  askQuestions: 3,
+  askChoicesPerQuestion: 20,
+  askPromptBytes: 16_384,
+  askChoiceValueBytes: 4_096,
+  askChoiceLabelBytes: 1_024,
+  askChoiceDescriptionBytes: 4_096,
+  askAnswerValuesPerQuestion: 20,
+  askAnswerBytes: 16_384,
 });
 
 export interface OperatorAttachment {

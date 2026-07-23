@@ -10,7 +10,7 @@ import {
   readAuthorityFile,
   type AuthorityFileSnapshot,
 } from "./authority-read.js";
-import { AgentConfigError, type AgentConfigIssue, errorMessage } from "./errors.js";
+import { AgentConfigError, AgentModuleError, type AgentConfigIssue, errorMessage } from "./errors.js";
 import {
   loadSelectedModules,
   moduleConfigFor,
@@ -95,6 +95,11 @@ export async function loadAgentConfig(
     modules = await loadSelectedModules({ projectRoot, selections, environment });
   } catch (error) {
     if (error instanceof AgentConfigError) throw error;
+    if (error instanceof AgentModuleError && error.code !== undefined) {
+      throw new AgentConfigError(`Selected module validation failed: ${absoluteConfigPath}`, [
+        { path: error.configPath ?? "$", message: error.message, code: error.code },
+      ]);
+    }
     throw new AgentConfigError(`Selected module validation failed: ${absoluteConfigPath}`, [
       { path: "$", message: errorMessage(error), code: "module_load" },
     ]);

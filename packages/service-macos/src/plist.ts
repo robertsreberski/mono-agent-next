@@ -1,24 +1,34 @@
+import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
-
-import type { ServiceMacosServiceConfig } from "./config.js";
-
+import type { ServiceMacosLogsConfig, ServiceMacosServiceConfig } from "./config.js";
 export interface ServiceMacosRuntimePaths {
-  readonly nodePath: string;
-  readonly runnerScriptPath: string;
-  readonly launchAgentsDirectory: string;
-  readonly uid: number;
+  readonly nodePath: string; readonly runnerScriptPath: string;
+  readonly launchAgentsDirectory: string; readonly uid: number;
 }
-
 export interface ServiceMacosTarget {
-  readonly serviceId: string;
-  readonly label: string;
-  readonly plistPath: string;
-  readonly launchdDomain: string;
-  readonly launchdTarget: string;
-  readonly stdoutPath: string;
-  readonly stderrPath: string;
+  readonly serviceId: string; readonly label: string; readonly plistPath: string;
+  readonly launchdDomain: string; readonly launchdTarget: string;
+  readonly stdoutPath: string; readonly stderrPath: string; readonly readinessPath: string;
 }
-
+export interface ServiceRunnerBinding {
+  readonly agentConfigDigest: string; readonly packageManifestDigest: string;
+  readonly lockfilePath: string; readonly lockfileDigest: string;
+  readonly logsDirectoryIdentity: string;
+  readonly environmentFileDigest?: string;
+}
+export interface ServiceRunnerActivation {
+  readonly schemaVersion: 1;
+  readonly binding: ServiceRunnerBinding;
+  readonly logs: ServiceMacosLogsConfig & {
+    readonly directoryIdentity: string;
+    readonly stdoutPath: string;
+    readonly stderrPath: string;
+    readonly readinessPath: string;
+  };
+}
+export interface EncodedServiceRunnerActivation {
+  readonly encoded: string; readonly readinessToken: string;
+}
 export function serviceTarget(serviceId: string, service: ServiceMacosServiceConfig, runtime: ServiceMacosRuntimePaths): ServiceMacosTarget {
   const label = `ai.mono-agent.${serviceId}`;
   const launchdDomain = `gui/${String(runtime.uid)}`;
@@ -30,20 +40,24 @@ export function serviceTarget(serviceId: string, service: ServiceMacosServiceCon
     launchdTarget: `${launchdDomain}/${label}`,
     stdoutPath: join(service.logs.directory, `${serviceId}.stdout.log`),
     stderrPath: join(service.logs.directory, `${serviceId}.stderr.log`),
+    readinessPath: join(service.logs.directory, `${serviceId}.ready.json`),
   });
 }
-
 export function renderServicePlist(
   target: ServiceMacosTarget,
   service: ServiceMacosServiceConfig,
   runtime: ServiceMacosRuntimePaths,
+  binding: ServiceRunnerBinding,
 ): string {
+  const activation = encodeServiceRunnerActivation(target, service.logs, binding);
   const args = [
     runtime.nodePath,
     runtime.runnerScriptPath,
     "run-service",
     "--config",
     service.agentConfig,
+    "--activation",
+    activation.encoded,
     ...(service.environmentFile === undefined ? [] : ["--environment-file", service.environmentFile]),
   ];
   const keepAlive = service.restartPolicy === "always"
@@ -81,7 +95,38 @@ ${args.map((argument) => `    <string>${xml(argument)}</string>`).join("\n")}
 </plist>
 `;
 }
-
+export function encodeServiceRunnerActivation(
+  target: ServiceMacosTarget,
+  logs: ServiceMacosLogsConfig,
+  binding: ServiceRunnerBinding,
+): EncodedServiceRunnerActivation {
+  const runnerBinding: ServiceRunnerBinding = Object.freeze({
+    agentConfigDigest: binding.agentConfigDigest,
+    packageManifestDigest: binding.packageManifestDigest,
+    lockfilePath: binding.lockfilePath,
+    lockfileDigest: binding.lockfileDigest,
+    logsDirectoryIdentity: binding.logsDirectoryIdentity,
+    ...(binding.environmentFileDigest === undefined ? {} : {
+      environmentFileDigest: binding.environmentFileDigest,
+    }),
+  });
+  const activation: ServiceRunnerActivation = Object.freeze({
+    schemaVersion: 1,
+    binding: runnerBinding,
+    logs: Object.freeze({
+      ...logs,
+      directoryIdentity: binding.logsDirectoryIdentity,
+      stdoutPath: target.stdoutPath,
+      stderrPath: target.stderrPath,
+      readinessPath: target.readinessPath,
+    }),
+  });
+  const encoded = Buffer.from(JSON.stringify(activation)).toString("base64url");
+  return Object.freeze({
+    encoded,
+    readinessToken: createHash("sha256").update(encoded).digest("hex"),
+  });
+}
 export function assertRuntimePaths(runtime: ServiceMacosRuntimePaths): void {
   for (const [field, path] of Object.entries({
     nodePath: runtime.nodePath,
@@ -93,7 +138,6 @@ export function assertRuntimePaths(runtime: ServiceMacosRuntimePaths): void {
   if (!Number.isSafeInteger(runtime.uid) || runtime.uid < 0) throw new Error("uid must be a non-negative integer.");
   if (basename(runtime.runnerScriptPath).length === 0) throw new Error("runnerScriptPath must name a file.");
 }
-
 function xml(value: string): string {
   return value
     .replace(/&/gu, "&amp;")

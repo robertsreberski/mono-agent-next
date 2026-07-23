@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -19,13 +18,21 @@ import { parse as parseYaml } from "yaml";
 import { AgentConfigError, AgentModuleError, errorMessage } from "./errors.js";
 import { snapshotBoundedValue } from "./bounded-value.js";
 import type { ModuleSelection } from "./config.js";
-import type { GenericModuleDefinition, LoadedAgentModule } from "./types.js";
+import type { GenericModuleDefinition, LoadedAgentModule, ModuleKind } from "./types.js";
 import type { AgentConfigIssue } from "./errors.js";
 
+const REGISTRY_TAG_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/u;
+const REGISTRY_RANGE_TOKEN_PATTERN = /^(?:\^|~|>=?|<=?|=)?v?(?:\d+|[xX*])(?:\.(?:\d+|[xX*])){0,2}(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 const moduleConfigs = new WeakMap<LoadedAgentModule, unknown>();
 const MODULE_CONFIG_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 const MODULE_CONFIG_SNAPSHOT_MAX_DEPTH = 64;
 const MODULE_CONFIG_SNAPSHOT_MAX_ITEMS = 50_000;
+const RESERVED_FIRST_PARTY_PACKAGES: ReadonlyMap<ModuleKind, string> = new Map([
+  ["state", "@mono-agent/state-local"],
+  ["trigger", "@mono-agent/trigger-cron"],
+  ["exporter", "@mono-agent/exporter-otlp"],
+  ["sandbox", "@mono-agent/sandbox-srt"],
+] as const);
 
 export function moduleConfigFor(module: LoadedAgentModule): unknown {
   if (!moduleConfigs.has(module)) throw new AgentModuleError(`Parsed config is unavailable for ${module.packageName}`);
@@ -53,9 +60,9 @@ interface PackageManifest {
   readonly version?: string;
   readonly main?: string;
   readonly exports?: unknown;
-  readonly dependencies?: Readonly<Record<string, string>>;
-  readonly optionalDependencies?: Readonly<Record<string, string>>;
-  readonly devDependencies?: Readonly<Record<string, string>>;
+  readonly dependencies?: Readonly<Record<string, unknown>>;
+  readonly optionalDependencies?: Readonly<Record<string, unknown>>;
+  readonly devDependencies?: Readonly<Record<string, unknown>>;
   readonly ["mono-agent"]?: {
     readonly packageName?: string;
     readonly apiVersion?: number;
@@ -74,7 +81,7 @@ export async function loadSelectedModules(input: {
   const lock = await readProjectLock(input.projectRoot);
   const preflighted = [];
   for (const selection of input.selections) {
-    preflighted.push(await preflightModule(selection, input.projectRoot, projectManifestPath, projectManifest, lock));
+    preflighted.push(await preflightModule(selection, input.projectRoot, projectManifest, lock));
   }
 
   const loaded: LoadedAgentModule[] = [];
@@ -84,7 +91,7 @@ export async function loadSelectedModules(input: {
 
 interface ProjectLock {
   readonly kind: "pnpm" | "npm";
-  hasDirect(packageName: string, installedVersion: string): boolean;
+  hasDirect(packageName: string, dependencySpec: string, installedVersion: string): boolean;
 }
 
 async function readProjectLock(projectRoot: string): Promise<ProjectLock> {
@@ -97,16 +104,18 @@ async function readProjectLock(projectRoot: string): Promise<ProjectLock> {
     const importer = parsed.importers["."];
     return {
       kind: "pnpm",
-      hasDirect(packageName, installedVersion) {
+      hasDirect(packageName, dependencySpec, installedVersion) {
         return ["dependencies", "optionalDependencies"].some((field) => {
           const entries = importer[field];
           if (!isRecord(entries) || !Object.hasOwn(entries, packageName)) return false;
           const locked = entries[packageName];
+          if (typeof locked === "string") {
+            return dependencySpec === installedVersion && locked === installedVersion;
+          }
+          if (!isRecord(locked) || locked.specifier !== dependencySpec) return false;
           const resolved = isRecord(locked) ? locked.version : locked;
-          return typeof resolved !== "string"
-            || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?(?:\([^)]*\))?$/u.test(resolved)
-            || resolved === installedVersion
-            || resolved.startsWith(`${installedVersion}(`);
+          return typeof resolved === "string"
+            && (resolved === installedVersion || resolved.startsWith(`${installedVersion}(`));
         });
       },
     };
@@ -121,10 +130,10 @@ async function readProjectLock(projectRoot: string): Promise<ProjectLock> {
     const root = isRecord(packages[""]) ? packages[""] : {};
     return {
       kind: "npm",
-      hasDirect(packageName, installedVersion) {
+      hasDirect(packageName, dependencySpec, installedVersion) {
         const declared = ["dependencies", "optionalDependencies"].some((field) => {
           const entries = root[field];
-          return isRecord(entries) && Object.hasOwn(entries, packageName);
+          return isRecord(entries) && entries[packageName] === dependencySpec;
         });
         const installed = packages[`node_modules/${packageName}`];
         return declared && isRecord(installed) && installed.version === installedVersion;
@@ -147,27 +156,36 @@ interface PreflightedModule {
 async function preflightModule(
   selection: ModuleSelection,
   projectRoot: string,
-  projectManifestPath: string,
   projectManifest: PackageManifest,
   lock: ProjectLock,
 ): Promise<PreflightedModule> {
   const packageName = selection.selected.$use;
+  const reservedPackage = RESERVED_FIRST_PARTY_PACKAGES.get(selection.slot);
+  if (reservedPackage !== undefined && packageName !== reservedPackage) {
+    throw new AgentModuleError(
+      `${selection.configPath}: reserved ${selection.slot} modules must use the first-party catalog package ${reservedPackage}`,
+      { code: "reserved_module_not_first_party", packageName, configPath: selection.configPath },
+    );
+  }
   const dependencySpec = projectManifest.dependencies?.[packageName]
     ?? projectManifest.optionalDependencies?.[packageName];
   if (dependencySpec === undefined) {
     throw moduleIssue(selection, `${packageName} must be a direct project dependency`);
   }
-  if (/^(?:npm:|file:|link:|portal:|patch:|git(?:\+|:)|https?:|github:|\.\.?\/|\/)/u.test(dependencySpec)) {
+  if (!isRegistryDependencySpec(dependencySpec)) {
     throw moduleIssue(selection, `${packageName} uses forbidden dependency spec ${JSON.stringify(dependencySpec)}`);
   }
-  const projectRequire = createRequire(projectManifestPath);
-  let packageRoot: string;
+  const localPackageRoot = join(projectRoot, "node_modules", ...packageName.split("/"));
+  let realPackageRoot: string;
   try {
-    packageRoot = await findPackageRoot(projectRequire, packageName);
+    realPackageRoot = await realpath(localPackageRoot);
   } catch (error) {
-    throw moduleIssue(selection, `${packageName} cannot be resolved from ${projectRoot}`, error);
+    throw moduleIssue(
+      selection,
+      `${packageName} must be installed at ${localPackageRoot}; ancestor node_modules are not eligible`,
+      error,
+    );
   }
-  const realPackageRoot = await realpath(packageRoot);
   const manifest = await readJson<PackageManifest>(join(realPackageRoot, "package.json"), `${packageName} package.json`);
   const entryTarget = packageImportTarget(manifest);
   if (entryTarget === undefined || entryTarget.includes("\0") || isAbsolute(entryTarget)) {
@@ -187,7 +205,7 @@ async function preflightModule(
   if (typeof manifest.version !== "string" || manifest.version.length === 0) {
     throw moduleIssue(selection, `${packageName} package.json must declare a version`);
   }
-  if (!lock.hasDirect(packageName, manifest.version)) {
+  if (!lock.hasDirect(packageName, dependencySpec, manifest.version)) {
     throw moduleIssue(selection, `${packageName}@${manifest.version} is missing or mismatched in the ${lock.kind} lockfile root importer`);
   }
   const metadata = manifest["mono-agent"];
@@ -211,6 +229,25 @@ async function preflightModule(
     packageRoot: realPackageRoot,
     packageEntry: realPackageEntry,
   };
+}
+
+function isRegistryDependencySpec(value: unknown): value is string {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 512
+    || value !== value.trim()
+    || /\.(?:tgz|tar(?:\.gz)?)$/iu.test(value)
+  ) {
+    return false;
+  }
+  if (REGISTRY_TAG_PATTERN.test(value)) return true;
+  return value.split(/\s*\|\|\s*/u).every((clause) => {
+    const tokens = clause.split(/\s+/u);
+    return tokens.length > 0 && tokens.every((token, index) =>
+      REGISTRY_RANGE_TOKEN_PATTERN.test(token)
+      || (token === "-" && index > 0 && index < tokens.length - 1));
+  });
 }
 
 function packageImportTarget(manifest: PackageManifest): string | undefined {
@@ -939,20 +976,6 @@ function moduleIssue(selection: ModuleSelection, message: string, cause?: unknow
     configPath: selection.configPath,
     ...(cause === undefined ? {} : { cause }),
   });
-}
-
-async function findPackageRoot(projectRequire: NodeJS.Require, expectedName: string): Promise<string> {
-  const searchPaths = projectRequire.resolve.paths(expectedName) ?? [];
-  for (const nodeModules of searchPaths) {
-    const current = join(nodeModules, expectedName);
-    try {
-      const manifest = await readJson<PackageManifest>(join(current, "package.json"), `${expectedName} package.json`);
-      if (manifest.name === expectedName) return current;
-    } catch (error) {
-      if (!isNotFound(error)) throw error;
-    }
-  }
-  throw new AgentModuleError(`Could not locate installed package root for ${expectedName}`);
 }
 
 async function readJson<T>(path: string, label: string): Promise<T> {

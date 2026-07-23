@@ -10,6 +10,7 @@ describe("website CI contract", () => {
     expect([...document.errors, ...document.warnings]).toEqual([]);
     const workflow = document.toJS({ mapAsMap: false });
     const website = workflow.jobs.website;
+    const verify = workflow.jobs.verify;
 
     expect(website).toEqual({
       name: "Website (Node 22)",
@@ -35,9 +36,16 @@ describe("website CI contract", () => {
       ],
     });
 
-    const verifyRuns = workflow.jobs.verify.steps
+    expect(verify.steps[0]).toEqual({
+      name: "Checkout",
+      uses: "actions/checkout@v4",
+      with: { "fetch-depth": 0 },
+    });
+
+    const verifyRuns = verify.steps
       .map((step) => step.run)
       .filter((run) => typeof run === "string");
+    expect(verifyRuns.some((run) => run.includes("pnpm run check:apache-provenance"))).toBe(true);
     expect(verifyRuns.some((run) => run.includes("pnpm run check:source-beta-budgets"))).toBe(true);
     expect(verifyRuns.some((run) => run.includes("pnpm run scripts:test"))).toBe(true);
 

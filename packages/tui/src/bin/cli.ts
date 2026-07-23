@@ -7,6 +7,7 @@ export interface ParsedArgs {
   readonly operatorId?: string;
   readonly conversationId?: string;
   readonly title?: string;
+  readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
   readonly help: boolean;
@@ -20,6 +21,7 @@ const VALUE_FLAGS = new Map<string, Exclude<keyof ParsedArgs, "help" | "registry
   ["--agent", "operatorId"],
   ["--conversation", "conversationId"],
   ["--title", "title"],
+  ["--runtime", "runtime"],
   ["--model", "model"],
   ["--effort", "effort"],
 ]);
@@ -73,13 +75,14 @@ Connection:
 
 Session:
   --conversation <id>    Conversation id (default: tui-<random uuid>).
+  --runtime <instance>   Initial named runtime-instance override.
   --model <ref>          Initial per-turn model override, when eligible.
   --effort <level>       Initial per-turn effort override, when eligible.
   --title <text>         Header title (default: mono-agent).
   -h, --help             Show this help and exit.
 
-Inside the console, /model and /effort change eligible overrides, /cancel or
-Escape cancels an active turn, and /exit or /quit closes only this renderer.
+Inside the console, /runtime, /model, and /effort change eligible overrides.
+/cancel or Escape cancels an active turn; /exit or /quit closes only this renderer.
 `;
 
 export function exitWithError(message: string): never {

@@ -1,33 +1,15 @@
-import { constants } from "node:fs";
-import { lstat, open } from "node:fs/promises";
-
+import { readServiceInput } from "./input.js";
 export interface ProtectedEnvironment {
   readonly source: string;
   readonly values: Readonly<Record<string, string>>;
 }
-
 export async function loadProtectedEnvironment(
   path: string,
   expectedUid: number,
 ): Promise<ProtectedEnvironment> {
-  const before = await lstat(path);
-  if (!before.isFile() || before.isSymbolicLink() || before.uid !== expectedUid || (before.mode & 0o777) !== 0o600) {
-    throw new Error(`${path} must be an owner-private regular file (mode 0600, uid ${String(expectedUid)}).`);
-  }
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const after = await handle.stat();
-    if (!after.isFile() || after.dev !== before.dev || after.ino !== before.ino || after.nlink !== 1) {
-      throw new Error(`${path} changed identity while it was opened.`);
-    }
-    if (after.size > 1_048_576) throw new Error(`${path} exceeds the 1 MiB environment limit.`);
-    const source = await handle.readFile("utf8");
-    return Object.freeze({ source, values: Object.freeze(parseEnvironment(source, path)) });
-  } finally {
-    await handle.close();
-  }
+  const source = (await readServiceInput(path, 1_048_576, { uid: expectedUid, mode: 0o600 })).source.toString("utf8");
+  return Object.freeze({ source, values: Object.freeze(parseEnvironment(source, path)) });
 }
-
 export function parseEnvironment(source: string, path = "environment file"): Record<string, string> {
   const values: Record<string, string> = Object.create(null);
   for (const [index, raw] of source.replace(/\r\n?/gu, "\n").split("\n").entries()) {
@@ -41,7 +23,6 @@ export function parseEnvironment(source: string, path = "environment file"): Rec
   }
   return values;
 }
-
 function unquote(value: string, path: string, line: number): string {
   if (value.length < 2) return value;
   const quote = value[0];

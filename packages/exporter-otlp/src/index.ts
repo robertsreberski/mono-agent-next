@@ -1,4 +1,7 @@
-import { defineExporterModule } from "@mono-agent/module-sdk/internal";
+import type {
+  ExporterModuleCreateContext,
+  ExporterModuleDefinition,
+} from "@mono-agent/module-sdk/internal";
 
 import {
   otlpExporterConfigSchema,
@@ -18,24 +21,24 @@ import {
   type OtlpTransportResponse,
 } from "./transport.js";
 
-export const monoAgentModule = defineExporterModule({
-  manifest: {
+export const monoAgentModule = Object.freeze({
+  manifest: Object.freeze({
     packageName: "@mono-agent/exporter-otlp",
     packageVersion: "0.15.0",
     apiVersion: 1,
     kind: "exporter",
     responsibility: "Exports bounded normalized telemetry batches to an OTLP HTTP endpoint.",
-    capabilities: [
+    capabilities: Object.freeze([
       "exporter.otlp",
       "exporter.bounded-queue",
       "exporter.safe-redirects",
       "exporter.phoenix-semantics",
       "exporter.content-pattern-redaction",
-    ],
-  },
+    ]),
+  }),
   schema: otlpExporterConfigSchema,
-  create: (context) => new OtlpExporter(context.config),
-});
+  create: (context: ExporterModuleCreateContext<OtlpExporterConfig>) => new OtlpExporter(context.config),
+}) satisfies ExporterModuleDefinition<OtlpExporterConfig, OtlpExporter>;
 
 export default monoAgentModule;
 

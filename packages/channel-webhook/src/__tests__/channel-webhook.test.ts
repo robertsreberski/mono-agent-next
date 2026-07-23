@@ -14,6 +14,7 @@ import {
   isSecretSchema,
   type ChannelHost,
   type ChannelInboundRequest,
+  type ChannelOutboundMessage,
   type ChannelReplySink,
   type ModuleLogger,
 } from "@mono-agent/module-sdk";
@@ -50,6 +51,7 @@ afterEach(async () => {
   }));
   channels.clear();
   moduleChannels.clear();
+  vi.unstubAllGlobals();
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -384,7 +386,7 @@ describe("webhook HTTP channel", () => {
 });
 
 describe("webhook outbound delivery", () => {
-  it("signs a fixed destination and collapses concurrent duplicate idempotency keys", async () => {
+  it("signs a fixed destination, collapses matching keys, and rejects conflicting reuse", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
       expect(init?.redirect).toBe("error");
       const body = Buffer.from(init?.body as Uint8Array);
@@ -396,7 +398,378 @@ describe("webhook outbound delivery", () => {
     const delivery = new WebhookDelivery({ url: "https://hooks.example.test/deliver", apiKey: "outbound-key", signatureSecret: "outbound-signature-secret", timeoutMs: 1_000, maxResponseBytes: 1_024 }, fetchImpl);
     const message = { conversationId: "webhook:destination", text: "notice", idempotencyKey: "delivery-1" };
     await expect(Promise.all([delivery.deliver(message, new AbortController().signal), delivery.deliver(message, new AbortController().signal)])).resolves.toEqual([{ status: "delivered", idempotencyKey: "delivery-1", messageId: "remote-1" }, { status: "delivered", idempotencyKey: "delivery-1", messageId: "remote-1" }]);
+    await expect(delivery.deliver(message, new AbortController().signal)).resolves.toEqual({
+      status: "duplicate",
+      idempotencyKey: "delivery-1",
+      messageId: "remote-1",
+    });
+    await expect(delivery.deliver({
+      ...message,
+      text: "conflicting notice",
+    }, new AbortController().signal)).resolves.toMatchObject({
+      status: "failed",
+      idempotencyKey: "delivery-1",
+      diagnostic: { code: "webhook_delivery_idempotency_conflict" },
+    });
     expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an ambiguous outcome sticky, rejects conflicting reuse, and never replays", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      throw new Error("ambiguous transport failure with secret detail");
+    });
+    const delivery = new WebhookDelivery({ url: "https://hooks.example.test/deliver", apiKey: "outbound-key", timeoutMs: 1_000, maxResponseBytes: 1_024 }, fetchImpl);
+    const message = { conversationId: "webhook:destination", text: "notice", idempotencyKey: "delivery-unknown" };
+    const first = await delivery.deliver(message, new AbortController().signal);
+    const second = await delivery.deliver(message, new AbortController().signal);
+    expect(first).toEqual(second);
+    expect(first).toEqual({
+      status: "unknown",
+      idempotencyKey: "delivery-unknown",
+      diagnostic: {
+        code: "webhook_delivery_unknown",
+        severity: "error",
+        message: "Webhook delivery outcome is unknown.",
+      },
+    });
+    await expect(delivery.deliver({
+      ...message,
+      text: "conflicting notice",
+    }, new AbortController().signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "webhook_delivery_idempotency_conflict" },
+    });
+    expect(JSON.stringify(first)).not.toContain("secret detail");
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(delivery.degraded).toBe(true);
+    expect(delivery.hasAmbiguousOutcome).toBe(true);
+  });
+
+  it("canonicalizes collation-equivalent metadata keys without insertion-order conflicts", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    const delivery = new WebhookDelivery({ url: "https://hooks.example.test/deliver", apiKey: "outbound-key", timeoutMs: 1_000, maxResponseBytes: 1_024 }, fetchImpl);
+    const message = { conversationId: "webhook:destination", text: "notice", idempotencyKey: "delivery-unicode-metadata" };
+    const metadata = Object.fromEntries([["é", "precomposed"], ["e\u0301", "decomposed"]]);
+
+    await expect(delivery.deliver({ ...message, metadata }, new AbortController().signal)).resolves.toMatchObject({ status: "delivered" });
+    await expect(delivery.deliver({ ...message, metadata: Object.fromEntries(Object.entries(metadata).reverse()) }, new AbortController().signal)).resolves.toMatchObject({ status: "duplicate" });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("snapshots mutable payloads before fingerprinting and transport", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let posted: Record<string, unknown> | undefined;
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      posted = JSON.parse(Buffer.from(init?.body as Uint8Array).toString("utf8")) as Record<string, unknown>;
+      await gate;
+      return new Response(null, { status: 204 });
+    });
+    const delivery = new WebhookDelivery({ url: "https://hooks.example.test/deliver", apiKey: "outbound-key", timeoutMs: 10_000, maxResponseBytes: 1_024 }, fetchImpl);
+    const data = new Uint8Array([1, 2, 3]);
+    const attachment = {
+      id: "attachment-1",
+      kind: "file" as const,
+      name: "report.bin",
+      mediaType: "application/octet-stream",
+      sizeBytes: data.byteLength,
+      data,
+    };
+    const attachments = [attachment];
+    const metadata = { source: { name: "original" }, labels: ["stable"] };
+    const message = {
+      conversationId: "webhook:destination",
+      text: "original text",
+      attachments,
+      replyToMessageId: "parent-1",
+      idempotencyKey: "delivery-snapshot",
+      metadata,
+    };
+
+    const pending = delivery.deliver(message, new AbortController().signal);
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledOnce());
+    message.text = "mutated text";
+    attachment.name = "mutated.bin";
+    data[0] = 9;
+    metadata.source.name = "mutated";
+    metadata.labels.push("late");
+    attachments.push({
+      ...attachment,
+      id: "attachment-2",
+      data: new Uint8Array([4, 5, 6]),
+    });
+
+    expect(posted).toEqual({
+      idempotencyKey: "delivery-snapshot",
+      conversationId: "webhook:destination",
+      text: "original text",
+      replyToMessageId: "parent-1",
+      metadata: { source: { name: "original" }, labels: ["stable"] },
+      attachments: [{
+        name: "report.bin",
+        mediaType: "application/octet-stream",
+        data: Buffer.from([1, 2, 3]).toString("base64"),
+      }],
+    });
+    release();
+    await expect(pending).resolves.toMatchObject({ status: "delivered" });
+    await expect(delivery.deliver({
+      conversationId: "webhook:destination",
+      text: "original text",
+      attachments: [{
+        id: "attachment-1",
+        kind: "file",
+        name: "report.bin",
+        mediaType: "application/octet-stream",
+        sizeBytes: 3,
+        data: new Uint8Array([1, 2, 3]),
+      }],
+      replyToMessageId: "parent-1",
+      idempotencyKey: "delivery-snapshot",
+      metadata: { source: { name: "original" }, labels: ["stable"] },
+    }, new AbortController().signal)).resolves.toMatchObject({ status: "duplicate" });
+    await expect(delivery.deliver(message, new AbortController().signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "webhook_delivery_idempotency_conflict" },
+    });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("rejects proxies, accessors, sparse arrays, and unsafe metadata without touching transport", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    const delivery = new WebhookDelivery({ url: "https://hooks.example.test/deliver", apiKey: "outbound-key", timeoutMs: 1_000, maxResponseBytes: 1_024 }, fetchImpl);
+    const signal = new AbortController().signal;
+    let accessorReads = 0;
+    let proxyReads = 0;
+    const accessorMessage = {
+      conversationId: "webhook:destination",
+      idempotencyKey: "accessor-message",
+    } as Record<string, unknown>;
+    Object.defineProperty(accessorMessage, "text", {
+      enumerable: true,
+      get() {
+        accessorReads += 1;
+        return "must not run";
+      },
+    });
+    const metadataAccessor = {} as Record<string, unknown>;
+    Object.defineProperty(metadataAccessor, "secret", {
+      enumerable: true,
+      get() {
+        accessorReads += 1;
+        return "must not run";
+      },
+    });
+    const unsafeMetadata = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(unsafeMetadata, "constructor", {
+      enumerable: true,
+      value: "unsafe",
+    });
+    const sparseAttachments = new Array(1);
+    const sparseMetadata = new Array(1);
+    const proxiedMessage = new Proxy({
+      conversationId: "webhook:destination",
+      text: "proxy",
+      idempotencyKey: "proxy-message",
+    }, {
+      get(target, key, receiver) {
+        proxyReads += 1;
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const proxiedData = new Proxy(new Uint8Array([1]), {});
+    const cases: readonly ChannelOutboundMessage[] = [
+      accessorMessage as unknown as ChannelOutboundMessage,
+      proxiedMessage,
+      {
+        conversationId: "webhook:destination",
+        text: "sparse attachments",
+        attachments: sparseAttachments,
+        idempotencyKey: "sparse-attachments",
+      } as ChannelOutboundMessage,
+      {
+        conversationId: "webhook:destination",
+        text: "sparse metadata",
+        idempotencyKey: "sparse-metadata",
+        metadata: { values: sparseMetadata },
+      } as unknown as ChannelOutboundMessage,
+      {
+        conversationId: "webhook:destination",
+        text: "metadata accessor",
+        idempotencyKey: "metadata-accessor",
+        metadata: metadataAccessor,
+      } as unknown as ChannelOutboundMessage,
+      {
+        conversationId: "webhook:destination",
+        text: "unsafe metadata",
+        idempotencyKey: "unsafe-metadata",
+        metadata: unsafeMetadata,
+      } as unknown as ChannelOutboundMessage,
+      {
+        conversationId: "webhook:destination",
+        text: "",
+        attachments: [{
+          id: "proxy",
+          kind: "file",
+          name: "proxy.bin",
+          mediaType: "application/octet-stream",
+          sizeBytes: 1,
+          data: proxiedData,
+        }],
+        idempotencyKey: "proxy-data",
+      },
+      {
+        conversationId: "webhook:destination",
+        text: "unknown field",
+        idempotencyKey: "unknown-field",
+        unexpected: true,
+      } as unknown as ChannelOutboundMessage,
+    ];
+
+    for (const message of cases) {
+      await expect(delivery.deliver(message, signal)).resolves.toMatchObject({
+        status: "failed",
+        diagnostic: { code: "webhook_delivery_invalid" },
+      });
+    }
+    expect(accessorReads).toBe(0);
+    expect(proxyReads).toBe(0);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await expect(delivery.deliver({
+      conversationId: "webhook:destination",
+      text: "valid retry",
+      idempotencyKey: "sparse-attachments",
+    }, signal)).resolves.toMatchObject({ status: "delivered" });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("classifies a non-success response before reading its untrusted body", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response("x".repeat(2_048), {
+      status: 500,
+      headers: { "content-length": "2048" },
+    }));
+    const delivery = new WebhookDelivery({ url: "https://hooks.example.test/deliver", apiKey: "outbound-key", timeoutMs: 1_000, maxResponseBytes: 8 }, fetchImpl);
+    const message = { conversationId: "webhook:destination", text: "notice", idempotencyKey: "delivery-rejected" };
+    const signal = new AbortController().signal;
+
+    await expect(delivery.deliver(message, signal)).resolves.toMatchObject({
+      status: "failed",
+      idempotencyKey: "delivery-rejected",
+      diagnostic: { code: "webhook_delivery_rejected" },
+    });
+    await expect(delivery.deliver(message, signal)).resolves.toMatchObject({
+      status: "failed",
+      idempotencyKey: "delivery-rejected",
+      diagnostic: { code: "webhook_delivery_rejected" },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports exact receipt capacity as degraded and never evicts prior authority", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    const delivery = new WebhookDelivery({ url: "https://hooks.example.test/deliver", apiKey: "outbound-key", timeoutMs: 1_000, maxResponseBytes: 1_024 }, fetchImpl);
+    const signal = new AbortController().signal;
+    for (let index = 0; index < 1_000; index += 1) {
+      await delivery.deliver({
+        conversationId: "webhook:destination",
+        text: `notice-${String(index)}`,
+        idempotencyKey: `delivery-${String(index)}`,
+      }, signal);
+    }
+    expect(delivery.degraded).toBe(true);
+    expect(delivery.receiptCapacityExhausted).toBe(true);
+    await expect(delivery.deliver({
+      conversationId: "webhook:destination",
+      text: "one too many",
+      idempotencyKey: "delivery-capacity",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "webhook_delivery_receipt_capacity" },
+    });
+    expect(delivery.degraded).toBe(true);
+    await expect(delivery.deliver({
+      conversationId: "webhook:destination",
+      text: "notice-0",
+      idempotencyKey: "delivery-0",
+    }, signal)).resolves.toMatchObject({ status: "duplicate" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1_000);
+  });
+
+  it("clears transient capacity degradation after definitive failures free receipts", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      await gate;
+      return new Response(null, { status: 500 });
+    });
+    const delivery = new WebhookDelivery({ url: "https://hooks.example.test/deliver", apiKey: "outbound-key", timeoutMs: 10_000, maxResponseBytes: 1_024 }, fetchImpl);
+    const signal = new AbortController().signal;
+    const pending = Array.from({ length: 1_000 }, (_, index) => delivery.deliver({
+      conversationId: "webhook:destination",
+      text: `notice-${String(index)}`,
+      idempotencyKey: `recover-${String(index)}`,
+    }, signal));
+
+    await expect(delivery.deliver({
+      conversationId: "webhook:destination",
+      text: "at capacity",
+      idempotencyKey: "recover-capacity",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "webhook_delivery_receipt_capacity" },
+    });
+    expect(delivery.degraded).toBe(true);
+    release();
+    await expect(Promise.all(pending)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ status: "failed" })]),
+    );
+    expect(delivery.degraded).toBe(false);
+    expect(delivery.receiptCapacityExhausted).toBe(false);
+  });
+
+  it("accepts only bounded non-empty remote message identifiers and keeps invalid responses unknown", async () => {
+    const responses = [
+      "é".repeat(256),
+      "é".repeat(257),
+      "",
+      "remote\0message",
+    ];
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      messageId: responses.shift(),
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const delivery = new WebhookDelivery({ url: "https://hooks.example.test/deliver", apiKey: "outbound-key", timeoutMs: 1_000, maxResponseBytes: 2_048 }, fetchImpl);
+    const signal = new AbortController().signal;
+    const accepted = {
+      conversationId: "webhook:destination",
+      text: "notice",
+      idempotencyKey: "delivery-message-id-valid",
+    };
+    await expect(delivery.deliver(accepted, signal)).resolves.toEqual({
+      status: "delivered",
+      idempotencyKey: "delivery-message-id-valid",
+      messageId: "é".repeat(256),
+    });
+    for (const idempotencyKey of [
+      "delivery-message-id-oversized",
+      "delivery-message-id-empty",
+      "delivery-message-id-nul",
+    ]) {
+      const message = { ...accepted, idempotencyKey };
+      await expect(delivery.deliver(message, signal)).resolves.toMatchObject({
+        status: "unknown",
+        idempotencyKey,
+        diagnostic: { code: "webhook_delivery_response_invalid" },
+      });
+      await expect(delivery.deliver(message, signal)).resolves.toMatchObject({
+        status: "unknown",
+        idempotencyKey,
+      });
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
   });
 });
 
@@ -446,6 +819,7 @@ describe("mono-agent channel module", () => {
     moduleChannels.add(channel);
     expect(() => assertChannelInstanceCompliance(channel)).not.toThrow();
     expect(channel.capabilities.approvals).toBe(false);
+    expect(channel.resolveDefaultDeliveryConversationId?.()).toBeUndefined();
 
     await channel.start?.({ signal: lifecycle.signal });
     expect(channel.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/webhook\/invoke$/u);
@@ -476,6 +850,161 @@ describe("mono-agent channel module", () => {
       details: { activeRequests: 0, storedRequests: 0 },
     });
     await channel.stop?.({ signal: lifecycle.signal, reason: "shutdown" });
+  });
+
+  it("resolves a stable non-secret default for the configured fixed outbound URL", async () => {
+    const host: ChannelHost = {
+      grantedCapabilities: new Set(),
+      getCapability<T>(): T | undefined {
+        return undefined;
+      },
+      async dispatch() {
+        return { status: "completed" } as const;
+      },
+    };
+    const create = async (instanceId: string, url: string, outboundKey: string) => {
+      const channel = await monoAgentModule.create({
+        instanceId,
+        config: monoAgentModule.schema.parse({
+          apiKey: "module-key",
+          outbound: { url, apiKey: outboundKey },
+        }),
+        configDirectory: "/config",
+        provenance: {},
+        workspaceDirectory: "/workspace",
+        dataDirectory: "/data",
+        logger: noopLogger(),
+        host,
+        signal: new AbortController().signal,
+      });
+      moduleChannels.add(channel);
+      return channel;
+    };
+    const fixedUrl = "https://hooks.example.test/private-route?token=secret-query";
+    const first = await create("outbound-one", fixedUrl, "outbound-key-one");
+    const second = await create("outbound-two", fixedUrl, "different-outbound-key");
+    const different = await create(
+      "outbound-three",
+      "https://hooks.example.test/other-route",
+      "outbound-key-three",
+    );
+    const resolved = first.resolveDefaultDeliveryConversationId?.();
+    expect(() => assertChannelInstanceCompliance(first)).not.toThrow();
+    expect(resolved).toMatch(/^webhook:outbound:sha256:[0-9a-f]{64}$/u);
+    expect(second.resolveDefaultDeliveryConversationId?.()).toBe(resolved);
+    expect(different.resolveDefaultDeliveryConversationId?.()).not.toBe(resolved);
+    expect(resolved).not.toContain("hooks.example.test");
+    expect(resolved).not.toContain("secret-query");
+    expect(first.capabilities.proactive).toBe(true);
+  });
+
+  it("reports an ambiguous outbound transport outcome as degraded health", async () => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => {
+      throw new Error("ambiguous transport failure");
+    }));
+    const lifecycle = new AbortController();
+    const channel = await monoAgentModule.create({
+      instanceId: "outbound-health",
+      config: monoAgentModule.schema.parse({
+        apiKey: "module-key",
+        outbound: {
+          url: "https://hooks.example.test/deliver",
+          apiKey: "outbound-key",
+          timeoutMs: 1_000,
+        },
+      }),
+      configDirectory: "/config",
+      provenance: {},
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: {
+        grantedCapabilities: new Set(),
+        getCapability<T>(): T | undefined {
+          return undefined;
+        },
+        async dispatch() {
+          return { status: "completed" } as const;
+        },
+      },
+      signal: lifecycle.signal,
+    });
+    moduleChannels.add(channel);
+    await channel.start?.({ signal: lifecycle.signal });
+    const result = await channel.deliver?.({
+      conversationId: "webhook:outbound",
+      text: "notice",
+      idempotencyKey: "ambiguous-health",
+    }, lifecycle.signal);
+
+    expect(result).toMatchObject({ status: "unknown" });
+    expect(await channel.health?.({ signal: lifecycle.signal })).toMatchObject({
+      status: "degraded",
+      summary: "Webhook delivery has an unresolved ambiguous outcome.",
+      details: {
+        deliveryReceiptCapacityExhausted: false,
+        deliveryAmbiguousOutcome: true,
+      },
+    });
+  });
+
+  it("reports exact outbound receipt capacity as degraded module health", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchImpl);
+    const lifecycle = new AbortController();
+    const channel = await monoAgentModule.create({
+      instanceId: "outbound-capacity-health",
+      config: monoAgentModule.schema.parse({
+        apiKey: "module-key",
+        outbound: {
+          url: "https://hooks.example.test/deliver",
+          apiKey: "outbound-key",
+          timeoutMs: 1_000,
+        },
+      }),
+      configDirectory: "/config",
+      provenance: {},
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: {
+        grantedCapabilities: new Set(),
+        getCapability<T>(): T | undefined {
+          return undefined;
+        },
+        async dispatch() {
+          return { status: "completed" } as const;
+        },
+      },
+      signal: lifecycle.signal,
+    });
+    moduleChannels.add(channel);
+    await channel.start?.({ signal: lifecycle.signal });
+    for (let index = 0; index < 1_000; index += 1) {
+      await channel.deliver?.({
+        conversationId: "webhook:outbound",
+        text: `notice-${String(index)}`,
+        idempotencyKey: `capacity-health-${String(index)}`,
+      }, lifecycle.signal);
+    }
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1_000);
+    expect(await channel.health?.({ signal: lifecycle.signal })).toMatchObject({
+      status: "degraded",
+      summary: "Webhook delivery receipt capacity is exhausted.",
+      details: {
+        deliveryReceiptCapacityExhausted: true,
+        deliveryAmbiguousOutcome: false,
+      },
+    });
+    await expect(channel.deliver?.({
+      conversationId: "webhook:outbound",
+      text: "one too many",
+      idempotencyKey: "capacity-health-overflow",
+    }, lifecycle.signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "webhook_delivery_receipt_capacity" },
+    });
   });
 
   it("loads sorted Markdown routes and applies private prompt plus route defaults", async () => {

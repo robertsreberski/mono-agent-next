@@ -73,6 +73,9 @@ describe("standalone web product", () => {
         text: "with context",
         attachments: [attachment],
         quote: { conversationId: thread.operatorConversationId, messageId: "m1", text: "previous" },
+        runtime: "pi-secondary",
+        model: "openai:gpt-5.6-sol",
+        effort: "high",
       }),
     });
     expect(response.status).toBe(200);
@@ -80,6 +83,9 @@ describe("standalone web product", () => {
     expect(forwarded).toMatchObject({
       attachments: [attachment],
       quote: { conversationId: thread.operatorConversationId, messageId: "m1", text: "previous" },
+      runtime: "pi-secondary",
+      model: "openai:gpt-5.6-sol",
+      effort: "high",
     });
     const oversizedData = Buffer.alloc((512 * 1_024) + 1, 0x62);
     const oversized = await fetch(`${server.url}api/v1/threads/${thread.id}/turns`, {

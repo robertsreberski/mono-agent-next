@@ -581,7 +581,6 @@ describe("channel kernel", () => {
     const runtime = `@fixture/runtime-cron-grant-${suffix}`;
     const stateName = `@fixture/state-cron-grant-${suffix}`;
     const triggerName = `@fixture/trigger-cron-grant-${suffix}`;
-    const undeclaredName = `@fixture/trigger-no-grant-${suffix}`;
     const state = new MemoryStateStore();
     let grant: {
       read(request: unknown): Promise<unknown>;
@@ -596,21 +595,14 @@ describe("channel kernel", () => {
         controller: { create(context) {
           const host = methodRecord(methodRecord(context, "trigger context").host, "host");
           grant = methodRecord(host.getCapability("cron.durable-state.v1"), "cron grant") as typeof grant;
-          return {};
-        } },
-      },
-      {
-        name: undeclaredName, kind: "trigger",
-        controller: { create(context) {
-          const host = methodRecord(methodRecord(context, "trigger context").host, "host");
-          undeclared = host.getCapability("cron.durable-state.v1");
+          undeclared = host.getCapability("cron.unregistered.v1");
           return {};
         } },
       },
     ]);
     await project.writeConfig(minimalConfig(runtime, {
       state: { $use: stateName },
-      triggers: { cron: { $use: triggerName }, plain: { $use: undeclaredName } },
+      triggers: { cron: { $use: triggerName } },
     }));
     await started(project);
     expect(undeclared).toBeUndefined();

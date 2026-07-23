@@ -69,6 +69,20 @@ New v1 transcript, run, discovery, exporter, and web paths must be distinct
 from v0. Only a separately approved live cutover may point memory-local at the
 audited canonical BuJo directory.
 
+## Scaffold substitutions are not consumer identity
+
+The public `personal` template is a safe, runnable migration fixture, not an
+exact export of any live Personal Agent. Its generated `AGENTS.md`,
+project-local Pi auth path, identity-derived agent/model/discovery/project ids,
+and harmless `project-status` MCP server are deliberate generic substitutions.
+
+Before any consumer cutover, replace those values with the audited consumer
+instructions, credential location, stable ids, and real MCP definitions. In
+particular, the scaffold's `project-status` tool is not evidence that a live
+consumer's transcription, research, or other private tools were migrated.
+Review the resulting `.mcp.json` and config as consumer-specific security
+boundaries.
+
 ## Source rehearsal
 
 Perform this work in a copy while v0 remains the unchanged live source.
@@ -109,6 +123,29 @@ Perform this work in a copy while v0 remains the unchanged live source.
     registration. Do not apply host mutations.
 12. Save the exact source SHA, tarball digests, dependency closure, config
     digest, rehearsal paths, proof output, and rollback decision.
+
+### Reproducible source proof
+
+Run the complete proof only from a clean committed candidate on a supported
+Node.js version. Public CI records the minimum Node.js 22.19.0 proof:
+
+```bash
+pnpm run verify:v1-system
+```
+
+The verifier refuses a dirty or moving source tree. It creates an owner-private
+temporary clone at the exact source SHA, performs a frozen offline install,
+builds and packs all 23 packages there, clean-installs the three scaffold
+closures from those tarballs, and executes their bounded first-turn scenarios.
+It never deletes caller-repository build output.
+
+The final stdout line is machine-readable
+`mono-agent.v1-system-proof.v1` evidence. Retain it with the source SHA, exact
+Node result, ordered tarball SHA-256 and SHA-512 integrity records, artifact
+set digest, installed closure digest, original rendered-config digests, and
+combined closure/config digest. The verifier rehashes the artifacts after the
+scenario, proves the source stayed clean at the same SHA, and removes its
+branded temporary workspace before reporting success.
 
 ## First-run memory safety
 

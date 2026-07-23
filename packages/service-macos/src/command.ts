@@ -1,19 +1,13 @@
 import { spawn } from "node:child_process";
-
 export interface CommandResult {
-  readonly exitCode: number;
-  readonly stdout: string;
-  readonly stderr: string;
+  readonly exitCode: number; readonly stdout: string; readonly stderr: string;
 }
-
 export interface CommandRunOptions {
   readonly signal?: AbortSignal;
 }
-
 export interface CommandRunner {
   run(command: string, arguments_: readonly string[], options?: CommandRunOptions): Promise<CommandResult>;
 }
-
 export const processCommandRunner: CommandRunner = Object.freeze({
   async run(
     command: string,

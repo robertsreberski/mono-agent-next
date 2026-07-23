@@ -521,10 +521,6 @@ TriggerHost
 TriggerModuleCreateContext
 TriggerModuleDefinition
 TriggerReceipt
-defineExporterModule
-defineSandboxModule
-defineStateModule
-defineTriggerModule
 ```
 
 **`@mono-agent/module-sdk/secure-fs`**

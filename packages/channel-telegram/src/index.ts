@@ -314,6 +314,8 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
     async stop() { await stop(); },
     async health(): Promise<ModuleHealth> {
       const deliveryDegraded = delivery.degraded;
+      const deliveryReceiptCapacityExhausted = delivery.receiptCapacityExhausted;
+      const deliveryAmbiguousOutcome = delivery.hasAmbiguousOutcome;
       return {
         status: lastError !== undefined || deliveryDegraded
           ? "degraded"
@@ -322,11 +324,14 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
         ...(lastError !== undefined
           ? { summary: lastError }
           : deliveryDegraded
-            ? { summary: "Telegram delivery receipt capacity is exhausted." }
+            ? { summary: deliveryReceiptCapacityExhausted
+                ? "Telegram delivery receipt capacity is exhausted."
+                : "Telegram delivery has an unresolved ambiguous outcome." }
             : {}),
         details: {
           activeUpdates: active,
-          deliveryReceiptCapacityExhausted: deliveryDegraded,
+          deliveryReceiptCapacityExhausted,
+          deliveryAmbiguousOutcome,
         },
       };
     },

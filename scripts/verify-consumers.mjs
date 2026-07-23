@@ -22,10 +22,11 @@ const FORBIDDEN_PREDECESSOR_PACKAGES = Object.freeze([
 ]);
 const TEMPLATE_ENVIRONMENT = Object.freeze({
   CLAUDE_CODE_OAUTH_TOKEN: "source-contract-claude-token",
-  MONO_AGENT_OPENAI_API_KEY: "source-contract-openai-token",
+  MONO_AGENT_OPENAI_API_KEY: "source-contract-openai-token-0000000001",
   MONO_AGENT_OPERATOR_TOKEN: "source-contract-operator-token-0000000000000001",
   MONO_AGENT_TELEGRAM_BOT_TOKEN: "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
   MONO_AGENT_WEBHOOK_API_KEY: "source-contract-personal-webhook-token",
+  MONO_AGENT_WEBHOOK_SIGNATURE_SECRET: "source-contract-personal-signature-secret-0001",
   PERSONAL_AGENT_TELEGRAM_CHAT_ID: "123456789",
   WEBHOOK_API_KEY: "source-contract-webhook-token",
 });

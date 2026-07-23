@@ -24,6 +24,11 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
     { label: "check:oss-hygiene", command: "pnpm", args: ["run", "check:oss-hygiene"] },
     { label: "check:licenses", command: "pnpm", args: ["run", "check:licenses"] },
     {
+      label: "check:apache-provenance",
+      command: "pnpm",
+      args: ["run", "check:apache-provenance"],
+    },
+    {
       label: "check:dependency-vulnerabilities",
       command: "pnpm",
       args: ["run", "check:dependency-vulnerabilities"],
@@ -55,6 +60,11 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
     { label: "build", command: "pnpm", args: ["run", "build"] },
     { label: "check:doc-snippets", command: "pnpm", args: ["run", "check:doc-snippets"] },
     { label: "check:deep-imports", command: "pnpm", args: ["run", "check:deep-imports"] },
+    {
+      label: "verify:v1-operator-products",
+      command: "pnpm",
+      args: ["run", "verify:v1-operator-products"],
+    },
     {
       label: "verify:consumers",
       command: "pnpm",

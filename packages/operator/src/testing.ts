@@ -1,6 +1,7 @@
 import { reduceOperatorFrames, initialOperatorState, type OperatorConversationState } from "./state.js";
 import {
   OPERATOR_PROTOCOL,
+  type OperatorAskAnswerRequest,
   type OperatorFrame,
   type OperatorInfo,
   type OperatorTurnRequest,
@@ -50,6 +51,52 @@ export const ASK_USER_TURN_FRAMES: readonly OperatorFrame[] = Object.freeze([
   { type: "ask_user", turnId: "ask-turn", ask: { interactionId: "interaction-1", requestedAt: "2026-01-02T03:04:06.500Z", questions: [{ id: "choice", prompt: "Choose one", choices: [{ value: "one", label: "One" }], allowFreeText: true, multiple: false }] } },
   { type: "completed", turnId: "ask-turn", finalMessage: { role: "assistant", text: "Choice recorded." }, finishedAt: "2026-01-02T03:04:07.000Z", stopReason: "completed" },
 ]);
+
+/** Shared product-parity fixture for a bounded, multi-question AskUser turn. */
+export const MULTI_QUESTION_ASK_USER_TURN_FRAMES: readonly OperatorFrame[] = Object.freeze([
+  { type: "accepted", turnId: "multi-ask-turn", conversationId: "fixture-conversation", startedAt: "2026-01-02T03:04:06.000Z" },
+  { type: "capabilities", turnId: "multi-ask-turn", capabilities: FIXTURE_CAPABILITIES },
+  {
+    type: "ask_user",
+    turnId: "multi-ask-turn",
+    ask: {
+      interactionId: "interaction-multi",
+      requestedAt: "2026-01-02T03:04:06.500Z",
+      questions: [
+        {
+          id: "constructor",
+          prompt: "Choose a priority",
+          choices: [
+            { value: "speed", label: "Speed" },
+            { value: "quality,first;path\\strict", label: "Quality" },
+          ],
+          allowFreeText: false,
+          multiple: false,
+        },
+        {
+          id: "checks",
+          prompt: "Choose checks",
+          choices: [
+            { value: "tests", label: "Tests" },
+            { value: "types", label: "Types" },
+          ],
+          allowFreeText: true,
+          multiple: true,
+        },
+      ],
+    },
+  },
+  { type: "completed", turnId: "multi-ask-turn", finalMessage: { role: "assistant", text: "Answers recorded." }, finishedAt: "2026-01-02T03:04:07.000Z", stopReason: "completed" },
+]);
+
+/** One lossless answer shared by the TUI and web product parity proofs. */
+export const MULTI_QUESTION_ASK_USER_ANSWER: OperatorAskAnswerRequest = Object.freeze({
+  interactionId: "interaction-multi",
+  answers: Object.freeze({
+    constructor: Object.freeze(["quality,first;path\\strict"]),
+    checks: Object.freeze(["tests", "custom, review; C:\\tmp"]),
+  }),
+});
 
 export const MALFORMED_OPERATOR_FRAMES: readonly unknown[] = Object.freeze([
   { type: "unknown", turnId: "fixture-turn" },

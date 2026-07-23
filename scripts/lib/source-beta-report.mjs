@@ -39,6 +39,19 @@ const GENERATED_REPORT_PATHS = new Set([
   SOURCE_BETA_REPORT_OUTPUT,
 ]);
 
+const MODULE_SCHEMA_ENV_ELIGIBLE = "x-mono-agent-env-eligible";
+const MODULE_SCHEMA_SECRET = "x-mono-agent-secret";
+const MODULE_SCHEMA_SLOT_REFERENCE = "x-mono-agent-slot-reference";
+const MODULE_KINDS = new Set([
+  "runtime",
+  "channel",
+  "memory",
+  "state",
+  "trigger",
+  "exporter",
+  "sandbox",
+]);
+
 export function collectSourceBetaReport({ root, renderProject }) {
   const trackedPaths = listReportablePaths(root);
   const files = trackedPaths
@@ -308,7 +321,7 @@ ${sections.length === 0 ? "This package has no public code entrypoint." : sectio
 `;
 }
 
-export function renderSourceBetaConfigMarkdown(report, renderedProjects) {
+export function renderSourceBetaConfigMarkdown(report, renderedProjects, configReference) {
   const templateRows = report.templates.rows.map((row) => `| \`${row.template}\` | ${row.dependencies.map(code).join(", ")} | ${row.selectedPackages.map(code).join(", ")} | ${row.environmentNames.map(code).join(", ")} |`).join("\n");
   const configPaths = report.templates.configPaths.map((path) => {
     const usedBy = report.templates.rows
@@ -347,6 +360,47 @@ Runtime, channel, trigger, and exporter slots are instance maps. Memory and
 state are singletons. \`policy.sandbox\` is either \`{"mode":"off"}\` or one
 selected sandbox object. Every selected object begins with an exact package
 name in \`$use\`.
+
+## Executable schema inventory
+
+This inventory is regenerated from the executable Core composition and the
+executable schema exported by every publishable package whose manifest declares
+a \`mono-agent\` module kind. The generator rebuilds those packages before
+importing them, so a clean checkout does not rely on stale \`dist/\` output.
+Adding, removing, or changing a typed module field makes
+\`pnpm run check:source-beta-docs\` fail until this page is regenerated.
+
+Required means required by the containing object. \`conditional\` means a field
+is required only in a schema branch, \`item\` identifies an array item, and
+\`selected\` identifies a module object after its \`$use\` selection is present.
+Environment eligibility and secret handling come from the executable
+\`x-mono-agent-*\` annotations, not field-name heuristics.
+
+### Core composed envelope
+
+The Core table is composed through the public \`loadAgentConfig\` and
+\`composeAgentConfigSchema\` APIs using a hermetic reference config that selects
+all shipped typed modules. Selected module subtrees are collapsed to canonical
+slot placeholders and expanded in their owning package tables below. Route
+runtime enums show the reference composition's deterministic instance ids
+(\`claude\`, \`codex\`, \`opencode\`, and \`pi\`); an installed project's
+composed schema instead locks those enums to that project's configured runtime
+instance ids.
+
+${renderSchemaFieldTable(configReference.core.rows)}
+
+### Shipped typed module schemas
+
+This build contains ${configReference.modules.length} typed modules. Paths use
+\`{id}\` for a user-chosen instance id. The \`$use\` row is the Core-owned
+selection discriminator; all remaining rows come from the package's executable
+module schema.
+
+${configReference.modules.map((module) => `#### \`${module.packageName}\`
+
+Kind: \`${module.kind}\`. Canonical selected path: \`${module.prefix}\`.
+
+${renderSchemaFieldTable(module.rows)}`).join("\n\n")}
 
 ## Generated scaffold matrix
 
@@ -390,6 +444,471 @@ credentials. Service-macos may read a separately protected environment file,
 but it passes only the path to the runner and never expands secret values into a
 LaunchAgent plist or plan.
 `;
+}
+
+export function discoverTypedModulePackages(root, catalog = packageCatalog) {
+  const modules = [];
+  for (const entry of catalog) {
+    if (entry.publishable !== true) continue;
+    const packagePath = packageRelativePath(entry);
+    const manifest = JSON.parse(readFileSync(join(root, packagePath, "package.json"), "utf8"));
+    const metadata = manifest["mono-agent"];
+    if (metadata === undefined) continue;
+    if (
+      metadata === null
+      || typeof metadata !== "object"
+      || Array.isArray(metadata)
+      || metadata.packageName !== manifest.name
+      || metadata.apiVersion !== 1
+      || !MODULE_KINDS.has(metadata.kind)
+    ) {
+      throw new Error(`${packagePath}/package.json has invalid mono-agent module metadata.`);
+    }
+    const importTarget = rootImportTarget(manifest);
+    if (
+      typeof importTarget !== "string"
+      || !importTarget.startsWith("./")
+      || importTarget.includes("\0")
+      || importTarget.split("/").includes("..")
+    ) {
+      throw new Error(`${packagePath}/package.json has no safe relative ESM root import.`);
+    }
+    modules.push(Object.freeze({
+      packageName: manifest.name,
+      packagePath,
+      importTarget,
+      kind: metadata.kind,
+      responsibility: metadata.responsibility,
+    }));
+  }
+  return Object.freeze(modules.sort((left, right) => compareText(left.packageName, right.packageName)));
+}
+
+export function collectExecutableConfigReference({
+  coreSchema,
+  selectedModules,
+  typedModules,
+}) {
+  if (!isRecord(coreSchema)) throw new Error("Core composed schema must be an object.");
+  if (!Array.isArray(selectedModules)) throw new Error("Core selectedModules must be an array.");
+  if (!Array.isArray(typedModules)) throw new Error("typedModules must be an array.");
+
+  const stopPaths = new Set();
+  const aliases = new Map();
+  for (const module of selectedModules) {
+    if (
+      !isRecord(module)
+      || typeof module.configPath !== "string"
+      || !MODULE_KINDS.has(module.kind)
+    ) {
+      throw new Error("Core selected module metadata is invalid.");
+    }
+    stopPaths.add(module.configPath);
+    aliases.set(module.configPath, modulePrefix(module.kind));
+  }
+  const coreRows = collectSchemaFieldRows(coreSchema, {
+    stopPaths,
+    aliases,
+    rootRequired: "yes",
+  });
+
+  const seen = new Set();
+  const modules = typedModules.map((module) => {
+    if (
+      !isRecord(module)
+      || typeof module.packageName !== "string"
+      || !MODULE_KINDS.has(module.kind)
+      || !isRecord(module.jsonSchema)
+    ) {
+      throw new Error("Executable typed module metadata is invalid.");
+    }
+    if (seen.has(module.packageName)) {
+      throw new Error(`Duplicate executable typed module ${module.packageName}.`);
+    }
+    seen.add(module.packageName);
+    const prefix = modulePrefix(module.kind);
+    const schemaRows = collectSchemaFieldRows(module.jsonSchema, {
+      prefix,
+      rootRequired: "selected",
+    });
+    const selectionRow = Object.freeze({
+      path: `${prefix}.$use`,
+      sourcePath: `${prefix}.$use`,
+      type: "string",
+      required: "yes",
+      default: "—",
+      constraints: `const ${stableJson(module.packageName)}`,
+      environmentEligible: "no",
+      secret: "no",
+      crossSlot: "—",
+    });
+    return Object.freeze({
+      packageName: module.packageName,
+      kind: module.kind,
+      prefix,
+      rows: Object.freeze([
+        ...schemaRows.filter((row) => row.path === prefix),
+        selectionRow,
+        ...schemaRows.filter((row) => row.path !== prefix),
+      ]),
+    });
+  }).sort((left, right) =>
+    compareText(left.kind, right.kind) || compareText(left.packageName, right.packageName));
+
+  return Object.freeze({
+    core: Object.freeze({ rows: Object.freeze(coreRows) }),
+    modules: Object.freeze(modules),
+  });
+}
+
+export function collectSchemaFieldRows(
+  schema,
+  {
+    prefix = "",
+    rootRequired = "selected",
+    stopPaths = new Set(),
+    aliases = new Map(),
+  } = {},
+) {
+  if (!isRecord(schema)) throw new Error("Schema field traversal requires an object schema.");
+  const observations = new Map();
+
+  const visit = (
+    node,
+    sourcePath,
+    required,
+    conditional = false,
+    inheritedSecret = false,
+    unconditionalRequiredProperties = new Set(),
+    enclosingConditional = conditional,
+    preserveSelfRequired = false,
+  ) => {
+    if (!isRecord(node)) return;
+    const path = aliases.get(sourcePath) ?? sourcePath;
+    addSchemaObservation(observations, {
+      path: path.length === 0 ? "$" : path,
+      sourcePath: sourcePath.length === 0 ? "$" : sourcePath,
+      node,
+      required: aliases.has(sourcePath)
+        ? "selected"
+        : !preserveSelfRequired && conditional && required === "yes" ? "conditional" : required,
+      secret: inheritedSecret || node[MODULE_SCHEMA_SECRET] === true,
+    });
+    if (stopPaths.has(sourcePath)) return;
+
+    const secret = inheritedSecret || node[MODULE_SCHEMA_SECRET] === true;
+    const requiredProperties = new Set(
+      Array.isArray(node.required)
+        ? node.required.filter((value) => typeof value === "string")
+        : [],
+    );
+    if (isRecord(node.properties)) {
+      for (const name of Object.keys(node.properties).sort(compareText)) {
+        const child = node.properties[name];
+        if (!isRecord(child)) continue;
+        visit(
+          child,
+          appendSchemaPath(sourcePath, name),
+          requiredProperties.has(name) ? "yes" : "no",
+          unconditionalRequiredProperties.has(name) ? enclosingConditional : conditional,
+          secret,
+        );
+      }
+    }
+    if (isRecord(node.items)) {
+      visit(node.items, `${sourcePath}[]`, "item", conditional, secret);
+    }
+    if (isRecord(node.additionalProperties)) {
+      visit(
+        node.additionalProperties,
+        appendSchemaPath(sourcePath, "{key}"),
+        "conditional",
+        true,
+        secret,
+      );
+    }
+    if (isRecord(node.patternProperties)) {
+      for (const pattern of Object.keys(node.patternProperties).sort(compareText)) {
+        const child = node.patternProperties[pattern];
+        if (isRecord(child)) {
+          visit(
+            child,
+            appendSchemaPath(sourcePath, `{key:${pattern}}`),
+            "conditional",
+            true,
+            secret,
+          );
+        }
+      }
+    }
+    for (const keyword of ["allOf", "oneOf", "anyOf"]) {
+      if (!Array.isArray(node[keyword])) continue;
+      const branches = node[keyword].filter(isRecord);
+      const commonRequired = keyword === "allOf"
+        ? new Set()
+        : intersectRequiredProperties(branches);
+      for (const branch of branches) {
+        if (isRecord(branch)) {
+          visit(
+            branch,
+            sourcePath,
+            required,
+            conditional || keyword !== "allOf",
+            secret,
+            commonRequired,
+            conditional,
+            true,
+          );
+        }
+      }
+    }
+    for (const keyword of ["if", "then", "else"]) {
+      if (isRecord(node[keyword])) {
+        visit(node[keyword], sourcePath, required, true, secret, new Set(), conditional, true);
+      }
+    }
+  };
+
+  visit(schema, prefix, rootRequired);
+  return Object.freeze(
+    [...observations.values()]
+      .map(finalizeSchemaObservation)
+      .sort((left, right) => compareText(left.path, right.path)),
+  );
+}
+
+function intersectRequiredProperties(branches) {
+  if (branches.length === 0) return new Set();
+  const output = new Set(
+    Array.isArray(branches[0].required)
+      ? branches[0].required.filter((value) => typeof value === "string")
+      : [],
+  );
+  for (const branch of branches.slice(1)) {
+    const required = new Set(
+      Array.isArray(branch.required)
+        ? branch.required.filter((value) => typeof value === "string")
+        : [],
+    );
+    for (const name of output) if (!required.has(name)) output.delete(name);
+  }
+  return output;
+}
+
+function addSchemaObservation(observations, observation) {
+  const current = observations.get(observation.path) ?? {
+    path: observation.path,
+    sourcePaths: new Set(),
+    types: new Set(),
+    required: new Set(),
+    defaults: new Set(),
+    constraints: new Set(),
+    environmentEligible: false,
+    secret: false,
+    crossSlots: new Set(),
+  };
+  current.sourcePaths.add(observation.sourcePath);
+  for (const type of schemaTypes(observation.node)) current.types.add(type);
+  current.required.add(observation.required);
+  if (Object.hasOwn(observation.node, "default")) {
+    current.defaults.add(stableJson(observation.node.default));
+  }
+  for (const constraint of schemaConstraints(observation.node)) {
+    current.constraints.add(constraint);
+  }
+  current.environmentEligible ||= observation.node[MODULE_SCHEMA_ENV_ELIGIBLE] === true;
+  current.secret ||= observation.secret;
+  const reference = observation.node[MODULE_SCHEMA_SLOT_REFERENCE];
+  if (
+    isRecord(reference)
+    && MODULE_KINDS.has(reference.slot)
+    && (reference.capability === undefined || typeof reference.capability === "string")
+  ) {
+    current.crossSlots.add(
+      reference.capability === undefined
+        ? reference.slot
+        : `${reference.slot} capability ${reference.capability}`,
+    );
+  }
+  observations.set(observation.path, current);
+}
+
+function finalizeSchemaObservation(observation) {
+  const types = [...observation.types].filter((type) =>
+    type !== "unknown" || observation.types.size === 1);
+  const requiredValues = [...observation.required];
+  let required;
+  if (requiredValues.includes("selected")) required = "selected";
+  else if (requiredValues.length === 1) [required] = requiredValues;
+  else if (requiredValues.every((value) => value === "item")) required = "item";
+  else required = "conditional";
+  return Object.freeze({
+    path: observation.path,
+    sourcePath: [...observation.sourcePaths].sort(compareText)[0],
+    type: types.sort(compareText).join(" or "),
+    required,
+    default: observation.defaults.size === 0
+      ? "—"
+      : [...observation.defaults].sort(compareText).join(" / "),
+    constraints: observation.constraints.size === 0
+      ? "—"
+      : [...observation.constraints].sort(compareText).join("; "),
+    environmentEligible: observation.environmentEligible ? "yes" : "no",
+    secret: observation.secret ? "yes" : "no",
+    crossSlot: observation.crossSlots.size === 0
+      ? "—"
+      : [...observation.crossSlots].sort(compareText).join("; "),
+  });
+}
+
+function schemaTypes(schema) {
+  const types = new Set();
+  const declared = schema.type;
+  if (typeof declared === "string") types.add(declared);
+  if (Array.isArray(declared)) {
+    for (const type of declared) if (typeof type === "string") types.add(type);
+  }
+  if (types.size === 0 && (isRecord(schema.properties) || isRecord(schema.patternProperties))) {
+    types.add("object");
+  }
+  if (types.size === 0 && isRecord(schema.items)) types.add("array");
+  if (types.size === 0 && Object.hasOwn(schema, "const")) types.add(jsonValueType(schema.const));
+  if (types.size === 0 && Array.isArray(schema.enum)) {
+    for (const value of schema.enum) types.add(jsonValueType(value));
+  }
+  if (types.size === 0) {
+    for (const keyword of ["allOf", "oneOf", "anyOf"]) {
+      if (!Array.isArray(schema[keyword])) continue;
+      for (const branch of schema[keyword]) {
+        if (isRecord(branch)) {
+          for (const type of schemaTypes(branch)) types.add(type);
+        }
+      }
+    }
+  }
+  if (types.size === 0) types.add("unknown");
+  return types;
+}
+
+function jsonValueType(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  if (typeof value === "number" && Number.isInteger(value)) return "integer";
+  return typeof value === "object" ? "object" : typeof value;
+}
+
+function schemaConstraints(schema) {
+  const output = [];
+  if (Object.hasOwn(schema, "const")) output.push(`const ${stableJson(schema.const)}`);
+  if (Array.isArray(schema.enum)) output.push(`enum ${stableJson(schema.enum)}`);
+  for (const keyword of [
+    "minimum",
+    "exclusiveMinimum",
+    "maximum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+    "minItems",
+    "maxItems",
+    "minProperties",
+    "maxProperties",
+  ]) {
+    if (typeof schema[keyword] === "number") output.push(`${keyword} ${String(schema[keyword])}`);
+  }
+  if (typeof schema.pattern === "string") output.push(`pattern ${stableJson(schema.pattern)}`);
+  if (typeof schema.format === "string") output.push(`format ${schema.format}`);
+  if (schema.uniqueItems === true) output.push("unique items");
+  if (schema.additionalProperties === false) output.push("closed object");
+  if (isRecord(schema.propertyNames) && typeof schema.propertyNames.pattern === "string") {
+    output.push(`key pattern ${stableJson(schema.propertyNames.pattern)}`);
+  }
+  for (const keyword of ["allOf", "oneOf", "anyOf"]) {
+    if (Array.isArray(schema[keyword])) {
+      output.push(`${keyword} ${String(schema[keyword].length)} branches`);
+    }
+  }
+  if (isRecord(schema.if)) output.push("conditional schema");
+  if (isRecord(schema.not)) output.push(`not ${stableJson(schema.not)}`);
+  return output;
+}
+
+function renderSchemaFieldTable(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error("Executable schema table must contain at least one row.");
+  }
+  return `| Path | Type | Required | Default | Constraints | Env eligible | Secret | Cross-slot |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+${rows.map((row) => `| ${inlineCode(row.path)} | ${inlineCode(row.type)} | ${escapeTableCell(row.required)} | ${row.default === "—" ? "—" : inlineCode(row.default)} | ${row.constraints === "—" ? "—" : inlineCode(row.constraints)} | ${row.environmentEligible} | ${row.secret} | ${row.crossSlot === "—" ? "—" : escapeTableCell(row.crossSlot)} |`).join("\n")}`;
+}
+
+function inlineCode(value) {
+  return `\`${escapeTableCell(value).replaceAll("`", "&#96;")}\``;
+}
+
+function escapeTableCell(value) {
+  return String(value)
+    .replaceAll("|", "\\|")
+    .replaceAll("\r", " ")
+    .replaceAll("\n", " ");
+}
+
+function modulePrefix(kind) {
+  switch (kind) {
+    case "runtime": return "runtimes.{id}";
+    case "channel": return "channels.{id}";
+    case "memory": return "memory";
+    case "state": return "state";
+    case "trigger": return "triggers.{id}";
+    case "exporter": return "observability.exporters.{id}";
+    case "sandbox": return "policy.sandbox";
+    default: throw new Error(`Unknown typed module kind ${String(kind)}.`);
+  }
+}
+
+function appendSchemaPath(path, segment) {
+  return path.length === 0 ? segment : `${path}.${segment}`;
+}
+
+function stableJson(value) {
+  return JSON.stringify(stableJsonValue(value));
+}
+
+function stableJsonValue(value) {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value).sort(compareText).map((key) => [key, stableJsonValue(value[key])]),
+  );
+}
+
+function rootImportTarget(manifest) {
+  const rootExport = isRecord(manifest.exports) && Object.hasOwn(manifest.exports, ".")
+    ? manifest.exports["."]
+    : manifest.exports;
+  return conditionalImportTarget(rootExport) ?? manifest.main;
+}
+
+function conditionalImportTarget(value) {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const target = conditionalImportTarget(entry);
+      if (target !== undefined) return target;
+    }
+    return undefined;
+  }
+  if (!isRecord(value)) return undefined;
+  if (Object.hasOwn(value, "import")) {
+    const target = conditionalImportTarget(value.import);
+    if (target !== undefined) return target;
+  }
+  if (Object.hasOwn(value, "default")) return conditionalImportTarget(value.default);
+  return undefined;
+}
+
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function renderSourceBetaProductsMarkdown(report) {

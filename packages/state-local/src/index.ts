@@ -1,4 +1,7 @@
-import { defineStateModule } from "@mono-agent/module-sdk/internal";
+import type {
+  StateModuleCreateContext,
+  StateModuleDefinition,
+} from "@mono-agent/module-sdk/internal";
 
 import {
   parseStateLocalConfig,
@@ -35,14 +38,14 @@ import type {
   StateReadArtifactRequest,
 } from "./artifacts.js";
 
-export const monoAgentModule = defineStateModule({
-  manifest: {
+export const monoAgentModule = Object.freeze({
+  manifest: Object.freeze({
     packageName: "@mono-agent/state-local",
     packageVersion: "0.15.0",
     apiVersion: 1,
     kind: "state",
     responsibility: "Provides owner-private CAS state, durable transcript/run records, idempotency, and presence publication.",
-    capabilities: [
+    capabilities: Object.freeze([
       "state.local",
       "state.cas",
       "state.transactions",
@@ -51,17 +54,17 @@ export const monoAgentModule = defineStateModule({
       "state.artifacts",
       "state.maintenance",
       "state.execution",
-    ],
-  },
+    ]),
+  }),
   schema: stateLocalConfigSchema,
-  create: async (context) => StateLocalStore.open(
+  create: async (context: StateModuleCreateContext<StateLocalConfig>) => StateLocalStore.open(
     resolveStateLocalConfig(context.config, context.configDirectory),
     {
       instanceId: context.instanceId,
       signal: context.signal,
     },
   ),
-});
+}) satisfies StateModuleDefinition<StateLocalConfig, StateLocalStore>;
 
 export default monoAgentModule;
 

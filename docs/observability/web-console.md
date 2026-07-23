@@ -70,6 +70,9 @@ shell, health, and API requests. Mutations additionally require JSON and a
 same-authority HTTP `Origin`; incompatible `Sec-Fetch-Site` requests fail
 closed. These Host/origin checks defend browser request integrity and DNS
 rebinding, but they do not replace authentication or transport encryption.
+Turn and upload bodies retain the 1 MiB product cap. Structured AskUser answers
+have a dedicated 8 MiB cap so every module-sdk-valid answer remains
+representable after JSON escaping.
 
 ### Non-loopback plaintext is an explicit risk opt-in
 

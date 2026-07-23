@@ -84,6 +84,7 @@ function createOperatorModuleChannel(
   });
   const deliveryReceipts = new Map<string, OperatorDeliveryReceipt>();
   let deliveryCapacityExhausted = false;
+  let deliveryOutcomeAmbiguous = false;
 
   const start = async (startContext: ModuleStartContext): Promise<void> => {
     throwIfAborted(startContext.signal, "Operator channel start was aborted.");
@@ -102,8 +103,9 @@ function createOperatorModuleChannel(
 
   const health = async (_healthContext: ModuleHealthContext): Promise<ModuleHealth> => {
     const snapshot = transport.health();
+    const deliveryDegraded = deliveryCapacityExhausted || deliveryOutcomeAmbiguous;
     return {
-      status: deliveryCapacityExhausted
+      status: deliveryDegraded
         ? "degraded"
         : snapshot.status === "healthy"
           ? "healthy"
@@ -113,12 +115,15 @@ function createOperatorModuleChannel(
       checkedAt: new Date().toISOString(),
       ...(snapshot.message !== undefined
         ? { summary: snapshot.message }
-        : deliveryCapacityExhausted
-          ? { summary: "Operator delivery receipt capacity is exhausted." }
-          : {}),
+        : deliveryOutcomeAmbiguous
+          ? { summary: "An operator proactive delivery outcome is unknown." }
+          : deliveryCapacityExhausted
+            ? { summary: "Operator delivery receipt capacity is exhausted." }
+            : {}),
       details: {
         activeTurns: snapshot.activeTurns,
         deliveryReceiptCapacityExhausted: deliveryCapacityExhausted,
+        deliveryOutcomeAmbiguous,
         ...(transport.endpoint === undefined ? {} : { endpoint: transport.endpoint }),
       },
     };
@@ -219,10 +224,12 @@ function createOperatorModuleChannel(
           }
         })().then((result) => {
           receipt.result = result;
+          if (result.status === "unknown") deliveryOutcomeAmbiguous = true;
           return result;
         });
         receipt = { fingerprint, promise: execution };
         deliveryReceipts.set(message.idempotencyKey, receipt);
+        deliveryCapacityExhausted = deliveryReceipts.size >= MAX_DELIVERY_RECEIPTS;
         return execution;
       },
     }),
@@ -235,7 +242,7 @@ function throwIfAborted(signal: AbortSignal, message: string): void {
 }
 
 function deliveryFingerprint(message: Parameters<NonNullable<Channel["deliver"]>>[0]): string {
-  const encoded = JSON.stringify({
+  const encoded = canonicalJson({
     conversationId: message.conversationId,
     text: message.text,
     attachments: (message.attachments ?? []).map((attachment) => ({
@@ -248,10 +255,23 @@ function deliveryFingerprint(message: Parameters<NonNullable<Channel["deliver"]>
     })),
     replyToMessageId: message.replyToMessageId ?? null,
     metadata: message.metadata ?? null,
-  }, (_key, value: unknown) => isRecord(value)
-    ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)))
-    : value);
+  });
   return createHash("sha256").update(encoded).digest("hex");
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "string"
+    || typeof value === "boolean" || typeof value === "number") {
+    return JSON.stringify(value) as string;
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
+  }
+  if (!isRecord(value)) throw new TypeError("delivery fingerprint contains a non-JSON value");
+  const keys = Object.keys(value).sort((left, right) =>
+    Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")));
+  return `{${keys.map((key) =>
+    `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
 }
 
 function prepareOperatorDelivery(

@@ -2910,14 +2910,14 @@ describe("turn admission and routing", () => {
               interactionId: "ask-1",
               requestedAt: new Date().toISOString(),
               questions: [{
-                id: "tone",
+                id: "constructor",
                 prompt: "Choose a tone",
                 choices: [{ value: "concise", label: "Concise" }],
                 allowFreeText: true,
                 multiple: false,
               }],
             }, request.signal);
-            return completed(answer.answers.tone?.[0] ?? "missing");
+            return completed(answer.answers["constructor" as string]?.[0] ?? "missing");
           }),
         },
       },
@@ -2961,7 +2961,7 @@ describe("turn admission and routing", () => {
         if (isRecord(event) && event.type === "ask-user" && isRecord(event.ask)) {
           await expect(host.answerAsk("ask", {
             interactionId: String(event.ask.interactionId),
-            answers: { tone: ["concise"] },
+            answers: { constructor: ["concise"] },
           })).resolves.toBe("accepted");
         }
       },
