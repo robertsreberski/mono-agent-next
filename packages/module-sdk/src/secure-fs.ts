@@ -3,6 +3,8 @@ import { constants, type Stats } from "node:fs";
 import { link, lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 
+const READ_CHUNK_BYTES = 64 * 1024;
+
 export const OWNER_PRIVATE_DIRECTORY_MODE = 0o700;
 export const OWNER_PRIVATE_FILE_MODE = 0o600;
 export const DEFAULT_OWNER_PRIVATE_READ_MAX_BYTES = 1_048_576;
@@ -131,13 +133,14 @@ export async function readOwnerPrivateFile(
     handle = await open(absolutePath, readOnlyNoFollowFlags(false));
     const before = await validateHandleIdentity(handle, absolutePath, "file");
     if (before.size > maxBytes) throw pathError("too_large", absolutePath, `File exceeds ${maxBytes} bytes`);
-    const bytes = await handle.readFile();
-    if (bytes.byteLength > maxBytes) throw pathError("too_large", absolutePath, `File exceeds ${maxBytes} bytes`);
+    const bytes = await readAtMost(handle, absolutePath, maxBytes, options.signal);
     const after = identityFromStat(absolutePath, await handle.stat());
-    if (!sameIdentity(before, after)) throw pathError("identity_changed", absolutePath, "File changed while being read");
+    if (!sameFileSnapshot(before, after)) {
+      throw pathError("identity_changed", absolutePath, "File changed while being read");
+    }
     await assertPathMatches(after, "file");
     throwIfAborted(options.signal);
-    return new Uint8Array(bytes);
+    return bytes;
   } catch (error) {
     if (error instanceof OwnerPrivatePathError) throw error;
     if (hasErrorCode(error, "ENOENT")) throw pathError("missing", absolutePath, "Owner-private file does not exist", error);
@@ -145,6 +148,33 @@ export async function readOwnerPrivateFile(
   } finally {
     await handle?.close();
   }
+}
+
+async function readAtMost(
+  handle: FileHandle,
+  path: string,
+  maxBytes: number,
+  signal: AbortSignal | undefined,
+): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    throwIfAborted(signal);
+    const capacity = Math.min(READ_CHUNK_BYTES, maxBytes - total + 1);
+    const chunk = new Uint8Array(capacity);
+    const { bytesRead } = await handle.read(chunk, 0, capacity, null);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+    if (total > maxBytes) throw pathError("too_large", path, `File exceeds ${maxBytes} bytes`);
+    chunks.push(chunk.subarray(0, bytesRead));
+  }
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    output.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return output;
 }
 
 export async function createOwnerPrivateFile(
@@ -386,6 +416,14 @@ function identityFromStat(path: string, stat: Stats): OwnerPrivatePathIdentity {
 
 function sameIdentity(left: OwnerPrivatePathIdentity, right: OwnerPrivatePathIdentity): boolean {
   return left.device === right.device && left.inode === right.inode;
+}
+
+function sameFileSnapshot(left: OwnerPrivatePathIdentity, right: OwnerPrivatePathIdentity): boolean {
+  return sameIdentity(left, right)
+    && left.uid === right.uid
+    && left.mode === right.mode
+    && left.links === right.links
+    && left.size === right.size;
 }
 
 function currentUid(path: string): number {

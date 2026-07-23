@@ -1,6 +1,7 @@
 # @mono-agent/runtime-opencode
 
-Run OpenCode-native turns through its stable bounded JSONL CLI protocol.
+Run tool-free OpenCode-native turns through an owned, authenticated loopback
+server.
 
 ## Category
 
@@ -9,7 +10,7 @@ Run OpenCode-native turns through its stable bounded JSONL CLI protocol.
 
 Category: `runtime`
 Tier: `core`
-Catalog responsibility: Runs OpenCode JSONL process attempts with version preflight and bounded native session handling.
+Catalog responsibility: Runs an authenticated loopback OpenCode server with fail-closed tool containment and bounded native sessions.
 
 <!-- package-metadata:end -->
 
@@ -17,9 +18,10 @@ Runtime module.
 
 ## Responsibility
 
-Own stable-version enforcement, direct OpenCode process lifecycle, native model
-and session references, cancellation, bounded JSONL decoding, and normalization
-into the public runtime contract.
+Own OpenCode 1.15.13-or-newer enforcement, isolated server lifecycle, Basic-auth
+loopback transport, native model and session references, bounded SSE decoding,
+per-session serialization, cancellation, and normalization into the public
+runtime contract.
 
 ## Install / Usage
 
@@ -32,7 +34,7 @@ pnpm add @mono-agent/runtime-opencode
   "runtimes": {
     "opencode": {
       "$use": "@mono-agent/runtime-opencode",
-      "minimumVersion": "1.15.0",
+      "minimumVersion": "1.15.13",
       "environment": {
         "OPENAI_API_KEY": { "$env": "OPENAI_API_KEY" }
       }
@@ -44,30 +46,50 @@ pnpm add @mono-agent/runtime-opencode
 }
 ```
 
-Every configured environment value is secret and environment-only. Omit the
-map to use OpenCode's native auth state. The runtime executes `opencode run
---format json` with a direct argument array and never invokes a shell.
+Every configured environment value is secret and environment-only. The runtime
+uses isolated `HOME` and XDG directories, so it intentionally does not inherit
+OpenCode's native auth store; provide required provider credentials explicitly
+through `environment`.
+
+The runtime starts `opencode serve --hostname 127.0.0.1 --port 0 --pure` with a
+direct argument array and never invokes a shell. It discovers the actual port
+from bounded startup output and authenticates every request with a random,
+process-owned Basic-auth password. A random dedicated agent, inline deny-all
+configuration, exact session permissions, and per-prompt
+`"tools":{"*":false}` provide independent containment layers. `pure` remains a
+compatibility field and only accepts `true`.
 
 ## Architecture
 
 ### Data flow
 
-1. Start checks the installed stable CLI against `minimumVersion`.
-2. A turn is encoded as one direct `opencode run --format json` invocation.
-3. A supplied runtime session is resumed with `--session`; otherwise OpenCode
-   creates a native session and reports its opaque ID.
-4. Bounded JSONL events become normalized text, thinking, usage, diagnostics,
-   and session linkage.
-5. Abort terminates only the active process and errors settle retry/side-effect
-   metadata explicitly.
+1. Start checks the installed CLI and authenticated server health against
+   `minimumVersion`, whose secure floor is `1.15.13`.
+2. The owned child binds to `127.0.0.1` on a discovered port inside private
+   HOME/XDG directories. Its random Basic-auth credential never enters a URL.
+3. A new session is created with the exact deny-all permission array. A resumed
+   session is serialized and receives a trailing deny-all rule before use.
+4. The runtime subscribes to authenticated SSE and waits for
+   `server.connected` before submitting `prompt_async`. Every prompt sends
+   `"tools":{"*":false}`.
+5. Matching SSE events become normalized text, thinking, usage, diagnostics,
+   and session linkage. Completion requires both a completed assistant message
+   and the subsequent final idle event.
+6. Any native tool part or permission request synchronously quarantines the
+   runtime, aborts every active sibling turn, rejects new turns, and begins
+   bounded server shutdown while preserving the native-tool failure.
+7. Same-session prompts are serialized. Cancellation finishes a bounded native
+   session abort before releasing that session to another prompt.
 
 ### Package structure
 
 | Source | Responsibility |
 | --- | --- |
 | `config.ts` | Strict limits, stable version, and environment secrets. |
-| `process.ts` | Bounded direct-process text and JSONL readers. |
-| `runtime.ts` | Session/model semantics and event normalization. |
+| `environment.ts` | Isolated HOME/XDG and process-owned deny/auth settings. |
+| `process.ts` | Bounded direct-process startup, version, and shutdown handling. |
+| `server.ts` | Authenticated HTTP/SSE protocol and deny-all assertions. |
+| `runtime.ts` | Session serialization, quarantine, and event normalization. |
 | `index.ts` | Typed module definition. |
 
 ## Public API
@@ -104,9 +126,9 @@ runtime.
 
 ## What This Package Does Not Own
 
-It does not choose fallback, execute Core tools, bypass OpenCode permissions,
-claim a Core sandbox, persist canonical history, or migrate private OpenCode
-sessions to another runtime.
+It does not choose fallback, execute Core or OpenCode-native tools, bypass
+OpenCode permissions, claim a Core sandbox, persist canonical history, or
+migrate private OpenCode sessions to another runtime.
 
 ## Related Documentation
 

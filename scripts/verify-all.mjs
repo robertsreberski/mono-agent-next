@@ -5,164 +5,11 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { MINIMUM_NODE_VERSION } from "./node-version.mjs";
+import {
+  packageCatalog,
+  packageRelativePath,
+} from "./package-catalog.mjs";
 import { runVerifyConsumers } from "./verify-consumers.mjs";
-
-export const CI_RELEASE_TAG_EXPRESSION = "${{ steps.release-smoke.outputs.tag }}";
-
-/**
- * Intentional semantic differences from the CI verify job.
- *
- * scripts/__tests__/verify-all.test.mjs checks the complete ordered action,
- * environment, and gate sequence for every CI Node-matrix leg. The separate
- * website job is not a repo gate.
- */
-export const VERIFY_GATE_DELTA = Object.freeze({
-  ciSetup: Object.freeze([
-    Object.freeze({
-      key: "checkout",
-      after: null,
-      reason: "CI checks out the source tree; local verify:all runs in the caller's existing checkout.",
-    }),
-    Object.freeze({
-      key: "Node setup",
-      after: "checkout",
-      reason: "CI selects each exact Node-matrix runtime; local verify:all uses the active supported runtime.",
-    }),
-    Object.freeze({
-      key: "corepack setup",
-      after: "Node setup",
-      reason: "CI enables Corepack in its clean runner; local verify:all assumes the selected pnpm is already available.",
-    }),
-    Object.freeze({
-      key: "dependency install",
-      after: "check:node",
-      reason: "CI installs the frozen workspace after proving the Node floor; local verify:all uses the caller's installed workspace.",
-    }),
-    Object.freeze({
-      key: "bundled web console dependency install",
-      after: "dependency install",
-      reason: "CI installs the bundled web console's isolated frozen graph before its license gate; local verify:all uses the caller's installed webapp workspace.",
-    }),
-    Object.freeze({
-      key: "release-tag derivation",
-      after: "check:consumer-docs-consistency",
-      reason: "CI exports the manifest-derived smoke tag for later steps; local verify:all reads that manifest value in-process.",
-    }),
-  ]),
-  ciOnly: Object.freeze([]),
-  verifyAllOnly: Object.freeze([
-    Object.freeze({
-      gate: Object.freeze({
-        label: "test:demo",
-        command: "pnpm",
-        args: Object.freeze(["run", "test:demo"]),
-      }),
-      after: "test",
-      reason: "verify:all retains the explicit demo-test rerun while CI relies on the demo tests already chained into the root test command.",
-    }),
-  ]),
-  commandDifferences: Object.freeze([
-    Object.freeze({
-      label: "check:secrets",
-      ci: Object.freeze({
-        label: "check:secrets",
-        command: "docker",
-        args: Object.freeze([
-          "run",
-          "--rm",
-          "-v",
-          "$PWD:/repo",
-          "ghcr.io/gitleaks/gitleaks:v8.30.1",
-          "dir",
-          "--redact",
-          "--no-banner",
-          "--config",
-          "/repo/.gitleaks.toml",
-          "/repo",
-        ]),
-      }),
-      verifyAll: Object.freeze({
-        label: "check:secrets",
-        command: "pnpm",
-        args: Object.freeze(["run", "check:secrets"]),
-      }),
-      reason: "CI runs the pinned gitleaks container; the local gate uses the host-aware check:secrets wrapper.",
-    }),
-    Object.freeze({
-      label: "test",
-      ci: Object.freeze({
-        label: "test",
-        command: "pnpm",
-        args: Object.freeze(["test"]),
-      }),
-      verifyAll: Object.freeze({
-        label: "test",
-        command: "pnpm",
-        args: Object.freeze(["run", "test"]),
-      }),
-      reason: "pnpm test and pnpm run test invoke the same package script.",
-    }),
-  ]),
-  relocatedCommandDifferences: Object.freeze([
-    Object.freeze({
-      label: "check:pnpm-policy",
-      ci: Object.freeze({
-        label: "check:pnpm-policy",
-        command: "node",
-        args: Object.freeze(["scripts/pnpm-release-age-policy.mjs"]),
-      }),
-      ciAfter: "corepack setup",
-      verifyAll: Object.freeze({
-        label: "check:pnpm-policy",
-        command: "pnpm",
-        args: Object.freeze(["run", "check:pnpm-policy"]),
-      }),
-      verifyAllAfter: "check:node",
-      reason: "CI runs the policy script directly before invoking pnpm; local verify:all proves the Node floor first, then uses the package-script wrapper.",
-    }),
-    Object.freeze({
-      label: "check:dependency-vulnerabilities",
-      ci: Object.freeze({
-        label: "check:dependency-vulnerabilities",
-        command: "pnpm",
-        args: Object.freeze(["run", "check:dependency-vulnerabilities"]),
-      }),
-      ciAfter: "dependency install",
-      ciNodeVersion: MINIMUM_NODE_VERSION,
-      verifyAll: Object.freeze({
-        label: "check:dependency-vulnerabilities",
-        command: "pnpm",
-        args: Object.freeze(["run", "check:dependency-vulnerabilities"]),
-      }),
-      verifyAllAfter: "check:licenses",
-      reason: "CI runs the production advisory gate immediately after its frozen install on the minimum-Node leg; local verify:all runs it after license policy on every supported runtime.",
-    }),
-  ]),
-  matrixDifferences: Object.freeze([
-    Object.freeze({
-      label: "check:dependency-vulnerabilities",
-      ciCondition: `\${{ matrix.node-version == '${MINIMUM_NODE_VERSION}' }}`,
-      ciNodeVersion: MINIMUM_NODE_VERSION,
-      verifyAllOnlyGate: Object.freeze({
-        label: "check:dependency-vulnerabilities",
-        command: "pnpm",
-        args: Object.freeze(["run", "check:dependency-vulnerabilities"]),
-      }),
-      reason: "CI audits production dependencies once on the minimum-Node leg; verify:all runs the same fail-closed audit on every supported local runtime.",
-    }),
-    Object.freeze({
-      label: "release:consumer",
-      ciCondition: `\${{ matrix.node-version == '${MINIMUM_NODE_VERSION}' }}`,
-      ciNodeVersion: MINIMUM_NODE_VERSION,
-      verifyAllOnlyGate: Object.freeze({
-        label: "release:consumer",
-        command: "pnpm",
-        args: Object.freeze(["run", "release:consumer", "--", "--tag", CI_RELEASE_TAG_EXPRESSION]),
-      }),
-      reason: "CI runs the packed consumer only on the minimum-Node leg; verify:all also smoke-tests it on newer supported Node versions without --require-minimum.",
-    }),
-  ]),
-});
 
 export function createRepoGate({ releaseTag, nodeVersion = process.versions.node }) {
   const packedConsumerArgs = ["run", "release:consumer", "--", "--tag", releaseTag];
@@ -208,17 +55,45 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
     { label: "release:consumer", command: "pnpm", args: packedConsumerArgs },
     { label: "typecheck", command: "pnpm", args: ["run", "typecheck"] },
     { label: "test", command: "pnpm", args: ["run", "test"] },
-    { label: "test:demo", command: "pnpm", args: ["run", "test:demo"] },
     { label: "git diff --check", command: "git", args: ["diff", "--check"] },
   ];
 }
 
-export function readReleaseSmokeTag(cwd, readFile = readFileSync) {
-  const manifest = JSON.parse(readFile(resolve(cwd, "packages/agent-app/package.json"), "utf8"));
-  if (typeof manifest.version !== "string" || manifest.version.length === 0) {
-    throw new Error("packages/agent-app/package.json must contain a version for release smoke checks.");
+export function readReleaseSmokeTag(
+  cwd,
+  readFile = readFileSync,
+  catalog = packageCatalog,
+) {
+  const publishable = catalog.filter((entry) => entry.publishable === true);
+  if (publishable.length === 0) {
+    throw new Error("The publishable package roster is empty.");
   }
-  return `v${manifest.version}`;
+  let lockstepVersion;
+  let lockstepPackage;
+  for (const entry of publishable) {
+    const manifestPath = resolve(cwd, packageRelativePath(entry), "package.json");
+    const manifest = JSON.parse(readFile(manifestPath, "utf8"));
+    if (manifest.name !== entry.name) {
+      throw new Error(
+        `${manifestPath} must describe ${entry.name}; found ${String(manifest.name)}.`,
+      );
+    }
+    if (typeof manifest.version !== "string" || manifest.version.length === 0) {
+      throw new Error(`${manifestPath} must contain a version for release smoke checks.`);
+    }
+    if (lockstepVersion === undefined) {
+      lockstepVersion = manifest.version;
+      lockstepPackage = manifest.name;
+      continue;
+    }
+    if (manifest.version !== lockstepVersion) {
+      throw new Error(
+        `Publishable packages must share one lockstep version; `
+        + `${lockstepPackage}@${lockstepVersion} differs from ${manifest.name}@${manifest.version}.`,
+      );
+    }
+  }
+  return `v${lockstepVersion}`;
 }
 
 export function parseVerifyAllArgs(argv) {
@@ -244,7 +119,12 @@ export async function runVerifyAll(options = {}) {
     parsed = parseVerifyAllArgs(argv);
   } catch (error) {
     stderr.write(`${reasonOf(error)}\n\n${usage()}\n`);
-    stdout.write(renderFinalSummary({ repoOk: false, alphaOk: false, betaOk: false }));
+    stdout.write(renderFinalSummary({
+      repoOk: false,
+      minimalOk: false,
+      personalOk: false,
+      multiRuntimeOk: false,
+    }));
     return { exitCode: 1 };
   }
 
@@ -258,8 +138,9 @@ export async function runVerifyAll(options = {}) {
   let repoOk = true;
   let consumersAttempted = false;
   let consumersOk = false;
-  let alphaOk = false;
-  let betaOk = false;
+  let minimalOk = false;
+  let personalOk = false;
+  let multiRuntimeOk = false;
   for (const command of createRepoGate({ releaseTag, nodeVersion })) {
     if (command.runner === "verifyConsumers") {
       consumersAttempted = true;
@@ -271,9 +152,15 @@ export async function runVerifyAll(options = {}) {
         runCommand,
         writeOutput: true,
       });
-      alphaOk = consumerResult.statusByLabel.get("local-agent-alpha contract") === true;
-      betaOk = consumerResult.statusByLabel.get("local-agent-beta contract") === true;
-      consumersOk = consumerResult.exitCode === 0 && alphaOk && betaOk;
+      minimalOk = consumerResult.statusByLabel.get("minimal template contract") === true;
+      personalOk = consumerResult.statusByLabel.get("personal template contract") === true;
+      multiRuntimeOk =
+        consumerResult.statusByLabel.get("multi-runtime template contract") === true;
+      consumersOk =
+        consumerResult.exitCode === 0
+        && minimalOk
+        && personalOk
+        && multiRuntimeOk;
       if (!consumersOk) {
         repoOk = false;
         stderr.write("Consumer gate failed at verify:consumers; later repo gates skipped.\n");
@@ -294,19 +181,29 @@ export async function runVerifyAll(options = {}) {
     stderr.write("Consumer verification skipped because the repo gate is not green.\n");
   }
 
-  stdout.write(renderFinalSummary({ repoOk, alphaOk, betaOk }));
+  stdout.write(renderFinalSummary({
+    repoOk,
+    minimalOk,
+    personalOk,
+    multiRuntimeOk,
+  }));
   return {
     exitCode: repoOk && consumersOk ? 0 : 1,
   };
 }
 
 export function renderFinalSummary(input) {
-  const verificationOk = input.repoOk && input.alphaOk && input.betaOk;
+  const verificationOk =
+    input.repoOk
+    && input.minimalOk
+    && input.personalOk
+    && input.multiRuntimeOk;
   return [
     "final summary",
     `repo ${input.repoOk ? "ok" : "fail"}`,
-    `local-agent-alpha contract ${input.alphaOk ? "ok" : "fail"}`,
-    `local-agent-beta contract ${input.betaOk ? "ok" : "fail"}`,
+    `minimal template contract ${input.minimalOk ? "ok" : "fail"}`,
+    `personal template contract ${input.personalOk ? "ok" : "fail"}`,
+    `multi-runtime template contract ${input.multiRuntimeOk ? "ok" : "fail"}`,
     `verification ${verificationOk ? "green" : "failed"}`,
   ].join("\n") + "\n";
 }

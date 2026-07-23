@@ -20,6 +20,11 @@ import type {
 
 import { createClaudeCliTransport, type SpawnProcess } from "./cli.js";
 import type { RuntimeClaudeConfig } from "./config.js";
+import {
+  claudeRuntimeCapabilities,
+  isClaudeModelIdentifier,
+  validateClaudeModel,
+} from "./model.js";
 import { createClaudeSdkTransport } from "./sdk.js";
 import { claudeEnvironment, type ClaudeTransport, type ClaudeTransportControl } from "./transport.js";
 
@@ -63,10 +68,6 @@ function redact(value: unknown, secret: string | undefined): string {
   let message = value instanceof Error ? value.message : String(value);
   if (secret !== undefined && secret.length > 0) message = message.split(secret).join("[REDACTED]");
   return message.replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]");
-}
-
-function modelValid(model: string): boolean {
-  return /^(?:claude-[a-z0-9][a-z0-9.-]*|opus|sonnet|haiku)$/.test(model) && model.length <= 256;
 }
 
 function messageText(message: TurnMessage): string {
@@ -121,16 +122,7 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
       });
 
   return {
-    capabilities: {
-      tools: false,
-      mcp: false,
-      attachments: false,
-      approvals: false,
-      structuredOutput: true,
-      sandbox: false,
-      sessions: true,
-      liveInput: options.config.mode === "sdk",
-    },
+    capabilities: claudeRuntimeCapabilities(options.config),
 
     async start(_context: ModuleStartContext) {
       if (state === "stopped") throw new RuntimeClaudeError("RUNTIME_NOT_RUNNING", "runtime-claude cannot restart after stop", { retryability: "not-retryable" });
@@ -162,14 +154,16 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
       return [diagnostic("runtime-claude.lifecycle", "info", `Runtime state: ${state}; transport: ${options.config.mode}`)];
     },
 
-    validateModel(model) {
-      if (!modelValid(model)) return { supported: false, diagnostics: [diagnostic("runtime-claude.model", "error", "Claude model identifier is invalid")] };
-      return { supported: true, capabilities: this.capabilities };
+    preflightModel({ model, signal }) {
+      if (signal.aborted) {
+        throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
+      return validateClaudeModel({ model, config: options.config });
     },
 
     async runTurn(request: RuntimeTurnRequest, context: RuntimeTurnContext): Promise<RuntimeTurnResult> {
       if (state !== "running") throw new RuntimeClaudeError("RUNTIME_NOT_RUNNING", `runtime-claude is ${state}`, { retryability: "not-retryable" });
-      if (!modelValid(request.model)) throw new RuntimeClaudeError("MODEL_INVALID", "Claude model identifier is invalid", { retryability: "not-retryable" });
+      if (!isClaudeModelIdentifier(request.model)) throw new RuntimeClaudeError("MODEL_INVALID", "Claude model identifier is invalid", { retryability: "not-retryable" });
       if (request.tools.length > 0) throw new RuntimeClaudeError("TOOLS_UNSUPPORTED", "runtime-claude does not expose Core tools", { retryability: "not-retryable" });
       if (request.session?.runtimeInstanceId !== undefined && request.session.runtimeInstanceId !== options.instanceId) {
         throw new RuntimeClaudeError("SESSION_INVALID", "Claude session belongs to another runtime instance", { retryability: "not-retryable" });

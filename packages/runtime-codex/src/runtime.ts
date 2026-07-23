@@ -21,6 +21,11 @@ import type {
 import type { RuntimeCodexConfig } from "./config.js";
 import { codexProcessEnvironment } from "./environment.js";
 import { JsonRpcProcess, type JsonRpcMessage, type SpawnProcess } from "./json-rpc.js";
+import {
+  isRuntimeCodexModel,
+  runtimeCodexCapabilities,
+  validateRuntimeCodexModel,
+} from "./model.js";
 
 type RuntimeState = "created" | "running" | "draining" | "stopped";
 
@@ -60,10 +65,6 @@ function record(value: unknown): Record<string, unknown> {
 
 function nestedRecord(value: unknown, key: string): Record<string, unknown> {
   return record(record(value)[key]);
-}
-
-function safeModel(model: string): boolean {
-  return model.length > 0 && model.length <= 256 && model.trim() === model && !/[\u0000-\u001f\u007f]/.test(model);
 }
 
 function messageText(message: TurnMessage): string {
@@ -148,16 +149,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
   });
 
   return {
-    capabilities: {
-      tools: false,
-      mcp: false,
-      attachments: false,
-      approvals: false,
-      structuredOutput: true,
-      sandbox: false,
-      sessions: true,
-      liveInput: true,
-    },
+    capabilities: runtimeCodexCapabilities,
 
     async start(_context: ModuleStartContext) {
       if (state === "stopped") throw new RuntimeCodexError("RUNTIME_NOT_RUNNING", "runtime-codex cannot restart after stop", { retryability: "not-retryable" });
@@ -189,16 +181,17 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
       return [diagnostic("runtime-codex.lifecycle", "info", `Runtime state: ${state}`)];
     },
 
-    validateModel(model) {
-      if (!safeModel(model)) {
-        return { supported: false, diagnostics: [diagnostic("runtime-codex.model", "error", "Codex model identifier is invalid")] };
-      }
-      return { supported: true, capabilities: this.capabilities };
+    preflightModel(request) {
+      request.signal.throwIfAborted();
+      return validateRuntimeCodexModel({
+        model: request.model,
+        config: options.config,
+      });
     },
 
     async runTurn(request: RuntimeTurnRequest, context: RuntimeTurnContext): Promise<RuntimeTurnResult> {
       if (state !== "running") throw new RuntimeCodexError("RUNTIME_NOT_RUNNING", `runtime-codex is ${state}`, { retryability: "not-retryable" });
-      if (!safeModel(request.model)) throw new RuntimeCodexError("MODEL_INVALID", "Codex model identifier is invalid", { retryability: "not-retryable" });
+      if (!isRuntimeCodexModel(request.model)) throw new RuntimeCodexError("MODEL_INVALID", "Codex model identifier is invalid", { retryability: "not-retryable" });
       if (request.tools.length > 0) throw new RuntimeCodexError("TOOLS_UNSUPPORTED", "runtime-codex does not expose Core tools", { retryability: "not-retryable" });
       if (request.session?.runtimeInstanceId !== undefined && request.session.runtimeInstanceId !== options.instanceId) {
         throw new RuntimeCodexError("SESSION_INVALID", "Codex session belongs to another runtime instance", { retryability: "not-retryable" });

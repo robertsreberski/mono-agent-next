@@ -22,8 +22,33 @@ const ROOT_DEPENDENCY_SECTIONS = [
 const PACKAGE_PIN_SECTIONS = ROOT_DEPENDENCY_SECTIONS;
 export const RELEASE_REPOSITORY = Object.freeze({
   type: "git",
-  url: "git+https://github.com/robertsreberski/mono-agent.git",
+  url: "git+https://github.com/robertsreberski/mono-agent-next.git",
 });
+export const SOURCE_BETA_RELEASE_PACKAGE_NAMES = Object.freeze([
+  "@mono-agent/channel-openai-api",
+  "@mono-agent/channel-operator",
+  "@mono-agent/channel-slack",
+  "@mono-agent/channel-telegram",
+  "@mono-agent/channel-webhook",
+  "@mono-agent/cli",
+  "@mono-agent/core",
+  "@mono-agent/docs-mcp",
+  "@mono-agent/exporter-otlp",
+  "@mono-agent/memory-local",
+  "@mono-agent/module-sdk",
+  "@mono-agent/operator",
+  "@mono-agent/runtime-claude",
+  "@mono-agent/runtime-codex",
+  "@mono-agent/runtime-opencode",
+  "@mono-agent/runtime-pi",
+  "@mono-agent/sandbox-srt",
+  "@mono-agent/service-macos",
+  "@mono-agent/state-local",
+  "@mono-agent/trigger-cron",
+  "@mono-agent/tui",
+  "@mono-agent/web",
+  "create-mono-agent",
+]);
 
 function argValue(name, argv = process.argv.slice(2)) {
   const index = argv.indexOf(name);
@@ -42,13 +67,15 @@ export function releaseVersionFromTag(tag) {
   return match[1];
 }
 
-export function validateRelease({
-  tag = process.env.GITHUB_REF_NAME,
-  packages = discoverPackages(),
-  rootPackageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")),
-  nodeVersionFile = fs.readFileSync(path.join(REPO_ROOT, ".nvmrc"), "utf8").trim(),
-  silent = false,
-} = {}) {
+export function validateRelease(options = {}) {
+  const {
+    tag = process.env.GITHUB_REF_NAME,
+    packages = discoverPackages(),
+    rootPackageJson = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")),
+    nodeVersionFile = fs.readFileSync(path.join(REPO_ROOT, ".nvmrc"), "utf8").trim(),
+    silent = false,
+    enforceSourceBetaRoster = options.packages === undefined,
+  } = options;
   const version = releaseVersionFromTag(tag);
   const publishable = publishablePackages(packages);
   const packagesByName = new Map(packages.map((pkg) => [pkg.name, pkg]));
@@ -56,6 +83,19 @@ export function validateRelease({
 
   if (!publishable.length) {
     issues.push("no publishable packages found");
+  }
+  if (enforceSourceBetaRoster) {
+    const expectedNames = new Set(SOURCE_BETA_RELEASE_PACKAGE_NAMES);
+    const actualNames = new Set(publishable.map((pkg) => pkg.name));
+    const missing = SOURCE_BETA_RELEASE_PACKAGE_NAMES.filter((name) => !actualNames.has(name));
+    const unexpected = [...actualNames].filter((name) => !expectedNames.has(name)).sort();
+    if (missing.length > 0 || unexpected.length > 0) {
+      issues.push(
+        `publishable package roster must contain exactly ${SOURCE_BETA_RELEASE_PACKAGE_NAMES.length} source-beta packages`
+        + `${missing.length > 0 ? `; missing: ${missing.join(", ")}` : ""}`
+        + `${unexpected.length > 0 ? `; unexpected: ${unexpected.join(", ")}` : ""}`,
+      );
+    }
   }
 
   if (rootPackageJson.engines?.node !== SUPPORTED_NODE_ENGINE) {

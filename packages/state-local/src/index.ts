@@ -5,8 +5,10 @@ import {
   resolveStateLocalConfig,
   stateLocalConfigSchema,
   type ResolvedStateLocalConfig,
+  type ResolvedStateLocalRunsConfig,
   type StateLocalConfig,
   type StateLocalDiscoveryConfig,
+  type StateLocalRunsConfig,
 } from "./config.js";
 import { StateLocalConfigError } from "./config.js";
 import { StateLocalError, type StateLocalErrorCode } from "./errors.js";
@@ -20,6 +22,14 @@ import {
   type StateLocalStoreHooks,
   type StateLocalStoreOpenOptions,
 } from "./store.js";
+import type {
+  StateArtifactRef,
+  StateDeleteArtifactRequest,
+  StateListArtifactsRequest,
+  StateListArtifactsResult,
+  StatePutArtifactRequest,
+  StateReadArtifactRequest,
+} from "./artifacts.js";
 
 export const monoAgentModule = defineStateModule({
   manifest: {
@@ -28,7 +38,7 @@ export const monoAgentModule = defineStateModule({
     apiVersion: 1,
     kind: "state",
     responsibility: "Provides owner-private CAS state, durable transcript/run records, idempotency, and presence publication.",
-    capabilities: ["state.local", "state.cas", "state.presence"],
+    capabilities: ["state.local", "state.cas", "state.presence", "state.artifacts"],
   },
   schema: stateLocalConfigSchema,
   create: async (context) => StateLocalStore.open(
@@ -51,12 +61,20 @@ export {
 };
 export type {
   ResolvedStateLocalConfig,
+  ResolvedStateLocalRunsConfig,
+  StateArtifactRef,
+  StateDeleteArtifactRequest,
+  StateListArtifactsRequest,
+  StateListArtifactsResult,
   StateLocalConfig,
   StateLocalDiscoveryConfig,
+  StateLocalRunsConfig,
   StateLocalErrorCode,
   StateLocalStoreHooks,
   StateLocalStoreOpenOptions,
   StatePresenceDescriptor,
   StatePresenceStatus,
   StatePresenceUpdate,
+  StatePutArtifactRequest,
+  StateReadArtifactRequest,
 };

@@ -206,7 +206,7 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
   };
 
   return {
-    capabilities: Object.freeze({ attachments: true, liveInput: context.host.offerLiveInput !== undefined, askUser: context.host.answerAsk !== undefined, proactive: true, runtimeControl: false, verbatim: true, cancellation: context.host.cancel !== undefined }),
+    capabilities: Object.freeze({ attachments: true, liveInput: context.host.offerLiveInput !== undefined, askUser: context.host.answerAsk !== undefined, approvals: false, proactive: true, runtimeControl: false, verbatim: true, cancellation: context.host.cancel !== undefined }),
     get running() { return running; },
     async start(startContext) {
       if (running) return;

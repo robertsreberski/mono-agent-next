@@ -67,10 +67,10 @@ jobs:
       - name: Check package architecture
         run: pnpm run check:architecture
 
-      - name: Build packages and demos
+      - name: Build packages
         run: pnpm run build
 
-      - name: Typecheck packages and demos
+      - name: Typecheck packages
         run: pnpm run typecheck
 
       - name: Run tests
@@ -114,8 +114,8 @@ jobs:
           retry npm install -g --prefix "$TMP_ROOT/tui" --prefer-online "@mono-agent/tui@${VERSION}"
           "$TMP_ROOT/tui/bin/mono-agent-tui" --help
 
-          retry npm install -g --prefix "$TMP_ROOT/app" --prefer-online "@mono-agent/agent-app@${VERSION}"
-          "$TMP_ROOT/app/bin/mono-agent" --help
+          retry npm install -g --prefix "$TMP_ROOT/cli" --prefer-online "@mono-agent/cli@${VERSION}"
+          "$TMP_ROOT/cli/bin/mono-agent" --help
 
           retry npm install -g --prefix "$TMP_ROOT/create" --prefer-online "create-mono-agent@${VERSION}"
           "$TMP_ROOT/create/bin/create-mono-agent" --help

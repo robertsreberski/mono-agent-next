@@ -83,7 +83,7 @@ describe("telegram channel", () => {
       context: context(parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }), dispatch, { offerLiveInput, answerAsk, cancel }),
       clientFactory: () => client,
     });
-    expect(channel.capabilities).toMatchObject({ liveInput: true, askUser: true, cancellation: true, runtimeControl: false });
+    expect(channel.capabilities).toMatchObject({ liveInput: true, askUser: true, approvals: false, cancellation: true, runtimeControl: false });
     await channel.start?.({ signal: new AbortController().signal });
     await vi.waitFor(() => {
       expect(answerAsk).toHaveBeenCalledOnce();

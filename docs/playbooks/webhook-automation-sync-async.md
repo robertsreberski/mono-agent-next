@@ -114,4 +114,4 @@ This generic webhook feature does **not** prove that a later result belongs to t
 - [Delivery and send tools](/channels/delivery-and-send-tools/) — how answers are returned across channels.
 - [Durable continuations](/tools/durable-continuations/) — origin-bound later results for chat-delegated work.
 - [Config blueprint](/config/blueprint/) — the annotated `mono-agent.config.json`.
-- [mono-agent-composer skill](https://github.com/robertsreberski/mono-agent/blob/main/packages/agent-app/skills/mono-agent-composer/SKILL.md) — build this agent from one config.
+- [Quickstart](/getting-started/quickstart/) — build this agent from one config.

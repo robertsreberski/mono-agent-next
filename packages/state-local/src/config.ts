@@ -1,16 +1,18 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 export const DEFAULT_STATE_ROOT = "./.mono-agent/state";
 export const DEFAULT_MAX_RECORD_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_RECORDS = 100_000;
 export const DEFAULT_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
 export const DEFAULT_HEARTBEAT_MS = 15_000;
+export const DEFAULT_ARTIFACT_RETENTION_DAYS = 30;
 
 const MAX_RECORD_BYTES = 16 * 1024 * 1024;
 const MAX_RECORDS = 1_000_000;
 const MAX_TOTAL_BYTES = 1024 * 1024 * 1024;
 const MIN_HEARTBEAT_MS = 1_000;
 const MAX_HEARTBEAT_MS = 5 * 60_000;
+const MAX_ARTIFACT_RETENTION_DAYS = 3_650;
 
 export interface StateLocalDiscoveryConfig {
   readonly registryDirectory: string;
@@ -19,11 +21,17 @@ export interface StateLocalDiscoveryConfig {
   readonly heartbeatMs: number;
 }
 
+export interface StateLocalRunsConfig {
+  readonly artifactsDirectory?: string;
+  readonly retentionDays: number;
+}
+
 export interface StateLocalConfig {
   readonly root: string;
   readonly maxRecordBytes: number;
   readonly maxRecords: number;
   readonly maxTotalBytes: number;
+  readonly runs?: StateLocalRunsConfig;
   readonly discovery?: StateLocalDiscoveryConfig;
 }
 
@@ -31,8 +39,13 @@ export interface ResolvedStateLocalDiscoveryConfig extends StateLocalDiscoveryCo
   readonly registryDirectory: string;
 }
 
+export interface ResolvedStateLocalRunsConfig extends StateLocalRunsConfig {
+  readonly artifactsDirectory: string;
+}
+
 export interface ResolvedStateLocalConfig extends StateLocalConfig {
   readonly root: string;
+  readonly runs?: ResolvedStateLocalRunsConfig;
   readonly discovery?: ResolvedStateLocalDiscoveryConfig;
 }
 
@@ -50,7 +63,12 @@ const CONFIG_KEYS = new Set([
   "maxRecordBytes",
   "maxRecords",
   "maxTotalBytes",
+  "runs",
   "discovery",
+]);
+const RUNS_KEYS = new Set([
+  "artifactsDirectory",
+  "retentionDays",
 ]);
 const DISCOVERY_KEYS = new Set([
   "registryDirectory",
@@ -85,6 +103,7 @@ export function parseStateLocalConfig(value: unknown): StateLocalConfig {
     maxRecordBytes,
     MAX_TOTAL_BYTES,
   );
+  const runs = parseRuns(input.runs);
   const discovery = parseDiscovery(input.discovery);
 
   return {
@@ -92,6 +111,7 @@ export function parseStateLocalConfig(value: unknown): StateLocalConfig {
     maxRecordBytes,
     maxRecords,
     maxTotalBytes,
+    ...(runs === undefined ? {} : { runs }),
     ...(discovery === undefined ? {} : { discovery }),
   };
 }
@@ -100,10 +120,18 @@ export function resolveStateLocalConfig(
   config: StateLocalConfig,
   configDirectory: string,
 ): ResolvedStateLocalConfig {
+  const root = resolve(configDirectory, config.root);
+  const runs = config.runs;
   const discovery = config.discovery;
   return {
     ...config,
-    root: resolve(configDirectory, config.root),
+    root,
+    runs: {
+      artifactsDirectory: runs?.artifactsDirectory === undefined
+        ? join(root, "artifacts")
+        : resolve(configDirectory, runs.artifactsDirectory),
+      retentionDays: runs?.retentionDays ?? DEFAULT_ARTIFACT_RETENTION_DAYS,
+    },
     ...(discovery === undefined
       ? {}
       : {
@@ -139,6 +167,19 @@ export const stateLocalConfigSchema = Object.freeze({
         maximum: MAX_TOTAL_BYTES,
         default: DEFAULT_MAX_TOTAL_BYTES,
       },
+      runs: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          artifactsDirectory: { type: "string", minLength: 1, maxLength: 4_096 },
+          retentionDays: {
+            type: "integer",
+            minimum: 1,
+            maximum: MAX_ARTIFACT_RETENTION_DAYS,
+            default: DEFAULT_ARTIFACT_RETENTION_DAYS,
+          },
+        },
+      },
       discovery: {
         type: "object",
         additionalProperties: false,
@@ -159,6 +200,26 @@ export const stateLocalConfigSchema = Object.freeze({
   }),
   parse: parseStateLocalConfig,
 });
+
+function parseRuns(value: unknown): StateLocalRunsConfig | undefined {
+  if (value === undefined) return undefined;
+  const input = readRecord(value, "runs");
+  rejectUnknownKeys(input, RUNS_KEYS, "runs");
+  const artifactsDirectory = input.artifactsDirectory === undefined
+    ? undefined
+    : readPath(input.artifactsDirectory, "runs.artifactsDirectory");
+  const retentionDays = readBoundedInteger(
+    input.retentionDays,
+    "runs.retentionDays",
+    DEFAULT_ARTIFACT_RETENTION_DAYS,
+    1,
+    MAX_ARTIFACT_RETENTION_DAYS,
+  );
+  return {
+    ...(artifactsDirectory === undefined ? {} : { artifactsDirectory }),
+    retentionDays,
+  };
+}
 
 function parseDiscovery(value: unknown): StateLocalDiscoveryConfig | undefined {
   if (value === undefined) return undefined;

@@ -194,7 +194,10 @@ async function runStart(options: ParsedOptions, io: ResolvedCliIo): Promise<numb
     return 1;
   }
 
-  const host = await createAgentHost(options.configPath);
+  if (validation.loaded === undefined) {
+    throw new Error("Agent validation succeeded without an immutable loaded configuration");
+  }
+  const host = await createAgentHost(validation.loaded);
   await host.start();
   io.stdout(`${stringifyJson({ event: "started", ...host.startInfo })}\n`);
 

@@ -14,7 +14,7 @@ export const monoAgentModule = defineChannelModule({
 function createModule(context: ChannelModuleCreateContext<OpenAiApiConfig>): OpenAiApiModuleChannel {
   let server: OpenAiApiServer | undefined;
   return {
-    capabilities: Object.freeze({ attachments: true, liveInput: false, askUser: false, proactive: false, runtimeControl: false, verbatim: false, cancellation: true }),
+    capabilities: Object.freeze({ attachments: true, liveInput: false, askUser: false, approvals: false, proactive: false, runtimeControl: false, verbatim: false, cancellation: true }),
     get endpoint() { return server?.startInfo?.baseUrl; },
     get startInfo() { return server?.startInfo; },
     async start(startContext) { throwIfAborted(startContext.signal); server = createOpenAiApiServer({ config: context.config, dispatch: (request, reply) => context.host.dispatch(request, reply) }); const info = await server.start(); context.logger.info("OpenAI-compatible channel listening.", { instanceId: context.instanceId, endpoint: info.baseUrl, authRequired: true }); },

@@ -1,4 +1,4 @@
-import { ensureLoadedAgentConfig } from "./config.js";
+import { ensureLoadedAgentConfig, MAX_CONTEXT_BYTES } from "./config.js";
 import {
   isEnvEligibleSchema,
   isSecretSchema,
@@ -70,7 +70,7 @@ export async function composeAgentConfigSchema(
           roots: { type: "array", items: nonEmptyStringSchema() },
           load: { const: "all" },
           disclosure: { enum: ["full", "index"] },
-          maxBytes: { type: "integer", minimum: 1 },
+          maxBytes: { type: "integer", minimum: 1, maximum: MAX_CONTEXT_BYTES },
         },
         ["roots"],
       ),
@@ -93,7 +93,13 @@ export async function composeAgentConfigSchema(
             ),
           ],
         },
-        approvals: objectSchema({ default: { enum: ["allow", "ask", "deny"] } }, ["default"]),
+        approvals: objectSchema(
+          {
+            default: { enum: ["allow", "ask", "deny"] },
+            timeoutMs: { type: "integer", minimum: 1, maximum: 3_600_000 },
+          },
+          ["default"],
+        ),
         sandbox:
           singleton("policy.sandbox") === undefined
             ? objectSchema({ mode: { const: "off" } }, ["mode"])
@@ -147,11 +153,30 @@ function visit(
     return;
   }
   if (Array.isArray(value)) {
+    if (value.length === 0) {
+      output.push({
+        path,
+        owner: ownerFor(path, loaded),
+        source: "config",
+        value: [],
+      });
+      return;
+    }
     value.forEach((child, index) => visit(child, path.length === 0 ? String(index) : `${path}.${index}`, loaded, output));
     return;
   }
   if (isRecord(value)) {
-    for (const [key, child] of Object.entries(value)) {
+    const entries = Object.entries(value);
+    if (entries.length === 0) {
+      output.push({
+        path,
+        owner: ownerFor(path, loaded),
+        source: "config",
+        value: {},
+      });
+      return;
+    }
+    for (const [key, child] of entries) {
       visit(child, path.length === 0 ? key : `${path}.${key}`, loaded, output);
     }
     return;

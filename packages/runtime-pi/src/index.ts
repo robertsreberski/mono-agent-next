@@ -5,6 +5,7 @@ import {
   runtimePiJsonSchema,
   type RuntimePiConfig,
 } from "./config.js";
+import { validateRuntimePiModel } from "./model.js";
 import { createRuntimePi } from "./runtime.js";
 
 export type {
@@ -27,6 +28,7 @@ export const monoAgentModule = defineRuntimeModule({
     jsonSchema: runtimePiJsonSchema,
     parse: parseRuntimePiConfig,
   },
+  validateModel: validateRuntimePiModel,
   create(context) {
     return createRuntimePi({
       config: context.config,

@@ -10,39 +10,24 @@ import { runVerifyConsumers } from "../verify-consumers.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const execFileAsync = promisify(execFile);
+const templates = ["minimal", "personal", "multi-runtime"];
 
 describe("verify-consumers", () => {
-  it("is wired exactly once after the CI build-time deep-import gate", async () => {
-    const [workflow, packageJsonText] = await Promise.all([
-      readFile(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8"),
+  it("is exposed as the source-consumer gate and packed smoke uses the current CLI", async () => {
+    const [packageJsonText, verifier, packedSmoke] = await Promise.all([
       readFile(resolve(repoRoot, "package.json"), "utf8"),
+      readFile(resolve(repoRoot, "scripts/verify-consumers.mjs"), "utf8"),
+      readFile(resolve(repoRoot, "scripts/release/fixtures/packed-consumer/smoke.mjs"), "utf8"),
     ]);
     const packageJson = JSON.parse(packageJsonText);
-    const verifyStart = workflow.indexOf("  verify:\n");
-    const websiteStart = workflow.indexOf("\n  website:\n", verifyStart);
 
     expect(packageJson.scripts?.["verify:consumers"]).toBe("node scripts/verify-consumers.mjs");
-    expect(verifyStart).toBeGreaterThanOrEqual(0);
-    expect(websiteStart).toBeGreaterThan(verifyStart);
-
-    const verifyJob = workflow.slice(verifyStart, websiteStart);
-    const command = "pnpm run verify:consumers --skip-build";
-    const expectedSequence = [
-      "      - name: Build packages and demos",
-      "        run: pnpm run build",
-      "",
-      "      - name: Typecheck marked documentation snippets",
-      "        run: pnpm run check:doc-snippets",
-      "",
-      "      - name: Check agent-runtime deep imports",
-      "        run: pnpm run check:deep-imports",
-      "",
-      "      - name: Verify consumer contracts",
-      `        run: ${command}`,
-    ].join("\n");
-
-    expect(verifyJob).toContain(expectedSequence);
-    expect(verifyJob.split(command)).toHaveLength(2);
+    expect(verifier).toContain('importPackage("@mono-agent/cli")');
+    expect(verifier).toContain('importPackage("@mono-agent/core")');
+    expect(verifier).not.toContain('importPackage("@mono-agent/agent-app")');
+    expect(verifier).not.toContain('importPackage("@mono-agent/observability")');
+    expect(packedSmoke).toContain('{ packageName: "@mono-agent/cli", binName: "mono-agent"');
+    expect(packedSmoke).not.toContain("@mono-agent/agent-app");
   });
 
   it("accepts every package-script form advertised by help and rejects a standalone separator", async () => {
@@ -74,6 +59,8 @@ describe("verify-consumers", () => {
         cwd: "/repo",
         dependencies: fakeDependencies(),
         runCommand: async () => 0,
+        verifySourceContract: passingSourceContract,
+        verifyConsumerContract: passingConsumerContract,
         stdout: sink(),
         stderr: sink(),
       });
@@ -87,6 +74,7 @@ describe("verify-consumers", () => {
       cwd: "/repo",
       dependencies: fakeDependencies(),
       runCommand: async () => 0,
+      verifySourceContract: passingSourceContract,
       stdout: sink(),
       stderr,
     });
@@ -96,114 +84,111 @@ describe("verify-consumers", () => {
     expect(help).not.toContain("pnpm run verify:consumers -- --");
   });
 
-  it("prints PASS lines and an ok summary when both golden consumers pass", async () => {
+  it("prints all three v1 source contracts and an aggregate verdict", async () => {
     const stdout = sink();
     const result = await runVerifyConsumers({
       argv: ["--skip-build"],
       cwd: "/repo",
       dependencies: fakeDependencies(),
+      verifySourceContract: passingSourceContract,
       stdout,
       stderr: sink(),
     });
 
     expect(result.exitCode).toBe(0);
-    expect(stdout.text).toContain("PASS local-agent-alpha contract");
-    expect(stdout.text).toContain("PASS local-agent-beta contract");
+    for (const template of templates) {
+      expect(stdout.text).toContain(`PASS ${template} template contract`);
+      expect(result.statusByLabel.get(`${template} template contract`)).toBe(true);
+    }
     expect(stdout.text).toContain("PASS consumers");
-    expect(stdout.text).toContain("local-agent-alpha contract ok");
-    expect(stdout.text).toContain("local-agent-beta contract ok");
-    expect(stdout.text).toContain("consumers ok");
+    expect(result.statusByLabel.get("consumers")).toBe(true);
   });
 
-  it("exits non-zero when one consumer contract fails", async () => {
+  it("exits non-zero when one generated source contract fails", async () => {
     const stdout = sink();
     const result = await runVerifyConsumers({
       argv: ["--skip-build"],
       cwd: "/repo",
-      dependencies: fakeDependencies({ failingContract: "local-agent-beta" }),
+      dependencies: fakeDependencies(),
+      verifySourceContract: async (template) => template === "personal"
+        ? { label: "personal template contract", ok: false, details: ["module graph drift"] }
+        : passingSourceContract(template),
       stdout,
       stderr: sink(),
     });
 
     expect(result.exitCode).toBe(1);
-    expect(stdout.text).toContain("PASS local-agent-alpha contract");
-    expect(stdout.text).toContain("FAIL local-agent-beta contract: validation: fixture drift");
-    expect(stdout.text).toContain("local-agent-beta contract fail");
-    expect(stdout.text).toContain("consumers fail");
+    expect(stdout.text).toContain("FAIL personal template contract: module graph drift");
+    expect(result.statusByLabel.get("personal template contract")).toBe(false);
+    expect(result.statusByLabel.get("consumers")).toBe(false);
   });
 
-  it("adds a read-only downstream artifact audit when --consumer is supplied", async () => {
+  it("adds read-only downstream config validation when --consumer is supplied", async () => {
     const stdout = sink();
     const result = await runVerifyConsumers({
       argv: ["--skip-build", "--consumer", "/tmp/downstream-agent"],
       cwd: "/repo",
-      dependencies: fakeDependencies({
-        auditReport: cleanAuditReport({ parseFailureCount: 1 }),
+      dependencies: fakeDependencies(),
+      verifySourceContract: passingSourceContract,
+      verifyConsumerContract: async () => ({
+        label: "downstream-agent config contract",
+        ok: false,
+        details: ["routing.primary.model: unsupported model"],
       }),
       stdout,
       stderr: sink(),
     });
 
     expect(result.exitCode).toBe(1);
-    expect(stdout.text).toContain("FAIL downstream-agent artifact audit: 1 parse failure(s)");
-    expect(stdout.text).toContain("downstream-agent artifact audit fail");
-    expect(stdout.text).toContain("consumers fail");
+    expect(stdout.text).toContain(
+      "FAIL downstream-agent config contract: routing.primary.model: unsupported model",
+    );
+    expect(result.statusByLabel.get("downstream-agent config contract")).toBe(false);
+  });
+
+  it("builds the complete current workspace unless --skip-build is supplied", async () => {
+    const commands = [];
+    const failed = await runVerifyConsumers({
+      argv: [],
+      cwd: "/repo",
+      runCommand: async (command, args) => {
+        commands.push([command, args]);
+        return 1;
+      },
+      stdout: sink(),
+      stderr: sink(),
+    });
+
+    expect(commands).toEqual([["pnpm", ["run", "build"]]]);
+    expect(failed.exitCode).toBe(1);
+    for (const template of templates) {
+      expect(failed.statusByLabel.get(`${template} template contract`)).toBe(false);
+    }
   });
 });
 
-function fakeDependencies(options = {}) {
+function fakeDependencies() {
   return {
-    consumerContractNames: ["local-agent-alpha", "local-agent-beta"],
-    validateConsumerContractFixture: async ({ name }) => ({
-      name,
-      ok: name !== options.failingContract,
-      reportOk: name !== options.failingContract,
-      networkCallCount: 0,
-      sections: [],
-      issues: name === options.failingContract ? [{ check: "validation", message: "fixture drift" }] : [],
-    }),
-    resolveAppArtifactDir: async () => "/tmp/artifacts",
-    resolveAppTraceStaleAfterMs: async () => 30_000,
-    auditRecordedRuns: async () => options.auditReport ?? cleanAuditReport(),
+    projectTemplates: templates,
+    scaffoldAgent: async () => undefined,
+    validateAgentConfig: async () => ({ ok: true, issues: [], loaded: { modules: [] } }),
+    runCli: async () => 0,
   };
 }
 
-function cleanAuditReport(overrides = {}) {
+async function passingSourceContract(template) {
   return {
-    artifactDir: "/tmp/artifacts",
-    totalSummaryFiles: 2,
-    parsedSummaryFiles: 2,
-    parseFailureCount: 0,
-    parseFailures: [],
-    statusHistogram: {
-      running: 0,
-      succeeded: 2,
-      failed: 0,
-      cancelled: 0,
-      interrupted: 0,
-    },
-    unrecognizedStatusCount: 0,
-    unrecognizedStatuses: [],
-    failureKindHistogram: {
-      provider_unavailable: 0,
-      provider_unavailable_exhausted: 0,
-      usage_limit: 0,
-      process_death: 0,
-      runtime_error: 0,
-      cancelled: 0,
-    },
-    summariesWithFailureKind: 0,
-    unrecognizedFailureKindCount: 0,
-    unrecognizedFailureKinds: [],
-    staleRunningCount: 0,
-    staleRunning: [],
-    failureKindRates: [],
-    rateDenominators: {
-      parsedSummaries: 2,
-      summariesWithFailureKind: 0,
-    },
-    warnings: [],
-    ...overrides,
+    label: `${template} template contract`,
+    ok: true,
+    details: ["public APIs validated"],
+  };
+}
+
+async function passingConsumerContract(consumerPath) {
+  return {
+    label: `${consumerPath.split("/").at(-1)} config contract`,
+    ok: true,
+    details: ["config validated"],
   };
 }
 

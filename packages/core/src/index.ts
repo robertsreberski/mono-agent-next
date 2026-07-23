@@ -8,6 +8,8 @@ export type { JsonSchema } from "./schema.js";
 export type {
   AgentAskAnswer,
   AgentAskAnswerStatus,
+  AgentApprovalAnswer,
+  AgentApprovalAnswerStatus,
   AgentConfig,
   AgentConfigExplanation,
   AgentConfigView,
@@ -28,6 +30,7 @@ export type {
   AgentValidationResult,
   ConfigExplanationEntry,
   EnvReference,
+  LoadedAuthoritySource,
   LoadedAgentConfig,
   LoadedAgentModule,
   ModuleKind,

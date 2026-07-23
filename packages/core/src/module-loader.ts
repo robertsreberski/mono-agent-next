@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isProxy } from "node:util/types";
 
 import {
   isEnvEligibleSchema,
@@ -22,6 +23,10 @@ import type { GenericModuleDefinition, LoadedAgentModule, ModuleKind } from "./t
 import type { AgentConfigIssue } from "./errors.js";
 
 const moduleConfigs = new WeakMap<LoadedAgentModule, unknown>();
+const MODULE_CONFIG_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
+const MODULE_CONFIG_SNAPSHOT_MAX_DEPTH = 64;
+const MODULE_CONFIG_SNAPSHOT_MAX_ITEMS = 50_000;
+const UNSAFE_CONFIG_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 export function moduleConfigFor(module: LoadedAgentModule): unknown {
   if (!moduleConfigs.has(module)) throw new AgentModuleError(`Parsed config is unavailable for ${module.packageName}`);
@@ -279,7 +284,10 @@ async function importAndValidateModule(
   );
   let config: unknown;
   try {
-    config = definition.schema.parse(resolvedInline);
+    config = snapshotModuleConfig(
+      definition.schema.parse(resolvedInline),
+      `${preflight.selection.configPath} parsed config`,
+    );
   } catch (error) {
     const issues = moduleSchemaIssues(preflight.selection.configPath, error, resolvedEnvironmentValues);
     throw new AgentConfigError(`Invalid config for ${preflight.packageName}`, issues);
@@ -296,6 +304,200 @@ async function importAndValidateModule(
   };
   moduleConfigs.set(loaded, config);
   return loaded;
+}
+
+interface ModuleConfigSnapshotState {
+  readonly active: Set<object>;
+  readonly copies: WeakMap<object, object>;
+  bytes: number;
+  items: number;
+}
+
+function snapshotModuleConfig(value: unknown, path: string): unknown {
+  return snapshotModuleConfigValue(
+    value,
+    path,
+    0,
+    {
+      active: new Set(),
+      copies: new WeakMap(),
+      bytes: 0,
+      items: 0,
+    },
+  );
+}
+
+function snapshotModuleConfigValue(
+  value: unknown,
+  path: string,
+  depth: number,
+  state: ModuleConfigSnapshotState,
+): unknown {
+  addModuleConfigItem(state, path);
+  if (value === undefined || value === null || typeof value === "boolean") {
+    chargeModuleConfigBytes(state, 8, path);
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw new TypeError(`${path} must contain only finite numbers`);
+    }
+    chargeModuleConfigBytes(state, 16, path);
+    return value;
+  }
+  if (typeof value === "string") {
+    chargeModuleConfigBytes(state, Buffer.byteLength(value, "utf8"), path);
+    return value;
+  }
+  if (typeof value !== "object") {
+    throw new TypeError(`${path} must contain only plain config values`);
+  }
+  if (isProxy(value)) {
+    throw new TypeError(`${path} must not contain a Proxy`);
+  }
+  if (depth >= MODULE_CONFIG_SNAPSHOT_MAX_DEPTH) {
+    throw new TypeError(
+      `${path} exceeds the ${String(MODULE_CONFIG_SNAPSHOT_MAX_DEPTH)}-level depth boundary`,
+    );
+  }
+  if (state.active.has(value)) {
+    throw new TypeError(`${path} must not contain cycles`);
+  }
+  const prior = state.copies.get(value);
+  if (prior !== undefined) return prior;
+
+  const prototype = Object.getPrototypeOf(value);
+  if (Array.isArray(value)) {
+    if (prototype !== Array.prototype) {
+      throw new TypeError(`${path} must use the ordinary Array prototype`);
+    }
+    return snapshotModuleConfigArray(value, path, depth, state);
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`${path} must be a plain object`);
+  }
+  return snapshotModuleConfigRecord(
+    value as Record<string, unknown>,
+    prototype,
+    path,
+    depth,
+    state,
+  );
+}
+
+function snapshotModuleConfigArray(
+  value: readonly unknown[],
+  path: string,
+  depth: number,
+  state: ModuleConfigSnapshotState,
+): readonly unknown[] {
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  const length = lengthDescriptor?.value;
+  if (!Number.isSafeInteger(length) || length < 0) {
+    throw new TypeError(`${path}.length must be a non-negative safe integer data property`);
+  }
+  if (length > MODULE_CONFIG_SNAPSHOT_MAX_ITEMS) {
+    throw new TypeError(
+      `${path} exceeds the ${String(MODULE_CONFIG_SNAPSHOT_MAX_ITEMS)}-item boundary`,
+    );
+  }
+  const allowed = new Set(["length"]);
+  for (let index = 0; index < length; index += 1) allowed.add(String(index));
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowed.has(key)) {
+      throw new TypeError(`${path} contains a non-index array property`);
+    }
+  }
+
+  const output: unknown[] = [];
+  state.copies.set(value, output);
+  state.active.add(value);
+  try {
+    for (let index = 0; index < length; index += 1) {
+      const indexPath = `${path}[${String(index)}]`;
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (descriptor === undefined) {
+        throw new TypeError(`${indexPath} is required`);
+      }
+      if (!("value" in descriptor) || !descriptor.enumerable) {
+        throw new TypeError(`${indexPath} must be an enumerable data property`);
+      }
+      output.push(snapshotModuleConfigValue(descriptor.value, indexPath, depth + 1, state));
+    }
+  } finally {
+    state.active.delete(value);
+  }
+  return Object.freeze(output);
+}
+
+function snapshotModuleConfigRecord(
+  value: Record<string, unknown>,
+  prototype: object | null,
+  path: string,
+  depth: number,
+  state: ModuleConfigSnapshotState,
+): Readonly<Record<string, unknown>> {
+  const output = Object.create(prototype) as Record<string, unknown>;
+  state.copies.set(value, output);
+  state.active.add(value);
+  try {
+    const keys = Reflect.ownKeys(value);
+    if (keys.length > MODULE_CONFIG_SNAPSHOT_MAX_ITEMS) {
+      throw new TypeError(
+        `${path} exceeds the ${String(MODULE_CONFIG_SNAPSHOT_MAX_ITEMS)}-property boundary`,
+      );
+    }
+    for (const key of keys) {
+      if (typeof key !== "string") {
+        throw new TypeError(`${path} must not contain symbol properties`);
+      }
+      if (UNSAFE_CONFIG_KEYS.has(key)) {
+        throw new TypeError(`${path} contains unsafe property ${JSON.stringify(key)}`);
+      }
+      chargeModuleConfigBytes(state, Buffer.byteLength(key, "utf8"), path);
+      const propertyPath = `${path}.${key}`;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+        throw new TypeError(`${propertyPath} must be an enumerable data property`);
+      }
+      Object.defineProperty(output, key, {
+        configurable: true,
+        enumerable: true,
+        value: snapshotModuleConfigValue(
+          descriptor.value,
+          propertyPath,
+          depth + 1,
+          state,
+        ),
+        writable: true,
+      });
+    }
+  } finally {
+    state.active.delete(value);
+  }
+  return Object.freeze(output);
+}
+
+function addModuleConfigItem(state: ModuleConfigSnapshotState, path: string): void {
+  state.items += 1;
+  if (state.items > MODULE_CONFIG_SNAPSHOT_MAX_ITEMS) {
+    throw new TypeError(
+      `${path} exceeds the ${String(MODULE_CONFIG_SNAPSHOT_MAX_ITEMS)}-item boundary`,
+    );
+  }
+}
+
+function chargeModuleConfigBytes(
+  state: ModuleConfigSnapshotState,
+  bytes: number,
+  path: string,
+): void {
+  state.bytes += bytes;
+  if (state.bytes > MODULE_CONFIG_SNAPSHOT_MAX_BYTES) {
+    throw new TypeError(
+      `${path} exceeds the ${String(MODULE_CONFIG_SNAPSHOT_MAX_BYTES)}-byte boundary`,
+    );
+  }
 }
 
 function isModuleDefinition(value: unknown): value is GenericModuleDefinition {

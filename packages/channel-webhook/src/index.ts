@@ -134,6 +134,7 @@ function createWebhookModuleChannel(
       attachments: false,
       liveInput: false,
       askUser: false,
+      approvals: false,
       proactive: delivery !== undefined,
       runtimeControl: true,
       verbatim: false,

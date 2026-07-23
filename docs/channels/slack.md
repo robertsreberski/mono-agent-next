@@ -313,7 +313,7 @@ Use the highest abstraction that fits the host:
    boundary conversion; they do not open Socket Mode or admit events.
 
 See the
-[`@mono-agent/slack-adapter` package guide](https://github.com/robertsreberski/mono-agent/tree/main/packages/slack-adapter)
+[`@mono-agent/channel-slack` package guide](../../packages/channel-slack/README.md)
 for a standalone example and its source-module map.
 
 ## Slack app setup

@@ -29,7 +29,7 @@ for (const specifier of importSpecifiers) {
 }
 
 const cliSmokes = [
-  { packageName: "@mono-agent/agent-app", binName: "mono-agent", args: ["--help"], statuses: [0] },
+  { packageName: "@mono-agent/cli", binName: "mono-agent", args: ["--help"], statuses: [0] },
   { packageName: "@mono-agent/tui", binName: "mono-agent-tui", args: ["--help"], statuses: [0] },
   { packageName: "create-mono-agent", binName: "create-mono-agent", args: ["--help"], statuses: [0] },
 ];

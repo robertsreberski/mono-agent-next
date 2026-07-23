@@ -73,6 +73,7 @@ describe("public compliance assertions", () => {
           attachments: false,
           liveInput: false,
           askUser: false,
+          approvals: false,
           proactive: false,
           runtimeControl: false,
           verbatim: false,
@@ -120,6 +121,7 @@ describe("public compliance assertions", () => {
         attachments: false,
         liveInput: false,
         askUser: false,
+        approvals: false,
         proactive: false,
         runtimeControl: false,
         verbatim: false,
@@ -189,12 +191,156 @@ describe("public compliance assertions", () => {
         attachments: false,
         liveInput: false,
         askUser: false,
+        approvals: false,
         proactive: true,
         runtimeControl: false,
         verbatim: false,
         cancellation: true,
       },
     })).toThrow("proactive channel instance deliver must be a function");
+  });
+
+  it("requires truthful channel, memory, and runtime optional surfaces", () => {
+    expect(() => assertChannelInstanceCompliance({
+      capabilities: {
+        attachments: false,
+        liveInput: false,
+        askUser: false,
+        proactive: false,
+        runtimeControl: false,
+        verbatim: false,
+        cancellation: true,
+      },
+    })).not.toThrow();
+    expect(() => assertChannelInstanceCompliance({
+      capabilities: {
+        attachments: false,
+        liveInput: false,
+        askUser: false,
+        approvals: "sometimes",
+        proactive: false,
+        runtimeControl: false,
+        verbatim: false,
+        cancellation: true,
+      },
+    })).toThrow("channel capabilities.approvals must be a boolean when present");
+
+    expect(() => assertMemoryInstanceCompliance({
+      capabilities: { capture: true, forget: false },
+      recall() {},
+    })).toThrow("capture-capable memory instance capture must be a function");
+    expect(() => assertMemoryInstanceCompliance({
+      capabilities: { capture: false, forget: true },
+      recall() {},
+    })).toThrow("forget-capable memory instance forget must be a function");
+    expect(() => assertMemoryInstanceCompliance({
+      capabilities: { capture: true, forget: true },
+      recall() {},
+      capture() {},
+      forget() { return false; },
+    })).not.toThrow();
+
+    expect(() => assertRuntimeInstanceCompliance({
+      capabilities: {
+        tools: false,
+        mcp: false,
+        attachments: false,
+        approvals: false,
+        structuredOutput: false,
+        sandbox: false,
+        sessions: false,
+      },
+      runTurn() {},
+      preflightModel: "not-a-function",
+    })).toThrow("runtime instance preflightModel must be a function when present");
+
+    expect(() => assertRuntimeModuleCompliance({
+      manifest: {
+        ...manifestBase,
+        packageName: "@example/runtime-invalid-validator",
+        kind: "runtime",
+        responsibility: "Has an invalid pure model validator.",
+      },
+      schema,
+      validateModel: true,
+      create() {},
+    })).toThrow("runtime module definition validateModel must be a function when present");
+  });
+
+  it("matches Core's exact own-data capability authority boundary", () => {
+    const runtimeCapabilities = {
+      tools: false,
+      mcp: false,
+      attachments: false,
+      approvals: false,
+      structuredOutput: false,
+      sandbox: false,
+      sessions: false,
+    };
+    const channelCapabilities = {
+      attachments: false,
+      liveInput: false,
+      askUser: false,
+      proactive: false,
+      runtimeControl: false,
+      verbatim: false,
+      cancellation: false,
+    };
+
+    expect(() => assertRuntimeInstanceCompliance({
+      capabilities: {
+        ...runtimeCapabilities,
+        artifactResults: true,
+        liveInput: false,
+      },
+      runTurn() {},
+    })).not.toThrow();
+    expect(() => assertChannelInstanceCompliance({
+      capabilities: { ...channelCapabilities },
+    })).not.toThrow();
+
+    expect(() => assertRuntimeInstanceCompliance({
+      capabilities: { ...runtimeCapabilities, unexpected: false },
+      runTurn() {},
+    })).toThrow('runtime capabilities contains unknown key "unexpected"');
+    expect(() => assertChannelInstanceCompliance({
+      capabilities: Object.create(channelCapabilities) as unknown,
+    })).toThrow("channel capabilities must be a plain object");
+
+    const symbolCapabilities = { ...runtimeCapabilities } as Record<PropertyKey, unknown>;
+    symbolCapabilities[Symbol("unknown")] = false;
+    expect(() => assertRuntimeInstanceCompliance({
+      capabilities: symbolCapabilities,
+      runTurn() {},
+    })).toThrow("runtime capabilities contains an unknown symbol key");
+
+    let fieldAccessorCalls = 0;
+    const accessorCapabilities = { ...channelCapabilities };
+    Object.defineProperty(accessorCapabilities, "askUser", {
+      enumerable: true,
+      get() {
+        fieldAccessorCalls += 1;
+        return false;
+      },
+    });
+    expect(() => assertChannelInstanceCompliance({
+      capabilities: accessorCapabilities,
+    })).toThrow("channel capabilities.askUser must be a data property");
+    expect(fieldAccessorCalls).toBe(0);
+
+    let instanceAccessorCalls = 0;
+    const accessorInstance = {};
+    Object.defineProperty(accessorInstance, "capabilities", {
+      enumerable: true,
+      get() {
+        instanceAccessorCalls += 1;
+        return runtimeCapabilities;
+      },
+    });
+    expect(() => assertRuntimeInstanceCompliance(accessorInstance)).toThrow(
+      "runtime instance.capabilities must be a data property",
+    );
+    expect(instanceAccessorCalls).toBe(0);
   });
 });
 

@@ -66,6 +66,9 @@ jobs:
           pnpm run build
           pnpm run typecheck
 
+      - name: Check built package exports
+        run: pnpm run check:deep-imports
+
       - name: Test the complete v1 workspace
         run: pnpm run test
 

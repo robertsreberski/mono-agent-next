@@ -1,94 +1,148 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
-import { mappedEntries, runVerifyDeepImports } from "../verify-deep-imports.mjs";
+import {
+  mappedEntries,
+  runVerifyDeepImports,
+} from "../verify-deep-imports.mjs";
 
-function sink() {
-  const lines = [];
-  return { write: (text) => lines.push(text), get text() { return lines.join(""); } };
-}
-
-// Root of THIS repo/worktree (scripts/__tests__ -> scripts -> root).
-const repoRoot = new URL("../..", import.meta.url).pathname;
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 describe("verify-deep-imports", () => {
-  it("derives specifiers from the exports map, without wildcards, including the core deep paths", () => {
-    const specifiers = mappedEntries(repoRoot).map((entry) => entry.specifier);
-    expect(specifiers).toContain("@mono-agent/agent-runtime");
-    expect(specifiers).toContain("@mono-agent/agent-runtime/ai");
-    expect(specifiers).toContain("@mono-agent/agent-runtime/agent");
-    expect(specifiers).toContain("@mono-agent/agent-runtime/ai/failure.js");
-    expect(specifiers).toContain("@mono-agent/agent-runtime/agent/compaction.js");
-    expect(specifiers).toContain("@mono-agent/agent-runtime/ai/runtime/registry.js");
-    expect(specifiers).toContain("@mono-agent/agent-runtime/ai/providers/claude-sdk.js");
-    expect(specifiers).toContain("@mono-agent/agent-runtime/ai/providers/claude-cli.js");
-    expect(specifiers).toContain("@mono-agent/agent-runtime/ai/providers/codex-app.js");
-    expect(specifiers).toContain("@mono-agent/agent-runtime/agent/tools/shared/ripgrep.js");
-    // Phase 6 removed the wildcards + the pi-sdk shim; neither should be mapped.
-    expect(specifiers.some((s) => s.includes("*"))).toBe(false);
-    expect(specifiers).not.toContain("@mono-agent/agent-runtime/ai/providers/pi-sdk.js");
-  });
-
-  it("maps each non-wildcard export key to its types condition target", () => {
+  it("maps every export in the exact 23-package publishable roster", () => {
     const entries = mappedEntries(repoRoot);
-    // Every mapped key in the Phase-6 explicit map is a conditions object with a
-    // `types` target, so none should be null.
-    expect(entries.length).toBeGreaterThan(0);
-    expect(entries.every((entry) => typeof entry.typesTarget === "string")).toBe(true);
-    const root = entries.find((entry) => entry.specifier === "@mono-agent/agent-runtime");
-    expect(root?.typesTarget?.endsWith("packages/agent-runtime/types/index.d.ts")).toBe(true);
+    const packageNames = [...new Set(entries.map((entry) => entry.packageName))];
+    const specifiers = entries.map((entry) => entry.specifier);
+
+    expect(packageNames).toHaveLength(23);
+    expect(packageNames).toContain("@mono-agent/core");
+    expect(packageNames).toContain("@mono-agent/docs-mcp");
+    expect(packageNames).toContain("create-mono-agent");
+    expect(packageNames).not.toContain("@mono-agent/agent-app");
+    expect(packageNames).not.toContain("@mono-agent/agent-runtime");
+    expect(specifiers).toContain("@mono-agent/module-sdk/http");
+    expect(specifiers).toContain("@mono-agent/operator/testing");
+    expect(specifiers).toContain("@mono-agent/cli/package.json");
+    expect(specifiers).toContain("create-mono-agent/package.json");
+    expect(entries.some((entry) => entry.specifier.includes("*"))).toBe(false);
+
+    const roots = entries.filter((entry) => entry.key === ".");
+    expect(roots).toHaveLength(23);
+    expect(roots.every((entry) => entry.defaultTarget.endsWith("/dist/index.js"))).toBe(true);
+    expect(roots.every((entry) => entry.typesTarget?.endsWith("/dist/index.d.ts"))).toBe(true);
   });
 
-  it("resolves every mapped subpath (default + types conditions) through real resolution (exit 0)", async () => {
-    // Real `default` import resolution + real on-disk `types` (.d.ts) existence.
-    // The types/ outDir is a build artifact (gitignored); this runs after the
-    // package is built (worktree has types/ present, phase gate builds first).
+  it("rejects wildcard exports instead of silently skipping them", () => {
+    expect(() => mappedEntries("/repo", {
+      catalog: fixtureCatalog(),
+      readFile: () => JSON.stringify({
+        name: "@mono-agent/fixture",
+        exports: {
+          ".": { import: "./dist/index.js", types: "./dist/index.d.ts" },
+          "./*": { import: "./dist/*.js", types: "./dist/*.d.ts" },
+        },
+      }),
+    })).toThrow(/must not use wildcard mappings/u);
+  });
+
+  it("verifies all mapped default imports and declared type targets through injectable boundaries", async () => {
+    const imports = [];
     const stdout = sink();
-    const { exitCode, results } = await runVerifyDeepImports({ repoRoot, stdout, stderr: sink() });
-    if (exitCode !== 0) {
-      // Surface which subpath failed to make a regression actionable.
-      throw new Error(`deep-import verification failed:\n${stdout.text}`);
-    }
-    expect(exitCode).toBe(0);
-    expect(results.length).toBeGreaterThan(0);
-    expect(results.every((result) => result.ok)).toBe(true);
-    expect(stdout.text).toContain("deep-imports ok");
+    const result = await runVerifyDeepImports({
+      repoRoot,
+      importFn: async (specifier, entry) => {
+        imports.push({ specifier, json: entry.json });
+        return {};
+      },
+      fileExists: () => true,
+      stdout,
+      stderr: sink(),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(imports).toHaveLength(mappedEntries(repoRoot).length);
+    expect(imports).toContainEqual({
+      specifier: "@mono-agent/cli/package.json",
+      json: true,
+    });
+    expect(result.results.every((entry) => entry.ok)).toBe(true);
+    expect(stdout.text).toContain("built-exports ok (23 packages");
+    expect(stdout.text).toContain("(default)");
     expect(stdout.text).toContain("(types)");
   });
 
-  it("exits non-zero when a mapped types condition target is missing on disk", async () => {
-    // Default imports all succeed; a single types target is forced missing via
-    // the injectable fileExists, so the run fails on the broken `types` condition.
+  it("fails when a declared types target is missing", async () => {
     const stdout = sink();
-    const missing = "@mono-agent/agent-runtime/ai/cost.js";
-    const { exitCode, results } = await runVerifyDeepImports({
+    const missing = resolve(repoRoot, "packages/module-sdk/dist/http.d.ts");
+    const result = await runVerifyDeepImports({
       repoRoot,
+      importFn: async () => ({}),
+      fileExists: (path) => path !== missing,
       stdout,
       stderr: sink(),
-      importFn: () => Promise.resolve({}),
-      fileExists: (path) => !path.includes(`${"types"}/ai/cost.d.ts`),
     });
-    expect(exitCode).toBe(1);
-    expect(stdout.text).toContain(`FAIL ${missing} (types): types condition target missing on disk`);
-    expect(stdout.text).toContain("deep-imports fail");
-    expect(results.find((r) => r.specifier === missing)?.ok).toBe(false);
+
+    expect(result.exitCode).toBe(1);
+    expect(stdout.text).toContain(
+      "FAIL @mono-agent/module-sdk/http (types): declared types target missing on disk",
+    );
+    expect(result.results.find(
+      (entry) => entry.specifier === "@mono-agent/module-sdk/http",
+    )?.ok).toBe(false);
   });
 
-  it("exits non-zero and reports the offending specifier when a mapped subpath fails to load", async () => {
+  it("reports the exact default export that fails to load", async () => {
     const stdout = sink();
-    const { exitCode, results } = await runVerifyDeepImports({
+    const result = await runVerifyDeepImports({
+      repoRoot,
+      importFn: async (specifier) => {
+        if (specifier === "@mono-agent/operator/testing") throw new Error("boom");
+        return {};
+      },
+      fileExists: () => true,
+      stdout,
+      stderr: sink(),
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(stdout.text).toContain("FAIL @mono-agent/operator/testing (default): boom");
+    expect(result.results.find(
+      (entry) => entry.specifier === "@mono-agent/operator/testing",
+    )?.ok).toBe(false);
+  });
+
+  it("resolves and imports every real built export", async () => {
+    const stdout = sink();
+    const result = await runVerifyDeepImports({
       repoRoot,
       stdout,
       stderr: sink(),
-      importFn: (specifier) => {
-        if (specifier === "@mono-agent/agent-runtime/ai/cost.js") {
-          return Promise.reject(new Error("boom"));
-        }
-        return Promise.resolve({});
-      },
     });
-    expect(exitCode).toBe(1);
-    expect(stdout.text).toContain("FAIL @mono-agent/agent-runtime/ai/cost.js: boom");
-    expect(stdout.text).toContain("deep-imports fail");
-    expect(results.find((r) => r.specifier === "@mono-agent/agent-runtime/ai/cost.js")?.ok).toBe(false);
+    if (result.exitCode !== 0) {
+      throw new Error(`built export verification failed:\n${stdout.text}`);
+    }
+
+    expect(result.exitCode).toBe(0);
+    expect(result.results.every((entry) => entry.ok)).toBe(true);
   });
 });
+
+function fixtureCatalog() {
+  return [{
+    dir: "fixture",
+    name: "@mono-agent/fixture",
+    publishable: true,
+  }];
+}
+
+function sink() {
+  return {
+    text: "",
+    write(chunk) {
+      this.text += String(chunk);
+      return true;
+    },
+  };
+}

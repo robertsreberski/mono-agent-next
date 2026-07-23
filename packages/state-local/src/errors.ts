@@ -1,6 +1,7 @@
 export type StateLocalErrorCode =
   | "STATE_ABORTED"
   | "STATE_ALREADY_OPEN"
+  | "STATE_ARTIFACT_NOT_FOUND"
   | "STATE_CLOSED"
   | "STATE_CORRUPT"
   | "STATE_INVALID_CONFIG"

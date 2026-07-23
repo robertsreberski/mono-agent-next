@@ -68,7 +68,7 @@ export const packageCatalog = [
     dir: "runtime-opencode",
     name: "@mono-agent/runtime-opencode",
     category: "runtime",
-    responsibility: "Runs OpenCode JSONL process attempts with version preflight and bounded native session handling.",
+    responsibility: "Runs an authenticated loopback OpenCode server with fail-closed tool containment and bounded native sessions.",
     allowedDependencyCategories: ["core"],
     publishable: true,
   },

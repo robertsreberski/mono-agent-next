@@ -1,15 +1,25 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readFile, readdir, stat } from "node:fs/promises";
+import type { BigIntStats, Dirent } from "node:fs";
+import { lstat, opendir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import {
+  DEFAULT_APPROVAL_TIMEOUT_MS,
   HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE,
   isRuntimeTurnError,
+  parseApprovalDecision,
+  parseApprovalRequest,
+  parseArtifactRef,
+  parseAskUserRequest,
+  parseAskUserAnswer,
+  type ApprovalDecision,
+  type ApprovalRequest,
   type AskUserAnswer,
   type AskUserRequest,
   type Channel,
   type ChannelAttachment,
+  type ChannelCapabilities,
   type ChannelConversationListRequest,
   type ChannelConversationListResult,
   type ChannelDeliveryResult,
@@ -70,11 +80,28 @@ import {
 } from "./errors.js";
 import {
   connectProjectMcpTools,
-  loadProjectMcpConfig,
   type ConnectedMcpTools,
   type CoreRuntimeTool,
 } from "./mcp.js";
+import {
+  decodeAuthorityText,
+  readAuthorityFile,
+} from "./authority-read.js";
 import { moduleConfigFor } from "./module-loader.js";
+import {
+  normalizeToolResult,
+  type ToolResultArtifactSink,
+} from "./tool-result-normalizer.js";
+import {
+  assertRuntimeTurnEventBoundaryHealthy,
+  createRuntimeTurnEventBoundary,
+  normalizeChannelCapabilities,
+  normalizeRuntimeCapabilities,
+  normalizeRuntimeModelValidation,
+  normalizeRuntimeToolCall,
+  normalizeRuntimeTurnEvent,
+  normalizeRuntimeTurnResult,
+} from "./runtime-result-normalizer.js";
 import type {
   AgentHealth,
   AgentHost,
@@ -82,6 +109,8 @@ import type {
   AgentHostStartInfo,
   AgentAskAnswer,
   AgentAskAnswerStatus,
+  AgentApprovalAnswer,
+  AgentApprovalAnswerStatus,
   AgentConfigView,
   AgentConversationReplay,
   AgentConversationSummary,
@@ -100,6 +129,7 @@ const DEFAULT_MAX_CONCURRENT_TURNS = 4;
 const DEFAULT_MAX_PENDING_TURNS = 64;
 const DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
 const DEFAULT_LIFECYCLE_TIMEOUT_MS = 10_000;
+const DEFAULT_LIVE_INPUT_ACK_TIMEOUT_MS = 5_000;
 const DEFAULT_INSTRUCTION_BYTES = 1_000_000;
 const DEFAULT_MESSAGE_BYTES = 1_000_000;
 const DEFAULT_MAX_ATTACHMENTS = 10;
@@ -111,6 +141,7 @@ const MAX_PERSISTED_CONVERSATION_BYTES = 64 * 1024 * 1024;
 const MAX_PERSISTED_CONVERSATION_CHUNKS = 256;
 const TRIGGER_CLAIM_LEASE_MS = 30 * 60_000;
 const MAX_CONFIGURED_SKILLS = 256;
+const MAX_SKILL_ROOT_ENTRIES = 1_024;
 
 interface RunningModule {
   readonly loaded: LoadedAgentModule;
@@ -126,6 +157,12 @@ interface ActiveTurn {
     readonly interactionId: string;
     readonly request: AskUserRequest;
     readonly resolve: (answer: AskUserAnswer) => void;
+    readonly reject: (error: Error) => void;
+  } | undefined;
+  pendingApproval: {
+    readonly interactionId: string;
+    readonly request: ApprovalRequest;
+    readonly resolve: (decision: ApprovalDecision) => void;
     readonly reject: (error: Error) => void;
   } | undefined;
 }
@@ -180,7 +217,11 @@ class AgentHostImplementation implements AgentHost {
   readonly #options: Required<Pick<AgentHostOptions, "maxConcurrentTurns" | "maxPendingTurns" | "drainTimeoutMs" | "lifecycleTimeoutMs">>;
   readonly #hostAbort = new AbortController();
   readonly #runtimeInstances = new Map<string, Runtime>();
+  readonly #runtimeCapabilities = new Map<string, Readonly<Runtime["capabilities"]>>();
+  readonly #createdRuntimeCapabilities = new WeakMap<object, Readonly<Runtime["capabilities"]>>();
   readonly #channelInstances = new Map<string, Channel>();
+  readonly #channelCapabilities = new Map<string, Readonly<ChannelCapabilities>>();
+  readonly #createdChannelCapabilities = new WeakMap<object, Readonly<ChannelCapabilities>>();
   readonly #exporterInstances = new Map<string, Exporter>();
   readonly #running: RunningModule[] = [];
   readonly #history = new Map<string, readonly TurnMessage[]>();
@@ -261,11 +302,50 @@ class AgentHostImplementation implements AgentHost {
     return true;
   }
 
-  async offerLiveInput(conversationId: string, input: AgentLiveInput): Promise<AgentLiveInputStatus> {
+  async offerLiveInput(
+    conversationId: string,
+    input: AgentLiveInput,
+    suppliedSignal?: AbortSignal,
+  ): Promise<AgentLiveInputStatus> {
     const active = this.#activeTurns.get(conversationId);
     if (active?.liveInput === undefined) return "unavailable";
-    const result = await active.liveInput(input);
-    return isLiveInputStatus(result) ? result : "unavailable";
+    const handler = active.liveInput;
+    const normalizedInput = normalizeLiveInput(input);
+    const signal = AbortSignal.any([
+      this.#hostAbort.signal,
+      active.controller.signal,
+      ...(suppliedSignal === undefined ? [] : [suppliedSignal]),
+    ]);
+    throwIfAborted(signal);
+    let result: unknown;
+    try {
+      result = await withTimeoutSignal(
+        (boundedSignal) => waitForValueWithAbort(
+          Promise.resolve().then(() => handler(normalizedInput, boundedSignal)),
+          boundedSignal,
+        ),
+        Math.min(this.#options.lifecycleTimeoutMs, DEFAULT_LIVE_INPUT_ACK_TIMEOUT_MS),
+        signal,
+        "Runtime live-input acknowledgement",
+      );
+    } catch (error) {
+      if (this.#hostAbort.signal.aborted || suppliedSignal?.aborted === true) {
+        throw abortError("Runtime live-input acknowledgement was aborted");
+      }
+      active.controller.abort(
+        error instanceof Error
+          ? error
+          : new Error("Runtime live-input acknowledgement failed"),
+      );
+      return "requeue";
+    }
+    if (!isRuntimeLiveInputDisposition(result)) {
+      active.controller.abort(
+        new TypeError("Runtime live-input handler returned an invalid disposition"),
+      );
+      return "requeue";
+    }
+    return result;
   }
 
   async answerAsk(conversationId: string, answer: AgentAskAnswer): Promise<AgentAskAnswerStatus> {
@@ -273,9 +353,36 @@ class AgentHostImplementation implements AgentHost {
     if (active === undefined || active.pendingAsk === undefined) return "expired";
     const pending = active.pendingAsk;
     if (pending.interactionId !== answer.interactionId) return "mismatch";
-    if (!isValidAskUserAnswer(pending.request, answer)) return "mismatch";
+    let parsed: AskUserAnswer;
+    try {
+      parsed = parseAskUserAnswer(
+        { ...answer, answeredAt: new Date().toISOString() },
+        pending.request,
+      );
+    } catch {
+      return "mismatch";
+    }
     active.pendingAsk = undefined;
-    pending.resolve({ ...answer, answeredAt: new Date().toISOString() });
+    pending.resolve(parsed);
+    return "accepted";
+  }
+
+  async answerApproval(
+    conversationId: string,
+    decision: AgentApprovalAnswer,
+  ): Promise<AgentApprovalAnswerStatus> {
+    const active = this.#activeTurns.get(conversationId);
+    if (active === undefined || active.pendingApproval === undefined) return "expired";
+    const pending = active.pendingApproval;
+    if (pending.interactionId !== decision.interactionId) return "mismatch";
+    let parsed: ApprovalDecision;
+    try {
+      parsed = parseApprovalDecision(decision, pending.request);
+    } catch {
+      return "mismatch";
+    }
+    active.pendingApproval = undefined;
+    pending.resolve(parsed);
     return "accepted";
   }
 
@@ -453,14 +560,19 @@ class AgentHostImplementation implements AgentHost {
       this.#instructions = loadedInstructions.text;
       this.#instructionTools = loadedInstructions.tools;
       const environment = environmentFor(this.config);
-      const mcpConfig = await loadProjectMcpConfig(this.config.paths.mcpConfig, environment);
       const phases: readonly ModuleKind[] = ["state", "sandbox", "exporter", "runtime", "memory"];
       for (const kind of phases) await this.#startKind(kind);
-      this.#mcp = await connectProjectMcpTools(mcpConfig, {
+      this.#mcp = await connectProjectMcpTools(this.config.mcp, {
         projectRoot: this.config.projectRoot,
         ...(this.config.paths.mcpConfig === undefined ? {} : { configPath: this.config.paths.mcpConfig }),
         environment,
       });
+      assertUnambiguousToolPolicy(
+        this.config.raw.policy.tools.allow,
+        this.config.raw.policy.tools.deny,
+        this.#mcp.ambiguousAliases ?? [],
+        "agent tool policy",
+      );
       for (const instructionTool of this.#instructionTools) {
         if (this.#mcp.tools.some((tool) => tool.name === instructionTool.name)) {
           throw new AgentConfigError(`Project MCP tool conflicts with reserved Core tool ${instructionTool.name}`, [{
@@ -514,8 +626,24 @@ class AgentHostImplementation implements AgentHost {
       );
       if (instance === undefined) throw new Error(`${module.packageName} create() returned undefined`);
       this.#running.push({ loaded: module, instance });
-      if (kind === "runtime") this.#runtimeInstances.set(module.instanceId, instance as Runtime);
-      if (kind === "channel") this.#channelInstances.set(module.instanceId, instance as Channel);
+      if (kind === "runtime") {
+        const runtime = instance as Runtime;
+        const capabilities = this.#createdRuntimeCapabilities.get(runtime);
+        if (capabilities === undefined) {
+          throw new Error(`${module.instanceId} runtime capability snapshot is unavailable`);
+        }
+        this.#runtimeInstances.set(module.instanceId, runtime);
+        this.#runtimeCapabilities.set(module.instanceId, capabilities);
+      }
+      if (kind === "channel") {
+        const channel = instance as Channel;
+        const capabilities = this.#createdChannelCapabilities.get(channel);
+        if (capabilities === undefined) {
+          throw new Error(`${module.instanceId} channel capability snapshot is unavailable`);
+        }
+        this.#channelInstances.set(module.instanceId, channel);
+        this.#channelCapabilities.set(module.instanceId, capabilities);
+      }
       if (kind === "memory") this.#memory = instance as Memory;
       if (kind === "state") this.#stateStore = instance as StateStore;
       if (kind === "sandbox") this.#sandbox = instance as Sandbox;
@@ -586,6 +714,37 @@ class AgentHostImplementation implements AgentHost {
       instance = await (definition as ReservedModuleDefinition).create(context as never);
     }
     try {
+      if (module.slot === "runtime") {
+        const runtime = requireInstanceRecord(instance, "runtime instance");
+        const descriptor = Object.getOwnPropertyDescriptor(runtime, "capabilities");
+        if (descriptor === undefined || !("value" in descriptor)) {
+          throw new TypeError("runtime instance capabilities must be an own data property");
+        }
+        this.#createdRuntimeCapabilities.set(
+          runtime,
+          Object.freeze(normalizeRuntimeCapabilities(
+            descriptor.value,
+            `${module.instanceId} runtime capabilities`,
+          )),
+        );
+      }
+      if (module.slot === "channel") {
+        const channel = requireInstanceRecord(instance, "channel instance");
+        const descriptor = Object.getOwnPropertyDescriptor(channel, "capabilities");
+        if (descriptor === undefined) {
+          throw new TypeError("channel instance capabilities must be an own data property");
+        }
+        if (!("value" in descriptor)) {
+          throw new TypeError("channel instance capabilities must be an own data property");
+        }
+        this.#createdChannelCapabilities.set(
+          channel,
+          Object.freeze(normalizeChannelCapabilities(
+            descriptor.value,
+            `${module.instanceId} channel capabilities`,
+          )),
+        );
+      }
       assertCreatedInstanceCompliance(module.slot, instance);
     } catch (error) {
       throw new AgentModuleError(
@@ -644,7 +803,8 @@ class AgentHostImplementation implements AgentHost {
     if (module.slot !== "channel") return base;
     return {
       ...base,
-      dispatch: async (request, reply) => this.#dispatchChannel(request, reply),
+      dispatch: async (request, reply) =>
+        this.#dispatchChannel(module.instanceId, request, reply),
       cancel: async (request) => {
         throwIfAborted(request.signal);
         return { status: await this.cancel(request.conversationId, request.reason) ? "accepted" : "idle" };
@@ -656,12 +816,16 @@ class AgentHostImplementation implements AgentHost {
             id: input.id,
             text: input.text,
             receivedAt: input.receivedAt,
-          }),
+          }, input.signal),
         };
       },
       answerAsk: async (conversationId, answer, signal) => {
         throwIfAborted(signal);
         return { status: await this.answerAsk(conversationId, answer) };
+      },
+      answerApproval: async (conversationId, decision, signal) => {
+        throwIfAborted(signal);
+        return { status: await this.answerApproval(conversationId, decision) };
       },
       listConversations: (request) => this.#listChannelConversations(request),
       readReplay: (request) => this.#readChannelReplay(request),
@@ -761,10 +925,20 @@ class AgentHostImplementation implements AgentHost {
     return { conversationId, createdAt };
   }
 
-  async #dispatchChannel(request: ChannelInboundRequest, reply: ChannelReplySink): Promise<ChannelTurnResult> {
+  async #dispatchChannel(
+    channelInstanceId: string,
+    request: ChannelInboundRequest,
+    reply: ChannelReplySink,
+  ): Promise<ChannelTurnResult> {
     let emittedText = false;
     try {
+      const channel = this.#channelInstances.get(channelInstanceId);
+      const capabilities = this.#channelCapabilities.get(channelInstanceId);
+      if (channel === undefined || capabilities === undefined) {
+        throw new Error(`Channel ${channelInstanceId} is not started`);
+      }
       const input = normalizeSubmitInput({
+        requestId: request.requestId,
         conversationId: request.conversationId,
         text: request.text,
         ...(request.attachments.length === 0 ? {} : { attachments: request.attachments }),
@@ -785,7 +959,13 @@ class AgentHostImplementation implements AgentHost {
             await reply.emit({ type: "usage", usage: event.usage });
           }
         },
-        async (ask) => reply.emit({ type: "ask-user", ask }),
+        capabilities.askUser
+          ? async (ask: AskUserRequest) => reply.emit({ type: "ask-user", ask })
+          : undefined,
+        capabilities.approvals
+          ? async (approval: ApprovalRequest) =>
+              reply.emit({ type: "approval", approval })
+          : undefined,
       );
       if (!emittedText && response.text.length > 0) await reply.emit({ type: "text-replace", text: response.text });
       return { status: response.status === "completed" ? "completed" : "cancelled", text: response.text };
@@ -806,6 +986,7 @@ class AgentHostImplementation implements AgentHost {
     input: AgentSubmitInput,
     emit: (event: RuntimeTurnEvent) => Promise<void>,
     emitAsk?: (request: AskUserRequest) => Promise<void>,
+    emitApproval?: (request: ApprovalRequest) => Promise<void>,
   ): Promise<AgentResponse> {
     const previous = this.#conversationTails.get(input.conversationId) ?? Promise.resolve();
     let releaseConversation!: () => void;
@@ -822,12 +1003,18 @@ class AgentHostImplementation implements AgentHost {
       await waitWithAbort(previous.catch(() => {}), admissionSignal);
       const releaseSlot = await this.#semaphore.acquire(admissionSignal);
       const controller = new AbortController();
-      const active: ActiveTurn = { id: randomUUID(), controller, liveInput: undefined, pendingAsk: undefined };
+      const active: ActiveTurn = {
+        id: randomUUID(),
+        controller,
+        liveInput: undefined,
+        pendingAsk: undefined,
+        pendingApproval: undefined,
+      };
       const signal = AbortSignal.any([admissionSignal, controller.signal]);
       this.#activeTurns.set(input.conversationId, active);
       this.#active += 1;
       try {
-        return await this.#runTurn(input, active, signal, emit, emitAsk);
+        return await this.#runTurn(input, active, signal, emit, emitAsk, emitApproval);
       } finally {
         if (this.#activeTurns.get(input.conversationId) === active) {
           this.#activeTurns.delete(input.conversationId);
@@ -852,25 +1039,48 @@ class AgentHostImplementation implements AgentHost {
     signal: AbortSignal,
     emit: (event: RuntimeTurnEvent) => Promise<void>,
     emitAsk?: (request: AskUserRequest) => Promise<void>,
+    emitApproval?: (request: ApprovalRequest) => Promise<void>,
   ): Promise<AgentResponse> {
     await this.#loadConversation(input.conversationId, signal);
     const recalled = await this.#recallMemory(input, signal);
     const routes = routeCandidates(this.config, input);
-    const tools = filterTools([...this.#instructionTools, ...this.#mcp.tools], this.config, input);
+    const tools = filterTools(
+      [...this.#instructionTools, ...this.#mcp.tools],
+      this.config,
+      input,
+      this.#mcp.ambiguousAliases ?? [],
+    );
+    const requiredCapabilities = new Set(input.requiredCapabilities ?? []);
+    if ((input.attachments?.length ?? 0) > 0) requiredCapabilities.add("attachments");
+    const hasInteractionHandler =
+      input.interactionHandler !== undefined || emitApproval !== undefined;
     const errors: Error[] = [];
     for (const route of routes) {
       if (signal.aborted) throw abortError();
       const runtime = this.#runtimeInstances.get(route.runtime);
-      if (runtime === undefined) {
+      const runtimeCapabilities = this.#runtimeCapabilities.get(route.runtime);
+      if (runtime === undefined || runtimeCapabilities === undefined) {
         errors.push(new Error(`Runtime ${route.runtime} is not started`));
         continue;
       }
       active.runtime = runtime;
-      let routeCapabilities = runtime.capabilities;
-      if (runtime.validateModel !== undefined) {
-        const validation = await runtime.validateModel(route.model, signal);
+      let routeCapabilities = runtimeCapabilities;
+      if (runtime.preflightModel !== undefined || runtime.validateModel !== undefined) {
+        const rawValidation = runtime.preflightModel !== undefined
+          ? await runtime.preflightModel({ model: route.model, signal })
+          : await runtime.validateModel!(route.model, signal);
+        const validation = normalizeRuntimeModelValidation(
+          rawValidation,
+          `${route.runtime}:${route.model} model validation result`,
+        );
         if (!validation.supported) {
           errors.push(new Error(`${route.runtime} does not support model ${route.model}`));
+          continue;
+        }
+        if ((validation.nativeTools?.length ?? 0) > 0) {
+          errors.push(new Error(
+            `${route.runtime}:${route.model} advertises native tools that Core cannot govern`,
+          ));
           continue;
         }
         routeCapabilities = validation.capabilities ?? routeCapabilities;
@@ -878,8 +1088,9 @@ class AgentHostImplementation implements AgentHost {
       const eligibility = runtimeEligibility(
         routeCapabilities,
         tools,
-        input.requiredCapabilities ?? [],
+        [...requiredCapabilities],
         this.config,
+        hasInteractionHandler,
       );
       if (eligibility !== undefined) {
         errors.push(new Error(`${route.runtime}:${route.model} is ineligible: ${eligibility}`));
@@ -888,6 +1099,7 @@ class AgentHostImplementation implements AgentHost {
       let observedEffect = false;
       let runtimeReturned = false;
       let attemptOpen = true;
+      const eventBoundary = createRuntimeTurnEventBoundary();
       const observeEffect = (): void => {
         if (!attemptOpen) throw new Error("Runtime attempt context is closed");
         observedEffect = true;
@@ -900,42 +1112,98 @@ class AgentHostImplementation implements AgentHost {
           active.pendingAsk = undefined;
           pendingAsk.reject(new Error("Runtime attempt settled before AskUser completed"));
         }
+        const pendingApproval = active.pendingApproval;
+        if (pendingApproval !== undefined) {
+          active.pendingApproval = undefined;
+          pendingApproval.reject(new Error("Runtime attempt settled before approval completed"));
+        }
       };
       try {
         const runtimeContext = {
           emit: async (event: RuntimeTurnEvent) => {
             observeEffect();
-            await emit(event);
+            await emit(normalizeRuntimeTurnEvent(event, eventBoundary));
           },
           executeTool: async (call: RuntimeToolCall, toolSignal: AbortSignal) => {
             observeEffect();
+            const normalizedCall = normalizeRuntimeToolCall(call);
+            const tool = tools.find((candidate) => candidate.name === normalizedCall.name);
+            if (tool !== undefined
+              && tool.source.kind !== "core"
+              && this.config.raw.policy.approvals.default === "ask") {
+              const decision = await this.#requestApproval(
+                input,
+                active,
+                route,
+                {
+                  interactionId: randomUUID(),
+                  callId: normalizedCall.id,
+                  toolId: tool.name,
+                  displayName: tool.name,
+                  effects: ["execute", "network"],
+                  summary: `Allow ${tool.name} to execute for this turn?`,
+                  requestedAt: new Date().toISOString(),
+                },
+                AbortSignal.any([signal, toolSignal]),
+                emitApproval,
+              );
+              if (decision.decision !== "allow_once") {
+                return {
+                  callId: normalizedCall.id,
+                  isError: true,
+                  content: [{
+                    type: "text" as const,
+                    text: `Tool ${normalizedCall.name} was denied`,
+                  }],
+                } satisfies RuntimeToolResult;
+              }
+            }
             return executeTool(
-              call,
+              normalizedCall,
               tools,
               AbortSignal.any([signal, toolSignal]),
               (message) => this.#redact(message),
+              routeCapabilities.artifactResults === true
+                ? stateArtifactSink(this.#stateStore)
+                : undefined,
             );
           },
           registerLiveInput: (handler: RuntimeLiveInputHandler) => {
             if (!attemptOpen) throw new Error("Runtime attempt context is closed");
             throwIfAborted(signal);
-            const observedHandler: RuntimeLiveInputHandler = async (liveInput) => {
+            const observedHandler: RuntimeLiveInputHandler = async (liveInput, liveSignal) => {
+              throwIfAborted(liveSignal);
               observeEffect();
-              return handler(liveInput);
+              return handler(liveInput, AbortSignal.any([signal, liveSignal]));
             };
             active.liveInput = observedHandler;
             return () => {
               if (active.liveInput === observedHandler) active.liveInput = undefined;
             };
           },
-          ...(emitAsk === undefined ? {} : {
+          ...(input.interactionHandler === undefined && emitAsk === undefined ? {} : {
             askUser: (request: AskUserRequest, askSignal: AbortSignal) => {
               observeEffect();
-              return this.#awaitAskUser(
+              return this.#requestAskUser(
+                input,
                 active,
+                route,
                 request,
                 AbortSignal.any([signal, askSignal]),
                 emitAsk,
+              );
+            },
+          }),
+          ...(input.interactionHandler === undefined && emitApproval === undefined ? {} : {
+            requestApproval: (request: ApprovalRequest, approvalSignal: AbortSignal) => {
+              observeEffect();
+              return this.#requestApproval(
+                input,
+                active,
+                route,
+                request,
+                AbortSignal.any([signal, approvalSignal]),
+                emitApproval,
               );
             },
           }),
@@ -945,6 +1213,7 @@ class AgentHostImplementation implements AgentHost {
           runtimeContext,
         );
         runtimeReturned = true;
+        assertRuntimeTurnEventBoundaryHealthy(eventBoundary);
         closeAttempt();
         if (signal.aborted) throw abortError();
         const response = await this.#settle(input, route, result, active.id, signal);
@@ -961,14 +1230,40 @@ class AgentHostImplementation implements AgentHost {
     throw new AggregateError(errors, `Every eligible runtime route failed for conversation ${input.conversationId}`);
   }
 
-  async #awaitAskUser(
+  async #requestAskUser(
+    input: AgentSubmitInput,
+    active: ActiveTurn,
+    route: RuntimeRoute,
+    request: AskUserRequest,
+    signal: AbortSignal,
+    emitAsk: ((request: AskUserRequest) => Promise<void>) | undefined,
+  ): Promise<AskUserAnswer> {
+    throwIfAborted(signal);
+    const parsedRequest = parseAskUserRequest(request);
+    if (input.interactionHandler !== undefined) {
+      const answer = await waitForValueWithAbort(
+        Promise.resolve().then(() => input.interactionHandler!.askUser(parsedRequest, {
+          conversationId: input.conversationId,
+          turnId: active.id,
+          route: { runtimeInstanceId: route.runtime, model: route.model },
+          signal,
+        })),
+        signal,
+      );
+      return parseAskUserAnswer(answer, parsedRequest);
+    }
+    if (emitAsk === undefined) {
+      throw new Error("AskUser interaction handler is unavailable");
+    }
+    return this.#awaitChannelAskUser(active, parsedRequest, signal, emitAsk);
+  }
+
+  async #awaitChannelAskUser(
     active: ActiveTurn,
     request: AskUserRequest,
     signal: AbortSignal,
     emitAsk: (request: AskUserRequest) => Promise<void>,
   ): Promise<AskUserAnswer> {
-    throwIfAborted(signal);
-    assertAskUserRequest(request);
     if (active.pendingAsk !== undefined) throw new Error("Only one AskUser interaction may be pending per turn");
     let rejectPending!: (error: Error) => void;
     const answer = new Promise<AskUserAnswer>((resolve, reject) => {
@@ -986,6 +1281,90 @@ class AgentHostImplementation implements AgentHost {
     } finally {
       signal.removeEventListener("abort", abort);
       active.pendingAsk = undefined;
+    }
+  }
+
+  async #requestApproval(
+    input: AgentSubmitInput,
+    active: ActiveTurn,
+    route: RuntimeRoute,
+    request: ApprovalRequest,
+    signal: AbortSignal,
+    emitApproval: ((request: ApprovalRequest) => Promise<void>) | undefined,
+  ): Promise<ApprovalDecision> {
+    throwIfAborted(signal);
+    const parsedRequest = parseApprovalRequest(request);
+    const timeoutMs =
+      this.config.raw.policy.approvals.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+    try {
+      const decision = await withTimeoutSignal(
+        async (boundedSignal) => {
+          if (input.interactionHandler !== undefined) {
+            return input.interactionHandler.requestApproval(parsedRequest, {
+              conversationId: input.conversationId,
+              turnId: active.id,
+              route: { runtimeInstanceId: route.runtime, model: route.model },
+              signal: boundedSignal,
+            });
+          }
+          if (emitApproval === undefined) {
+            throw new Error("Approval interaction handler is unavailable");
+          }
+          return this.#awaitChannelApproval(
+            active,
+            parsedRequest,
+            boundedSignal,
+            emitApproval,
+          );
+        },
+        timeoutMs,
+        signal,
+        `Approval ${parsedRequest.interactionId}`,
+      );
+      if (decision === undefined) throw new Error("Approval handler returned no decision");
+      return parseApprovalDecision(decision, parsedRequest);
+    } catch (error) {
+      if (signal.aborted) throw abortError();
+      return parseApprovalDecision({
+        interactionId: parsedRequest.interactionId,
+        decision: "deny",
+        decidedAt: new Date().toISOString(),
+        reason: "approval failed closed",
+      }, parsedRequest);
+    }
+  }
+
+  async #awaitChannelApproval(
+    active: ActiveTurn,
+    request: ApprovalRequest,
+    signal: AbortSignal,
+    emitApproval: (request: ApprovalRequest) => Promise<void>,
+  ): Promise<ApprovalDecision> {
+    throwIfAborted(signal);
+    if (active.pendingApproval !== undefined) {
+      throw new Error("Only one approval interaction may be pending per turn");
+    }
+    let rejectPending!: (error: Error) => void;
+    const decision = new Promise<ApprovalDecision>((resolve, reject) => {
+      rejectPending = reject;
+      active.pendingApproval = {
+        interactionId: request.interactionId,
+        request,
+        resolve,
+        reject,
+      };
+    });
+    const abort = (): void => {
+      active.pendingApproval = undefined;
+      rejectPending(abortError("Approval interaction was aborted"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      const [, resolved] = await Promise.all([emitApproval(request), decision]);
+      return resolved;
+    } finally {
+      signal.removeEventListener("abort", abort);
+      active.pendingApproval = undefined;
     }
   }
 
@@ -1030,6 +1409,13 @@ class AgentHostImplementation implements AgentHost {
         ...(input.effort ?? this.config.raw.routing.effort) === undefined
           ? {}
           : { effort: input.effort ?? this.config.raw.routing.effort },
+        ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }),
+        ...(input.maxOutputTokens === undefined
+          ? {}
+          : { maxOutputTokens: input.maxOutputTokens }),
+        ...(input.responseSchema === undefined
+          ? {}
+          : { responseSchema: immutableClone(input.responseSchema) }),
       },
       ...(metadata === undefined ? {} : { metadata }),
     };
@@ -1042,8 +1428,14 @@ class AgentHostImplementation implements AgentHost {
     turnId: string,
     signal: AbortSignal,
   ): Promise<AgentResponse> {
-    const settledResult = immutableClone(result);
-    if (!isRuntimeTurnResult(settledResult)) throw new Error(`${route.runtime} returned an invalid turn result`);
+    let settledResult: RuntimeTurnResult;
+    try {
+      settledResult = normalizeRuntimeTurnResult(result);
+    } catch (error) {
+      throw new Error(`${route.runtime} returned an invalid turn result: ${errorMessage(error)}`, {
+        cause: error,
+      });
+    }
     const text = settledResult.message === undefined ? "" : textFromMessage(settledResult.message);
     if (settledResult.status === "completed") {
       const history = this.#history.get(input.conversationId) ?? [];
@@ -1109,6 +1501,9 @@ class AgentHostImplementation implements AgentHost {
       model: route.model,
       status: settledResult.status,
       text,
+      ...(settledResult.message === undefined
+        ? {}
+        : { message: immutableClone(settledResult.message) }),
       output: settledResult,
       ...(settledResult.metadata === undefined ? {} : { metadata: settledResult.metadata }),
     });
@@ -1411,6 +1806,7 @@ class AgentHostImplementation implements AgentHost {
     let delivery: ChannelDeliveryResult | undefined;
     try {
       const response = await this.submit({
+        requestId: event.id,
         conversationId,
         text: event.prompt,
         ...(event.runtime === undefined ? {} : { runtime: event.runtime }),
@@ -1485,7 +1881,8 @@ class AgentHostImplementation implements AgentHost {
     const runtime = this.#runtimeInstances.get(this.config.raw.routing.primary.runtime);
     if (runtime === undefined) throw new Error("primary runtime is unavailable for memory capture");
     const signal = AbortSignal.any([this.#hostAbort.signal, request.signal]);
-    const result = await runtime.runTurn({
+    const eventBoundary = createRuntimeTurnEventBoundary();
+    const rawResult = await runtime.runTurn({
       turnId: randomUUID(),
       conversationId: `memory-capture:${randomUUID()}`,
       model: this.config.raw.routing.primary.model,
@@ -1499,7 +1896,17 @@ class AgentHostImplementation implements AgentHost {
         maxOutputTokens: request.maxOutputTokens,
         ...(request.responseSchema === undefined ? {} : { responseSchema: request.responseSchema }),
       },
-    }, { emit: async () => undefined, executeTool: async () => { throw new Error("tools are disabled for memory capture"); } });
+    }, {
+      emit: async (event) => {
+        normalizeRuntimeTurnEvent(event, eventBoundary);
+      },
+      executeTool: async (call) => {
+        normalizeRuntimeToolCall(call);
+        throw new Error("tools are disabled for memory capture");
+      },
+    });
+    assertRuntimeTurnEventBoundaryHealthy(eventBoundary);
+    const result = normalizeRuntimeTurnResult(rawResult);
     if (result.status !== "completed") throw new Error(`memory capture runtime ended with ${result.status}`);
     return {
       text: textFromMessage(result.message),
@@ -1594,7 +2001,9 @@ class AgentHostImplementation implements AgentHost {
     }
     this.#running.length = 0;
     this.#runtimeInstances.clear();
+    this.#runtimeCapabilities.clear();
     this.#channelInstances.clear();
+    this.#channelCapabilities.clear();
     this.#exporterInstances.clear();
     this.#memory = undefined;
     this.#stateStore = undefined;
@@ -1664,10 +2073,15 @@ function runtimeEligibility(
   tools: readonly CoreRuntimeTool[],
   required: readonly string[],
   config: LoadedAgentConfig,
+  hasInteractionHandler: boolean,
 ): string | undefined {
   if (tools.length > 0 && !capabilities.tools) return "tools unsupported";
   if (tools.some((tool) => tool.source.kind === "mcp") && !capabilities.mcp) return "MCP tools unsupported";
-  if (config.raw.policy.approvals.default === "ask" && !capabilities.approvals) return "approvals unsupported";
+  if (config.raw.policy.approvals.default === "ask"
+    && tools.some((tool) => tool.source.kind !== "core")
+    && !hasInteractionHandler) {
+    return "approval interaction handler unavailable";
+  }
   if (!("mode" in config.raw.policy.sandbox && config.raw.policy.sandbox.mode === "off") && !capabilities.sandbox) {
     return "sandbox unsupported";
   }
@@ -1682,7 +2096,14 @@ function filterTools(
   tools: readonly CoreRuntimeTool[],
   config: LoadedAgentConfig,
   input: AgentSubmitInput,
+  ambiguousAliases: readonly string[],
 ): readonly CoreRuntimeTool[] {
+  assertUnambiguousToolPolicy(
+    input.toolPolicy?.allow,
+    input.toolPolicy?.deny,
+    ambiguousAliases,
+    "request tool policy",
+  );
   const instructionTools = tools.filter((tool) => tool.source.kind === "core");
   const governedTools = tools.filter((tool) => tool.source.kind !== "core");
   if (config.raw.policy.approvals.default === "deny") return instructionTools;
@@ -1699,11 +2120,32 @@ function filterTools(
   return [...instructionTools, ...governedTools.filter((tool) => allowed.has(tool.name))];
 }
 
+function assertUnambiguousToolPolicy(
+  allow: readonly string[] | undefined,
+  deny: readonly string[] | undefined,
+  ambiguousAliases: readonly string[],
+  label: string,
+): void {
+  if (ambiguousAliases.length === 0) return;
+  const ambiguous = new Set(ambiguousAliases);
+  const conflicts = [...new Set([...(allow ?? []), ...(deny ?? [])])]
+    .filter((name) => ambiguous.has(name))
+    .sort((left, right) => left.localeCompare(right));
+  if (conflicts.length > 0) {
+    throw new AgentConfigError(`${label} contains ambiguous MCP tool aliases`, [{
+      path: label === "agent tool policy" ? "policy.tools" : "toolPolicy",
+      message: `use canonical tool ids instead of ${conflicts.map((name) => JSON.stringify(name)).join(", ")}`,
+      code: "ambiguous_tool_alias",
+    }]);
+  }
+}
+
 async function executeTool(
   call: RuntimeToolCall,
   tools: readonly CoreRuntimeTool[],
   signal: AbortSignal,
   redact: (message: string) => string,
+  artifactSink: ToolResultArtifactSink | undefined,
 ): Promise<RuntimeToolResult> {
   const tool = tools.find((candidate) => candidate.name === call.name);
   if (tool === undefined) {
@@ -1711,87 +2153,42 @@ async function executeTool(
   }
   try {
     const output = await tool.execute(call.input, { signal });
-    return { callId: call.id, content: normalizeToolContent(output) };
+    const normalized = await normalizeToolResult(output, {
+      signal,
+      ...(artifactSink === undefined ? {} : { artifactSink }),
+    });
+    return {
+      callId: call.id,
+      content: normalized.content,
+      ...(normalized.isError ? { isError: true } : {}),
+    };
   } catch (error) {
     return {
       callId: call.id,
       isError: true,
-      content: [{ type: "text", text: redact(errorMessage(error)) }],
+      content: [{
+        type: "text",
+        text: boundedUtf8(redact(errorMessage(error)), 16_384),
+      }],
     };
   }
 }
 
-function normalizeToolContent(output: unknown): RuntimeToolResult["content"] {
-  if (isRecord(output) && Array.isArray(output.content)) {
-    return output.content.map((part) => {
-      if (isRecord(part) && part.type === "text" && typeof part.text === "string") return { type: "text" as const, text: part.text };
-      if (isRecord(part) && part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string") {
-        return { type: "file" as const, data: part.data, mediaType: part.mimeType };
-      }
-      return { type: "json" as const, value: toJsonValue(part) };
-    });
-  }
-  return [{ type: "json", value: toJsonValue(output) }];
+function stateArtifactSink(state: StateStore | undefined): ToolResultArtifactSink | undefined {
+  if (state?.putArtifact === undefined) return undefined;
+  return {
+    putArtifact: (request) => state.putArtifact!(request),
+  };
 }
 
-function isRuntimeTurnResult(value: unknown): value is RuntimeTurnResult {
-  if (!isRecord(value)
-    || !(["completed", "cancelled", "max-turns"] as const).includes(value.status as never)
-    || (value.session !== undefined && !isRuntimeSession(value.session))
-    || (value.usage !== undefined && !isRuntimeUsage(value.usage))
-    || (value.metadata !== undefined && !isJsonObject(value.metadata))) {
-    return false;
-  }
-  if (value.status === "completed") {
-    return isTurnMessage(value.message)
-      && (value.structuredOutput === undefined || isJsonValue(value.structuredOutput));
-  }
-  return value.message === undefined || isTurnMessage(value.message);
-}
-
-function isRuntimeSession(value: unknown): value is RuntimeSession {
-  return isJsonObject(value) && typeof value.id === "string" && value.id.trim().length > 0;
-}
-
-function isRuntimeUsage(value: unknown): boolean {
-  if (!isJsonObject(value)
-    || !isNonNegativeFiniteNumber(value.inputTokens)
-    || !isNonNegativeFiniteNumber(value.outputTokens)) {
-    return false;
-  }
-  for (const key of [
-    "totalTokens",
-    "cacheReadTokens",
-    "cacheWriteTokens",
-    "reasoningTokens",
-    "contextWindow",
-    "contextUsed",
-  ] as const) {
-    if (value[key] !== undefined && !isNonNegativeFiniteNumber(value[key])) return false;
-  }
-  if (value.sessionEvicted !== undefined && typeof value.sessionEvicted !== "boolean") return false;
-  if (value.cost !== undefined && !isRuntimeUsageCost(value.cost)) return false;
-  return value.compaction === undefined || isRuntimeCompaction(value.compaction);
-}
-
-function isRuntimeUsageCost(value: unknown): boolean {
-  if (!isJsonObject(value) || value.currency !== "USD" || !isNonNegativeFiniteNumber(value.total)) return false;
-  for (const key of ["input", "output", "cacheRead", "cacheWrite"] as const) {
-    if (value[key] !== undefined && !isNonNegativeFiniteNumber(value[key])) return false;
-  }
-  return true;
-}
-
-function isRuntimeCompaction(value: unknown): boolean {
-  if (!isJsonObject(value) || typeof value.compacted !== "boolean") return false;
-  for (const key of ["tokensBefore", "tokensAfter", "summaryTokens"] as const) {
-    if (value[key] !== undefined && !isNonNegativeFiniteNumber(value[key])) return false;
-  }
-  return value.firstRetainedMessageId === undefined || typeof value.firstRetainedMessageId === "string";
-}
-
-function isNonNegativeFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+function boundedUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  const suffix = "...";
+  const payloadBytes = maxBytes - Buffer.byteLength(suffix, "utf8");
+  const bytes = Buffer.from(value, "utf8");
+  let end = Math.max(0, payloadBytes);
+  while (end > 0 && (bytes[end] ?? 0) >> 6 === 0b10) end -= 1;
+  return `${bytes.subarray(0, end).toString("utf8")}${suffix}`;
 }
 
 function isTurnMessage(value: unknown): value is TurnMessage {
@@ -1837,6 +2234,14 @@ function isRuntimeToolResultPart(value: unknown): boolean {
     return typeof value.mediaType === "string"
       && (typeof value.data === "string" || value.data instanceof Uint8Array)
       && (value.name === undefined || typeof value.name === "string");
+  }
+  if (value.type === "artifact") {
+    try {
+      parseArtifactRef(value.ref);
+      return value.preview === undefined || typeof value.preview === "string";
+    } catch {
+      return false;
+    }
   }
   return false;
 }
@@ -1884,15 +2289,12 @@ function moduleProvenance(module: LoadedAgentModule, config: LoadedAgentConfig):
 }
 
 async function readInstructions(config: LoadedAgentConfig): Promise<LoadedInstructions> {
-  const info = await stat(config.paths.instructions);
-  if (!info.isFile()) throw new AgentConfigError("Agent instructions are not a regular file", [
-    { path: "agent.instructions", message: "must resolve to a regular file", code: "file_type" },
-  ]);
   const maxBytes = config.raw.context?.skills?.maxBytes ?? DEFAULT_INSTRUCTION_BYTES;
-  if (info.size > maxBytes) throw new AgentConfigError("Agent instructions exceed the configured context bound", [
-    { path: "agent.instructions", message: `${info.size} bytes exceeds ${maxBytes}`, code: "size" },
-  ]);
-  const instructions = await readFile(config.paths.instructions, "utf8");
+  const instructions = await readAuthorityText(
+    config.paths.instructions,
+    maxBytes,
+    "agent.instructions",
+  );
   const settings = config.raw.context?.skills;
   if (settings === undefined || config.paths.skillRoots.length === 0) return { text: instructions, tools: [] };
 
@@ -1907,20 +2309,15 @@ async function readInstructions(config: LoadedAgentConfig): Promise<LoadedInstru
   const skills: Array<{ readonly name: string; readonly description: string; readonly source: string }> = [];
   const names = new Set<string>();
   const rendered: string[] = [];
-  for (const skillPath of skillFiles) {
-    const skillInfo = await lstat(skillPath);
-    if (!skillInfo.isFile() || skillInfo.isSymbolicLink()) {
-      throw new AgentConfigError("Configured skill is not a regular file", [
-        { path: "context.skills.roots", message: `${skillPath} is not a regular no-follow file`, code: "file_type" },
-      ]);
-    }
-    if (skillInfo.size > maxBytes) {
-      throw new AgentConfigError("Configured skill exceeds the context bound", [
-        { path: "context.skills.maxBytes", message: `${skillPath} exceeds ${maxBytes} bytes`, code: "size" },
-      ]);
-    }
-    const source = await readFile(skillPath, "utf8");
-    const metadata = readSkillMetadata(source, skillPath);
+  for (const skill of skillFiles) {
+    for (const guard of skill.guards) await assertSkillDirectoryIdentity(guard);
+    const source = await readAuthorityText(
+      skill.path,
+      maxBytes,
+      "context.skills.roots",
+    );
+    for (const guard of skill.guards) await assertSkillDirectoryIdentity(guard);
+    const metadata = readSkillMetadata(source, skill.path);
     if (names.has(metadata.name)) {
       throw new AgentConfigError("Configured skill names must be unique", [{
         path: "context.skills.roots",
@@ -1949,6 +2346,25 @@ async function readInstructions(config: LoadedAgentConfig): Promise<LoadedInstru
     text: combined,
     tools: settings.disclosure === "full" ? [] : [createReadSkillTool(skills)],
   };
+}
+
+async function readAuthorityText(
+  path: string,
+  maxBytes: number,
+  issuePath: string,
+): Promise<string> {
+  try {
+    return decodeAuthorityText(await readAuthorityFile(path, {
+      maxBytes,
+      requireSingleLink: true,
+    }));
+  } catch (error) {
+    throw new AgentConfigError(`Could not securely read ${path}`, [{
+      path: issuePath,
+      message: errorMessage(error),
+      code: "authority_read",
+    }]);
+  }
 }
 
 function createReadSkillTool(
@@ -1982,31 +2398,110 @@ function createReadSkillTool(
   });
 }
 
-async function discoverSkillFiles(roots: readonly string[]): Promise<readonly string[]> {
-  const files = new Set<string>();
+interface SkillDirectoryGuard {
+  readonly path: string;
+  readonly device: bigint;
+  readonly inode: bigint;
+  readonly modifiedAtNs: bigint;
+  readonly changedAtNs: bigint;
+}
+
+interface DiscoveredSkillFile {
+  readonly path: string;
+  readonly guards: readonly SkillDirectoryGuard[];
+}
+
+async function discoverSkillFiles(
+  roots: readonly string[],
+): Promise<readonly DiscoveredSkillFile[]> {
+  const files = new Map<string, DiscoveredSkillFile>();
   for (const root of [...roots].sort((left, right) => left.localeCompare(right))) {
-    const rootInfo = await lstat(root).catch((error: unknown) => {
-      throw new AgentConfigError("Configured skill root is unavailable", [
-        { path: "context.skills.roots", message: `${root}: ${errorMessage(error)}`, code: "config_read" },
-      ]);
-    });
-    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
-      throw new AgentConfigError("Configured skill root is not a directory", [
-        { path: "context.skills.roots", message: `${root} is not a regular no-follow directory`, code: "file_type" },
-      ]);
-    }
+    const rootGuard = await readSkillDirectoryGuard(root);
     const direct = join(root, "SKILL.md");
     const directInfo = await lstat(direct).catch((error: unknown) => isNotFoundError(error) ? undefined : Promise.reject(error));
-    if (directInfo !== undefined) files.add(direct);
-    const entries = await readdir(root, { withFileTypes: true });
+    if (directInfo !== undefined) {
+      files.set(direct, { path: direct, guards: [rootGuard] });
+    }
+    const entries: Dirent[] = [];
+    const directory = await opendir(root);
+    for await (const entry of directory) {
+      entries.push(entry);
+      if (entries.length > MAX_SKILL_ROOT_ENTRIES) {
+        throw new AgentConfigError("Configured skill root exceeds the discovery bound", [{
+          path: "context.skills.roots",
+          message: `${root} contains more than ${MAX_SKILL_ROOT_ENTRIES} entries`,
+          code: "size",
+        }]);
+      }
+    }
+    await assertSkillDirectoryIdentity(rootGuard);
     for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
       if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-      const candidate = join(root, entry.name, "SKILL.md");
+      const child = join(root, entry.name);
+      let childGuard: SkillDirectoryGuard;
+      try {
+        childGuard = await readSkillDirectoryGuard(child);
+      } catch {
+        continue;
+      }
+      const candidate = join(child, "SKILL.md");
       const candidateInfo = await lstat(candidate).catch((error: unknown) => isNotFoundError(error) ? undefined : Promise.reject(error));
-      if (candidateInfo !== undefined) files.add(candidate);
+      if (candidateInfo !== undefined) {
+        files.set(candidate, { path: candidate, guards: [rootGuard, childGuard] });
+      }
     }
+    await assertSkillDirectoryIdentity(rootGuard);
   }
-  return Object.freeze([...files].sort((left, right) => left.localeCompare(right)));
+  return Object.freeze([...files.values()].sort((left, right) => left.path.localeCompare(right.path)));
+}
+
+async function readSkillDirectoryGuard(path: string): Promise<SkillDirectoryGuard> {
+  let info: BigIntStats;
+  try {
+    info = await lstat(path, { bigint: true });
+  } catch (error) {
+    throw new AgentConfigError("Configured skill root is unavailable", [{
+      path: "context.skills.roots",
+      message: `${path}: ${errorMessage(error)}`,
+      code: "config_read",
+    }]);
+  }
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new AgentConfigError("Configured skill root is not a directory", [{
+      path: "context.skills.roots",
+      message: `${path} is not a regular no-follow directory`,
+      code: "file_type",
+    }]);
+  }
+  return {
+    path,
+    device: info.dev,
+    inode: info.ino,
+    modifiedAtNs: info.mtimeNs,
+    changedAtNs: info.ctimeNs,
+  };
+}
+
+async function assertSkillDirectoryIdentity(guard: SkillDirectoryGuard): Promise<void> {
+  const current = await lstat(guard.path, { bigint: true }).catch((error: unknown) => {
+    throw new AgentConfigError("Configured skill root changed during discovery", [{
+      path: "context.skills.roots",
+      message: `${guard.path}: ${errorMessage(error)}`,
+      code: "identity_changed",
+    }]);
+  });
+  if (!current.isDirectory()
+    || current.isSymbolicLink()
+    || current.dev !== guard.device
+    || current.ino !== guard.inode
+    || current.mtimeNs !== guard.modifiedAtNs
+    || current.ctimeNs !== guard.changedAtNs) {
+    throw new AgentConfigError("Configured skill root changed during discovery", [{
+      path: "context.skills.roots",
+      message: `${guard.path} changed identity while skills were read`,
+      code: "identity_changed",
+    }]);
+  }
 }
 
 function readSkillMetadata(source: string, skillPath: string): { readonly name: string; readonly description: string } {
@@ -2068,6 +2563,21 @@ function assertCreatedInstanceCompliance(kind: ModuleKind, value: unknown): asse
       "listPresence",
     ], "state instance");
     assertOptionalInstanceFunction(instance, "publishHostPresence", "state instance");
+    const artifactMethods = [
+      "putArtifact",
+      "readArtifact",
+      "deleteArtifact",
+      "listArtifacts",
+    ] as const;
+    const presentArtifactMethods = artifactMethods.filter((method) =>
+      instance[method] !== undefined);
+    if (presentArtifactMethods.length > 0
+      && presentArtifactMethods.length !== artifactMethods.length) {
+      throw new TypeError("state instance must implement the complete artifact method group");
+    }
+    for (const method of artifactMethods) {
+      assertOptionalInstanceFunction(instance, method, "state instance");
+    }
     return;
   }
   if (kind === "exporter") {
@@ -2174,20 +2684,73 @@ function attachmentParts(
 }
 
 function normalizeSubmitInput(input: AgentSubmitInput): AgentSubmitInput {
+  input = ownDataRecord(
+    input,
+    "submission",
+    [
+      "requestId",
+      "conversationId",
+      "text",
+      "attachments",
+      "runtime",
+      "model",
+      "effort",
+      "maxTurns",
+      "maxOutputTokens",
+      "responseSchema",
+      "interactionHandler",
+      "signal",
+      "metadata",
+      "requiredCapabilities",
+      "toolPolicy",
+    ],
+  ) as unknown as AgentSubmitInput;
+  const requestId = input.requestId ?? randomUUID();
+  if (typeof requestId !== "string" || requestId.trim().length === 0) {
+    throw new TypeError("requestId must be non-empty");
+  }
+  assertBoundedText(requestId, "requestId", 512);
   if (typeof input.text !== "string") throw new TypeError("text must be a string");
   assertBoundedText(input.text, "text", DEFAULT_MESSAGE_BYTES);
-  const attachments = input.attachments ?? [];
-  if (attachments.length > DEFAULT_MAX_ATTACHMENTS) {
-    throw new RangeError(`attachments exceeds the ${DEFAULT_MAX_ATTACHMENTS} item limit`);
+  if (input.maxTurns !== undefined) {
+    boundedSubmitInteger(input.maxTurns, "maxTurns", 1, 10_000);
   }
+  if (input.maxOutputTokens !== undefined) {
+    boundedSubmitInteger(input.maxOutputTokens, "maxOutputTokens", 1, 100_000_000);
+  }
+  if (input.responseSchema !== undefined) {
+    if (!isJsonObject(input.responseSchema)) {
+      throw new TypeError("responseSchema must be a JSON object");
+    }
+    const encoded = JSON.stringify(input.responseSchema);
+    if (Buffer.byteLength(encoded, "utf8") > 64 * 1024) {
+      throw new RangeError("responseSchema exceeds 65536 bytes");
+    }
+  }
+  if (input.interactionHandler !== undefined
+    && (typeof input.interactionHandler.askUser !== "function"
+      || typeof input.interactionHandler.requestApproval !== "function")) {
+    throw new TypeError("interactionHandler must implement askUser and requestApproval");
+  }
+  const attachments = denseOwnDataArray(
+    input.attachments ?? [],
+    "attachments",
+    DEFAULT_MAX_ATTACHMENTS,
+  );
   let totalBytes = 0;
-  const normalized = attachments.map((attachment, index): ChannelAttachment => {
+  const normalized = attachments.map((value, index): ChannelAttachment => {
+    const attachment = ownDataRecord(
+      value,
+      `attachments.${String(index)}`,
+      ["id", "kind", "name", "mediaType", "sizeBytes", "data"],
+    );
     if (
       typeof attachment.id !== "string" || attachment.id.trim().length === 0
       || typeof attachment.name !== "string" || attachment.name.trim().length === 0
       || typeof attachment.mediaType !== "string" || attachment.mediaType.trim().length === 0
       || (attachment.kind !== "image" && attachment.kind !== "audio" && attachment.kind !== "file")
       || !(attachment.data instanceof Uint8Array)
+      || typeof attachment.sizeBytes !== "number"
       || !Number.isSafeInteger(attachment.sizeBytes)
       || attachment.sizeBytes < 0
       || attachment.sizeBytes !== attachment.data.byteLength
@@ -2201,11 +2764,112 @@ function normalizeSubmitInput(input: AgentSubmitInput): AgentSubmitInput {
     if (totalBytes > DEFAULT_TOTAL_ATTACHMENT_BYTES) {
       throw new RangeError(`attachments exceed ${DEFAULT_TOTAL_ATTACHMENT_BYTES} total bytes`);
     }
-    return Object.freeze({ ...attachment, data: new Uint8Array(attachment.data) });
+    return Object.freeze({
+      id: attachment.id,
+      kind: attachment.kind,
+      name: attachment.name,
+      mediaType: attachment.mediaType,
+      sizeBytes: attachment.sizeBytes,
+      data: new Uint8Array(attachment.data),
+    });
   });
   const { attachments: _ignoredAttachments, ...rest } = input;
   void _ignoredAttachments;
-  return { ...rest, ...(normalized.length === 0 ? {} : { attachments: Object.freeze(normalized) }) };
+  return {
+    ...rest,
+    requestId,
+    ...(normalized.length === 0 ? {} : { attachments: Object.freeze(normalized) }),
+  };
+}
+
+function ownDataRecord(
+  value: unknown,
+  path: string,
+  allowed: readonly string[],
+): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(`${path} must be a plain object`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`${path} must be a plain object`);
+  }
+  const allowedKeys = new Set(allowed);
+  const detached: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowedKeys.has(key)) {
+      throw new TypeError(`${path} contains an unknown field`);
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor)) {
+      throw new TypeError(`${path}.${key} must be a data property`);
+    }
+    detached[key] = descriptor.value;
+  }
+  return detached;
+}
+
+function denseOwnDataArray(
+  value: unknown,
+  path: string,
+  maximum: number,
+): readonly unknown[] {
+  if (!Array.isArray(value)) throw new TypeError(`${path} must be an array`);
+  const length = value.length;
+  if (!Number.isSafeInteger(length) || length > maximum) {
+    throw new RangeError(`${path} exceeds the ${maximum} item limit`);
+  }
+  const allowed = new Set(["length"]);
+  for (let index = 0; index < length; index += 1) allowed.add(String(index));
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !allowed.has(key)) {
+      throw new TypeError(`${path} contains an unknown array field`);
+    }
+  }
+  const detached: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (descriptor === undefined) {
+      throw new TypeError(`${path}.${String(index)} is required`);
+    }
+    if (!("value" in descriptor)) {
+      throw new TypeError(`${path}.${String(index)} must be a data property`);
+    }
+    detached.push(descriptor.value);
+  }
+  return detached;
+}
+
+function normalizeLiveInput(input: AgentLiveInput): AgentLiveInput {
+  if (typeof input.id !== "string" || input.id.trim().length === 0) {
+    throw new TypeError("live input id must be non-empty");
+  }
+  assertBoundedText(input.id, "live input id", 512);
+  if (typeof input.text !== "string") throw new TypeError("live input text must be a string");
+  assertBoundedText(input.text, "live input text", DEFAULT_MESSAGE_BYTES);
+  if (
+    typeof input.receivedAt !== "string"
+    || !Number.isFinite(Date.parse(input.receivedAt))
+    || new Date(input.receivedAt).toISOString() !== input.receivedAt
+  ) {
+    throw new TypeError("live input receivedAt must be a canonical UTC timestamp");
+  }
+  return Object.freeze({
+    id: input.id,
+    text: input.text,
+    receivedAt: input.receivedAt,
+  });
+}
+
+function boundedSubmitInteger(
+  value: number,
+  name: string,
+  minimum: number,
+  maximum: number,
+): void {
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new RangeError(`${name} must be an integer from ${minimum} through ${maximum}`);
+  }
 }
 
 function renderRecalledMemory(records: readonly MemoryRecord[]): string {
@@ -2395,8 +3059,10 @@ function calendarDateKey(timestamp: string, timeZone: string): string {
   return `${values.year ?? ""}-${values.month ?? ""}-${values.day ?? ""}`;
 }
 
-function isLiveInputStatus(value: unknown): value is AgentLiveInputStatus {
-  return value === "applied" || value === "requeue" || value === "discarded" || value === "unavailable";
+function isRuntimeLiveInputDisposition(
+  value: unknown,
+): value is Exclude<AgentLiveInputStatus, "unavailable"> {
+  return value === "applied" || value === "requeue" || value === "discarded";
 }
 
 function isSafeRuntimeFallback(error: unknown): boolean {
@@ -2441,53 +3107,6 @@ function stableReplayId(conversationId: string, index: number, message: TurnMess
 function assertBoundedText(value: string, name: string, maxBytes: number): void {
   const bytes = Buffer.byteLength(value, "utf8");
   if (bytes > maxBytes) throw new RangeError(`${name} exceeds ${maxBytes} bytes`);
-}
-
-function assertAskUserRequest(request: AskUserRequest): void {
-  if (request.interactionId.trim().length === 0 || request.requestedAt.trim().length === 0) {
-    throw new TypeError("AskUser interactionId and requestedAt must be non-empty");
-  }
-  if (request.questions.length < 1 || request.questions.length > 3) {
-    throw new RangeError("AskUser requires between one and three questions");
-  }
-  const ids = new Set<string>();
-  for (const question of request.questions) {
-    if (question.id.trim().length === 0 || ids.has(question.id)) throw new TypeError("AskUser question ids must be unique and non-empty");
-    ids.add(question.id);
-    if (question.prompt.trim().length === 0) throw new TypeError("AskUser prompts must be non-empty");
-    assertBoundedText(question.prompt, "AskUser prompt", 16_384);
-    if (typeof question.allowFreeText !== "boolean" || typeof question.multiple !== "boolean") {
-      throw new TypeError("AskUser question flags must be boolean");
-    }
-    const choices = question.choices ?? [];
-    if (choices.length > 20 || (choices.length === 0 && !question.allowFreeText)) {
-      throw new RangeError("AskUser questions require free text or at most twenty choices");
-    }
-    const values = new Set<string>();
-    for (const choice of choices) {
-      if (choice.value.trim().length === 0 || choice.label.trim().length === 0 || values.has(choice.value)) {
-        throw new TypeError("AskUser choices must have unique non-empty values and labels");
-      }
-      values.add(choice.value);
-    }
-  }
-}
-
-function isValidAskUserAnswer(request: AskUserRequest, answer: AgentAskAnswer): boolean {
-  const questions = new Map(request.questions.map((question) => [question.id, question]));
-  const entries = Object.entries(answer.answers);
-  if (entries.length !== questions.size) return false;
-  for (const [questionId, values] of entries) {
-    const question = questions.get(questionId);
-    if (question === undefined || !Array.isArray(values) || values.length === 0) return false;
-    if (!question.multiple && values.length !== 1) return false;
-    const choices = new Set((question.choices ?? []).map((choice) => choice.value));
-    for (const value of values) {
-      if (typeof value !== "string" || value.trim().length === 0 || Buffer.byteLength(value, "utf8") > 16_384) return false;
-      if (!choices.has(value) && !question.allowFreeText) return false;
-    }
-  }
-  return true;
 }
 
 function isJsonObject(value: unknown): value is JsonObject {
@@ -2545,6 +3164,28 @@ async function waitWithAbort(promise: Promise<unknown>, signal: AbortSignal): Pr
   }
 }
 
+async function waitForValueWithAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) {
+    void promise.catch(() => undefined);
+    throw signal.reason instanceof Error ? signal.reason : abortError();
+  }
+  let listener: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    listener = () => {
+      reject(signal.reason instanceof Error ? signal.reason : abortError());
+    };
+    signal.addEventListener("abort", listener, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    if (listener !== undefined) signal.removeEventListener("abort", listener);
+  }
+}
+
 async function withTimeoutSignal<T>(
   operation: (signal: AbortSignal) => T | PromiseLike<T> | undefined,
   timeoutMs: number,
@@ -2565,7 +3206,10 @@ async function withTimeoutSignal<T>(
   });
   const running = Promise.resolve().then(() => operation(signal));
   try {
-    return await Promise.race([running, timedOut]);
+    return await Promise.race([
+      waitForValueWithAbort(running, signal),
+      timedOut,
+    ]);
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
   }

@@ -52,12 +52,71 @@ class FakeCodexProcess extends EventEmitter implements ProcessLike {
 }
 
 describe("runtime-codex", () => {
-  it("imports its module definition without network work", async () => {
+  it("validates deterministic model and config syntax before create without effects", async () => {
     const fetch = vi.spyOn(globalThis, "fetch");
     const definition = await import("../index.js");
+    const config = parseRuntimeCodexConfig({});
+    const validation = definition.monoAgentModule.validateModel?.({
+      model: "gpt-5.6-codex",
+      config,
+    });
+
     expect(definition.monoAgentModule.manifest.packageName).toBe("@mono-agent/runtime-codex");
+    expect(validation).toEqual({
+      supported: true,
+      capabilities: {
+        tools: false,
+        mcp: false,
+        attachments: false,
+        approvals: false,
+        structuredOutput: true,
+        sandbox: false,
+        sessions: true,
+        liveInput: true,
+      },
+      nativeTools: [],
+    });
+    expect(validation).not.toBeInstanceOf(Promise);
+    expect(definition.monoAgentModule.validateModel?.({
+      model: " gpt-5.6-codex",
+      config,
+    })).toMatchObject({
+      supported: false,
+      diagnostics: [{ code: "runtime-codex.model", severity: "error" }],
+    });
+    expect(() => definition.monoAgentModule.validateModel?.({
+      model: "gpt-5.6-codex",
+      config: { binary: " codex" },
+    })).toThrow("must be a non-empty trimmed string");
     expect(fetch).not.toHaveBeenCalled();
     fetch.mockRestore();
+  });
+
+  it("keeps instance preflight effect-free and removes the deprecated validator", async () => {
+    const launch = vi.fn<SpawnProcess>();
+    const runtime = createRuntimeCodex({
+      config: parseRuntimeCodexConfig({ requestTimeoutMs: 1_000 }),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      spawnProcess: launch,
+    });
+
+    expect(await runtime.preflightModel?.({
+      model: "gpt-5.6-codex",
+      signal: new AbortController().signal,
+    })).toMatchObject({ supported: true, nativeTools: [] });
+    expect(await runtime.preflightModel?.({
+      model: "bad\u0000model",
+      signal: new AbortController().signal,
+    })).toMatchObject({ supported: false });
+    const aborted = new AbortController();
+    aborted.abort(new Error("preflight cancelled"));
+    expect(() => runtime.preflightModel?.({
+      model: "gpt-5.6-codex",
+      signal: aborted.signal,
+    })).toThrow("preflight cancelled");
+    expect(runtime.validateModel).toBeUndefined();
+    expect(launch).not.toHaveBeenCalled();
   });
 
   it("uses a bounded direct app-server protocol and returns native session linkage", async () => {
