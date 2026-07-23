@@ -10,7 +10,12 @@ import {
   slackConfigSchema,
 } from "./config.js";
 import { SlackDelivery } from "./delivery.js";
-import { parseSlackDestination, parseSlackIdentifier, slackConversationId } from "./destination.js";
+import {
+  isSlackMessageTimestamp,
+  parseSlackDestination,
+  parseSlackIdentifier,
+  slackConversationId,
+} from "./destination.js";
 import { SlackInbox } from "./inbox.js";
 import {
   createSlackSendTools,
@@ -472,10 +477,14 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
         message.conversationId.slice("slack:".length),
         "Slack delivery history",
       );
+      if (result.status !== "delivered" && result.status !== "duplicate") {
+        throw new TypeError("Slack delivery history requires confirmed delivery.");
+      }
       return {
         conversationId: slackConversationId(destination.threadId === undefined
-          ? { channelId: destination.channelId,
-              threadId: parseSlackIdentifier(result.messageId, "confirmed message id") }
+          ? isSlackMessageTimestamp(result.messageId)
+            ? { channelId: destination.channelId, threadId: result.messageId }
+            : { channelId: destination.channelId }
           : destination),
       };
     },

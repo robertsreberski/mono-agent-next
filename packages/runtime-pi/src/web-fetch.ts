@@ -1,10 +1,12 @@
 import { Buffer } from "node:buffer";
 import { lookup } from "node:dns/promises";
-import { request as httpsRequest } from "node:https";
+import {
+  request as httpsRequest,
+  type RequestOptions as HttpsRequestOptions,
+} from "node:https";
 import { BlockList, isIP } from "node:net";
 
 export const WEB_FETCH_MAX_URL_BYTES = 8 * 1024;
-export const WEB_FETCH_MAX_PROMPT_BYTES = 4 * 1024;
 export const WEB_FETCH_MAX_HEADER_VALUE_BYTES = 4 * 1024;
 export const WEB_FETCH_MAX_RESPONSE_BYTES = 512 * 1024;
 export const WEB_FETCH_MAX_OUTPUT_BYTES = 64 * 1024;
@@ -27,7 +29,6 @@ const PUBLIC_ADDRESS_BLOCKLISTS = createPublicAddressBlocklists();
 
 export interface WebFetchInput {
   readonly url: string;
-  readonly prompt?: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly maxOutputBytes: number;
 }
@@ -56,6 +57,12 @@ export interface WebFetchOptions {
   ) => Promise<WebFetchResponse>;
   readonly timeoutMs?: number;
   readonly retryDelaysMs?: readonly number[];
+}
+
+interface PinnedHttpsRequestOptions extends HttpsRequestOptions {
+  // Supported by node:net but not yet projected through @types/node's
+  // http.RequestOptions even though https.request forwards it.
+  readonly autoSelectFamily: false;
 }
 
 function webFetchError(message: string, cause?: unknown): Error {
@@ -236,7 +243,8 @@ function responseHeaders(rawHeaders: readonly string[]): Headers {
   return headers;
 }
 
-async function requestPinnedHttps(
+/** @internal Exported only for direct transport regression coverage. */
+export async function requestPinnedHttps(
   url: URL,
   address: WebFetchAddress,
   headers: Headers,
@@ -252,7 +260,7 @@ async function requestPinnedHttps(
       settled = true;
       callback();
     };
-    const request = httpsRequest({
+    const requestOptions: PinnedHttpsRequestOptions = {
       protocol: "https:",
       hostname: hostnameWithoutBrackets(url.hostname),
       port: url.port === "" ? 443 : Number(url.port),
@@ -263,10 +271,15 @@ async function requestPinnedHttps(
       ...(isIP(hostnameWithoutBrackets(url.hostname)) === 0
         ? { servername: hostnameWithoutBrackets(url.hostname) }
         : {}),
+      // Node enables family auto-selection by default. That mode calls a
+      // custom lookup with `all: true`, but this callback deliberately returns
+      // the one scalar address that passed the public-address policy.
+      autoSelectFamily: false,
       lookup(_hostname, _options, callback) {
         callback(null, address.address, address.family);
       },
-    }, (response) => {
+    };
+    const request = httpsRequest(requestOptions, (response) => {
       const declaredLength = response.headers["content-length"];
       if (typeof declaredLength === "string"
         && /^\d+$/u.test(declaredLength)
@@ -327,12 +340,14 @@ function boundedUtf8(value: string, maxBytes: number): string {
   const encoded = Buffer.from(value, "utf8");
   if (encoded.byteLength <= maxBytes) return value;
   const notice = `\n\n[WebFetch output truncated to ${String(maxBytes)} UTF-8 bytes.]`;
-  const contentLimit = Math.max(0, maxBytes - Buffer.byteLength(notice, "utf8"));
+  const noticeBytes = Buffer.byteLength(notice, "utf8");
+  const includeNotice = noticeBytes <= maxBytes;
+  const contentLimit = includeNotice ? maxBytes - noticeBytes : maxBytes;
   let end = contentLimit;
   while (end > 0 && ((encoded[end] ?? 0) & 0b1100_0000) === 0b1000_0000) {
     end -= 1;
   }
-  return `${encoded.subarray(0, end).toString("utf8")}${notice}`;
+  return `${encoded.subarray(0, end).toString("utf8")}${includeNotice ? notice : ""}`;
 }
 
 function crossOriginHeaders(): Headers {

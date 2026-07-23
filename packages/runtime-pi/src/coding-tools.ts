@@ -1,9 +1,9 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
-import { access, glob as globFiles, open } from "node:fs/promises";
+import { constants, type Dir, type Dirent } from "node:fs";
+import { access, open, opendir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, matchesGlob, relative, resolve, sep } from "node:path";
 
 import {
   createBashTool,
@@ -44,7 +44,6 @@ import {
 import {
   fetchPublicWeb,
   WEB_FETCH_MAX_OUTPUT_BYTES,
-  WEB_FETCH_MAX_PROMPT_BYTES,
   WEB_FETCH_MAX_URL_BYTES,
   type WebFetchInput,
   type WebFetchOptions,
@@ -55,6 +54,8 @@ const STRING_PREVIEW_MAX_BYTES = 1_024;
 const WRITE_MAX_CONTENT_BYTES = 256 * 1024;
 const BASH_MAX_TIMEOUT_SECONDS = 600;
 const SEARCH_MAX_RESULTS = 1_000;
+export const RUNTIME_PI_GLOB_MAX_VISITED_ENTRIES = 100_000;
+export const RUNTIME_PI_GLOB_TIMEOUT_MS = 15_000;
 export const RUNTIME_PI_MAX_READ_SOURCE_BYTES = 16 * 1024 * 1024;
 export const RUNTIME_PI_MAX_BASH_CAPTURE_BYTES = 1024 * 1024;
 const BASH_FORWARD_MAX_BYTES = DEFAULT_MAX_BYTES - 1024;
@@ -91,6 +92,10 @@ export interface RuntimePiCodingToolsOptions {
   ) => Promise<void>;
   readonly record: (result: RuntimeToolResult) => void;
   readonly onToolAttempt: () => void;
+  readonly glob?: {
+    readonly maxVisitedEntries?: number;
+    readonly timeoutMs?: number;
+  };
   readonly webFetch?: Omit<WebFetchOptions, "signal">;
 }
 
@@ -235,12 +240,14 @@ function boundedUtf8(value: string, maxBytes: number): string {
   const encoded = Buffer.from(value, "utf8");
   if (encoded.byteLength <= maxBytes) return value;
   const notice = `\n\n[Tool output truncated to ${String(maxBytes)} UTF-8 bytes.]`;
-  const bodyLimit = Math.max(0, maxBytes - Buffer.byteLength(notice, "utf8"));
+  const noticeBytes = Buffer.byteLength(notice, "utf8");
+  const includeNotice = noticeBytes <= maxBytes;
+  const bodyLimit = includeNotice ? maxBytes - noticeBytes : maxBytes;
   let end = bodyLimit;
   while (end > 0 && ((encoded[end] ?? 0) & 0b1100_0000) === 0b1000_0000) {
     end -= 1;
   }
-  return `${encoded.subarray(0, end).toString("utf8")}${notice}`;
+  return `${encoded.subarray(0, end).toString("utf8")}${includeNotice ? notice : ""}`;
 }
 
 export function capRuntimePiAgentResult<T>(
@@ -692,38 +699,172 @@ function writeTool(options: RuntimePiCodingToolsOptions): AgentTool {
   });
 }
 
-async function localGlob(
+function checkedGlobBound(
+  value: number | undefined,
+  fallback: number,
+  label: string,
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1 || value > fallback) {
+    throw toolError(
+      "Glob",
+      `${label} must be a positive safe integer no greater than ${String(fallback)}.`,
+    );
+  }
+  return value;
+}
+
+async function openGlobDirectory(path: string, signal: AbortSignal): Promise<Dir> {
+  signal.throwIfAborted();
+  return new Promise<Dir>((resolvePromise, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => {
+      finish(() => reject(signal.reason ?? toolError("Glob", "operation aborted.")));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void opendir(path).then(
+      (directory) => {
+        if (settled) {
+          void directory.close().catch(() => undefined);
+          return;
+        }
+        finish(() => resolvePromise(directory));
+      },
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
+async function readGlobDirectory(
+  directory: Dir,
+  signal: AbortSignal,
+): Promise<Dirent | null> {
+  signal.throwIfAborted();
+  return new Promise<Dirent | null>((resolvePromise, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = (): void => {
+      finish(() => reject(signal.reason ?? toolError("Glob", "operation aborted.")));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    void directory.read().then(
+      (entry) => {
+        if (settled) {
+          if (signal.aborted) void directory.close().catch(() => undefined);
+          return;
+        }
+        finish(() => resolvePromise(entry));
+      },
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
+function posixRelativePath(root: string, path: string): string {
+  return relative(root, path).split(sep).join("/");
+}
+
+function ignoredGlobPath(
+  relativePath: string,
+  isDirectory: boolean,
+  patterns: readonly string[],
+): boolean {
+  const candidate = isDirectory ? `${relativePath}/` : relativePath;
+  return patterns.some((pattern) =>
+    matchesGlob(relativePath, pattern) || matchesGlob(candidate, pattern));
+}
+
+function compareGlobPaths(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function retainLexicographicallySmallest(
+  results: string[],
+  candidate: string,
+  limit: number,
+): void {
+  let lower = 0;
+  let upper = results.length;
+  while (lower < upper) {
+    const middle = Math.floor((lower + upper) / 2);
+    if (compareGlobPaths(results[middle] ?? "", candidate) < 0) lower = middle + 1;
+    else upper = middle;
+  }
+  if (lower >= limit) return;
+  results.splice(lower, 0, candidate);
+  if (results.length > limit) results.pop();
+}
+
+export async function runRuntimePiGlobTraversal(
   pattern: string,
   cwd: string,
-  input: { readonly ignore: string[]; readonly limit: number },
+  input: {
+    readonly ignore: string[];
+    readonly limit: number;
+    readonly maxVisitedEntries: number;
+    readonly signal: AbortSignal;
+  },
 ): Promise<string[]> {
   const results: string[] = [];
-  for await (const match of globFiles(pattern, {
-    cwd,
-    exclude: input.ignore,
-    withFileTypes: false,
-  })) {
-    results.push(resolve(cwd, match));
-    if (results.length >= input.limit) break;
+  const directories = [resolve(cwd)];
+  let visitedEntries = 0;
+  while (directories.length > 0) {
+    input.signal.throwIfAborted();
+    const directoryPath = directories.pop();
+    if (directoryPath === undefined) break;
+    const directory = await openGlobDirectory(directoryPath, input.signal);
+    try {
+      for (;;) {
+        const entry = await readGlobDirectory(directory, input.signal);
+        if (entry === null) break;
+        visitedEntries += 1;
+        if (visitedEntries > input.maxVisitedEntries) {
+          throw toolError(
+            "Glob",
+            `traversal exceeded the ${String(input.maxVisitedEntries)}-entry limit.`,
+          );
+        }
+        const absolutePath = resolve(directoryPath, entry.name);
+        const relativePath = posixRelativePath(cwd, absolutePath);
+        if (ignoredGlobPath(relativePath, entry.isDirectory(), input.ignore)) continue;
+        if (entry.isDirectory()) {
+          directories.push(absolutePath);
+          continue;
+        }
+        const candidate = isAbsolute(pattern) ? absolutePath : relativePath;
+        if (matchesGlob(candidate, pattern)) {
+          retainLexicographicallySmallest(results, absolutePath, input.limit);
+        }
+      }
+    } finally {
+      const closing = directory.close().catch(() => undefined);
+      if (input.signal.aborted) void closing;
+      else await closing;
+    }
   }
   return results;
 }
 
 function globTool(options: RuntimePiCodingToolsOptions): AgentTool {
-  const findOptions = {
-    operations: {
-      async exists(path: string) {
-        try {
-          await access(path);
-          return true;
-        } catch {
-          return false;
-        }
-      },
-      glob: localGlob,
-    },
+  const upstream = createFindTool(options.workspaceDirectory);
+  const template = {
+    ...upstream,
+    description:
+      "Search for files by glob pattern without following directory symlinks. "
+      + "Excludes node_modules and .git, caps traversal at 100,000 entries and 15 seconds, "
+      + "and returns at most the requested result limit.",
   };
-  const template = createFindTool(options.workspaceDirectory, findOptions);
   const parameters = {
     type: "object",
     additionalProperties: false,
@@ -753,8 +894,17 @@ function globTool(options: RuntimePiCodingToolsOptions): AgentTool {
     }) ?? 100;
     const workdir = effectiveWorkdir(input, "Glob", options.workspaceDirectory);
     const maxOutputBytes = outputLimit(input, "Glob");
-    const tool = createFindTool(workdir, findOptions);
     const executionSignal = combinedSignal(options.turnSignal, signal);
+    const maxVisitedEntries = checkedGlobBound(
+      options.glob?.maxVisitedEntries,
+      RUNTIME_PI_GLOB_MAX_VISITED_ENTRIES,
+      "maxVisitedEntries",
+    );
+    const timeoutMs = checkedGlobBound(
+      options.glob?.timeoutMs,
+      RUNTIME_PI_GLOB_TIMEOUT_MS,
+      "timeoutMs",
+    );
     return approvedExecution(
       options,
       runtimePiGlobTool,
@@ -763,18 +913,56 @@ function globTool(options: RuntimePiCodingToolsOptions): AgentTool {
         "Allow this unsandboxed filesystem glob?",
         `path: ${JSON.stringify(displayPath(path ?? ".", workdir))}`,
         `limit: ${String(limit)}`,
+        `traversal_entry_limit: ${String(maxVisitedEntries)}`,
+        `traversal_deadline_ms: ${String(timeoutMs)}`,
         evidence("pattern", pattern),
       ].join("\n"),
       executionSignal,
-      async () => capRuntimePiAgentResult(
-        await tool.execute(
-          toolCallId,
-          { pattern, ...(path === undefined ? {} : { path }), limit },
-          executionSignal,
-          onUpdate as AgentToolUpdateCallback<unknown> | undefined,
-        ),
-        maxOutputBytes,
-      ),
+      async () => {
+        const deadlineSignal = AbortSignal.timeout(timeoutMs);
+        const traversalSignal = AbortSignal.any([executionSignal, deadlineSignal]);
+        const tool = createFindTool(workdir, {
+          operations: {
+            async exists(searchPath: string) {
+              traversalSignal.throwIfAborted();
+              try {
+                await access(searchPath);
+                traversalSignal.throwIfAborted();
+                return true;
+              } catch (error) {
+                if (traversalSignal.aborted) throw traversalSignal.reason ?? error;
+                return false;
+              }
+            },
+            async glob(globPattern, searchPath, globInput) {
+              try {
+                return await runRuntimePiGlobTraversal(globPattern, searchPath, {
+                  ...globInput,
+                  maxVisitedEntries,
+                  signal: traversalSignal,
+                });
+              } catch (error) {
+                if (deadlineSignal.aborted && !executionSignal.aborted) {
+                  throw toolError(
+                    "Glob",
+                    `traversal exceeded the ${String(timeoutMs)}-millisecond deadline.`,
+                  );
+                }
+                throw error;
+              }
+            },
+          },
+        });
+        return capRuntimePiAgentResult(
+          await tool.execute(
+            toolCallId,
+            { pattern, ...(path === undefined ? {} : { path }), limit },
+            executionSignal,
+            onUpdate as AgentToolUpdateCallback<unknown> | undefined,
+          ),
+          maxOutputBytes,
+        );
+      },
     );
   });
 }
@@ -813,7 +1001,7 @@ function grepPartialNotice(result: AgentToolResult<unknown>): string | undefined
     )}; files and counts below are incomplete. Refine the pattern or increase head_limit.]`;
 }
 
-function grepOutputMode(
+export function grepOutputMode(
   result: AgentToolResult<unknown>,
   mode: "content" | "files_with_matches" | "count",
 ): AgentToolResult<unknown> {
@@ -823,8 +1011,12 @@ function grepOutputMode(
     .map((part) => part.text)
     .join("\n");
   const matches = matchedLines(text);
+  const partialNotice = grepPartialNotice(result);
   if (matches.length === 0) {
-    return { ...result, content: [{ type: "text", text: "No matches found." }] };
+    const output = partialNotice === undefined
+      ? "No matches found."
+      : `${partialNotice}\nNo complete match records were available in the bounded output.`;
+    return { ...result, content: [{ type: "text", text: output }] };
   }
   const counts = new Map<string, number>();
   for (const match of matches) counts.set(match.path, (counts.get(match.path) ?? 0) + 1);
@@ -832,7 +1024,6 @@ function grepOutputMode(
   const projection = mode === "files_with_matches"
     ? sortedCounts.map(([path]) => path).join("\n")
     : sortedCounts.map(([path, count]) => `${path}:${String(count)}`).join("\n");
-  const partialNotice = grepPartialNotice(result);
   const output = partialNotice === undefined
     ? projection
     : `${partialNotice}\n${projection}`;
@@ -981,7 +1172,6 @@ function webFetchTool(options: RuntimePiCodingToolsOptions): AgentTool {
     required: ["url"],
     properties: {
       url: { type: "string", minLength: 1, maxLength: WEB_FETCH_MAX_URL_BYTES },
-      prompt: { type: "string", maxLength: WEB_FETCH_MAX_PROMPT_BYTES },
       headers: {
         type: "object",
         additionalProperties: { type: "string" },
@@ -1005,15 +1195,13 @@ function webFetchTool(options: RuntimePiCodingToolsOptions): AgentTool {
     signal,
   ) => {
     const input = ownRecord(params, "WebFetch", [
-      "url", "prompt", "headers", "max_output_chars",
+      "url", "headers", "max_output_chars",
     ]);
     const url = requiredString(input, "url", "WebFetch", WEB_FETCH_MAX_URL_BYTES);
-    const prompt = optionalString(input, "prompt", "WebFetch", WEB_FETCH_MAX_PROMPT_BYTES);
     const headers = headersRecord(input.headers);
     const maxOutputBytes = outputLimit(input, "WebFetch");
     const fetchInput: WebFetchInput = {
       url,
-      ...(prompt === undefined ? {} : { prompt }),
       headers,
       maxOutputBytes,
     };
@@ -1026,7 +1214,6 @@ function webFetchTool(options: RuntimePiCodingToolsOptions): AgentTool {
         "Allow this DNS-pinned public HTTPS request?",
         evidence("url", url),
         `header_names: ${JSON.stringify(Object.keys(headers).map((name) => name.toLowerCase()).sort())}`,
-        ...(prompt === undefined ? [] : [evidence("prompt", prompt)]),
       ].join("\n"),
       executionSignal,
       async () => ({

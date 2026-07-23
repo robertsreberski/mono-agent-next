@@ -26,6 +26,7 @@ import {
 import {
   DEFAULT_MAX_BODY_BYTES,
   parseWebhookConfig,
+  WebhookConfigError,
   webhookConfigSchema,
   type WebhookConfig,
 } from "../config.js";
@@ -1252,6 +1253,24 @@ describe("mono-agent channel module", () => {
     await writeFile(join(root, "a.md"), "---\nname: a\npath: /same\n---\na", "utf8");
     await writeFile(join(root, "b.md"), "---\nname: b\npath: /same\n---\nb", "utf8");
     await expect(loadWebhookRoutesFromDirectory(root, "sync")).rejects.toThrow(/Duplicate webhook route path/u);
+  });
+
+  it("preserves precise sanitized diagnostics for malformed supplied-route notifications", () => {
+    const config = parseWebhookConfig({ apiKey: TEST_API_KEY });
+    expect(() => createWebhookChannel({
+      config,
+      submit: async () => ({ text: "unused" }),
+      routes: [{
+        name: "diagnostic",
+        path: "/hooks/diagnostic",
+        mode: "sync",
+        prompt: "",
+        notify: { channel: " invalid " },
+        source: "test",
+      }],
+    })).toThrowError(new WebhookConfigError(
+      "Webhook route notify.channel must be a non-empty bounded string without surrounding whitespace.",
+    ));
   });
 });
 

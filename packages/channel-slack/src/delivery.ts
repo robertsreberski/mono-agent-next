@@ -13,6 +13,7 @@ import type {
 import type { SlackApiClient } from "./client.js";
 import type { SlackConfig } from "./config.js";
 import {
+  isSlackMessageTimestamp,
   resolveSlackDestination,
   slackConversationId,
   type SlackDestination,
@@ -110,8 +111,24 @@ export class SlackDelivery {
     if (message.text.length === 0 && (message.attachments?.length ?? 0) === 0) return failed(message.idempotencyKey, "slack_delivery_empty", "Slack delivery requires text or an attachment.");
     try {
       let messageId: string | undefined;
-      if (message.text.length > 0) messageId = (await this.client.postMessage({ ...destination, text: message.text, idempotencyKey: message.idempotencyKey, signal })).messageId;
-      for (const attachment of message.attachments ?? []) messageId = (await this.client.postFile({ ...destination, attachment, idempotencyKey: message.idempotencyKey, signal })).messageId;
+      if (message.text.length > 0) {
+        const receipt = await this.client.postMessage({
+          ...destination,
+          text: message.text,
+          idempotencyKey: message.idempotencyKey,
+          signal,
+        });
+        if (isSlackMessageTimestamp(receipt.messageId)) messageId = receipt.messageId;
+      }
+      for (const attachment of message.attachments ?? []) {
+        const receipt = await this.client.postFile({
+          ...destination,
+          attachment,
+          idempotencyKey: message.idempotencyKey,
+          signal,
+        });
+        if (isSlackMessageTimestamp(receipt.messageId)) messageId = receipt.messageId;
+      }
       return { status: "delivered", idempotencyKey: message.idempotencyKey, ...(messageId === undefined ? {} : { messageId }) };
     } catch {
       return { status: "unknown", idempotencyKey: message.idempotencyKey, diagnostic: diagnostic("slack_delivery_unknown", "Slack delivery outcome is unknown.") };

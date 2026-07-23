@@ -10,6 +10,7 @@ import {
   MAX_RUN_MS,
   parseWebhookMode,
   parseWebhookPath,
+  WebhookConfigError,
   type WebhookConfig,
   type WebhookMode,
 } from "./config.js";
@@ -649,7 +650,10 @@ function normalizeRoutes(
   for (const candidate of candidates) {
     let notify;
     try { notify = parseWebhookNotify(candidate.notify, "Webhook route notify"); }
-    catch { throw new Error("Webhook route configuration is invalid."); }
+    catch (error: unknown) {
+      if (error instanceof WebhookConfigError) throw error;
+      throw new Error("Webhook route configuration is invalid.");
+    }
     if (!/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(candidate.name)
       || parseWebhookPath(candidate.path) !== candidate.path
       || parseWebhookMode(candidate.mode) !== candidate.mode

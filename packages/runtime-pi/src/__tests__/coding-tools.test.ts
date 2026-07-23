@@ -22,9 +22,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   capRuntimePiAgentResult,
   createRuntimePiCodingTools,
+  grepOutputMode,
   RUNTIME_PI_MAX_BASH_CAPTURE_BYTES,
   RUNTIME_PI_MAX_IMAGE_BASE64_BYTES,
   RUNTIME_PI_MAX_READ_SOURCE_BYTES,
+  runRuntimePiGlobTraversal,
   runtimePiCodingNativeTools,
 } from "../coding-tools.js";
 import type { WebFetchAddress, WebFetchResponse } from "../web-fetch.js";
@@ -59,6 +61,10 @@ function fixture(
       headers: Headers,
       signal: AbortSignal,
     ) => Promise<WebFetchResponse>;
+    readonly glob?: {
+      readonly maxVisitedEntries?: number;
+      readonly timeoutMs?: number;
+    };
   } = {},
 ): {
   readonly tools: Map<string, AgentTool>;
@@ -77,6 +83,7 @@ function fixture(
     authorize,
     record: (result) => results.push(result),
     onToolAttempt: attempts,
+    ...(overrides.glob === undefined ? {} : { glob: overrides.glob }),
     webFetch: {
       resolve: async () => [PUBLIC_ADDRESS],
       request: overrides.webFetchRequest ?? (async () => ({
@@ -171,6 +178,18 @@ describe("Personal-compatible Pi coding tools", () => {
       type: "text",
       text: expect.stringContaining("Image omitted"),
     }]);
+
+    for (const maxBytes of [1, 2, 8, 32]) {
+      const bounded = capRuntimePiAgentResult({
+        content: [{ type: "text", text: "é".repeat(100) }],
+        details: {},
+      }, maxBytes);
+      const text = bounded.content
+        .map((part) => part.type === "text" ? part.text : "")
+        .join("");
+      expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(maxBytes);
+      expect(text).not.toContain("\uFFFD");
+    }
   });
 
   it("approves before effects and preserves arbitrary absolute paths", async () => {
@@ -315,6 +334,59 @@ describe("Personal-compatible Pi coding tools", () => {
       expect.any(String),
       expect.any(AbortSignal),
     );
+
+    const budgeted = fixture(root, {
+      glob: { maxVisitedEntries: 1, timeoutMs: 1_000 },
+    });
+    await expect(tool(budgeted, "Glob").execute("glob-budget", {
+      pattern: "**/*.missing",
+      path: root,
+      limit: 100,
+      workdir: root,
+    }, signal())).rejects.toThrow("traversal exceeded the 1-entry limit");
+
+    const orderingRoot = await temporaryRoot("runtime-pi-coding-glob-order-");
+    for (const [directory, file] of [
+      ["w", "w.txt"],
+      ["a", "a.txt"],
+      ["m", "m.txt"],
+    ] as const) {
+      await mkdir(join(orderingRoot, directory), { recursive: true });
+      await writeFile(join(orderingRoot, directory, file), file);
+    }
+    const full = await runRuntimePiGlobTraversal("**/*.txt", orderingRoot, {
+      ignore: [],
+      limit: 100,
+      maxVisitedEntries: 100,
+      signal: AbortSignal.timeout(1_000),
+    });
+    const limited = await runRuntimePiGlobTraversal("**/*.txt", orderingRoot, {
+      ignore: [],
+      limit: 1,
+      maxVisitedEntries: 100,
+      signal: AbortSignal.timeout(1_000),
+    });
+    expect(limited).toEqual(full.slice(0, 1));
+    expect(limited).toEqual([join(orderingRoot, "a", "a.txt")]);
+
+    const deadline = AbortSignal.timeout(1);
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 5));
+    await expect(runRuntimePiGlobTraversal("**/*", root, {
+      ignore: [],
+      limit: 100,
+      maxVisitedEntries: 100,
+      signal: deadline,
+    })).rejects.toMatchObject({ name: "TimeoutError" });
+
+    const cancellation = new AbortController();
+    const cancelledTraversal = runRuntimePiGlobTraversal("**/*", root, {
+      ignore: [],
+      limit: 100,
+      maxVisitedEntries: 100,
+      signal: cancellation.signal,
+    });
+    queueMicrotask(() => cancellation.abort(new Error("cancelled traversal")));
+    await expect(cancelledTraversal).rejects.toThrow("cancelled traversal");
   });
 
   it("preserves Personal Grep content, files, and count output modes", async () => {
@@ -375,6 +447,26 @@ describe("Personal-compatible Pi coding tools", () => {
         type: "text",
         text: expect.stringMatching(/^\[PARTIAL Grep projection:.*incomplete\./u),
       }));
+    }
+
+    for (const outputMode of ["files_with_matches", "count"] as const) {
+      const partialWithoutParsedMatches = grepOutputMode({
+        content: [{ type: "text", text: "truncated before a complete match record" }],
+        details: {
+          truncation: { truncated: true },
+          matchLimitReached: 2,
+        },
+      }, outputMode);
+      expect(partialWithoutParsedMatches.content).toEqual([{
+        type: "text",
+        text: expect.stringMatching(
+          /^\[PARTIAL Grep projection:.*\nNo complete match records were available/u,
+        ),
+      }]);
+      expect(partialWithoutParsedMatches.content).not.toEqual([{
+        type: "text",
+        text: "No matches found.",
+      }]);
     }
   });
 
@@ -446,11 +538,24 @@ describe("Personal-compatible Pi coding tools", () => {
     expect(value.authorize).not.toHaveBeenCalled();
     expect(request).not.toHaveBeenCalled();
 
+    await expect(tool(value, "WebFetch").execute("fetch-prompt", {
+      url: "https://example.test/",
+      prompt: "Silently ignored processing must not be accepted.",
+    }, signal())).rejects.toThrow('parameter "prompt" is not supported');
+    expect(value.authorize).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+
     const result = await tool(value, "WebFetch").execute("fetch-safe", {
       url: "https://example.test/",
       headers: { Accept: "text/plain", "User-Agent": "PersonalAgent/1" },
       max_output_chars: 1_024,
     }, signal());
     expect(result.content).toEqual([{ type: "text", text: "fetched" }]);
+
+    const tinyResult = await tool(value, "WebFetch").execute("fetch-tiny", {
+      url: "https://example.test/",
+      max_output_chars: 1,
+    }, signal());
+    expect(tinyResult.content).toEqual([{ type: "text", text: "f" }]);
   });
 });

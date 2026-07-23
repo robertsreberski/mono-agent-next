@@ -135,7 +135,8 @@ Bash accepts legacy millisecond timeouts, caps every command at 600 seconds,
 kills the process tree on cancellation, keeps the provider preview within Pi's
 2,000-line/50-KiB output bound, and kills output-flooding commands above a
 1-MiB hard capture limit without persisting unbounded full output. `Glob` wraps
-Pi Find with Node's bounded local glob operation. `Grep` retains `content`,
+Pi Find with a cancellation-aware local traversal capped at 100,000 filesystem
+entries and 15 seconds. `Grep` retains `content`,
 `files_with_matches`, and `count` projections. Files/count projections prepend
 an explicit `PARTIAL` diagnostic when Pi reaches its match or byte limit, so a
 dense early file cannot make an incomplete projection appear exhaustive.
@@ -150,6 +151,8 @@ revalidates every bounded redirect and retry. Transient network failures and
 HTTP 5xx responses receive two bounded backoff retries. Each attempt has a
 timeout and the complete retry sequence has a bounded overall deadline.
 Response size, output size, elapsed time, content type, and UTF-8 are bounded.
+`WebFetch` returns fetched text for the calling model to interpret and does not
+accept a second model-processing prompt.
 `WebSearch` uses a fixed HTTPS endpoint,
 bounded response and output sizes, checked same-origin redirects, a
 whole-request timeout, strict content type and UTF-8 decoding, and distinguishes

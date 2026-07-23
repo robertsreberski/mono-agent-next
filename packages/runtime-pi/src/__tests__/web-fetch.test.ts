@@ -1,10 +1,16 @@
 import { Buffer } from "node:buffer";
+import {
+  createServer,
+  getDefaultAutoSelectFamily,
+  setDefaultAutoSelectFamily,
+} from "node:net";
 
 import { describe, expect, it, vi } from "vitest";
 
 import {
   fetchPublicWeb,
   isPublicWebFetchAddress,
+  requestPinnedHttps,
   WEB_FETCH_MAX_RESPONSE_BYTES,
   type WebFetchAddress,
   type WebFetchResponse,
@@ -89,6 +95,47 @@ describe("public HTTPS WebFetch", () => {
       .resolves.toBe("bounded body");
     expect(resolve).toHaveBeenCalledWith("example.test");
     expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses the pinned scalar lookup for a normal hostname with family auto-selection enabled", async () => {
+    let connections = 0;
+    const server = createServer((socket) => {
+      connections += 1;
+      socket.destroy();
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.removeListener("error", reject);
+        resolve();
+      });
+    });
+    const serverAddress = server.address();
+    if (serverAddress === null || typeof serverAddress === "string") {
+      throw new Error("Expected a TCP fixture address.");
+    }
+    const previousAutoSelectFamily = getDefaultAutoSelectFamily();
+    setDefaultAutoSelectFamily(true);
+    let requestError: unknown;
+    try {
+      await requestPinnedHttps(
+        new URL(`https://normal-hostname.test:${String(serverAddress.port)}/`),
+        { address: "127.0.0.1", family: 4 },
+        new Headers(),
+        AbortSignal.timeout(5_000),
+      );
+    } catch (error) {
+      requestError = error;
+    } finally {
+      setDefaultAutoSelectFamily(previousAutoSelectFamily);
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error === undefined ? resolve() : reject(error));
+      });
+    }
+
+    expect(requestError).toBeInstanceOf(Error);
+    expect((requestError as NodeJS.ErrnoException).code).not.toBe("ERR_INVALID_IP_ADDRESS");
+    expect(connections).toBe(1);
   });
 
   it("rejects mixed or private DNS answers before opening a request", async () => {
@@ -267,6 +314,22 @@ describe("public HTTPS WebFetch", () => {
     });
     expect(Buffer.byteLength(output, "utf8")).toBeLessThanOrEqual(64);
     expect(output).toContain("truncated");
+
+    const oneByteOutput = await fetchPublicWeb(input({ maxOutputBytes: 1 }), {
+      resolve: async () => [PUBLIC_V4],
+      request: async () => response(200, "ascii"),
+    });
+    expect(oneByteOutput).toBe("a");
+
+    for (const maxOutputBytes of [1, 2, 8, 32]) {
+      const tinyOutput = await fetchPublicWeb(input({ maxOutputBytes }), {
+        resolve: async () => [PUBLIC_V4],
+        request: async () => response(200, "é".repeat(100)),
+      });
+      expect(Buffer.byteLength(tinyOutput, "utf8")).toBeLessThanOrEqual(maxOutputBytes);
+      expect(tinyOutput).not.toContain("\uFFFD");
+      expect(tinyOutput).not.toContain("truncated");
+    }
 
     await expect(fetchPublicWeb(input(), {
       resolve: async () => [PUBLIC_V4],
