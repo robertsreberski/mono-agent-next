@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { createAgentHost, validateAgentConfig } from "@mono-agent/core";
-import { loadWebConfig, startWebServer } from "@mono-agent/web";
+import { parseWebConfig, startWebServer } from "@mono-agent/web";
 
 import { loadProtectedEnvironment } from "./environment.js";
 import { readServiceInput } from "./input.js";
@@ -31,6 +31,7 @@ export interface ForegroundServiceCommand {
   readonly activation: string;
 }
 export interface ForegroundServiceTestHooks {
+  readonly afterRunnerClosureRead?: () => void | Promise<void>;
   readonly afterManagedStart?: (startInfo: unknown) => void | Promise<void>;
 }
 
@@ -81,9 +82,10 @@ export async function runForegroundService(
     throw new Error("Runner inputs do not match the planned activation.");
   }
 
+  await hooks.afterRunnerClosureRead?.();
   const managed = activation.binding.targetKind === "agent"
     ? await startAgent(command.configPath, environment, activation.binding.targetConfigDigest)
-    : await startWeb(command.configPath, environment);
+    : await startWeb(command.configPath, before[0]!.source, environment);
   const proof = createHash("sha256").update(command.activation).digest("hex");
   let maintenanceFailed = false;
   let maintenanceRun: Promise<void> | undefined;
@@ -168,9 +170,16 @@ async function startAgent(
 
 async function startWeb(
   configPath: string,
+  configSource: Uint8Array,
   environment: Readonly<Record<string, string>>,
 ) {
-  const config = await loadWebConfig(configPath, { environment });
+  let raw: unknown;
+  try {
+    raw = JSON.parse(Buffer.from(configSource).toString("utf8")) as unknown;
+  } catch {
+    throw new Error("Fingerprint-verified web config is not valid JSON.");
+  }
+  const config = parseWebConfig(raw, { sourcePath: configPath, environment });
   const server = await startWebServer({ config, environment });
   return Object.freeze({
     startInfo: Object.freeze({

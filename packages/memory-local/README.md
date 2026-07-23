@@ -91,6 +91,11 @@ mono-agent-memory-local adopt-v0 \
 ```
 
 `snapshot-v0` never writes the source and refuses an existing target.
+It preflights the active database inside the 64 GiB tree budget, rechecks the
+identity and content of every copied static source file after online backup,
+and syncs every copied directory. A failed snapshot removes only the exact
+target directory inode it created; a replaced or otherwise ambiguous target is
+preserved and remains blocked as unusable.
 It accepts the canonical initialized marker used by v0-final and the older
 marker-absent BuJo shape, but refuses an in-flight or malformed marker.
 `sourceStateSha256` binds stable live-root provenance: the canonical root,
@@ -170,9 +175,11 @@ warnings or errors, and an unsafe, corrupt, or in-flight identity returns one
 sanitized integrity error. The diagnostics callback does not capture, embed,
 retry, consolidate, rebuild, or start the module.
 
-The sanitized v0-final fixture snapshots a source with no v1 marker, adopts
-only the copy, and rehearses audit, backup, both old and new readers, capture
-idempotency, rebuild, and rollback without mutating the source store.
+The primary sanitized v0-final fixture snapshots a source with its canonical
+initialized v0 marker, adopts only the copy, and rehearses audit, backup, both
+old and new readers, capture idempotency, rebuild, and rollback without
+mutating the source store. A separate case covers the older marker-absent
+source shape.
 
 ## Public API
 

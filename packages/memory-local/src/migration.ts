@@ -4,12 +4,15 @@ import { constants, type BigIntStats } from "node:fs";
 import {
   lstat,
   mkdir,
+  mkdtemp,
   open,
   readdir,
   realpath,
+  rename,
+  rm,
   type FileHandle,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { load as loadSqliteVec } from "sqlite-vec";
 
@@ -171,8 +174,25 @@ interface EmbeddingIdentity {
 type SourceMarkerEvidence = MemoryLocalV0SnapshotResult["sourceMarker"];
 
 interface MemoryLocalMigrationTestHooks {
+  readonly beforeSnapshotSourceRecheck?: (
+    sourceRoot: string,
+    targetRoot: string,
+  ) => void | Promise<void>;
+  readonly afterSnapshotDirectorySync?: (
+    targetDirectory: string,
+  ) => void | Promise<void>;
   readonly beforeAdoptionDatabaseBind?: (path: string) => void | Promise<void>;
   readonly beforeAdoptionCommit?: (path: string) => void | Promise<void>;
+}
+
+interface SnapshotSourceFileEvidence {
+  readonly stats: BigIntStats;
+  readonly sha256: string;
+}
+
+interface SnapshotSourceDirectoryEvidence {
+  readonly stats: BigIntStats;
+  readonly children: readonly string[];
 }
 
 interface MutableSourceDatabase {
@@ -185,6 +205,21 @@ interface MutableSourceDatabase {
 
 export async function snapshotV0MemoryLocalRoot(
   options: SnapshotV0MemoryLocalRootOptions,
+): Promise<MemoryLocalV0SnapshotResult> {
+  return await snapshotV0MemoryLocalRootInternal(options, {});
+}
+
+/** @internal Test-only adversarial hook surface; not exported by the package entrypoint. */
+export async function snapshotV0MemoryLocalRootForTesting(
+  options: SnapshotV0MemoryLocalRootOptions,
+  hooks: MemoryLocalMigrationTestHooks,
+): Promise<MemoryLocalV0SnapshotResult> {
+  return await snapshotV0MemoryLocalRootInternal(options, hooks);
+}
+
+async function snapshotV0MemoryLocalRootInternal(
+  options: SnapshotV0MemoryLocalRootOptions,
+  hooks: MemoryLocalMigrationTestHooks,
 ): Promise<MemoryLocalV0SnapshotResult> {
   const signal = options.signal ?? new AbortController().signal;
   throwIfAborted(signal);
@@ -199,15 +234,19 @@ export async function snapshotV0MemoryLocalRoot(
 
   const source = await openProtectedSourceRoot(sourceRoot);
   let target: SecureRoot | undefined;
+  let createdTargetIdentity: FileIdentity | undefined;
   let sourceDatabaseFile: MutableSourceDatabase | undefined;
   let sourceDatabase: DatabaseSync | undefined;
+  let completed = false;
   try {
     const sourceMarker = await inspectSourceMarker(source.path);
     const managed = await readManagedDatabase(source.path);
     const sourceStateBefore = sourceStateDigest(source, managed, sourceMarker);
+    const activeDatabaseBytes = await sourceDatabaseFootprint(managed.path);
     await assertDistinctTarget(source, targetRoot);
-    await createPrivateTargetRoot(targetRoot);
-    target = await openSecureRoot(targetRoot);
+    target = await createPrivateTargetRoot(targetRoot);
+    createdTargetIdentity = target.identity;
+    await syncDirectory(dirname(targetRoot));
     if (sameRoot(source.identity, target.identity)) {
       throw migrationFailure("Snapshot source and target resolve to the same directory.");
     }
@@ -216,25 +255,44 @@ export async function snapshotV0MemoryLocalRoot(
       source.path,
       target.path,
       managed.relativePath,
+      activeDatabaseBytes,
       signal,
+      hooks,
     );
     await copy.copyDirectory("");
     throwIfAborted(signal);
 
     const targetDatabasePath = join(target.path, managed.relativePath);
     sourceDatabaseFile = await openMutableSourceDatabase(managed.path);
+    const liveDatabaseStats = await sourceDatabaseFile.handle.stat({ bigint: true });
+    assertSourceFile(managed.path, liveDatabaseStats);
+    copy.assertActiveDatabaseBytes(Math.max(
+      activeDatabaseBytes,
+      Number(liveDatabaseStats.size),
+    ));
     sourceDatabase = openDatabase(managed.path, true);
     await sourceDatabaseFile.verify();
+    sourceDatabase.exec("BEGIN");
+    copy.assertActiveDatabaseBytes(Math.max(
+      activeDatabaseBytes,
+      logicalDatabaseBytes(sourceDatabase),
+    ));
     const sourceAudit = auditBujoDatabase(sourceDatabase);
     await createPrivateFile(targetDatabasePath);
     await backupSqlite(sourceDatabase, targetDatabasePath);
     await sourceDatabaseFile.verify();
+    sourceDatabase.exec("COMMIT");
     sourceDatabase.close();
     sourceDatabase = undefined;
     await sourceDatabaseFile.close();
     sourceDatabaseFile = undefined;
     await normalizeSnapshotDatabase(targetDatabasePath);
-    await syncDirectory(dirname(targetDatabasePath));
+    const targetDatabaseStats = await lstat(targetDatabasePath, { bigint: true });
+    assertTargetFile(targetDatabaseStats);
+    copy.assertActiveDatabaseBytes(Number(targetDatabaseStats.size));
+    await syncSnapshotDirectory(dirname(targetDatabasePath), hooks);
+    await hooks.beforeSnapshotSourceRecheck?.(source.path, target.path);
+    await copy.verifySourceTree();
     await assertManifestCurrent(managed);
     await verifyProtectedSourceRoot(source);
     const refreshedManaged = await readManagedDatabase(source.path);
@@ -255,7 +313,7 @@ export async function snapshotV0MemoryLocalRoot(
     if (firstTree.sha256 !== secondTree.sha256) {
       throw migrationFailure("Snapshot target changed while its digest was computed.");
     }
-    return Object.freeze({
+    const result = Object.freeze({
       schema: MEMORY_LOCAL_V0_SNAPSHOT_SCHEMA,
       sourceRoot: source.path,
       targetRoot: target.path,
@@ -268,6 +326,8 @@ export async function snapshotV0MemoryLocalRoot(
       bytes: firstTree.bytes,
       database,
     });
+    completed = true;
+    return result;
   } finally {
     try {
       sourceDatabase?.close();
@@ -275,8 +335,21 @@ export async function snapshotV0MemoryLocalRoot(
       // The source process retains ownership of its live SQLite state.
     }
     await sourceDatabaseFile?.close().catch(() => undefined);
+    let cleanupError: unknown;
+    if (!completed && createdTargetIdentity !== undefined) {
+      try {
+        await cleanupFailedSnapshotTarget(
+          targetRoot,
+          createdTargetIdentity,
+          target,
+        );
+      } catch (error) {
+        cleanupError = error;
+      }
+    }
     await target?.handle.close().catch(() => undefined);
     await source.handle.close().catch(() => undefined);
+    if (cleanupError !== undefined) throw cleanupError;
   }
 }
 
@@ -489,6 +562,10 @@ class SnapshotCopier {
   readonly #targetRoot: string;
   readonly #activeDatabase: string;
   readonly #signal: AbortSignal;
+  readonly #hooks: MemoryLocalMigrationTestHooks;
+  readonly #files = new Map<string, SnapshotSourceFileEvidence>();
+  readonly #directories = new Map<string, SnapshotSourceDirectoryEvidence>();
+  #activeDatabaseBytes: number;
   #entries = 0;
   #bytes = 0;
 
@@ -496,12 +573,26 @@ class SnapshotCopier {
     sourceRoot: string,
     targetRoot: string,
     activeDatabase: string,
+    activeDatabaseBytes: number,
     signal: AbortSignal,
+    hooks: MemoryLocalMigrationTestHooks,
   ) {
     this.#sourceRoot = sourceRoot;
     this.#targetRoot = targetRoot;
     this.#activeDatabase = activeDatabase;
     this.#signal = signal;
+    this.#hooks = hooks;
+    this.#activeDatabaseBytes = activeDatabaseBytes;
+    this.#count(activeDatabaseBytes);
+  }
+
+  assertActiveDatabaseBytes(bytes: number): void {
+    assertBoundedActiveDatabase(bytes);
+    this.#bytes += bytes - this.#activeDatabaseBytes;
+    this.#activeDatabaseBytes = bytes;
+    if (this.#bytes > MAX_TREE_BYTES) {
+      throw migrationFailure("Snapshot source exceeds the bounded tree limits.");
+    }
   }
 
   async copyDirectory(relativePath: string): Promise<void> {
@@ -513,10 +604,13 @@ class SnapshotCopier {
       await mkdir(join(this.#targetRoot, relativePath), { mode: 0o700 });
     }
     this.#count(0);
-    const entries = await readdir(sourcePath, { withFileTypes: true });
-    for (const entry of entries.sort((left, right) => left.name.localeCompare(right.name))) {
+    const entries = (await readdir(sourcePath, { withFileTypes: true }))
+      .sort((left, right) => comparePathNames(left.name, right.name));
+    const copiedChildren: string[] = [];
+    for (const entry of entries) {
       const childRelative = relativePath === "" ? entry.name : join(relativePath, entry.name);
       if (skipSnapshotPath(childRelative, this.#activeDatabase)) continue;
+      copiedChildren.push(entry.name);
       const sourceChild = join(this.#sourceRoot, childRelative);
       const stats = await lstat(sourceChild, { bigint: true });
       if (stats.isDirectory() && !stats.isSymbolicLink()) {
@@ -527,15 +621,78 @@ class SnapshotCopier {
         throw migrationFailure("Snapshot source contains an unsupported filesystem entry.");
       }
       this.#count(Number(stats.size));
-      await copyStableFile(
+      this.#files.set(childRelative, await copyStableFile(
         sourceChild,
         join(this.#targetRoot, childRelative),
         this.#signal,
-      );
+        stats,
+      ));
     }
     const after = await lstat(sourcePath, { bigint: true });
     if (!sameStableDirectoryIdentity(before, after)) {
       throw migrationFailure("Snapshot source directory changed while it was copied.");
+    }
+    this.#directories.set(relativePath, Object.freeze({
+      stats: after,
+      children: Object.freeze(copiedChildren),
+    }));
+    await syncSnapshotDirectory(
+      relativePath === "" ? this.#targetRoot : join(this.#targetRoot, relativePath),
+      this.#hooks,
+    );
+  }
+
+  async verifySourceTree(): Promise<void> {
+    const seenFiles = new Set<string>();
+    const seenDirectories = new Set<string>();
+    const walk = async (relativePath: string): Promise<void> => {
+      throwIfAborted(this.#signal);
+      const expected = this.#directories.get(relativePath);
+      if (expected === undefined) {
+        throw migrationFailure("Snapshot source directory manifest is incomplete.");
+      }
+      const sourcePath = relativePath === ""
+        ? this.#sourceRoot
+        : join(this.#sourceRoot, relativePath);
+      const current = await lstat(sourcePath, { bigint: true });
+      assertSourceDirectory(sourcePath, current);
+      if (!sameStableDirectoryIdentity(expected.stats, current)) {
+        throw migrationFailure("Snapshot source directory changed after it was copied.");
+      }
+      const children = (await readdir(sourcePath))
+        .sort(comparePathNames)
+        .filter((name) => {
+          const child = relativePath === "" ? name : join(relativePath, name);
+          return !skipSnapshotPath(child, this.#activeDatabase);
+        });
+      if (
+        children.length !== expected.children.length
+        || children.some((name, index) => name !== expected.children[index])
+      ) {
+        throw migrationFailure("Snapshot source tree changed after it was copied.");
+      }
+      seenDirectories.add(relativePath);
+      for (const name of children) {
+        const child = relativePath === "" ? name : join(relativePath, name);
+        const directory = this.#directories.get(child);
+        if (directory !== undefined) {
+          await walk(child);
+          continue;
+        }
+        const file = this.#files.get(child);
+        if (file === undefined) {
+          throw migrationFailure("Snapshot source file manifest is incomplete.");
+        }
+        await verifyCopiedSourceFile(join(this.#sourceRoot, child), file, this.#signal);
+        seenFiles.add(child);
+      }
+    };
+    await walk("");
+    if (
+      seenFiles.size !== this.#files.size
+      || seenDirectories.size !== this.#directories.size
+    ) {
+      throw migrationFailure("Snapshot source tree manifest no longer matches the source.");
     }
   }
 
@@ -810,8 +967,8 @@ async function copyStableFile(
   source: string,
   target: string,
   signal: AbortSignal,
-): Promise<void> {
-  const before = await lstat(source, { bigint: true });
+  before: BigIntStats,
+): Promise<SnapshotSourceFileEvidence> {
   assertSourceFile(source, before);
   const input = await open(source, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   let output: FileHandle | undefined;
@@ -830,12 +987,14 @@ async function copyStableFile(
       0o600,
     );
     const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES);
+    const hash = createHash("sha256");
     let offset = 0;
     while (offset < Number(opened.size)) {
       throwIfAborted(signal);
       const length = Math.min(buffer.byteLength, Number(opened.size) - offset);
       const { bytesRead } = await input.read(buffer, 0, length, offset);
       if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
       const { bytesWritten } = await output.write(buffer, 0, bytesRead, offset);
       if (bytesWritten !== bytesRead) {
         throw migrationFailure("Snapshot target file write was incomplete.");
@@ -851,9 +1010,50 @@ async function copyStableFile(
     if (!sameStableIdentity(opened, after) || !sameStableIdentity(after, current)) {
       throw migrationFailure("Snapshot source file changed while it was copied.");
     }
+    return Object.freeze({ stats: after, sha256: hash.digest("hex") });
   } finally {
     await output?.close().catch(() => undefined);
     await input.close();
+  }
+}
+
+async function verifyCopiedSourceFile(
+  path: string,
+  expected: SnapshotSourceFileEvidence,
+  signal: AbortSignal,
+): Promise<void> {
+  const before = await lstat(path, { bigint: true });
+  assertSourceFile(path, before);
+  if (!sameStableIdentity(expected.stats, before)) {
+    throw migrationFailure("Snapshot source file changed after it was copied.");
+  }
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const opened = await handle.stat({ bigint: true });
+    if (!sameStableIdentity(before, opened)) {
+      throw migrationFailure("Snapshot source file changed while it was re-opened.");
+    }
+    const hash = createHash("sha256");
+    const buffer = Buffer.allocUnsafe(COPY_BUFFER_BYTES);
+    let offset = 0;
+    while (offset < Number(opened.size)) {
+      throwIfAborted(signal);
+      const length = Math.min(buffer.byteLength, Number(opened.size) - offset);
+      const { bytesRead } = await handle.read(buffer, 0, length, offset);
+      if (bytesRead === 0) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      offset += bytesRead;
+    }
+    if (offset !== Number(opened.size) || hash.digest("hex") !== expected.sha256) {
+      throw migrationFailure("Snapshot source file content changed after it was copied.");
+    }
+    const after = await handle.stat({ bigint: true });
+    const current = await lstat(path, { bigint: true });
+    if (!sameStableIdentity(opened, after) || !sameStableIdentity(after, current)) {
+      throw migrationFailure("Snapshot source file changed while it was rechecked.");
+    }
+  } finally {
+    await handle.close();
   }
 }
 
@@ -1050,7 +1250,7 @@ async function inspectSourceMarker(root: string): Promise<SourceMarkerEvidence> 
   });
 }
 
-async function createPrivateTargetRoot(path: string): Promise<void> {
+async function createPrivateTargetRoot(path: string): Promise<SecureRoot> {
   const parent = dirname(path);
   const parentReal = await realpath(parent).catch(() => undefined);
   if (parentReal !== parent) {
@@ -1064,15 +1264,110 @@ async function createPrivateTargetRoot(path: string): Promise<void> {
   ) {
     throw migrationFailure("Snapshot target parent is not protected.");
   }
+  const stagingPath = await mkdtemp(
+    join(parent, `.${basename(path)}.snapshot-creating-`),
+  );
+  let staging: SecureRoot | undefined;
+  let published = false;
   try {
-    await mkdir(path, { mode: 0o700 });
-  } catch (error) {
-    if (isErrno(error, "EEXIST")) {
+    staging = await openSecureRoot(stagingPath);
+    if (await lstat(path).then(() => true).catch((error: unknown) => {
+      if (isErrno(error, "ENOENT")) return false;
+      throw error;
+    })) {
       throw migrationFailure("Snapshot target must not already exist.");
     }
+    await rename(stagingPath, path);
+    published = true;
+    await assertPinnedSnapshotDirectory(path, staging.identity, staging);
+    return Object.freeze({
+      path,
+      handle: staging.handle,
+      identity: staging.identity,
+    });
+  } catch (error) {
+    if (!published && staging !== undefined) {
+      await removePinnedSnapshotDirectory(stagingPath, staging).catch(() => undefined);
+    }
+    await staging?.handle.close().catch(() => undefined);
     throw error;
   }
-  await syncDirectory(parent);
+}
+
+async function cleanupFailedSnapshotTarget(
+  path: string,
+  expected: FileIdentity,
+  pinned: SecureRoot | undefined,
+): Promise<void> {
+  if (pinned === undefined) {
+    throw migrationFailure(
+      "Failed snapshot target identity changed; preserving it as unusable.",
+    );
+  }
+  const quarantine = join(
+    dirname(path),
+    `.${basename(path)}.snapshot-cleanup-${randomUUID()}`,
+  );
+  try {
+    await assertPinnedSnapshotDirectory(path, expected, pinned);
+  } catch {
+    throw migrationFailure(
+      "Failed snapshot target identity changed; preserving it as unusable.",
+    );
+  }
+  try {
+    await rename(path, quarantine);
+    await assertPinnedSnapshotDirectory(quarantine, expected, pinned);
+    await rm(quarantine, { recursive: true });
+    await syncDirectory(dirname(path));
+  } catch {
+    throw migrationFailure(
+      "Failed snapshot target could not be safely removed and remains unusable.",
+    );
+  }
+}
+
+async function removePinnedSnapshotDirectory(
+  path: string,
+  pinned: SecureRoot,
+): Promise<void> {
+  await assertPinnedSnapshotDirectory(path, pinned.identity, pinned);
+  await rm(path, { recursive: true });
+  await syncDirectory(dirname(path));
+}
+
+async function assertPinnedSnapshotDirectory(
+  path: string,
+  expected: FileIdentity,
+  pinned: SecureRoot,
+): Promise<void> {
+  const current = await lstat(path).catch(() => undefined);
+  const descriptor = await pinned.handle.stat().catch(() => undefined);
+  if (
+    current === undefined
+    || descriptor === undefined
+    || !current.isDirectory()
+    || current.isSymbolicLink()
+    || !descriptor.isDirectory()
+    || String(current.dev) !== expected.device
+    || String(current.ino) !== expected.inode
+    || String(descriptor.dev) !== expected.device
+    || String(descriptor.ino) !== expected.inode
+    || current.uid !== expected.owner
+    || descriptor.uid !== expected.owner
+    || (current.mode & 0o777) !== 0o700
+    || (descriptor.mode & 0o777) !== 0o700
+  ) {
+    throw migrationFailure("Snapshot target directory identity changed.");
+  }
+}
+
+async function syncSnapshotDirectory(
+  path: string,
+  hooks: MemoryLocalMigrationTestHooks,
+): Promise<void> {
+  await syncDirectory(path);
+  await hooks.afterSnapshotDirectorySync?.(path);
 }
 
 async function createPrivateFile(path: string): Promise<void> {
@@ -1082,6 +1377,53 @@ async function createPrivateFile(path: string): Promise<void> {
   } finally {
     await handle.close();
   }
+}
+
+function assertBoundedActiveDatabase(bytes: number): void {
+  if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > MAX_TREE_BYTES) {
+    throw migrationFailure("Snapshot source exceeds the bounded tree limits.");
+  }
+}
+
+async function sourceDatabaseFootprint(path: string): Promise<number> {
+  let bytes = 0;
+  for (const suffix of ["", ...SQLITE_SIDECARS]) {
+    const sidecarPath = `${path}${suffix}`;
+    const stats = await lstat(sidecarPath, { bigint: true }).catch((error: unknown) => {
+      if (isErrno(error, "ENOENT")) return undefined;
+      throw error;
+    });
+    if (stats === undefined) continue;
+    assertBoundedActiveDatabase(Number(stats.size));
+    assertSourceFile(sidecarPath, stats);
+    bytes += Number(stats.size);
+    assertBoundedActiveDatabase(bytes);
+  }
+  return bytes;
+}
+
+function logicalDatabaseBytes(database: DatabaseSync): number {
+  const pageCount = pragmaInteger(database, "page_count");
+  const pageSize = pragmaInteger(database, "page_size");
+  const bytes = pageCount * pageSize;
+  if (pageCount < 1n || pageSize < 1n || bytes > BigInt(MAX_TREE_BYTES)) {
+    throw migrationFailure("Snapshot source exceeds the bounded tree limits.");
+  }
+  return Number(bytes);
+}
+
+function pragmaInteger(database: DatabaseSync, name: "page_count" | "page_size"): bigint {
+  const row = database.prepare(`PRAGMA ${name}`).get() as
+    | Record<string, number | bigint>
+    | undefined;
+  const value = row?.[name];
+  if (
+    (typeof value !== "number" || !Number.isSafeInteger(value))
+    && typeof value !== "bigint"
+  ) {
+    throw migrationFailure("Memory database size metadata is invalid.");
+  }
+  return BigInt(value);
 }
 
 async function inspectSourceFile(path: string, exactPrivate = false): Promise<FileIdentity> {
@@ -1406,6 +1748,10 @@ function plainObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value) as unknown;
   return prototype === Object.prototype || prototype === null;
+}
+
+function comparePathNames(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function absolutePath(value: string, field: string): string {

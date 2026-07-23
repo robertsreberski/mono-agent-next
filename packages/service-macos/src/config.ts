@@ -36,6 +36,18 @@ const ROOT_KEYS = new Set(["$schema", "configVersion", "services"]);
 const SERVICE_KEYS = new Set(["target", "startAtLogin", "restartPolicy", "environmentFile", "logs"]);
 const TARGET_KEYS = new Set(["kind", "config"]);
 const LOG_KEYS = new Set(["directory", "maxBytes", "retainFiles"]);
+const BOUNDED_STRING_SCHEMA = Object.freeze({
+  type: "string",
+  minLength: 1,
+  maxLength: 4_096,
+  pattern: "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])\\S(?:[\\s\\S]*\\S)?$",
+});
+const ABSOLUTE_PATH_SCHEMA = Object.freeze({
+  type: "string",
+  minLength: 1,
+  maxLength: 4_096,
+  pattern: "^/(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?:[\\s\\S]*\\S)?$",
+});
 export async function loadServiceMacosConfig(path: string): Promise<LoadedServiceMacosConfig> {
   const absolutePath = resolve(path);
   let source: string;
@@ -82,7 +94,7 @@ export const serviceMacosConfigSchema = Object.freeze({
   type: "object",
   additionalProperties: false,
   properties: {
-    $schema: { type: "string" },
+    $schema: BOUNDED_STRING_SCHEMA,
     configVersion: { const: 1 },
     services: {
       type: "object",
@@ -100,7 +112,7 @@ export const serviceMacosConfigSchema = Object.freeze({
                   additionalProperties: false,
                   properties: {
                     kind: { const: "agent" },
-                    config: { type: "string", minLength: 1 },
+                    config: ABSOLUTE_PATH_SCHEMA,
                   },
                   required: ["kind", "config"],
                 },
@@ -109,7 +121,7 @@ export const serviceMacosConfigSchema = Object.freeze({
                   additionalProperties: false,
                   properties: {
                     kind: { const: "web" },
-                    config: { type: "string", minLength: 1 },
+                    config: ABSOLUTE_PATH_SCHEMA,
                   },
                   required: ["kind", "config"],
                 },
@@ -117,12 +129,12 @@ export const serviceMacosConfigSchema = Object.freeze({
             },
             startAtLogin: { type: "boolean" },
             restartPolicy: { enum: ["never", "on-failure", "always"] },
-            environmentFile: { type: "string", minLength: 1 },
+            environmentFile: ABSOLUTE_PATH_SCHEMA,
             logs: {
               type: "object",
               additionalProperties: false,
               properties: {
-                directory: { type: "string", minLength: 1 },
+                directory: ABSOLUTE_PATH_SCHEMA,
                 maxBytes: { type: "integer", minimum: 1, maximum: 1_073_741_824 },
                 retainFiles: { type: "integer", minimum: 1, maximum: 100 },
               },

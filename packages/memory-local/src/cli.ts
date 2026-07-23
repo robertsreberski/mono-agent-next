@@ -1,4 +1,4 @@
-import { isAbsolute } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 
 import { MemoryLocalError } from "./errors.js";
 
@@ -111,6 +111,13 @@ function parseCommand(argv: readonly string[]): ParsedCommand {
 function pathValue(values: ReadonlyMap<string, string>, flag: string): string {
   const value = required(values, flag);
   if (!isAbsolute(value)) throw new UsageError(`${flag} must be an absolute path`);
+  if (
+    value.includes("\0")
+    || value !== value.trim()
+    || value !== resolve(value)
+  ) {
+    throw new UsageError(`${flag} must be a canonical absolute path`);
+  }
   return value;
 }
 

@@ -78,7 +78,7 @@ async function inspectOptionalManagedFile(
   logs: ActivationLogs,
   uid: number,
 ): Promise<void> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     .catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return undefined;
       throw error;
@@ -102,7 +102,7 @@ async function readOptionalManagedFile(
   uid: number,
   maximum: number,
 ): Promise<Buffer | undefined> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     .catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return undefined;
       throw error;
@@ -139,7 +139,7 @@ export async function readManagedServiceLog(
 ): Promise<ManagedServiceLogSnapshot> {
   let handle;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     if (isErrno(error, "ENOENT")) {
       return Object.freeze({
@@ -185,7 +185,12 @@ export async function readServiceReadiness(
 ): Promise<boolean> {
   await assertDirectory(logs, uid);
   let handle;
-  try { handle = await open(logs.readinessPath, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (error) {
+  try {
+    handle = await open(
+      logs.readinessPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+  } catch (error) {
     if (isErrno(error, "ENOENT")) return false;
     throw error;
   }
@@ -215,10 +220,20 @@ async function rewriteReadiness(
 ): Promise<void> {
   await assertDirectory(logs, uid);
   let handle; let created = false;
-  try { handle = await open(logs.readinessPath, constants.O_RDWR | constants.O_NOFOLLOW); } catch (error) {
+  try {
+    handle = await open(
+      logs.readinessPath,
+      constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+  } catch (error) {
     if (!isErrno(error, "ENOENT")) throw error;
     if (!create) return;
-    handle = await open(logs.readinessPath, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+    handle = await open(
+      logs.readinessPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_RDWR
+        | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      0o600,
+    );
     created = true;
   }
   try {
@@ -247,7 +262,9 @@ async function rotate(
 ): Promise<void> {
   await assertDirectory(logs, uid);
   let handle;
-  try { handle = await open(path, constants.O_RDWR | constants.O_NOFOLLOW); } catch (error) {
+  try {
+    handle = await open(path, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
     if (isErrno(error, "ENOENT") && expected === undefined) return;
     if (isErrno(error, "ENOENT")) throw new Error(`${path} bound live log disappeared.`);
     throw error;
@@ -288,8 +305,9 @@ async function writeArchive(path: string, bytes: Buffer, logs: ActivationLogs, u
   if (selected === undefined) throw new Error("No managed log archive slot is available.");
   await assertDirectory(logs, uid);
   const flags = selected.stats === undefined
-    ? constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW
-    : constants.O_RDWR | constants.O_NOFOLLOW;
+    ? constants.O_CREAT | constants.O_EXCL | constants.O_RDWR
+      | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    : constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK;
   const handle = await open(selected.path, flags, 0o600);
   try {
     const opened = await handle.stat({ bigint: true }); assertSafe(selected.path, opened, uid);
@@ -300,7 +318,7 @@ async function writeArchive(path: string, bytes: Buffer, logs: ActivationLogs, u
   } finally { await handle.close(); }
 }
 async function bindFile(logs: ActivationLogs, path: string, uid: number): Promise<string> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stats = await handle.stat({ bigint: true }); assertSafe(path, stats, uid);
     await assertBound(logs, path, stats, uid);

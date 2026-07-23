@@ -188,10 +188,15 @@ async function planServiceMacosInternal(
   );
   const loaded = await loadServiceMacosConfig(configPath);
   await assertNoPendingTransactions(loaded, options.runtime, launchAgentsDirectoryIdentity);
-  const observations = await inspectLoadedConfig(loaded, options, launchAgentsDirectoryIdentity);
+  const selectedServiceIds = selectServiceIds(loaded, options.serviceIds);
+  const observations = await inspectLoadedConfig(
+    loaded,
+    options,
+    launchAgentsDirectoryIdentity,
+    selectedServiceIds,
+  );
   const byService = new Map(observations.map((observation) => [observation.target.serviceId, observation]));
   const entries: ServiceMacosPlanEntry[] = [];
-  const selectedServiceIds = selectServiceIds(loaded, options.serviceIds);
   for (const serviceId of selectedServiceIds) {
     const service = loaded.config.services[serviceId]!;
     await assertOwnedDirectory(service.logs.directory, options.runtime.uid);
@@ -328,6 +333,7 @@ export async function applyServiceMacosPlan(
     loaded,
     options,
     plan.launchAgentsDirectoryIdentity,
+    plan.entries.map((entry) => entry.serviceId),
   );
   const finalByService = new Map(
     finalObservations.map((observation) => [observation.target.serviceId, observation]),
@@ -600,7 +606,12 @@ export async function planServiceMacosRemoval(
   const loaded = await loadServiceMacosConfig(configPath);
   await assertNoPendingTransactions(loaded, options.runtime, launchAgentsDirectoryIdentity);
   const selectedServiceIds = selectServiceIds(loaded, [options.serviceId]);
-  const observations = await inspectLoadedConfig(loaded, options, launchAgentsDirectoryIdentity);
+  const observations = await inspectLoadedConfig(
+    loaded,
+    options,
+    launchAgentsDirectoryIdentity,
+    selectedServiceIds,
+  );
   const byService = new Map(observations.map((observation) => [observation.target.serviceId, observation]));
   const entries = selectedServiceIds.map((serviceId): ServiceMacosRemovalPlanEntry => {
     const observed = byService.get(serviceId);
@@ -743,7 +754,12 @@ export async function recoverServiceMacosTransactions(
       ),
     );
   }
-  return await inspectLoadedConfig(loaded, options, launchAgentsDirectoryIdentity);
+  return await inspectLoadedConfig(
+    loaded,
+    options,
+    launchAgentsDirectoryIdentity,
+    selectedServiceIds,
+  );
 }
 export function fingerprintPlan(plan: Omit<ServiceMacosPlan, "fingerprint">): string {
   return `service-macos:v1:${digest(JSON.stringify(plan))}`;
@@ -755,10 +771,12 @@ async function inspectLoadedConfig(
   loaded: LoadedServiceMacosConfig,
   options: InspectServiceMacosOptions,
   expectedLaunchAgentsDirectoryIdentity: string,
+  serviceIds: readonly string[] = Object.keys(loaded.config.services),
 ): Promise<readonly ServiceMacosObservation[]> {
   const runner = options.runner ?? processCommandRunner;
   const observations = [];
-  for (const [serviceId, service] of Object.entries(loaded.config.services)) {
+  for (const serviceId of serviceIds) {
+    const service = loaded.config.services[serviceId]!;
     observations.push(await inspectTarget(
       serviceTarget(serviceId, service, options.runtime),
       options.runtime.uid,

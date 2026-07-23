@@ -73,7 +73,7 @@ export async function observeOwnerPrivatePlist(path: string, expectedUid: number
   }
   const maximumLinks = options.allowTwoLinks === true ? 2n : 1n;
   assertOwnerPrivateStats(path, before, expectedUid, maximumLinks);
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = await handle.stat({ bigint: true });
     assertOwnerPrivateStats(path, opened, expectedUid, maximumLinks);
@@ -975,7 +975,7 @@ async function readOwnerPrivateBounded(
   ) {
     throw new ServiceMacosDriftError(`${path} must be an owner-private single-linked bounded file.`);
   }
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = await handle.stat({ bigint: true });
     assertSameIdentity(path, before, opened);
