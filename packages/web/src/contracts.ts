@@ -14,6 +14,19 @@ export const WEB_API_VERSION = 1 as const;
 
 export type WebTurnStatus = "idle" | "running" | "complete" | "failed" | "cancelled" | "interrupted";
 
+/**
+ * Content-free, per-turn operator telemetry. Event flags are sticky for the
+ * lifetime of the turn so later usage snapshots cannot erase an occurrence.
+ */
+export interface WebTurnTelemetry {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly contextWindow?: number;
+  readonly contextUsed?: number;
+  readonly compacted: boolean;
+  readonly sessionEvicted: boolean;
+}
+
 export interface WebAgent {
   readonly id: string;
   readonly label: string;
@@ -53,6 +66,8 @@ export interface WebMessage {
   readonly updatedAt: string;
   readonly status: Exclude<WebTurnStatus, "idle">;
   readonly error?: { readonly code: string; readonly message: string };
+  /** Bounded numeric/event metadata only; never thoughts, activity, or provider payloads. */
+  readonly telemetry?: WebTurnTelemetry;
 }
 
 export interface WebThreadDetail {
@@ -97,7 +112,7 @@ export type WebConfigView = OperatorConfigView;
 export type WebHealthView = OperatorHealth;
 
 export interface StoredWebState {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly threads: readonly WebThread[];
   readonly messages: readonly WebMessage[];
 }

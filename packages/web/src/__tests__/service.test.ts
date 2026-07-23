@@ -106,6 +106,79 @@ describe("web service lifecycle", () => {
     await service.stop();
   });
 
+  it("preserves full assistant text while persisting usage and sticky runtime events across restart", async () => {
+    const root = await temporaryDirectory();
+    const stateDirectory = join(root, "state");
+    const store = await DurableWebStore.open(stateDirectory);
+    const service = new WebService(store, gateway({
+      async runTurn(input) {
+        await input.onState?.({
+          conversationId: input.conversationId,
+          status: "streaming",
+          activeTurnId: "operator-turn",
+          assistantText: "First <literal> line",
+          thoughtText: "",
+          activities: [],
+          usage: {
+            inputTokens: 100,
+            outputTokens: 20,
+            contextWindow: 200_000,
+            contextUsed: 120,
+            compacted: true,
+            sessionEvicted: false,
+          },
+        });
+        await input.onState?.({
+          conversationId: input.conversationId,
+          status: "completed",
+          assistantText: "First <literal> line\nSecond & final line",
+          thoughtText: "",
+          activities: [],
+          usage: {
+            inputTokens: 110,
+            outputTokens: 30,
+            contextWindow: 200_000,
+            contextUsed: 140,
+            compacted: false,
+            sessionEvicted: true,
+          },
+          finalMessage: {
+            id: "operator-final",
+            role: "assistant",
+            text: "First <literal> line\nSecond & final line",
+          },
+        });
+      },
+    }));
+    const thread = await service.createThread("personal");
+    await expect(service.runTurn(thread.id, { text: "measure" }, async () => undefined)).resolves.toMatchObject({
+      messages: [
+        { role: "user", text: "measure" },
+        {
+          role: "assistant",
+          operatorMessageId: "operator-final",
+          text: "First <literal> line\nSecond & final line",
+          telemetry: {
+            inputTokens: 110,
+            outputTokens: 30,
+            contextWindow: 200_000,
+            contextUsed: 140,
+            compacted: true,
+            sessionEvicted: true,
+          },
+        },
+      ],
+    });
+    await service.stop();
+
+    const reopened = await DurableWebStore.open(stateDirectory);
+    expect(reopened.getThreadDetail(thread.id)?.messages[1]).toMatchObject({
+      text: "First <literal> line\nSecond & final line",
+      telemetry: { compacted: true, sessionEvicted: true },
+    });
+    await reopened.close();
+  });
+
   it("registers a durable turn before a blocked first renderer update so cancel cannot miss it", async () => {
     const root = await temporaryDirectory();
     const store = await DurableWebStore.open(join(root, "state"));

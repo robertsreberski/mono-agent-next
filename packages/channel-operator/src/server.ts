@@ -372,6 +372,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
 
     let text = "";
     let unsupportedAttachment = false;
+    let projectedUsage: OperatorUsage | undefined;
     const reply: ChannelReplySink = {
       async emit(event: ChannelReplyEvent): Promise<void> {
         switch (event.type) {
@@ -394,7 +395,35 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
             await writer.write({ type: "ask_user", turnId, ask: event.ask });
             break;
           case "usage":
-            await writer.write({ type: "usage", turnId, usage: operatorUsage(event.usage) });
+            projectedUsage = mergeOperatorUsage(
+              projectedUsage,
+              operatorUsage(event.usage),
+            );
+            await writer.write({ type: "usage", turnId, usage: projectedUsage });
+            break;
+          case "compaction":
+            projectedUsage = mergeOperatorUsage(
+              projectedUsage,
+              {
+                inputTokens: projectedUsage?.inputTokens ?? 0,
+                outputTokens: projectedUsage?.outputTokens ?? 0,
+                compacted: event.compaction.compacted,
+                sessionEvicted: false,
+              },
+            );
+            await writer.write({ type: "usage", turnId, usage: projectedUsage });
+            break;
+          case "session-evicted":
+            projectedUsage = mergeOperatorUsage(
+              projectedUsage,
+              {
+                inputTokens: projectedUsage?.inputTokens ?? 0,
+                outputTokens: projectedUsage?.outputTokens ?? 0,
+                compacted: false,
+                sessionEvicted: true,
+              },
+            );
+            await writer.write({ type: "usage", turnId, usage: projectedUsage });
             break;
         }
       },
@@ -849,6 +878,28 @@ function operatorUsage(usage: RuntimeUsage): OperatorUsage {
     ...(usage.contextUsed === undefined ? {} : { contextUsed: usage.contextUsed }),
     compacted: usage.compaction?.compacted ?? false,
     sessionEvicted: usage.sessionEvicted ?? false,
+  };
+}
+
+function mergeOperatorUsage(
+  previous: OperatorUsage | undefined,
+  next: OperatorUsage,
+): OperatorUsage {
+  return {
+    inputTokens: next.inputTokens,
+    outputTokens: next.outputTokens,
+    ...(next.contextWindow !== undefined
+      ? { contextWindow: next.contextWindow }
+      : previous?.contextWindow === undefined
+        ? {}
+        : { contextWindow: previous.contextWindow }),
+    ...(next.contextUsed !== undefined
+      ? { contextUsed: next.contextUsed }
+      : previous?.contextUsed === undefined
+        ? {}
+        : { contextUsed: previous.contextUsed }),
+    compacted: previous?.compacted === true || next.compacted,
+    sessionEvicted: previous?.sessionEvicted === true || next.sessionEvicted,
   };
 }
 

@@ -9,14 +9,17 @@ import type {
   ChannelReplyEvent,
   ChannelReplySink,
   ChannelTurnResult,
+  RuntimeToolCall,
   RuntimeUsage,
 } from "@mono-agent/module-sdk";
 
 import { isLoopbackHost, type OpenAiApiConfig } from "./config.js";
+import { renderOpenWebUiToolDetail } from "./tool-details.js";
 import { OpenAiRequestError, parseOpenAiChatRequest, toChannelRequest } from "./translation.js";
 
 const SHUTDOWN_MS = 1_000;
 const SSE_TERMINAL_RESERVE_BYTES = 2_048;
+const MAX_TOOL_CALLS_PER_TURN = 256;
 
 export type OpenAiDispatch = (request: ChannelInboundRequest, reply: ChannelReplySink) => Promise<ChannelTurnResult>;
 export interface OpenAiApiStartInfo { readonly host: string; readonly port: number; readonly baseUrl: string; readonly modelsUrl: string; readonly chatCompletionsUrl: string; }
@@ -26,6 +29,7 @@ export interface CreateOpenAiApiServerOptions { readonly config: OpenAiApiConfig
 
 interface OutputBudget { remaining: number; }
 interface OpenAiUsage { readonly prompt_tokens: number; readonly completion_tokens: number; readonly total_tokens: number; }
+interface ToolDetailPlacement { readonly textOffset: number; readonly rendered: string; }
 
 class HttpError extends Error {
   constructor(readonly status: number, readonly code: string, message: string) {
@@ -187,6 +191,10 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
     let acceptingReplies = true;
     let replyFailure: unknown;
     let usage: OpenAiUsage | undefined;
+    let toolDetailBytes = 0;
+    const seenToolCallIds = new Set<string>();
+    const pendingToolCalls = new Map<string, RuntimeToolCall>();
+    const toolDetails: ToolDetailPlacement[] = [];
     const abortForDisconnect = (): void => {
       if (!response.writableEnded) controller.abort(new HttpError(499, "client_closed", "The client disconnected."));
     };
@@ -203,6 +211,10 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
       await startStream();
       await writeSse(response, chunk(id, created, parsed.model, { content: value }), budget, SSE_TERMINAL_RESERVE_BYTES);
       streamedText += value;
+    };
+    const streamToolDetail = async (value: string): Promise<void> => {
+      await startStream();
+      await writeSse(response, chunk(id, created, parsed.model, { content: value }), budget, SSE_TERMINAL_RESERVE_BYTES);
     };
     const reply: ChannelReplySink = {
       async emit(event: ChannelReplyEvent): Promise<void> {
@@ -233,6 +245,35 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
             case "usage":
               usage = toOpenAiUsage(event.usage);
               return;
+            case "tool-call":
+              if (
+                seenToolCallIds.has(event.call.id)
+                || seenToolCallIds.size >= MAX_TOOL_CALLS_PER_TURN
+              ) {
+                throw new HttpError(502, "invalid_tool_event", "Core emitted an invalid tool-call sequence.");
+              }
+              seenToolCallIds.add(event.call.id);
+              pendingToolCalls.set(event.call.id, event.call);
+              return;
+            case "tool-result": {
+              const call = pendingToolCalls.get(event.result.callId);
+              if (call === undefined) {
+                throw new HttpError(502, "invalid_tool_event", "Core emitted an unmatched tool result.");
+              }
+              pendingToolCalls.delete(event.result.callId);
+              const rendered = renderOpenWebUiToolDetail(call, event.result);
+              toolDetailBytes += Buffer.byteLength(rendered);
+              assertResponseTextSize(toolDetailBytes, options.config.maxResponseBytes);
+              if (parsed.stream) {
+                await streamToolDetail(rendered);
+              } else {
+                toolDetails.push({ textOffset: text.length, rendered });
+              }
+              return;
+            }
+            case "compaction":
+            case "session-evicted":
+              return;
             case "activity":
             case "attachment":
             case "ask-user":
@@ -257,6 +298,9 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
       if (result.status !== "completed") {
         throw new HttpError(result.status === "cancelled" ? 499 : 422, result.status, `Turn ${result.status}.`);
       }
+      if (pendingToolCalls.size > 0) {
+        throw new HttpError(502, "incomplete_tool_event", "Core completed with an unfinished tool call.");
+      }
       const final = result.text ?? text;
       assertResponseTextSize(Buffer.byteLength(final), options.config.maxResponseBytes);
       if (parsed.stream) {
@@ -273,12 +317,22 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
         await writeBudgeted(response, terminal, budget, 0);
         response.end();
       } else {
+        if (toolDetails.length > 0 && text.length > 0 && !final.startsWith(text)) {
+          throw new HttpError(502, "non_append_final_text", "Core returned final text that cannot preserve completed tool ordering.");
+        }
         sendJsonBounded(response, 200, {
           id,
           object: "chat.completion",
           created,
           model: parsed.model,
-          choices: [{ index: 0, message: { role: "assistant", content: final }, finish_reason: "stop" }],
+          choices: [{
+            index: 0,
+            message: {
+              role: "assistant",
+              content: insertToolDetails(final, toolDetails),
+            },
+            finish_reason: "stop",
+          }],
           usage: usage ?? emptyUsage(),
         }, options.config.maxResponseBytes);
       }
@@ -540,6 +594,18 @@ function tokenCount(value: number, field: string): number {
 
 function emptyUsage(): OpenAiUsage {
   return { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+}
+
+function insertToolDetails(text: string, details: readonly ToolDetailPlacement[]): string {
+  let output = "";
+  let cursor = 0;
+  for (const detail of details) {
+    const position = Math.max(cursor, Math.min(detail.textOffset, text.length));
+    output += text.slice(cursor, position);
+    output += detail.rendered;
+    cursor = position;
+  }
+  return output + text.slice(cursor);
 }
 
 function raceAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

@@ -4,16 +4,27 @@ import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { parseAskSnapshot, parseTurnRequest, type OperatorMessage } from "@mono-agent/operator";
+import {
+  parseAskSnapshot,
+  parseTurnRequest,
+  type OperatorMessage,
+  type OperatorUsage,
+} from "@mono-agent/operator";
 
-import type { StartWebTurnInput, StoredWebState, WebMessage, WebThread } from "./contracts.js";
+import type {
+  StartWebTurnInput,
+  StoredWebState,
+  WebMessage,
+  WebThread,
+  WebTurnTelemetry,
+} from "./contracts.js";
 import { WebProductError } from "./errors.js";
 
 const STATE_FILE = "state.json";
 const MARKER_FILE = ".mono-agent-web-state";
 const LEASE_FILE = "lease.sqlite";
 const MARKER_CONTENT = '{"kind":"mono-agent-web-state","schemaVersion":1}\n';
-const EMPTY_STATE: StoredWebState = Object.freeze({ schemaVersion: 1, threads: [], messages: [] });
+const EMPTY_STATE: StoredWebState = Object.freeze({ schemaVersion: 2, threads: [], messages: [] });
 
 export interface DurableWebStoreOptions {
   readonly clock?: () => Date;
@@ -192,6 +203,7 @@ export class DurableWebStore {
     text: string,
     pendingAsk?: WebThread["pendingAsk"],
     operatorMessageId?: string,
+    usage?: OperatorUsage,
   ): Promise<WebMessage> {
     return this.mutate((draft) => {
       const thread = requiredThread(draft, threadId);
@@ -200,6 +212,9 @@ export class DurableWebStore {
       const updatedAt = this.clock().toISOString();
       Object.assign(message, { text, updatedAt });
       if (operatorMessageId !== undefined) Object.assign(message, { operatorMessageId });
+      if (usage !== undefined) {
+        Object.assign(message, { telemetry: mergeTelemetry(message.telemetry, usage) });
+      }
       Object.assign(thread, { updatedAt });
       delete (thread as { pendingAsk?: unknown }).pendingAsk;
       if (pendingAsk !== undefined) Object.assign(thread, { pendingAsk });
@@ -309,10 +324,16 @@ export class DurableWebStore {
 }
 
 type MutableState = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   threads: WebThread[];
   messages: WebMessage[];
 };
+
+interface LegacyStoredWebState {
+  readonly schemaVersion: 1;
+  readonly threads: readonly WebThread[];
+  readonly messages: readonly WebMessage[];
+}
 
 async function prepareDirectory(directory: string): Promise<void> {
   const existing = await lstat(directory).catch(() => undefined);
@@ -400,6 +421,17 @@ async function loadState(directory: string): Promise<StoredWebState> {
   } catch {
     throw new WebProductError("state_corrupt", "Web state is corrupt; refusing to overwrite it.", 409);
   }
+  if (recordValue(raw)?.schemaVersion === 1) {
+    validateState(raw, 1);
+    const migrated: MutableState = {
+      schemaVersion: 2,
+      threads: clone([...(raw as LegacyStoredWebState).threads]),
+      messages: clone([...(raw as LegacyStoredWebState).messages]),
+    };
+    validateState(migrated);
+    await writeStateAtomic(directory, migrated);
+    return freezeState(migrated);
+  }
   validateState(raw);
   return freezeState(raw as MutableState);
 }
@@ -481,10 +513,10 @@ function requiredAssistant(state: MutableState, threadId: string, turnId: string
   return message;
 }
 
-function validateState(raw: unknown): asserts raw is StoredWebState {
+function validateState(raw: unknown, legacyVersion?: 1): asserts raw is StoredWebState | LegacyStoredWebState {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) invalidState();
   const value = raw as Record<string, unknown>;
-  if (value.schemaVersion !== 1 || !Array.isArray(value.threads) || !Array.isArray(value.messages)) invalidState();
+  if (value.schemaVersion !== (legacyVersion ?? 2) || !Array.isArray(value.threads) || !Array.isArray(value.messages)) invalidState();
   const fields = Object.keys(value);
   if (fields.some((field) => !["schemaVersion", "threads", "messages"].includes(field))) invalidState();
   const threadIds = new Set<string>();
@@ -513,7 +545,7 @@ function validateState(raw: unknown): asserts raw is StoredWebState {
     if (!record || !isString(record.id) || !isString(record.threadId) || !threadIds.has(record.threadId) || (record.role !== "user" && record.role !== "assistant") || !isString(record.text) || !isTimestamp(record.createdAt) || !isTimestamp(record.updatedAt) || !isStatus(record.status) || record.status === "idle") invalidState();
     if (Object.keys(record).some((field) => ![
       "id", "operatorMessageId", "threadId", "turnId", "role", "text", "attachments", "quote",
-      "createdAt", "updatedAt", "status", "error",
+      "createdAt", "updatedAt", "status", "error", ...(legacyVersion === 1 ? [] : ["telemetry"]),
     ].includes(field))) invalidState();
     if (messageIds.has(record.id)) invalidState();
     messageIds.add(record.id);
@@ -535,6 +567,7 @@ function validateState(raw: unknown): asserts raw is StoredWebState {
       const error = recordValue(record.error);
       if (!error || Object.keys(error).some((field) => !["code", "message"].includes(field)) || !isString(error.code) || !isString(error.message)) invalidState();
     }
+    if (record.telemetry !== undefined && !isTelemetry(record.telemetry)) invalidState();
   }
 }
 
@@ -546,6 +579,48 @@ function isString(value: unknown): value is string { return typeof value === "st
 function isTimestamp(value: unknown): value is string { return typeof value === "string" && !Number.isNaN(Date.parse(value)); }
 function isStatus(value: unknown): boolean { return ["idle", "running", "complete", "failed", "cancelled", "interrupted"].includes(String(value)); }
 function invalidState(): never { throw new WebProductError("state_corrupt", "Web state is corrupt; refusing to overwrite it.", 409); }
+
+function isTelemetry(value: unknown): value is WebTurnTelemetry {
+  const record = recordValue(value);
+  return record !== undefined
+    && !Object.keys(record).some((field) => ![
+      "inputTokens", "outputTokens", "contextWindow", "contextUsed", "compacted", "sessionEvicted",
+    ].includes(field))
+    && isCount(record.inputTokens)
+    && isCount(record.outputTokens)
+    && (record.contextWindow === undefined || (isCount(record.contextWindow) && record.contextWindow >= 1))
+    && (record.contextUsed === undefined || isCount(record.contextUsed))
+    && typeof record.compacted === "boolean"
+    && typeof record.sessionEvicted === "boolean";
+}
+
+function isCount(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function mergeTelemetry(
+  previous: WebTurnTelemetry | undefined,
+  usage: OperatorUsage,
+): WebTurnTelemetry {
+  if (
+    !isCount(usage.inputTokens)
+    || !isCount(usage.outputTokens)
+    || (usage.contextWindow !== undefined && (!isCount(usage.contextWindow) || usage.contextWindow < 1))
+    || (usage.contextUsed !== undefined && !isCount(usage.contextUsed))
+    || typeof usage.compacted !== "boolean"
+    || typeof usage.sessionEvicted !== "boolean"
+  ) {
+    throw new WebProductError("invalid_telemetry", "Operator turn telemetry is invalid.", 502);
+  }
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    ...(usage.contextWindow === undefined ? {} : { contextWindow: usage.contextWindow }),
+    ...(usage.contextUsed === undefined ? {} : { contextUsed: usage.contextUsed }),
+    compacted: previous?.compacted === true || usage.compacted,
+    sessionEvicted: previous?.sessionEvicted === true || usage.sessionEvicted,
+  };
+}
 
 function cleanTitle(value: string): string {
   const title = value.trim().replace(/\s+/gu, " ");
@@ -560,7 +635,7 @@ function stripAttachmentData(
 }
 
 function freezeState(state: MutableState): StoredWebState {
-  return Object.freeze({ schemaVersion: 1, threads: Object.freeze(clone(state.threads)), messages: Object.freeze(clone(state.messages)) });
+  return Object.freeze({ schemaVersion: 2, threads: Object.freeze(clone(state.threads)), messages: Object.freeze(clone(state.messages)) });
 }
 
 function clone<T>(value: T): T { return structuredClone(value); }

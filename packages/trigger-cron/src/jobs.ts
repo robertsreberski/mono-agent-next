@@ -179,6 +179,15 @@ export function nextCronOccurrence(job: CronJob, currentDate: Date): Date {
   }).next().toDate();
 }
 
+export function previousCronOccurrence(job: CronJob, currentDate: Date): Date {
+  return CronExpressionParser.parse(job.expression, {
+    currentDate,
+    strict: false,
+    tz: job.timezone,
+    hashSeed: job.id,
+  }).prev().toDate();
+}
+
 function validateCronExpression(expression: string, timezone: string, hashSeed: string): void {
   if (expression.split(/\s+/u).length !== 5) {
     throw new TriggerCronConfigError("Cron expressions must contain exactly five fields.");

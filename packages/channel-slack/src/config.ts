@@ -1,5 +1,10 @@
 import { envEligibleSchema } from "@mono-agent/module-sdk";
 
+import {
+  parseSlackDestination,
+  parseSlackIdentifier,
+} from "./destination.js";
+
 export const DEFAULT_SLACK_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const MAX_SLACK_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 export const MAX_SLACK_SHORTCUTS = 100;
@@ -58,8 +63,14 @@ export function parseSlackConfig(value: unknown): SlackConfig {
     ? []
     : identifiers(input.allowedChannelIds, "allowedChannelIds");
   if (!allowAllChannels && allowedChannelIds.length === 0) fail("allowedChannelIds must contain at least one exact channel id unless allowAllChannels is true.");
-  const defaultDestination = input.defaultDestination === undefined ? undefined : id(input.defaultDestination, "defaultDestination");
-  if (defaultDestination !== undefined && !allowAllChannels && !allowedChannelIds.includes(defaultDestination.split(":", 1)[0]!)) fail("defaultDestination channel must be authorized.");
+  const defaultDestination = input.defaultDestination === undefined
+    ? undefined
+    : destination(input.defaultDestination, "defaultDestination");
+  if (defaultDestination !== undefined
+    && !allowAllChannels
+    && !allowedChannelIds.includes(defaultDestination.split(":")[0]!)) {
+    fail("defaultDestination channel must be authorized.");
+  }
   const shortcuts = parseShortcuts(input.shortcuts, allowedChannelIds, allowAllChannels);
   const homeTab = parseHomeTab(input.homeTab, allowedChannelIds, allowAllChannels);
   return Object.freeze({
@@ -75,7 +86,18 @@ export function parseSlackConfig(value: unknown): SlackConfig {
   });
 }
 
-const idSchema = envEligibleSchema({ type: "string", minLength: 1, maxLength: 128 });
+const idSchema = envEligibleSchema({
+  type: "string",
+  minLength: 1,
+  maxLength: 128,
+  pattern: "^[^\\s:]+$",
+});
+const destinationSchema = envEligibleSchema({
+  type: "string",
+  minLength: 1,
+  maxLength: 257,
+  pattern: "^[^\\s:]+(?::[^\\s:]+)?$",
+});
 export const slackConfigSchema = Object.freeze({
   jsonSchema: Object.freeze({
     type: "object",
@@ -87,7 +109,7 @@ export const slackConfigSchema = Object.freeze({
       allowedTeamIds: { type: "array", uniqueItems: true, items: idSchema },
       allowedChannelIds: { type: "array", uniqueItems: true, items: idSchema },
       allowAllChannels: { type: "boolean", default: false },
-      defaultDestination: idSchema,
+      defaultDestination: destinationSchema,
       maxAttachmentBytes: { type: "integer", minimum: 1, maximum: MAX_SLACK_ATTACHMENT_BYTES, default: DEFAULT_SLACK_MAX_ATTACHMENT_BYTES },
       shortcuts: {
         type: "array",
@@ -230,7 +252,21 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 function exact(value: Record<string, unknown>, fields: readonly string[], label: string): void { const allowed = new Set(fields); const unknown = Object.keys(value).filter((key) => !allowed.has(key)).sort(); if (unknown.length > 0) fail(`${label} contains unknown field(s): ${unknown.join(", ")}.`); }
 function token(value: unknown, label: string, prefix: string): string { if (typeof value !== "string" || value.length < 20 || value.length > 4_096 || !value.startsWith(prefix) || /\s/u.test(value)) fail(`${label} must be a resolved ${prefix} env-only secret.`); return value; }
-function id(value: unknown, label: string): string { if (typeof value !== "string" || value.length === 0 || value.length > 128 || /\s/u.test(value)) fail(`${label} must be a non-empty identifier.`); return value; }
+function id(value: unknown, label: string): string {
+  try {
+    return parseSlackIdentifier(value, label);
+  } catch {
+    return fail(`${label} must be one non-empty identifier.`);
+  }
+}
+function destination(value: unknown, label: string): string {
+  try {
+    const parsed = parseSlackDestination(value, label);
+    return `${parsed.channelId}${parsed.threadId === undefined ? "" : `:${parsed.threadId}`}`;
+  } catch {
+    return fail(`${label} must be one channel or channel:thread destination.`);
+  }
+}
 function actionId(value: unknown, label: string): string {
   const result = id(value, label);
   if (!/^[A-Za-z0-9_-]+$/u.test(result)) fail(`${label} must contain only letters, numbers, underscores, and hyphens.`);

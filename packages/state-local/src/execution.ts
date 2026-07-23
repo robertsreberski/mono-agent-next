@@ -14,6 +14,7 @@ import {
   createDurableFingerprint,
   type DeliveryIntentInput,
   type DeliverySettlementInput,
+  type DeliverySettlementWithHistoryInput,
   type ExecutionMaintenanceInput,
   type ReconcileArtifactPublicationsInput,
   type RunAdmissionInput,
@@ -53,6 +54,7 @@ export const STATE_LOCAL_EXECUTION_OPERATIONS = Object.freeze([
   "session.evict",
   "delivery.prepare",
   "delivery.settle",
+  "delivery.settle-with-history",
   "artifact-publications.reconcile",
   "maintenance.run",
 ] as const);
@@ -117,7 +119,10 @@ export class StateLocalExecution implements StateExecution {
         );
         return appendCanonicalTranscript(
           input.current as CanonicalTranscript | undefined,
-          requiredString(input.conversationId, `${operation}.conversationId`),
+          requiredConversationId(
+            input.conversationId,
+            `${operation}.conversationId`,
+          ),
           input.entries as readonly CanonicalTranscriptEntry[],
         );
       }
@@ -139,7 +144,10 @@ export class StateLocalExecution implements StateExecution {
       case "conversation.load": {
         const input = inputRecord(request.input, operation, ["conversationId"]);
         return this.#journal.loadConversation(
-          requiredString(input.conversationId, `${operation}.conversationId`),
+          requiredConversationId(
+            input.conversationId,
+            `${operation}.conversationId`,
+          ),
           request.signal,
         );
       }
@@ -164,15 +172,15 @@ export class StateLocalExecution implements StateExecution {
       case "run.renew-admission": {
         const input = inputRecord(request.input, operation, ["requestId", "runId"]);
         return this.#journal.renewAdmission(
-          requiredString(input.requestId, `${operation}.requestId`),
-          requiredString(input.runId, `${operation}.runId`),
+          requiredIdentifier(input.requestId, `${operation}.requestId`),
+          requiredIdentifier(input.runId, `${operation}.runId`),
           request.signal,
         );
       }
       case "run.record-attempt": {
         const input = inputRecord(request.input, operation, ["runId", "attempt"]);
         return this.#journal.recordAttempt(
-          requiredString(input.runId, `${operation}.runId`),
+          requiredIdentifier(input.runId, `${operation}.runId`),
           input.attempt as AgentRunAttemptEvidence,
           request.signal,
         );
@@ -180,7 +188,7 @@ export class StateLocalExecution implements StateExecution {
       case "run.record-interaction": {
         const input = inputRecord(request.input, operation, ["runId", "evidence"]);
         return this.#journal.recordInteraction(
-          requiredString(input.runId, `${operation}.runId`),
+          requiredIdentifier(input.runId, `${operation}.runId`),
           input.evidence as AgentInteractionEvidence,
           request.signal,
         );
@@ -226,7 +234,7 @@ export class StateLocalExecution implements StateExecution {
       case "run.read": {
         const input = inputRecord(request.input, operation, ["runId"]);
         return this.#journal.readRun(
-          requiredString(input.runId, `${operation}.runId`),
+          requiredIdentifier(input.runId, `${operation}.runId`),
           request.signal,
         );
       }
@@ -244,7 +252,10 @@ export class StateLocalExecution implements StateExecution {
           ["conversationId", "route"],
         );
         return this.#journal.loadSession(
-          requiredString(input.conversationId, `${operation}.conversationId`),
+          requiredConversationId(
+            input.conversationId,
+            `${operation}.conversationId`,
+          ),
           input.route as RouteIdentity,
           request.signal,
         );
@@ -256,7 +267,10 @@ export class StateLocalExecution implements StateExecution {
           ["conversationId", "route", "expected"],
         );
         return this.#journal.evictSession(
-          requiredString(input.conversationId, `${operation}.conversationId`),
+          requiredConversationId(
+            input.conversationId,
+            `${operation}.conversationId`,
+          ),
           input.route as RouteIdentity,
           input.expected as { readonly sessionId: string; readonly updatedAt: string },
           request.signal,
@@ -291,6 +305,26 @@ export class StateLocalExecution implements StateExecution {
           ...input,
           signal: request.signal,
         } as unknown as DeliverySettlementInput);
+      }
+      case "delivery.settle-with-history": {
+        const input = inputRecord(
+          request.input,
+          operation,
+          [
+            "idempotencyKey",
+            "fingerprint",
+            "attempt",
+            "token",
+            "messageId",
+            "conversationId",
+            "entry",
+            "entryFingerprint",
+          ],
+        );
+        return this.#journal.settleDeliveryWithHistory({
+          ...input,
+          signal: request.signal,
+        } as unknown as DeliverySettlementWithHistoryInput);
       }
       case "artifact-publications.reconcile": {
         const input = optionalInputRecord(
@@ -376,20 +410,34 @@ function requireNoInput(value: unknown, operation: string): void {
   }
 }
 
-function requiredString(value: unknown, path: string): string {
+function requiredBoundedString(
+  value: unknown,
+  path: string,
+  maximumBytes: number,
+): string {
   if (
     typeof value !== "string"
     || value.trim().length === 0
     || value.includes("\0")
-    || Buffer.byteLength(value, "utf8") > 4_096
+    || Buffer.byteLength(value, "utf8") > maximumBytes
   ) {
     throw new TypeError(`${path} must be a bounded non-empty string`);
   }
   return value;
 }
 
+function requiredIdentifier(value: unknown, path: string): string {
+  return requiredBoundedString(value, path, 512);
+}
+
+function requiredConversationId(value: unknown, path: string): string {
+  return requiredBoundedString(value, path, 4_096);
+}
+
 function optionalString(value: unknown, path: string): string | undefined {
-  return value === undefined ? undefined : requiredString(value, path);
+  return value === undefined
+    ? undefined
+    : requiredBoundedString(value, path, 4_096);
 }
 
 function throwIfAborted(signal: AbortSignal): void {

@@ -26,7 +26,6 @@ const MEMORY_QUERY = "packed-memory-query-a41c";
 const WEBHOOK_SECRET = "packed-system-webhook-token";
 const OPERATOR_SECRET = "packed-system-operator-token-0000000000000001";
 const DELIVERY_SECRET = "packed-system-delivery-token";
-const FIXED_CRON_INSTANT = "2031-02-03T04:05:00.000Z";
 
 const EXPECTED_PACKAGE_NAMES = Object.freeze([
   "@mono-agent/module-sdk",
@@ -156,10 +155,10 @@ async function main() {
         SYSTEM_DELIVERY_TOKEN: DELIVERY_SECRET,
       },
     );
-    assertScenarioOutput(scenario.stdout);
+    const scenarioProof = assertScenarioOutput(scenario.stdout);
     assertProviderRequests(provider.requests);
     assertOtlpRequests(otlpReceiver.requests);
-    assertDeliveryRequests(deliveryReceiver.requests);
+    assertDeliveryRequests(deliveryReceiver.requests, scenarioProof.expectedCronKey);
 
     console.log(
       `Verified exact ${String(EXPECTED_PACKAGE_NAMES.length)}-package packed v1: clean install/import, all templates, Core/Pi/state/memory/webhook/operator/cron/OTLP, restart persistence, atomic trigger delivery, and bounded shutdown on Node.js ${process.versions.node}.`,
@@ -551,7 +550,6 @@ import {
 
 const EXPECTED_REPLY = "mono-agent-next durable provider fact 7d3f9c";
 const MEMORY_QUERY = "packed-memory-query-a41c";
-const FIXED_CRON_INSTANT = "2031-02-03T04:05:00.000Z";
 const configPath = resolve(process.argv[2] ?? "mono-agent.config.json");
 const configDirectory = dirname(configPath);
 const webhookSecret = requiredEnvironment("SYSTEM_WEBHOOK_TOKEN");
@@ -569,10 +567,12 @@ try {
 
   const firstCron = await firstHost.runModuleCommand("cron", "trigger-cron:invoke", {
     jobId: "packed-system",
-    scheduledAt: FIXED_CRON_INSTANT,
   });
   assert.equal(firstCron.value.status, "accepted");
-  assert.equal(firstCron.value.idempotencyKey, expectedCronIdempotencyKey());
+  const cronInstant = firstCron.value.scheduledAt;
+  assert.equal(new Date(cronInstant).toISOString(), cronInstant);
+  assert.equal(firstCron.value.scheduledAt, cronInstant);
+  assert.equal(firstCron.value.idempotencyKey, expectedCronIdempotencyKey(cronInstant));
 
   await stopHost(firstHost, "first host");
   firstHost = undefined;
@@ -597,10 +597,10 @@ try {
 
   const duplicate = await secondHost.runModuleCommand("cron", "trigger-cron:invoke", {
     jobId: "packed-system",
-    scheduledAt: FIXED_CRON_INSTANT,
+    scheduledAt: cronInstant,
   });
-  assert.equal(duplicate.value.status, "rejected");
-  assert.equal(duplicate.value.reason, "duplicate trigger event");
+  assert.equal(duplicate.value.status, "duplicate");
+  assert.match(duplicate.value.reason, /already admitted/u);
   assert.equal(duplicate.value.idempotencyKey, firstCron.value.idempotencyKey);
 
   await stopHost(secondHost, "second host");
@@ -727,9 +727,9 @@ function within(promise, milliseconds, label) {
   ]).finally(() => clearTimeout(timer));
 }
 
-function expectedCronIdempotencyKey() {
+function expectedCronIdempotencyKey(scheduledAt) {
   const digest = createHash("sha256")
-    .update(JSON.stringify([1, "cron", "packed-system", FIXED_CRON_INSTANT]), "utf8")
+    .update(JSON.stringify([1, "cron", "packed-system", scheduledAt]), "utf8")
     .digest("hex");
   return "cron:v1:" + digest;
 }
@@ -746,10 +746,18 @@ function assertScenarioOutput(stdout) {
   const lines = stdout.trim().split("\n").filter(Boolean);
   const parsed = JSON.parse(lines.at(-1) ?? "null");
   if (parsed?.ok !== true) throw new Error(`Packed scenario did not report success: ${stdout}`);
-  if (parsed.firstCron?.status !== "accepted" || parsed.duplicateCron?.status !== "rejected") {
+  if (parsed.firstCron?.status !== "accepted" || parsed.duplicateCron?.status !== "duplicate") {
     throw new Error(`Packed scenario did not prove trigger persistence: ${stdout}`);
   }
-  const expectedKey = expectedCronIdempotencyKey();
+  const cronInstant = parsed.firstCron.scheduledAt;
+  if (
+    typeof cronInstant !== "string"
+    || new Date(cronInstant).toISOString() !== cronInstant
+    || parsed.duplicateCron.scheduledAt !== cronInstant
+  ) {
+    throw new Error(`Packed scenario did not reuse one canonical due cron instant: ${stdout}`);
+  }
+  const expectedKey = expectedCronIdempotencyKey(cronInstant);
   if (
     parsed.firstCron.idempotencyKey !== expectedKey
     || parsed.duplicateCron.idempotencyKey !== expectedKey
@@ -759,6 +767,7 @@ function assertScenarioOutput(stdout) {
   if (!parsed.operatorFrames?.includes("completed")) {
     throw new Error(`Packed scenario did not complete an operator turn: ${stdout}`);
   }
+  return { expectedCronKey: expectedKey };
 }
 
 function assertProviderRequests(requests) {
@@ -830,7 +839,7 @@ function otlpRequestSummary({ body: _body, ...summary }) {
   return summary;
 }
 
-function assertDeliveryRequests(requests) {
+function assertDeliveryRequests(requests, expectedCronKey) {
   if (requests.length !== 1) {
     throw new Error(`Atomic trigger delivery expected exactly one request; received ${String(requests.length)}`);
   }
@@ -843,7 +852,7 @@ function assertDeliveryRequests(requests) {
   }
   if (
     request.body.idempotencyKey !== request.idempotencyKey
-    || request.idempotencyKey !== expectedCronIdempotencyKey()
+    || request.idempotencyKey !== expectedCronKey
   ) {
     throw new Error(`Trigger delivery used an invalid idempotency key: ${JSON.stringify(request)}`);
   }
@@ -852,9 +861,9 @@ function assertDeliveryRequests(requests) {
   }
 }
 
-function expectedCronIdempotencyKey() {
+function expectedCronIdempotencyKey(scheduledAt) {
   const digest = createHash("sha256")
-    .update(JSON.stringify([1, "cron", "packed-system", FIXED_CRON_INSTANT]), "utf8")
+    .update(JSON.stringify([1, "cron", "packed-system", scheduledAt]), "utf8")
     .digest("hex");
   return `cron:v1:${digest}`;
 }

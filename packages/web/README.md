@@ -26,6 +26,8 @@ Catalog responsibility: Runs the standalone authenticated browser product with o
   not reappear.
 - Stream turns through the shared operator client and reducer, and cancel the
   exact active conversation only on explicit operator cancellation or product shutdown.
+- Persist and render per-turn numeric usage plus compaction and provider-session
+  eviction events without retaining thoughts, activities, or provider payloads.
 - Route live input, structured AskUser answers, bounded inline uploads, quotes,
   replay, redacted config, and health through capability-gated shared client APIs.
 - Keep a service-owned turn running and durably settling when its browser stream
@@ -128,7 +130,15 @@ against reads and writes until close/reopen, preventing a stale in-memory
 snapshot from overwriting the visible commit. Turns left `running` by an
 unclean stop become explicitly `interrupted` on the next exclusive open.
 
-State schema version 1 has no automatic retention or bulk purge. Deleting an
+State schema version 2 adds optional content-free per-turn telemetry to
+assistant messages. On first exclusive open, a valid version 1 state is copied
+field-for-field into version 2 and atomically committed before serving reads;
+unknown or corrupt versions remain untouched. Usage stores safe non-negative
+integer counters only. Compaction and provider-session eviction flags are
+sticky within the turn so a later usage snapshot cannot erase an earlier
+event.
+
+State has no automatic retention or bulk purge. Deleting an
 ordinary thread atomically removes its local messages. Deleting an imported
 proactive thread removes its messages and keeps only an owner-private tombstone
 so the same agent conversation is not re-imported on the next discovery poll.
@@ -187,6 +197,7 @@ WebServerHandle
 WebThread
 WebThreadDetail
 WebTurnStatus
+WebTurnTelemetry
 loadWebConfig
 parseWebConfig
 startWebServer
@@ -251,5 +262,6 @@ pnpm --filter @mono-agent/web test
 Focused tests cover strict secret resolution, body bounds, bearer auth,
 cross-origin rejection, real shared-client turn streaming, cancellation,
 AskUser/live-input routing, uploads/quotes, proactive import and dismissal,
-browser view routes, restart persistence, deletion, exclusive ownership,
+browser view routes, v1-to-v2 migration, telemetry rendering and restart
+persistence, deletion, exclusive ownership,
 atomic recovery, corruption preservation, modes, and symlink rejection.

@@ -1,5 +1,7 @@
 import { envEligibleSchema } from "@mono-agent/module-sdk";
 
+import { parseTelegramChatId } from "./destination.js";
+
 export const DEFAULT_TELEGRAM_POLL_SECONDS = 20;
 export const DEFAULT_TELEGRAM_MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const MAX_TELEGRAM_ATTACHMENT_BYTES = 20 * 1024 * 1024;
@@ -259,9 +261,11 @@ function identifier(value: unknown, label: string): string {
 }
 
 function chatId(value: unknown, label: string): string {
-  const result = identifier(value, label);
-  if (result.includes(":")) fail(`${label} must not contain a colon.`);
-  return result;
+  try {
+    return parseTelegramChatId(value, label);
+  } catch {
+    return fail(`${label} must not contain whitespace, controls, or a colon.`);
+  }
 }
 
 function chatIdArray(value: unknown, label: string): string[] {

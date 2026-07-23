@@ -92,8 +92,8 @@ bounded pass over package-owned state. The pass removes expired hidden presence
 records and unpublished artifact reservations older than
 `runs.retentionDays`. `dryRun` reports the same bounded candidates without
 mutation. Published content-addressed blobs, legacy unindexed blobs, Core run
-records, and delivery-idempotency records are never inferred to be unreferenced
-or deleted by this command.
+records, delivery-idempotency records, and confirmed-delivery entry bindings
+are never inferred to be unreferenced or deleted by this command.
 
 Selected-module diagnostics are non-serving and read-only. They verify the
 existing owner-private path identities, writer lease, and exact state-execution
@@ -106,12 +106,24 @@ bounded error without paths, record bytes, or underlying failure text.
 - **Ownership and schema:** the state snapshot uses
   `mono-agent.state-local.v1`. Artifact index rows written by the maintenance
   implementation use schema version 2; legacy published rows remain readable
-  but deliberately receive no deletion authority.
+  but deliberately receive no deletion authority. The private execution
+  protocol accepts conversation identities and route model names through 4,096
+  UTF-8 bytes. Runtime instance IDs retain Module SDK's 256-character
+  identifier contract; runtime-owned session IDs, entry IDs, request IDs, run
+  IDs, delivery IDs, and receipt message IDs retain a 512-byte bound.
 - **Atomicity and idempotency:** record changes use the descriptor-bound
   transactional index and exact versions. Artifact publication first commits a
   reservation, then descriptor identity, then published status. Repeating
   maintenance after a crash resumes an exact removal claim or observes an
-  already removed reservation.
+  already removed reservation. `delivery.settle-with-history` commits the
+  delivered transport receipt, one assistant destination-history entry, and
+  their global delivery/`entryId`/fingerprint/content binding in the same
+  transaction. The operation creates an exact first-seen destination
+  conversation when needed; exact replay is a duplicate, while any reuse with
+  a different receipt, destination, or content fails closed. State-local stamps
+  the canonical `recordedAt` on the successful first commit, preserving
+  chronology without making a later crash replay depend on a caller's wall
+  clock.
 - **Retention:** `retentionDays` applies only to unpublished, package-proven
   artifact reservations. Core owns terminal run/index/reference retirement and
   must release those records before any future referenced-artifact collection.
@@ -173,8 +185,11 @@ bounded error without paths, record bytes, or underlying failure text.
    published blobs remain private and untouched.
 10. The package-owned `mono-agent.state-execution` protocol implements the
     physical transcript, conversation, run, admission, session, artifact
-    intent, and delivery-idempotency formats. Core consumes only bounded opaque
-    operations and never reads those records directly.
+    intent, delivery-idempotency, and confirmed-delivery history formats.
+    The transport receipt, transcript chunks, destination conversation pointer,
+    and durable receipt-to-entry binding advance in one CAS transaction. Core
+    consumes only bounded opaque operations and never reads those records
+    directly.
 11. Diagnostics recheck existing path and lease guards plus the package-owned
     execution protocol identity. They do not start lifecycle services, publish
     discovery, mutate durable state, or expose raw failures.
@@ -189,7 +204,7 @@ bounded error without paths, record bytes, or underlying failure text.
 | `execution-types.ts` | Package-private execution input, record, and result contracts. |
 | `execution-store.ts` | Bounded typed record/transaction adapter over the local state store. |
 | `execution-transcript.ts` | Canonical transcript and conversation persistence owned by state-local. |
-| `execution-journal.ts` | Run admission/events/settlement, sessions, artifact intents, and delivery idempotency. |
+| `execution-journal.ts` | Run admission/events/settlement, sessions, artifact intents, delivery idempotency, and confirmed destination-history appends. |
 | `maintenance.ts` | Strict bounded maintenance request/command contracts and result counters. |
 | `secure-fs.ts` | Owner/mode/link checks, no-follow reads, pinned framed index log, reserved-sidecar checks, and process lease. |
 | `snapshot.ts` | Canonical snapshot validation, serialization, keys, versions, and record copies. |
@@ -257,8 +272,9 @@ or third-party storage libraries.
 
 ## What This Package Does Not Own
 
-It owns the physical transcript, run, admission, session, artifact-intent, and
-delivery-idempotency formats behind its versioned opaque protocol. It does not
+It owns the physical transcript, run, admission, session, artifact-intent,
+delivery-idempotency, and confirmed-delivery history formats behind its
+versioned opaque protocol. It does not
 choose runtime routes, decide fallback or interaction semantics, infer that a
 published artifact is unreferenced, discover remote agents, serve operator
 endpoints, load the agent envelope, or import v0 state. Core remains responsible

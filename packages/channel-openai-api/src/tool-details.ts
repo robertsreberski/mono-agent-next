@@ -7,6 +7,13 @@ import type {
 
 const TOOL_DETAIL_PAYLOAD_BYTES = 4 * 1024;
 export const OPEN_WEBUI_TOOL_DETAIL_FRAME_BYTES = 64 * 1024;
+const CREDENTIAL_KEY = String.raw`(?:access[_-]?token|api[_-]?key|auth[_-]?token|authorization|bearer|client[_-]?secret|cookie|credential|password|private[_-]?key|refresh[_-]?token|secret|session[_-]?token|token)`;
+const SENSITIVE_KEY = new RegExp(`^${CREDENTIAL_KEY}$`, "iu");
+const SECRET_ASSIGNMENT = new RegExp(
+  String.raw`(["']?)\b(${CREDENTIAL_KEY})\b\1\s*[:=]\s*(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s,;]+)`,
+  "giu",
+);
+const AUTHORIZATION_VALUE = /\b(Basic|Bearer)\s+[^\s,;]+/giu;
 
 /**
  * Render one completed host-owned tool for Open WebUI without asking the HTTP
@@ -18,8 +25,8 @@ export function renderOpenWebUiToolDetail(
   call: RuntimeToolCall,
   result: RuntimeToolResult,
 ): string {
-  const argumentsJson = boundedJson(call.input);
-  const resultJson = boundedJson(projectResult(result));
+  const argumentsJson = boundedJson(redactJson(call.input));
+  const resultJson = boundedJson(redactJson(projectResult(result)));
   const rendered = details(call, result, argumentsJson, resultJson);
   if (Buffer.byteLength(rendered, "utf8") <= OPEN_WEBUI_TOOL_DETAIL_FRAME_BYTES) {
     return rendered;
@@ -103,6 +110,27 @@ function projectResultPart(part: RuntimeToolResultPart): JsonValue {
         ...(part.preview === undefined ? {} : { preview: part.preview }),
       };
   }
+}
+
+function redactJson(value: JsonValue): JsonValue;
+function redactJson(value: Readonly<Record<string, JsonValue>>): Readonly<Record<string, JsonValue>>;
+function redactJson(
+  value: JsonValue | Readonly<Record<string, JsonValue>>,
+): JsonValue | Readonly<Record<string, JsonValue>> {
+  if (typeof value === "string") return redactText(value);
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((entry) => redactJson(entry));
+  const redacted: Record<string, JsonValue> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    redacted[key] = SENSITIVE_KEY.test(key) ? "[REDACTED]" : redactJson(entry);
+  }
+  return redacted;
+}
+
+function redactText(value: string): string {
+  return value
+    .replace(SECRET_ASSIGNMENT, "$2=[REDACTED]")
+    .replace(AUTHORIZATION_VALUE, "$1 [REDACTED]");
 }
 
 function utf8Prefix(value: string, maxBytes: number): string {

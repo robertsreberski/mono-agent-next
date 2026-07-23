@@ -1,31 +1,18 @@
 import type {
+  ChannelSendTool,
   ChannelDeliveryResult,
   ChannelOutboundMessage,
   JsonValue,
-  RuntimeToolDefinition,
 } from "@mono-agent/module-sdk";
+
+import {
+  parseSlackDestination,
+  parseSlackIdentifier,
+} from "./destination.js";
 
 const MAX_SLACK_MESSAGE_CHARACTERS = 40_000;
 
-interface ChannelSendToolContext {
-  readonly requestId: string;
-  readonly conversationId: string;
-  readonly callId: string;
-  readonly signal: AbortSignal;
-}
-
-export interface SlackChannelSendTool extends RuntimeToolDefinition {
-  prepare(
-    input: JsonValue,
-    context: ChannelSendToolContext,
-  ): Omit<ChannelOutboundMessage, "idempotencyKey">;
-  historyConversationId(
-    message: ChannelOutboundMessage,
-    result: ChannelDeliveryResult,
-  ): string;
-}
-
-export function createSlackSendTools(): readonly SlackChannelSendTool[] {
+export function createSlackSendTools(): readonly ChannelSendTool[] {
   return Object.freeze([
     Object.freeze({
       name: "SlackSendMessage",
@@ -50,7 +37,7 @@ export function createSlackSendTools(): readonly SlackChannelSendTool[] {
           ["channel", "text", "thread_ts"],
           "SlackSendMessage input",
         );
-        const channel = identifier(value.channel, "channel");
+        const channel = parseSlackIdentifier(value.channel, "channel");
         const text = boundedText(
           value.text,
           "text",
@@ -58,7 +45,7 @@ export function createSlackSendTools(): readonly SlackChannelSendTool[] {
         );
         const thread = value.thread_ts === undefined
           ? undefined
-          : identifier(value.thread_ts, "thread_ts");
+          : parseSlackIdentifier(value.thread_ts, "thread_ts");
         return {
           conversationId: `slack:${channel}${thread === undefined ? "" : `:${thread}`}`,
           text,
@@ -68,14 +55,30 @@ export function createSlackSendTools(): readonly SlackChannelSendTool[] {
         message: ChannelOutboundMessage,
         result: ChannelDeliveryResult,
       ) {
-        const destination = message.conversationId.slice("slack:".length);
-        if (destination.includes(":") || result.messageId === undefined) {
+        if (result.status !== "delivered" && result.status !== "duplicate") {
+          throw new TypeError("Slack destination history requires confirmed delivery.");
+        }
+        const destination = exactDestination(message.conversationId);
+        if (destination.threadId !== undefined) {
           return message.conversationId;
         }
-        return `slack:${destination}:${result.messageId}`;
+        const messageId = parseSlackIdentifier(result.messageId, "confirmed message id");
+        return `slack:${destination.channelId}:${messageId}`;
       },
-    } satisfies SlackChannelSendTool),
+    } satisfies ChannelSendTool),
   ]);
+}
+
+function exactDestination(
+  conversationId: string,
+): { readonly channelId: string; readonly threadId?: string } {
+  if (!conversationId.startsWith("slack:")) {
+    throw new TypeError("Slack destination history requires a Slack conversation.");
+  }
+  return parseSlackDestination(
+    conversationId.slice("slack:".length),
+    "Slack destination history",
+  );
 }
 
 function record(
@@ -103,18 +106,6 @@ function record(
     output[key] = descriptor.value;
   }
   return output;
-}
-
-function identifier(value: unknown, label: string): string {
-  if (typeof value !== "string"
-    || value.length === 0
-    || value.length > 128
-    || value !== value.trim()
-    || value.includes(":")
-    || /[\u0000-\u001f\u007f]/u.test(value)) {
-    throw new TypeError(`${label} must be one bounded Slack identifier.`);
-  }
-  return value;
 }
 
 function boundedText(value: unknown, label: string, max: number): string {

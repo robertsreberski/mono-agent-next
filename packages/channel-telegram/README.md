@@ -75,8 +75,9 @@ normalized `ChannelInboundRequest` -> Core -> final reply. Supported Core
 controls route `/cancel`, live steering, and bounded AskUser button/free-text
 answers. `/model` and `/effort` maintain bounded, process-local per-chat
 overrides. Activity updates edit one status message when Telegram supports it.
-Core proactive delivery -> exact Telegram destination -> in-process idempotent
-Bot API send. `metadata.telegram.replyOptions` renders non-blocking buttons whose
+Core proactive delivery -> durable Core/state receipt -> exact Telegram
+destination -> fingerprint-guarded Bot API send.
+`metadata.telegram.replyOptions` renders non-blocking buttons whose
 answers return as normal user input, separate from blocking AskUser callbacks.
 Instance-bound send-tool contributions prepare the same outbound contract; Core
 owns tool policy, deterministic idempotency, and receipt-keyed history.
@@ -154,8 +155,11 @@ Depends only on `@mono-agent/module-sdk` and Node/platform HTTP primitives. It d
 
 It does not persist transcripts or delivery receipts, select runtimes, create
 Telegram credentials, or promise delivery after Telegram returns an ambiguous
-transport failure. Core records confirmed send-tool receipts in destination
-history; the transport's own successful-delivery deduplication is process-local.
+transport failure. Core plus the selected state module is the only restart-safe
+delivery authority and records confirmed send-tool receipts in destination
+history. The adapter keeps a bounded fingerprint-aware live-instance guard,
+retains ambiguous outcomes without replay, rejects conflicting key reuse, and
+fails closed instead of evicting that guard when its capacity is exhausted.
 
 ## Related Documentation
 

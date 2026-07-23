@@ -9,6 +9,7 @@ import {
   type ChannelModuleCreateContext,
   type ChannelReplyEvent,
   type ChannelReplySink,
+  type ChannelSendTool,
   type ChannelTurnResult,
   type AskUserRequest,
   type ModuleHealth,
@@ -19,7 +20,6 @@ import { type TelegramConfig, telegramConfigSchema } from "./config.js";
 import { TelegramDelivery } from "./delivery.js";
 import {
   createTelegramSendTools,
-  type TelegramChannelSendTool,
 } from "./send-tools.js";
 
 const PACKAGE_NAME = "@mono-agent/channel-telegram";
@@ -53,7 +53,7 @@ interface TelegramRuntimeSelection {
 
 export interface TelegramChannel extends Channel {
   readonly running: boolean;
-  readonly sendTools: readonly TelegramChannelSendTool[];
+  readonly sendTools: readonly ChannelSendTool[];
 }
 
 export interface CreateTelegramChannelOptions {
@@ -307,7 +307,22 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
     async drain() { await stop(); },
     async stop() { await stop(); },
     async health(): Promise<ModuleHealth> {
-      return { status: lastError === undefined ? running ? "healthy" : "unknown" : "degraded", checkedAt: new Date().toISOString(), ...(lastError === undefined ? {} : { summary: lastError }), details: { activeUpdates: active } };
+      const deliveryDegraded = delivery.degraded;
+      return {
+        status: lastError !== undefined || deliveryDegraded
+          ? "degraded"
+          : running ? "healthy" : "unknown",
+        checkedAt: new Date().toISOString(),
+        ...(lastError !== undefined
+          ? { summary: lastError }
+          : deliveryDegraded
+            ? { summary: "Telegram delivery receipt capacity is exhausted." }
+            : {}),
+        details: {
+          activeUpdates: active,
+          deliveryReceiptCapacityExhausted: deliveryDegraded,
+        },
+      };
     },
     deliver(message, signal) { return delivery.deliver(message, signal); },
   };

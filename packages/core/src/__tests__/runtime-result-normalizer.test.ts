@@ -145,6 +145,10 @@ describe("runtime result boundary", () => {
       ...valid,
       route: { runtimeInstanceId: "main", model: "fixture:other" },
     }))).toThrow(/route.*active runtime route/u);
+    expect(() => normalizeResult(resultWithSession({ ...valid, id: "s".repeat(512) })))
+      .not.toThrow();
+    expect(() => normalizeResult(resultWithSession({ ...valid, id: "s".repeat(513) })))
+      .toThrow(/session\.id.*512-byte boundary/u);
 
     let conversationReads = 0;
     const accessorSession = {

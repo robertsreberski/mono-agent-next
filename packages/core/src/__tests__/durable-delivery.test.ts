@@ -174,6 +174,24 @@ describe("durable proactive delivery", () => {
     expect(sends).toBe(1);
   });
 
+  it("treats an oversized adapter message id as sticky unknown", async () => {
+    let sends = 0;
+    const fixture = await createDurableDeliveryFixture({
+      notify: async (message) => {
+        sends += 1;
+        return {
+          status: "delivered", idempotencyKey: message.idempotencyKey,
+          messageId: "m".repeat(513),
+        };
+      },
+    });
+    const host = await fixture.start();
+    const message = outboundMessage("delivery-message-id-bound", "hello");
+    await expect(host.deliver("notify", message)).resolves.toMatchObject({ status: "unknown" });
+    await expect(host.deliver("notify", message)).resolves.toMatchObject({ status: "unknown" });
+    expect(sends).toBe(1);
+  });
+
   it("rejects idempotency-key reuse with a different channel or message before channel execution", async () => {
     const sends = { primary: 0, secondary: 0 };
     const fixture = await createDurableDeliveryFixture({
@@ -214,6 +232,25 @@ describe("durable proactive delivery", () => {
       diagnostic: { code: "channel_delivery_idempotency_conflict" },
     });
     expect(sends).toEqual({ primary: 1, secondary: 0 });
+  });
+
+  it("never confirms an adapter delivery when durable settlement returns conflict", async () => {
+    let sends = 0;
+    const fixture = await createDurableDeliveryFixture({
+      notify: async (message) => {
+        sends += 1;
+        return { status: "delivered", idempotencyKey: message.idempotencyKey };
+      },
+    });
+    fixture.state.mapExecutionResult = (operation, _input, result) =>
+      operation === "delivery.settle" ? { status: "conflict" } : result;
+    const host = await fixture.start();
+    await expect(host.deliver("notify", outboundMessage("settlement-conflict", "hello")))
+      .resolves.toMatchObject({
+        status: "unknown",
+        diagnostic: { code: "channel_delivery_settlement_unknown" },
+      });
+    expect(sends).toBe(1);
   });
 
   it("joins concurrent in-process duplicates onto one channel send", async () => {

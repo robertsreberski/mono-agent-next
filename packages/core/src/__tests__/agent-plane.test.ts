@@ -543,7 +543,8 @@ describe("complete agent plane", () => {
       "NOTHING_TO_REPORT ",
     ]);
     await expect(host.runModuleCommand("cron", "cron:repeat-suppressed")).resolves.toMatchObject({
-      value: { status: "rejected", reason: "duplicate trigger event" },
+      value: { status: "rejected", code: "execution_failed",
+        reason: "Request suppression-1 was already used with different input" },
     });
     await expect(host.runModuleCommand("cron", "cron:no-delivery")).resolves.toMatchObject({
       value: { status: "accepted" },
@@ -569,6 +570,7 @@ describe("complete agent plane", () => {
     const state = new MemoryStateStore();
     let turns = 0;
     let deliveries = 0;
+    const receipts = new Map<string, unknown>();
     let deliveryStatus: "delivered" | "failed" | "unknown" = "failed";
     const project = await createFixtureProject([
       {
@@ -589,6 +591,14 @@ describe("complete agent plane", () => {
       {
         name: channelName,
         kind: "channel",
+        schema: {
+          type: "object", additionalProperties: false, required: ["token"],
+          properties: {
+            token: {
+              type: "string", "x-mono-agent-env-eligible": true, "x-mono-agent-secret": true,
+            },
+          },
+        },
         controller: {
           create: () => ({
             capabilities: {
@@ -621,13 +631,15 @@ describe("complete agent plane", () => {
                 description: "Invoke a recoverable fixture schedule.",
                 async run(input: unknown) {
                   const id = typeof input === "string" ? input : "failed-delivery";
-                  return host.emit({
+                  const receipt = await host.emit({
                     id,
                     triggerInstanceId: "cron",
                     prompt: "prepare recovery update",
                     createdAt: new Date().toISOString(),
                     deliveryChannel: "notify",
                   }, new AbortController().signal);
+                  receipts.set(id, receipt);
+                  return receipt;
                 },
               }],
             };
@@ -638,13 +650,15 @@ describe("complete agent plane", () => {
     projects.push(project);
     await project.writeConfig(minimalConfig(runtimeName, {
       state: { $use: stateName },
-      channels: { notify: { $use: channelName } },
+      channels: { notify: { $use: channelName, token: { $env: "UNKNOWN_SECRET" } } },
       triggers: { cron: { $use: triggerName } },
     }));
-    const host = await createAgentHost(project.configPath);
+    const host = await createAgentHost(project.configPath, {
+      environment: { UNKNOWN_SECRET: "unknown" },
+    });
 
     await expect(host.runModuleCommand("cron", "cron:invoke", "failed-delivery")).resolves.toMatchObject({
-      value: { status: "rejected", reason: "Trigger delivery ended with failed" },
+      value: { status: "rejected", code: "execution_failed", reason: "Trigger delivery ended with failed" },
     });
     deliveryStatus = "delivered";
     await expect(host.runModuleCommand("cron", "cron:invoke", "failed-delivery")).resolves.toMatchObject({
@@ -655,25 +669,51 @@ describe("complete agent plane", () => {
     expect(turns).toBe(1);
     expect(deliveries).toBe(2);
     await expect(host.runModuleCommand("cron", "cron:invoke", "failed-delivery")).resolves.toMatchObject({
-      value: { status: "rejected", reason: "duplicate trigger event" },
+      value: { status: "rejected", code: "duplicate", reason: "duplicate trigger event" },
     });
     expect(turns).toBe(1);
     expect(deliveries).toBe(2);
+    state.mapExecutionResult = (operation, input, result) =>
+      operation === "run.admit"
+        && (input as { readonly requestId?: unknown }).requestId === "joined-admission"
+        ? { status: "join", runId: "joined-run" }
+        : result;
+    await host.runModuleCommand("cron", "cron:invoke", "joined-admission");
+    expect(receipts.get("joined-admission")).toMatchObject({
+      status: "unknown", code: "execution_unknown",
+    });
+    await host.runModuleCommand("cron", "cron:invoke", "joined-admission");
+    expect(receipts.get("joined-admission")).toMatchObject({
+      status: "unknown", code: "execution_unknown",
+    });
+    state.mapExecutionResult = (_operation, _input, result) => result;
     deliveryStatus = "unknown";
-    await expect(host.runModuleCommand("cron", "cron:invoke", "unknown-delivery")).resolves.toMatchObject({
-      value: { status: "rejected", reason: "Trigger delivery ended with unknown" },
+    await host.runModuleCommand("cron", "cron:invoke", "unknown-delivery");
+    expect(receipts.get("unknown-delivery")).toMatchObject({
+      status: "unknown", code: "delivery_unknown",
     });
-    await expect(host.runModuleCommand("cron", "cron:invoke", "unknown-delivery")).resolves.toMatchObject({
-      value: { status: "rejected", reason: "duplicate trigger event" },
+    expect((receipts.get("unknown-delivery") as { reason: string }).reason).not.toContain("unknown");
+    await host.runModuleCommand("cron", "cron:invoke", "unknown-delivery");
+    expect(receipts.get("unknown-delivery")).toMatchObject({
+      status: "unknown", code: "delivery_unknown",
     });
+    expect((receipts.get("unknown-delivery") as { reason: string }).reason).not.toContain("unknown");
     expect(turns).toBe(2);
     expect(deliveries).toBe(3);
     await host.stop();
 
-    const restarted = await createAgentHost(project.configPath);
-    await expect(restarted.runModuleCommand("cron", "cron:invoke", "unknown-delivery")).resolves.toMatchObject({
-      value: { status: "rejected", reason: "Trigger delivery ended with unknown" },
+    const restarted = await createAgentHost(project.configPath, {
+      environment: { UNKNOWN_SECRET: "unknown" },
     });
+    await restarted.runModuleCommand("cron", "cron:invoke", "joined-admission");
+    expect(receipts.get("joined-admission")).toMatchObject({
+      status: "unknown", code: "execution_unknown",
+    });
+    await restarted.runModuleCommand("cron", "cron:invoke", "unknown-delivery");
+    expect(receipts.get("unknown-delivery")).toMatchObject({
+      status: "unknown", code: "delivery_unknown",
+    });
+    expect((receipts.get("unknown-delivery") as { reason: string }).reason).not.toContain("unknown");
     expect(turns).toBe(2);
     expect(deliveries).toBe(3);
     await restarted.stop();

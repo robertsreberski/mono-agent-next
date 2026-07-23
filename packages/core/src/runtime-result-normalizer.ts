@@ -450,7 +450,7 @@ function attachment(value: unknown, files: FileBudget, path: string): Normalized
   const sizeBytes = nonNegativeInteger(input.sizeBytes, `${path}.sizeBytes`);
   if (sizeBytes !== data.byteLength) fail(`${path}.sizeBytes`, "must equal the attachment byte length");
   return {
-    id: boundedText(input.id, `${path}.id`, MAX_IDENTIFIER_BYTES),
+    id: boundedText(input.id, `${path}.id`, 512),
     kind: oneOf(input.kind, ["image", "audio", "file"] as const, `${path}.kind`),
     name: displayFileName(input.name, `${path}.name`),
     mediaType: mediaType(input.mediaType, `${path}.mediaType`),
@@ -575,7 +575,7 @@ function sessionValue(
   const metadata = optional(input.metadata, (metadata) =>
     boundedJsonObject(metadata, `${path}.metadata`, RUNTIME_RESULT_MAX_METADATA_BYTES));
   return compact({
-    id: boundedText(input.id, `${path}.id`, MAX_IDENTIFIER_BYTES),
+    id: boundedText(input.id, `${path}.id`, 512),
     conversationId,
     route,
     createdAt,

@@ -1,7 +1,41 @@
 import { OPERATOR_LIMITS } from "@mono-agent/operator";
 
+import type { WebMessage } from "./contracts.js";
+
 const MAX_INLINE_ATTACHMENT_BYTES = 512 * 1_024;
 const UPLOAD_SELECTION_RESERVE = 32 * 1_024;
+
+export const WEB_TELEMETRY_TEXT_BOUND = 256;
+
+/**
+ * The browser embeds this exact pure function. Keeping message text separate
+ * from a fixed, numeric-only telemetry description prevents metadata from
+ * replacing or injecting conversation content.
+ */
+export function presentWebMessage(
+  message: Pick<WebMessage, "text" | "telemetry">,
+): { readonly body: string; readonly telemetry: readonly string[] } {
+  const value = message.telemetry;
+  if (value === undefined) return { body: message.text, telemetry: [] };
+  const count = (candidate: unknown): string =>
+    Number.isSafeInteger(candidate) && Number(candidate) >= 0 ? String(candidate) : "?";
+  const lines = [
+    `Usage: ${count(value.inputTokens)} input · ${count(value.outputTokens)} output`,
+  ];
+  if (value.contextWindow !== undefined) {
+    lines.push(
+      value.contextUsed === undefined
+        ? `Context window: ${count(value.contextWindow)}`
+        : `Context: ${count(value.contextUsed)} / ${count(value.contextWindow)}`,
+    );
+  }
+  const events = [
+    ...(value.compacted ? ["context compacted"] : []),
+    ...(value.sessionEvicted ? ["provider session evicted"] : []),
+  ];
+  if (events.length > 0) lines.push(`Events: ${events.join(", ")}`);
+  return { body: message.text, telemetry: lines };
+}
 
 export const WEB_INDEX_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -15,9 +49,10 @@ export const WEB_INDEX_HTML = `<!doctype html>
 <div><input id="files" type="file" multiple hidden><input id="model" aria-label="Model override" placeholder="Model"><input id="effort" aria-label="Effort override" placeholder="Effort"><button id="attach" type="button">Attach</button><button type="submit">Send</button><button id="cancel" type="button">Cancel</button></div></form></section></main>
 <script src="/app.js" defer></script></body></html>`;
 
-export const WEB_STYLES = `:root{color-scheme:dark;font:15px/1.45 ui-sans-serif,system-ui;background:#111;color:#eee}*{box-sizing:border-box}body{margin:0}header{height:52px;padding:0 20px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #333}header #status{margin-left:auto}main{height:calc(100vh - 52px);display:grid;grid-template-columns:300px 1fr}aside{padding:16px;border-right:1px solid #333;overflow:auto}label,select,button,textarea,input{font:inherit}select,button,textarea,input{color:inherit;background:#1d1d1d;border:1px solid #444;border-radius:7px}select,button{padding:8px}button:disabled{opacity:.45}label{display:grid;gap:5px}#new-thread{width:100%;margin:12px 0}.toolbar{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:12px}.thread{display:block;width:100%;text-align:left;margin:5px 0}.thread.active{border-color:#8ab4ff}.thread.proactive{border-left:3px solid #d0a5ff}.thread small{display:block;color:#aaa}section{min-width:0;display:grid;grid-template-rows:auto 1fr auto auto auto}#messages{padding:24px;overflow:auto}.message{position:relative;max-width:760px;margin:0 auto 14px;padding:12px 15px;border-radius:12px;white-space:pre-wrap}.user{background:#224b70}.assistant{background:#222}.message.failed{border:1px solid #a44}.meta{font-size:12px;color:#aaa;margin-bottom:5px}.attachment{display:inline-block;margin:8px 5px 0 0;padding:3px 7px;border:1px solid #555;border-radius:5px;font-size:12px}.quote{border-left:3px solid #88a;padding-left:8px;color:#ccd;margin-bottom:8px}.quote-button{float:right;padding:3px 6px}.empty{color:#999}#ask,#draft{padding:0 16px}#ask form,#view{max-width:760px;margin:8px auto;padding:12px;border:1px solid #665b2c;background:#25210f;border-radius:8px}#ask fieldset{margin:8px 0;border:1px solid #555}#ask label{display:block;margin:5px}#view{max-height:35vh;overflow:auto;border-color:#355}#view pre{white-space:pre-wrap}#view .replay-row{display:flex;gap:8px;align-items:start;margin:6px 0}#view .replay-row span{flex:1;white-space:pre-wrap}#draft{color:#bbb}form#composer{border-top:1px solid #333;padding:14px;display:flex;gap:10px}textarea{flex:1;min-height:64px;padding:10px;resize:vertical}form#composer>div{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end}#model,#effort{width:120px;padding:8px}@media(max-width:700px){main{grid-template-columns:1fr;grid-template-rows:auto 1fr}aside{border-right:0;border-bottom:1px solid #333;max-height:230px}}`;
+export const WEB_STYLES = `:root{color-scheme:dark;font:15px/1.45 ui-sans-serif,system-ui;background:#111;color:#eee}*{box-sizing:border-box}body{margin:0}header{height:52px;padding:0 20px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #333}header #status{margin-left:auto}main{height:calc(100vh - 52px);display:grid;grid-template-columns:300px 1fr}aside{padding:16px;border-right:1px solid #333;overflow:auto}label,select,button,textarea,input{font:inherit}select,button,textarea,input{color:inherit;background:#1d1d1d;border:1px solid #444;border-radius:7px}select,button{padding:8px}button:disabled{opacity:.45}label{display:grid;gap:5px}#new-thread{width:100%;margin:12px 0}.toolbar{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin-bottom:12px}.thread{display:block;width:100%;text-align:left;margin:5px 0}.thread.active{border-color:#8ab4ff}.thread.proactive{border-left:3px solid #d0a5ff}.thread small{display:block;color:#aaa}section{min-width:0;display:grid;grid-template-rows:auto 1fr auto auto auto}#messages{padding:24px;overflow:auto}.message{position:relative;max-width:760px;margin:0 auto 14px;padding:12px 15px;border-radius:12px;white-space:pre-wrap}.user{background:#224b70}.assistant{background:#222}.message.failed{border:1px solid #a44}.meta,.telemetry{font-size:12px;color:#aaa;margin-bottom:5px}.telemetry{margin-top:8px;margin-bottom:0}.attachment{display:inline-block;margin:8px 5px 0 0;padding:3px 7px;border:1px solid #555;border-radius:5px;font-size:12px}.quote{border-left:3px solid #88a;padding-left:8px;color:#ccd;margin-bottom:8px}.quote-button{float:right;padding:3px 6px}.empty{color:#999}#ask,#draft{padding:0 16px}#ask form,#view{max-width:760px;margin:8px auto;padding:12px;border:1px solid #665b2c;background:#25210f;border-radius:8px}#ask fieldset{margin:8px 0;border:1px solid #555}#ask label{display:block;margin:5px}#view{max-height:35vh;overflow:auto;border-color:#355}#view pre{white-space:pre-wrap}#view .replay-row{display:flex;gap:8px;align-items:start;margin:6px 0}#view .replay-row span{flex:1;white-space:pre-wrap}#draft{color:#bbb}form#composer{border-top:1px solid #333;padding:14px;display:flex;gap:10px}textarea{flex:1;min-height:64px;padding:10px;resize:vertical}form#composer>div{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end}#model,#effort{width:120px;padding:8px}@media(max-width:700px){main{grid-template-columns:1fr;grid-template-rows:auto 1fr}aside{border-right:0;border-bottom:1px solid #333;max-height:230px}}`;
 
 export const WEB_APP_JS = `(() => {
+  const presentMessage = ${presentWebMessage.toString()};
   const maxAttachmentBytes = ${MAX_INLINE_ATTACHMENT_BYTES};
   const maxAttachmentUrlCharacters = ${OPERATOR_LIMITS.attachmentUrlCharacters};
   const maxRequestBytes = ${OPERATOR_LIMITS.requestBytes};
@@ -121,6 +156,7 @@ export const WEB_APP_JS = `(() => {
     state.detail = detail; state.threadId = detail.thread.id;
     view.hidden = true;
     messages.replaceChildren(...detail.messages.map(message => {
+      const presentation = presentMessage(message);
       const div = document.createElement("div"); div.className = "message " + message.role + " " + message.status;
       const meta = document.createElement("div"); meta.className = "meta"; meta.textContent = message.role + " · " + message.status;
       if (message.operatorMessageId && capability("quotes") && detail.thread.status !== "running") {
@@ -129,7 +165,8 @@ export const WEB_APP_JS = `(() => {
         meta.append(quoteButton);
       }
       if (message.quote) { const quoted = document.createElement("div"); quoted.className = "quote"; quoted.textContent = message.quote.text || ("Message " + message.quote.messageId); div.append(meta, quoted); } else div.append(meta);
-      const body = document.createElement("div"); body.textContent = message.text || (message.status === "running" ? "…" : ""); div.append(body);
+      const body = document.createElement("div"); body.textContent = presentation.body || (message.status === "running" ? "…" : ""); div.append(body);
+      if (presentation.telemetry.length) { const telemetry = document.createElement("div"); telemetry.className = "telemetry"; telemetry.textContent = presentation.telemetry.join(" · "); div.append(telemetry); }
       (message.attachments || []).forEach(file => { const item = document.createElement("span"); item.className = "attachment"; item.textContent = file.name; div.append(item); });
       return div;
     }));

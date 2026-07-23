@@ -4,10 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { isEnvEligibleSchema, isSecretSchema, type ChannelHost, type ModuleLogger } from "@mono-agent/module-sdk";
-import { assertChannelInstanceCompliance, assertChannelModuleCompliance } from "@mono-agent/module-sdk/testing";
+import {
+  assertChannelBehaviorCompliance,
+  assertChannelInstanceCompliance,
+  assertChannelModuleCompliance,
+} from "@mono-agent/module-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createSlackChannel, createSlackSocketModeTransport, createSlackWebApiClient, monoAgentModule, parseSlackConfig, slackConfigSchema, type SlackApiClient, type SlackSocketEvent, type SlackSocketEventHandler, type SlackSocketFailureHandler, type SlackSocketTransport } from "../index.js";
+import { createSlackChannel, createSlackSocketModeTransport, createSlackWebApiClient, monoAgentModule, parseSlackConfig, SlackDelivery, slackConfigSchema, type SlackApiClient, type SlackSocketEvent, type SlackSocketEventHandler, type SlackSocketFailureHandler, type SlackSocketTransport } from "../index.js";
 import { SlackInbox } from "../inbox.js";
 
 const CONFIG = { appToken: "xapp-000000000000000", botToken: "xoxb-000000000000000", allowedTeamIds: ["T1"], allowedChannelIds: ["C1"], defaultDestination: "C1" };
@@ -30,6 +34,14 @@ describe("slack channel", () => {
       allowedTeamIds: ["T1"],
       allowAllChannels: true,
     }).allowedChannelIds).toEqual([]);
+    expect(() => parseSlackConfig({
+      ...CONFIG,
+      defaultDestination: "C1:1712345678.000100:redirect",
+    })).toThrow(/channel or channel:thread/u);
+    expect(() => parseSlackConfig({
+      ...CONFIG,
+      allowedChannelIds: ["C1:redirect"],
+    })).toThrow(/one non-empty identifier/u);
   });
 
   it("validates bounded shortcut and App Home actions against the destination allowlist", () => {
@@ -100,7 +112,7 @@ describe("slack channel", () => {
       callId: "call-1",
       signal: new AbortController().signal,
     };
-    const topLevel = tool.prepare({
+    const topLevel = await tool.prepare({
       channel: "C1",
       text: "Scheduled digest",
     }, toolContext);
@@ -121,7 +133,7 @@ describe("slack channel", () => {
       result,
     )).toBe("slack:C1:1712345678.000100");
 
-    const threaded = tool.prepare({
+    const threaded = await tool.prepare({
       channel: "C1",
       thread_ts: "1700000000.000001",
       text: "Thread reply",
@@ -130,8 +142,30 @@ describe("slack channel", () => {
       { ...threaded, idempotencyKey: "tool-thread" },
       result,
     )).toBe("slack:C1:1700000000.000001");
+    expect(() => tool.historyConversationId(
+      { ...topLevel, idempotencyKey: "tool-unknown" },
+      {
+        status: "unknown",
+        idempotencyKey: "tool-unknown",
+      },
+    )).toThrow(/confirmed delivery/u);
+    expect(() => tool.historyConversationId(
+      { ...topLevel, idempotencyKey: "tool-no-receipt" },
+      {
+        status: "delivered",
+        idempotencyKey: "tool-no-receipt",
+      },
+    )).toThrow(/confirmed message id/u);
+    expect(() => tool.historyConversationId(
+      { ...topLevel, idempotencyKey: "tool-bad-receipt" },
+      {
+        status: "delivered",
+        idempotencyKey: "tool-bad-receipt",
+        messageId: "1712345678.000100 redirect",
+      },
+    )).toThrow(/confirmed message id/u);
     await expect(channel.deliver!({
-      ...tool.prepare({ channel: "C2", text: "forbidden" }, toolContext),
+      ...await tool.prepare({ channel: "C2", text: "forbidden" }, toolContext),
       idempotencyKey: "tool-forbidden",
     }, toolContext.signal)).resolves.toMatchObject({
       status: "failed",
@@ -141,6 +175,242 @@ describe("slack channel", () => {
       channel: "C1:redirect",
       text: "unsafe",
     }, toolContext)).toThrow(/identifier/u);
+    expect(() => tool.prepare({
+      channel: "C 1",
+      text: "unsafe",
+    }, toolContext)).toThrow(/identifier/u);
+    await expect(channel.deliver!({
+      conversationId: "slack:C1:1700000000.000001:redirect",
+      text: "unsafe",
+      idempotencyKey: "tool-extra-segment",
+    }, toolContext.signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "slack_destination_forbidden" },
+    });
+  });
+
+  it("coalesces exact payloads, rejects conflicting keys, and keeps unknown outcomes sticky", async () => {
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async (request) => {
+      if (request.text === "ambiguous") {
+        throw new Error("secret transport detail /private/token");
+      }
+      return { messageId: "1712345678.000100" };
+    });
+    const delivery = new SlackDelivery(
+      parseSlackConfig(CONFIG),
+      client({ postMessage }),
+    );
+    const signal = new AbortController().signal;
+    const message = {
+      conversationId: "slack:C1",
+      text: "one",
+      idempotencyKey: "same",
+    };
+    await expect(Promise.all([
+      delivery.deliver(message, signal),
+      delivery.deliver(message, signal),
+    ])).resolves.toEqual([
+      expect.objectContaining({ status: "delivered" }),
+      expect.objectContaining({ status: "delivered" }),
+    ]);
+    await expect(delivery.deliver(message, signal)).resolves.toMatchObject({
+      status: "duplicate",
+    });
+    await expect(delivery.deliver({
+      ...message,
+      text: "different",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "slack_delivery_idempotency_conflict" },
+    });
+
+    const ambiguous = {
+      conversationId: "slack:C1",
+      text: "ambiguous",
+      idempotencyKey: "ambiguous",
+    };
+    const first = await delivery.deliver(ambiguous, signal);
+    const second = await delivery.deliver(ambiguous, signal);
+    expect(first).toEqual(second);
+    expect(first).toEqual({
+      status: "unknown",
+      idempotencyKey: "ambiguous",
+      diagnostic: {
+        code: "slack_delivery_unknown",
+        severity: "error",
+        message: "Slack delivery outcome is unknown.",
+      },
+    });
+    expect(JSON.stringify(first)).not.toContain("secret transport");
+    expect(postMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds and snapshots public delivery payloads before fingerprinting or transport", async () => {
+    let releaseFile!: () => void;
+    const fileGate = new Promise<void>((resolve) => { releaseFile = resolve; });
+    let postedAttachment: Parameters<SlackApiClient["postFile"]>[0]["attachment"] | undefined;
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({
+      messageId: "posted",
+    }));
+    const postFile = vi.fn<SlackApiClient["postFile"]>(async (request) => {
+      postedAttachment = request.attachment;
+      await fileGate;
+      return { messageId: "file" };
+    });
+    const delivery = new SlackDelivery(
+      parseSlackConfig({
+        appToken: CONFIG.appToken,
+        botToken: CONFIG.botToken,
+        allowedTeamIds: ["T1"],
+        allowAllChannels: true,
+      }),
+      client({ postMessage, postFile }),
+    );
+    const signal = new AbortController().signal;
+
+    for (const conversationId of [
+      "slack:C 1",
+      `slack:${"C".repeat(129)}`,
+      "slack:C1:\u0007thread",
+    ]) {
+      await expect(delivery.deliver({
+        conversationId,
+        text: "unsafe",
+        idempotencyKey: `bad-destination-${conversationId.length}`,
+      }, signal)).resolves.toMatchObject({
+        status: "failed",
+        diagnostic: { code: "slack_destination_forbidden" },
+      });
+    }
+
+    await expect(delivery.deliver({
+      conversationId: "slack:C1",
+      text: "oversized metadata",
+      idempotencyKey: "retry-after-invalid",
+      metadata: { detail: "x".repeat(65_537) },
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "slack_delivery_invalid" },
+    });
+    await expect(delivery.deliver({
+      conversationId: "slack:C1",
+      text: "valid retry",
+      idempotencyKey: "retry-after-invalid",
+    }, signal)).resolves.toMatchObject({ status: "delivered" });
+
+    const proxiedData = new Proxy(new Uint8Array([1]), {});
+    await expect(delivery.deliver({
+      conversationId: "slack:C1",
+      text: "",
+      attachments: [{
+        id: "proxy",
+        kind: "file",
+        name: "proxy.bin",
+        mediaType: "application/octet-stream",
+        sizeBytes: 1,
+        data: proxiedData,
+      }],
+      idempotencyKey: "proxy-data",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "slack_delivery_invalid" },
+    });
+
+    const source = new Uint8Array([1, 2, 3]);
+    const pending = delivery.deliver({
+      conversationId: "slack:C1",
+      text: "",
+      attachments: [{
+        id: "snapshot",
+        kind: "file",
+        name: "snapshot.bin",
+        mediaType: "application/octet-stream",
+        sizeBytes: source.byteLength,
+        data: source,
+      }],
+      idempotencyKey: "snapshot",
+    }, signal);
+    await vi.waitFor(() => expect(postFile).toHaveBeenCalledOnce());
+    source[0] = 9;
+    expect(postedAttachment?.data).not.toBe(source);
+    expect(postedAttachment?.data).toEqual(new Uint8Array([1, 2, 3]));
+    releaseFile();
+    await expect(pending).resolves.toMatchObject({ status: "delivered" });
+    expect(postMessage).toHaveBeenCalledOnce();
+  });
+
+  it("passes the reusable channel behavior compliance contract", async () => {
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async (request) => {
+      if (request.text === "ambiguous compliance") {
+        throw new Error("secret Slack transport failure /private/token");
+      }
+      return { messageId: "compliance-posted" };
+    });
+    await assertChannelBehaviorCompliance({
+      create: () => createSlackChannel({
+        context: context(
+          parseSlackConfig(CONFIG),
+          async () => ({ status: "completed" }),
+        ),
+        socketFactory: () => ({ async start() {}, async stop() {} }),
+        clientFactory: () => client({ postMessage }),
+      }),
+      delivery: {
+        delivered: {
+          conversationId: "slack:C1",
+          text: "compliance",
+          idempotencyKey: "slack-compliance",
+        },
+        conflicting: {
+          conversationId: "slack:C1",
+          text: "conflicting compliance",
+          idempotencyKey: "slack-compliance",
+        },
+        unknown: {
+          conversationId: "slack:C1",
+          text: "ambiguous compliance",
+          idempotencyKey: "slack-compliance-unknown",
+        },
+      },
+      secrets: [CONFIG.appToken, CONFIG.botToken, "secret Slack"],
+      exercise(instance) {
+        expect(instance.capabilities.proactive).toBe(true);
+      },
+    });
+  });
+
+  it("fails closed instead of evicting receipt authority at the live-instance bound", async () => {
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async (_request) => ({
+      messageId: "posted",
+    }));
+    const delivery = new SlackDelivery(
+      parseSlackConfig(CONFIG),
+      client({ postMessage }),
+    );
+    const signal = new AbortController().signal;
+    for (let index = 0; index < 1_000; index += 1) {
+      await delivery.deliver({
+        conversationId: "slack:C1",
+        text: `notice-${String(index)}`,
+        idempotencyKey: `key-${String(index)}`,
+      }, signal);
+    }
+    await expect(delivery.deliver({
+      conversationId: "slack:C1",
+      text: "one too many",
+      idempotencyKey: "capacity",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "slack_delivery_receipt_capacity" },
+    });
+    expect(delivery.degraded).toBe(true);
+    expect(postMessage).toHaveBeenCalledTimes(1_000);
+    await expect(delivery.deliver({
+      conversationId: "slack:C1",
+      text: "notice-0",
+      idempotencyKey: "key-0",
+    }, signal)).resolves.toMatchObject({ status: "duplicate" });
+    expect(postMessage).toHaveBeenCalledTimes(1_000);
   });
 
   it("normalizes one authorized Socket Mode event, ignores unauthorized events, and deduplicates delivery", async () => {

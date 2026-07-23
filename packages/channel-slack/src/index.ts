@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { MODULE_API_VERSION, defineChannelModule, type AskUserRequest, type Channel, type ChannelAttachment, type ChannelInboundRequest, type ChannelModuleCreateContext, type ChannelReplyEvent, type ChannelReplySink, type ModuleHealth } from "@mono-agent/module-sdk";
+import { MODULE_API_VERSION, defineChannelModule, type AskUserRequest, type Channel, type ChannelAttachment, type ChannelInboundRequest, type ChannelModuleCreateContext, type ChannelReplyEvent, type ChannelReplySink, type ChannelSendTool, type ModuleHealth } from "@mono-agent/module-sdk";
 
 import { createSlackWebApiClient, type SlackApiClientFactory } from "./client.js";
 import {
@@ -13,7 +13,6 @@ import { SlackDelivery } from "./delivery.js";
 import { SlackInbox } from "./inbox.js";
 import {
   createSlackSendTools,
-  type SlackChannelSendTool,
 } from "./send-tools.js";
 import {
   createSlackSocketModeTransport,
@@ -57,7 +56,7 @@ interface SlackRuntimeSelection {
 
 export interface SlackChannel extends Channel {
   readonly running: boolean;
-  readonly sendTools: readonly SlackChannelSendTool[];
+  readonly sendTools: readonly ChannelSendTool[];
 }
 export interface CreateSlackChannelOptions { readonly context: ChannelModuleCreateContext<SlackConfig>; readonly socketFactory?: SlackSocketTransportFactory; readonly clientFactory?: SlackApiClientFactory; }
 
@@ -484,10 +483,19 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
     async stop() { await stop(); },
     async health(): Promise<ModuleHealth> {
       const snapshot = inbox?.snapshot();
+      const deliveryDegraded = delivery.degraded;
       return {
-        status: failureSummary === undefined ? running ? "healthy" : "unknown" : "unhealthy",
+        status: failureSummary !== undefined
+          ? "unhealthy"
+          : deliveryDegraded
+            ? "degraded"
+            : running ? "healthy" : "unknown",
         checkedAt: new Date().toISOString(),
-        ...(failureSummary === undefined ? {} : { summary: failureSummary }),
+        ...(failureSummary !== undefined
+          ? { summary: failureSummary }
+          : deliveryDegraded
+            ? { summary: "Slack delivery receipt capacity is exhausted." }
+            : {}),
         details: {
           activeEvents: active,
           pendingEvents: snapshot?.pending ?? 0,
@@ -496,6 +504,7 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
           completedReceipts: snapshot?.completed ?? 0,
           transientActivityEntries: [...activityLedger.values()].reduce((total, entries) => total + entries.length, 0),
           deliveryMode: "final-only",
+          deliveryReceiptCapacityExhausted: deliveryDegraded,
         },
       };
     },

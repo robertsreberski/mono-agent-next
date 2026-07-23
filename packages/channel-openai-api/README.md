@@ -35,11 +35,18 @@ facade forwards only the latest user turn, because Core owns canonical history;
 `user` identifies the sender and is never reused as a cross-chat conversation
 key.
 
+Host-owned tools remain host-owned: the channel never emits OpenAI
+`tool_calls` for the HTTP client to execute. After Core reports a matching tool
+result, both JSON and SSE responses include a standard text-content extension
+using Open WebUI's completed `<details type="tool_calls">` block. Arguments and
+results are bounded, credential-shaped fields and strings are redacted, and
+file payload bytes are represented only by safe metadata.
+
 ## Architecture
 
 ### Data flow
 
-Authenticated OpenAI request -> exact Host/Origin authority and body validation -> message/image normalization -> bounded Core dispatch -> size-bounded JSON response or SSE chunks ending in `[DONE]`.
+Authenticated OpenAI request -> exact Host/Origin authority and body validation -> message/image normalization -> bounded Core dispatch -> ordered text/completed-tool rendering -> size-bounded JSON response or SSE chunks ending in `[DONE]`.
 
 ### Package structure
 
@@ -47,6 +54,7 @@ Authenticated OpenAI request -> exact Host/Origin authority and body validation 
 | --- | --- |
 | `config.ts` | Strict env-only auth and explicit safe-bind configuration. |
 | `translation.ts` | OpenAI request validation and normalized channel requests. |
+| `tool-details.ts` | Bounded, redacted Open WebUI rendering for matched completed tools. |
 | `server.ts` | Authenticated HTTP lifecycle, JSON/SSE rendering, and cancellation. |
 | `index.ts` | Typed channel module and health. |
 
@@ -104,7 +112,7 @@ Depends only on `@mono-agent/module-sdk` and Node HTTP primitives. It does not i
 
 ## What This Package Does Not Own
 
-It does not terminate TLS, execute models, select Core runtimes/models, persist OpenAI client history, honor sampling knobs that Core cannot represent, or emulate every OpenAI endpoint. Non-loopback binding is an explicit authenticated deployment choice, not a public-network exposure recommendation. Divergent streamed text replacements and unsupported reply events fail the request instead of producing a misleading OpenAI response.
+It does not terminate TLS, execute models, select Core runtimes/models, persist OpenAI client history, delegate host-owned tool execution to API clients, honor sampling knobs that Core cannot represent, or emulate every OpenAI endpoint. Non-loopback binding is an explicit authenticated deployment choice, not a public-network exposure recommendation. Divergent streamed text replacements, unmatched tool events, and unsupported reply events fail the request instead of producing a misleading OpenAI response.
 
 ## Related Documentation
 

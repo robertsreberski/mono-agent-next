@@ -237,6 +237,7 @@ export class WebService {
               state.assistantText,
               state.pendingAsk,
               state.finalMessage?.id,
+              state.usage,
             );
             await notify(onUpdate, this.thread(threadId));
           },

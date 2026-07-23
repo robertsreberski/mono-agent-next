@@ -11,7 +11,10 @@ import {
   type TriggerCronConfig,
 } from "./config.js";
 import { loadCronJobsFromDirectory } from "./jobs.js";
-import { createCronTrigger } from "./scheduler.js";
+import {
+  HOST_CAPABILITY_CRON_DURABLE_STATE,
+  createCronTrigger,
+} from "./scheduler.js";
 
 const PACKAGE_NAME = "@mono-agent/trigger-cron";
 const PACKAGE_VERSION = "0.15.0";
@@ -23,7 +26,7 @@ export const monoAgentModule = defineTriggerModule({
     apiVersion: MODULE_API_VERSION,
     kind: "trigger",
     responsibility: "Discovers scheduled Markdown jobs and emits deterministic idempotent trigger events.",
-    capabilities: [],
+    capabilities: [HOST_CAPABILITY_CRON_DURABLE_STATE],
   },
   schema: triggerCronConfigSchema,
   async create(context: TriggerModuleCreateContext<TriggerCronConfig>) {
@@ -62,6 +65,7 @@ export type {
   CronOverlapMode,
 } from "./jobs.js";
 export {
+  MAX_CRON_CATCH_UP,
   createCronTrigger,
   cronIdempotencyKey,
   systemCronClock,
@@ -71,6 +75,7 @@ export type {
   CronClock,
   CronInvocationResult,
   CronInvocationSource,
+  CronInvocationStatus,
   CronTimerHandle,
   CronTrigger,
 } from "./scheduler.js";

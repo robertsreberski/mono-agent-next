@@ -1,5 +1,9 @@
 import { isEnvEligibleSchema, isSecretSchema, type ChannelHost, type ModuleLogger } from "@mono-agent/module-sdk";
-import { assertChannelInstanceCompliance, assertChannelModuleCompliance } from "@mono-agent/module-sdk/testing";
+import {
+  assertChannelBehaviorCompliance,
+  assertChannelInstanceCompliance,
+  assertChannelModuleCompliance,
+} from "@mono-agent/module-sdk/testing";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -87,7 +91,7 @@ describe("telegram channel", () => {
       signal: new AbortController().signal,
     };
     const messageTool = channel.sendTools[0]!;
-    const preparedMessage = messageTool.prepare({
+    const preparedMessage = await messageTool.prepare({
       chat_id: 42,
       text: "Choose",
       reply_options: ["Yes", "No"],
@@ -117,9 +121,16 @@ describe("telegram channel", () => {
       { ...preparedMessage, idempotencyKey: "tool-message" },
       messageResult,
     )).toBe("telegram:42");
+    expect(() => messageTool.historyConversationId(
+      { ...preparedMessage, idempotencyKey: "tool-unknown" },
+      {
+        status: "unknown",
+        idempotencyKey: "tool-unknown",
+      },
+    )).toThrow(/confirmed delivery/u);
 
     const fileTool = channel.sendTools[1]!;
-    const preparedFile = fileTool.prepare({
+    const preparedFile = await fileTool.prepare({
       kind: "photo",
       chat_id: "42",
       data: Buffer.from([1, 2, 3]).toString("base64"),
@@ -144,7 +155,7 @@ describe("telegram channel", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
 
     await expect(channel.deliver!({
-      ...messageTool.prepare({ chat_id: "99", text: "forbidden" }, toolContext),
+      ...await messageTool.prepare({ chat_id: "99", text: "forbidden" }, toolContext),
       idempotencyKey: "tool-forbidden",
     }, toolContext.signal)).resolves.toMatchObject({
       status: "failed",
@@ -152,6 +163,10 @@ describe("telegram channel", () => {
     });
     expect(() => messageTool.prepare({
       chat_id: "42:shadow",
+      text: "ambiguous",
+    }, toolContext)).toThrow(/identifier/u);
+    expect(() => messageTool.prepare({
+      chat_id: "4 2",
       text: "ambiguous",
     }, toolContext)).toThrow(/identifier/u);
     await expect(channel.deliver!({
@@ -169,6 +184,268 @@ describe("telegram channel", () => {
       data: "not-base64",
       filename: "../secret",
     }, toolContext)).toThrow(/base64|filename/u);
+  });
+
+  it("coalesces exact payloads, rejects conflicting keys, and keeps unknown outcomes sticky", async () => {
+    const sendMessage = vi.fn<TelegramBotClient["sendMessage"]>(async (request) => {
+      if (request.text === "ambiguous") {
+        throw new Error("secret transport detail /private/token");
+      }
+      return { messageId: "message-1" };
+    });
+    const client: TelegramBotClient = {
+      async poll() { return []; },
+      async download() { throw new Error("unexpected download"); },
+      sendMessage,
+      async sendAttachment() { return { messageId: "attachment-1" }; },
+    };
+    const delivery = new TelegramDelivery(
+      parseTelegramConfig({
+        botToken: TOKEN,
+        allowedChatIds: ["42"],
+      }),
+      client,
+    );
+    const signal = new AbortController().signal;
+    const message = {
+      conversationId: "telegram:42",
+      text: "one",
+      idempotencyKey: "same",
+    };
+    await expect(Promise.all([
+      delivery.deliver(message, signal),
+      delivery.deliver(message, signal),
+    ])).resolves.toEqual([
+      expect.objectContaining({ status: "delivered" }),
+      expect.objectContaining({ status: "delivered" }),
+    ]);
+    await expect(delivery.deliver(message, signal)).resolves.toMatchObject({
+      status: "duplicate",
+    });
+    await expect(delivery.deliver({
+      ...message,
+      text: "different",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "telegram_delivery_idempotency_conflict" },
+    });
+
+    const ambiguous = {
+      conversationId: "telegram:42",
+      text: "ambiguous",
+      idempotencyKey: "ambiguous",
+    };
+    const first = await delivery.deliver(ambiguous, signal);
+    const second = await delivery.deliver(ambiguous, signal);
+    expect(first).toEqual(second);
+    expect(first).toEqual({
+      status: "unknown",
+      idempotencyKey: "ambiguous",
+      diagnostic: {
+        code: "telegram_delivery_unknown",
+        severity: "error",
+        message: "Telegram delivery outcome is unknown.",
+      },
+    });
+    expect(JSON.stringify(first)).not.toContain("secret transport");
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds and snapshots public delivery payloads before fingerprinting or transport", async () => {
+    let releaseAttachment!: () => void;
+    const attachmentGate = new Promise<void>((resolve) => {
+      releaseAttachment = resolve;
+    });
+    let postedAttachment: Parameters<TelegramBotClient["sendAttachment"]>[0]["attachment"] | undefined;
+    const sendMessage = vi.fn<TelegramBotClient["sendMessage"]>(async () => ({
+      messageId: "posted",
+    }));
+    const sendAttachment = vi.fn<TelegramBotClient["sendAttachment"]>(
+      async (request) => {
+        postedAttachment = request.attachment;
+        await attachmentGate;
+        return { messageId: "attachment" };
+      },
+    );
+    const delivery = new TelegramDelivery(
+      parseTelegramConfig({
+        botToken: TOKEN,
+        allowAllChats: true,
+      }),
+      {
+        async poll() { return []; },
+        async download() { throw new Error("unexpected download"); },
+        sendMessage,
+        sendAttachment,
+      },
+    );
+    const signal = new AbortController().signal;
+
+    for (const conversationId of [
+      "telegram:4 2",
+      `telegram:${"4".repeat(129)}`,
+      "telegram:42\u0007shadow",
+    ]) {
+      await expect(delivery.deliver({
+        conversationId,
+        text: "unsafe",
+        idempotencyKey: `bad-destination-${conversationId.length}`,
+      }, signal)).resolves.toMatchObject({
+        status: "failed",
+        diagnostic: { code: "telegram_destination_forbidden" },
+      });
+    }
+
+    await expect(delivery.deliver({
+      conversationId: "telegram:42",
+      text: "oversized metadata",
+      idempotencyKey: "retry-after-invalid",
+      metadata: { detail: "x".repeat(65_537) },
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "telegram_delivery_invalid" },
+    });
+    await expect(delivery.deliver({
+      conversationId: "telegram:42",
+      text: "valid retry",
+      idempotencyKey: "retry-after-invalid",
+    }, signal)).resolves.toMatchObject({ status: "delivered" });
+
+    const proxiedData = new Proxy(new Uint8Array([1]), {});
+    await expect(delivery.deliver({
+      conversationId: "telegram:42",
+      text: "",
+      attachments: [{
+        id: "proxy",
+        kind: "file",
+        name: "proxy.bin",
+        mediaType: "application/octet-stream",
+        sizeBytes: 1,
+        data: proxiedData,
+      }],
+      idempotencyKey: "proxy-data",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "telegram_delivery_invalid" },
+    });
+
+    const source = new Uint8Array([1, 2, 3]);
+    const pending = delivery.deliver({
+      conversationId: "telegram:42",
+      text: "",
+      attachments: [{
+        id: "snapshot",
+        kind: "file",
+        name: "snapshot.bin",
+        mediaType: "application/octet-stream",
+        sizeBytes: source.byteLength,
+        data: source,
+      }],
+      idempotencyKey: "snapshot",
+    }, signal);
+    await vi.waitFor(() => expect(sendAttachment).toHaveBeenCalledOnce());
+    source[0] = 9;
+    expect(postedAttachment?.data).not.toBe(source);
+    expect(postedAttachment?.data).toEqual(new Uint8Array([1, 2, 3]));
+    releaseAttachment();
+    await expect(pending).resolves.toMatchObject({ status: "delivered" });
+    expect(sendMessage).toHaveBeenCalledOnce();
+  });
+
+  it("passes the reusable channel behavior compliance contract", async () => {
+    const sendMessage = vi.fn<TelegramBotClient["sendMessage"]>(
+      async (request) => {
+        if (request.text === "ambiguous compliance") {
+          throw new Error("secret Telegram transport failure /private/token");
+        }
+        return { messageId: "compliance-posted" };
+      },
+    );
+    await assertChannelBehaviorCompliance({
+      create: () => createTelegramChannel({
+        context: context(
+          parseTelegramConfig({
+            botToken: TOKEN,
+            allowedChatIds: ["42"],
+          }),
+          async () => ({ status: "completed" }),
+        ),
+        clientFactory: () => ({
+          async poll(_offset, _timeout, signal) {
+            await new Promise<void>((resolve) => {
+              signal.addEventListener("abort", () => resolve(), { once: true });
+            });
+            return [];
+          },
+          async download() { throw new Error("unexpected download"); },
+          sendMessage,
+          async sendAttachment() { return { messageId: "attachment" }; },
+        }),
+      }),
+      delivery: {
+        delivered: {
+          conversationId: "telegram:42",
+          text: "compliance",
+          idempotencyKey: "telegram-compliance",
+        },
+        conflicting: {
+          conversationId: "telegram:42",
+          text: "conflicting compliance",
+          idempotencyKey: "telegram-compliance",
+        },
+        unknown: {
+          conversationId: "telegram:42",
+          text: "ambiguous compliance",
+          idempotencyKey: "telegram-compliance-unknown",
+        },
+      },
+      secrets: [TOKEN, "secret Telegram"],
+      exercise(instance) {
+        expect(instance.capabilities.proactive).toBe(true);
+      },
+    });
+  });
+
+  it("fails closed instead of evicting receipt authority at the live-instance bound", async () => {
+    const sendMessage = vi.fn<TelegramBotClient["sendMessage"]>(async () => ({
+      messageId: "sent",
+    }));
+    const delivery = new TelegramDelivery(
+      parseTelegramConfig({
+        botToken: TOKEN,
+        allowedChatIds: ["42"],
+      }),
+      {
+        async poll() { return []; },
+        async download() { throw new Error("unexpected download"); },
+        sendMessage,
+        async sendAttachment() { return { messageId: "attachment" }; },
+      },
+    );
+    const signal = new AbortController().signal;
+    for (let index = 0; index < 1_000; index += 1) {
+      await delivery.deliver({
+        conversationId: "telegram:42",
+        text: `notice-${String(index)}`,
+        idempotencyKey: `key-${String(index)}`,
+      }, signal);
+    }
+    await expect(delivery.deliver({
+      conversationId: "telegram:42",
+      text: "one too many",
+      idempotencyKey: "capacity",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "telegram_delivery_receipt_capacity" },
+    });
+    expect(delivery.degraded).toBe(true);
+    expect(sendMessage).toHaveBeenCalledTimes(1_000);
+    await expect(delivery.deliver({
+      conversationId: "telegram:42",
+      text: "notice-0",
+      idempotencyKey: "key-0",
+    }, signal)).resolves.toMatchObject({ status: "duplicate" });
+    expect(sendMessage).toHaveBeenCalledTimes(1_000);
   });
 
   it("normalizes authorized media, ignores unauthorized chats, and deduplicates proactive delivery", async () => {

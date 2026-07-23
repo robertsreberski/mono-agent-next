@@ -44,10 +44,13 @@ const OPERATIONS = Object.freeze([
   "session.evict",
   "delivery.prepare",
   "delivery.settle",
+  "delivery.settle-with-history",
 ] as const);
 
 type HookedStore = StateStore & {
   beforeExecutionOperation?(operation: string, input: unknown): void | Promise<void>;
+  afterExecutionOperation?(operation: string, input: unknown, result: unknown): void | Promise<void>;
+  mapExecutionResult?(operation: string, input: unknown, result: unknown): unknown;
 };
 
 interface StoredRun {
@@ -71,6 +74,8 @@ export class InMemoryStateExecution implements StateExecution {
   readonly #conversations = new Map<string, ConversationView>();
   readonly #sessions = new Map<string, { readonly value: RuntimeSession; readonly updatedAt: string }>();
   readonly #deliveries = new Map<string, StoredDelivery>();
+  readonly #deliveryEntries = new Map<string, { readonly fingerprint: string; readonly conversationId: string;
+    readonly deliveryIdempotencyKey: string; readonly deliveryFingerprint: string; readonly entry: AgentTranscriptEntry }>();
   readonly #state: HookedStore;
   #tail: Promise<void> = Promise.resolve();
 
@@ -104,7 +109,11 @@ export class InMemoryStateExecution implements StateExecution {
   }
 
   perform(request: StateExecutionRequest): Promise<unknown> {
-    const execute = (): Promise<unknown> => this.#perform(request);
+    const execute = async (): Promise<unknown> => {
+      const result = await this.#perform(request);
+      await this.#state.afterExecutionOperation?.(request.operation, request.input, result);
+      return this.#state.mapExecutionResult?.(request.operation, request.input, result) ?? result;
+    };
     const pending = this.#tail.then(execute, execute);
     this.#tail = pending.then(() => undefined, () => undefined);
     return pending;
@@ -229,6 +238,9 @@ export class InMemoryStateExecution implements StateExecution {
       case "delivery.settle":
         await this.#before(request);
         return this.#settleDelivery(input);
+      case "delivery.settle-with-history":
+        await this.#before(request);
+        return this.#settleDeliveryWithHistory(input);
       default:
         throw new Error(`unsupported fixture execution operation ${request.operation}`);
     }
@@ -420,6 +432,74 @@ export class InMemoryStateExecution implements StateExecution {
     }
     if (status === "unknown") return { status: "unknown", ...(input.code === undefined ? {} : { code: input.code }) };
     return { status: "join" };
+  }
+
+  #settleDeliveryWithHistory(input: Record<string, unknown>): unknown {
+    const key = input.idempotencyKey as string;
+    const conversationId = input.conversationId as string;
+    const candidate = input.entry as Omit<Extract<AgentTranscriptEntry, { readonly kind: "verbatim" }>, "recordedAt">;
+    const conflict = { status: "conflict", conversationId, entryId: candidate.entryId };
+    const delivery = this.#deliveries.get(key);
+    if (delivery === undefined
+      || delivery.fingerprint !== input.fingerprint
+      || delivery.attempt !== input.attempt
+      || delivery.token !== input.token
+      || (delivery.status === "delivered" && delivery.messageId !== input.messageId)
+      || (delivery.status !== "intent" && delivery.status !== "delivered")) return conflict;
+    const bound = this.#deliveryEntries.get(candidate.entryId);
+    if (delivery.status === "delivered" && bound === undefined)
+      throw new Error("delivered receipt exists without its atomic destination history");
+    if (bound !== undefined && (bound.deliveryIdempotencyKey !== key
+      || bound.deliveryFingerprint !== input.fingerprint)) return conflict;
+    const appended = this.#appendDelivery({
+      conversationId, entry: candidate, fingerprint: input.entryFingerprint,
+      deliveryIdempotencyKey: key, deliveryFingerprint: input.fingerprint,
+    }) as Record<string, unknown>;
+    if (appended.status === "conflict") return conflict;
+    if (delivery.status !== "delivered") {
+      this.#deliveries.set(key, {
+        ...delivery, status: "delivered",
+        ...(input.messageId === undefined ? {} : { messageId: input.messageId as string }),
+      });
+    }
+    return {
+      ...appended,
+      ...(input.messageId === undefined ? {} : { messageId: input.messageId }),
+    };
+  }
+
+  #appendDelivery(input: Record<string, unknown>): unknown {
+    const conversationId = input.conversationId as string;
+    const candidate = input.entry as Omit<Extract<AgentTranscriptEntry, { readonly kind: "verbatim" }>, "recordedAt">;
+    const existing = this.#deliveryEntries.get(candidate.entryId);
+    if (existing !== undefined) {
+      return existing.fingerprint === input.fingerprint && existing.conversationId === conversationId
+        && JSON.stringify({ ...existing.entry, recordedAt: undefined }) === JSON.stringify(candidate)
+        ? { status: "duplicate", conversationId, entryId: candidate.entryId,
+            revision: this.#conversations.get(conversationId)!.transcript.revision,
+            entryCount: this.#conversations.get(conversationId)!.transcript.entries.length }
+        : { status: "conflict", conversationId, entryId: candidate.entryId };
+    }
+    const now = new Date().toISOString();
+    const entry = { ...candidate, recordedAt: now } as AgentTranscriptEntry;
+    const prior = this.#conversations.get(conversationId);
+    const transcript: CanonicalTranscript = {
+      schemaVersion: 1, kind: "mono-agent.canonical-transcript", conversationId,
+      revision: (prior?.transcript.revision ?? 0) + 1,
+      entries: [...(prior?.transcript.entries ?? []), entry],
+    };
+    this.#conversations.set(conversationId, {
+      conversationId, createdAt: prior?.createdAt ?? now, updatedAt: now, transcript,
+      ...(prior?.title === undefined ? {} : { title: prior.title }),
+      ...(prior?.metadata === undefined ? {} : { metadata: prior.metadata }),
+    });
+    this.#deliveryEntries.set(candidate.entryId, {
+      fingerprint: input.fingerprint as string, conversationId,
+      deliveryIdempotencyKey: input.deliveryIdempotencyKey as string,
+      deliveryFingerprint: input.deliveryFingerprint as string, entry,
+    });
+    return { status: "appended", conversationId, entryId: candidate.entryId,
+      revision: transcript.revision, entryCount: transcript.entries.length };
   }
 
   #requiredRun(runId: string): StoredRun {

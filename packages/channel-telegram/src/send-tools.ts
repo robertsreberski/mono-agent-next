@@ -1,40 +1,26 @@
 import { createHash } from "node:crypto";
 
 import type {
+  ChannelSendTool,
   ChannelDeliveryResult,
   ChannelOutboundMessage,
   JsonSchema,
   JsonValue,
-  RuntimeToolDefinition,
 } from "@mono-agent/module-sdk";
 
 import type { TelegramConfig } from "./config.js";
+import {
+  parseTelegramChatId,
+  telegramConversationId,
+} from "./destination.js";
 
 const MAX_TELEGRAM_MESSAGE_CHARACTERS = 4_096;
 const MAX_TELEGRAM_CAPTION_CHARACTERS = 1_024;
 const MAX_INLINE_TOOL_FILE_BYTES = 180 * 1024;
 
-interface ChannelSendToolContext {
-  readonly requestId: string;
-  readonly conversationId: string;
-  readonly callId: string;
-  readonly signal: AbortSignal;
-}
-
-export interface TelegramChannelSendTool extends RuntimeToolDefinition {
-  prepare(
-    input: JsonValue,
-    context: ChannelSendToolContext,
-  ): Omit<ChannelOutboundMessage, "idempotencyKey">;
-  historyConversationId(
-    message: ChannelOutboundMessage,
-    result: ChannelDeliveryResult,
-  ): string;
-}
-
 export function createTelegramSendTools(
   config: TelegramConfig,
-): readonly TelegramChannelSendTool[] {
+): readonly ChannelSendTool[] {
   const inlineFileBytes = Math.min(
     config.maxAttachmentBytes,
     MAX_INLINE_TOOL_FILE_BYTES,
@@ -102,10 +88,13 @@ export function createTelegramSendTools(
             : { metadata: { telegram: { replyOptions: options } } }),
         };
       },
-      historyConversationId(message: ChannelOutboundMessage) {
-        return message.conversationId;
+      historyConversationId(
+        message: ChannelOutboundMessage,
+        result: ChannelDeliveryResult,
+      ) {
+        return confirmedTelegramDestination(message, result);
       },
-    } satisfies TelegramChannelSendTool),
+    } satisfies ChannelSendTool),
     Object.freeze({
       name: "TelegramSendFile",
       description: `Send one inline base64 document or photo of at most ${String(inlineFileBytes)} bytes to a Telegram chat authorized by this configured channel instance.`,
@@ -173,11 +162,31 @@ export function createTelegramSendTools(
             : { metadata: { telegram: { attachmentCaption: caption } } }),
         };
       },
-      historyConversationId(message: ChannelOutboundMessage) {
-        return message.conversationId;
+      historyConversationId(
+        message: ChannelOutboundMessage,
+        result: ChannelDeliveryResult,
+      ) {
+        return confirmedTelegramDestination(message, result);
       },
-    } satisfies TelegramChannelSendTool),
+    } satisfies ChannelSendTool),
   ]);
+}
+
+function confirmedTelegramDestination(
+  message: ChannelOutboundMessage,
+  result: ChannelDeliveryResult,
+): string {
+  if (result.status !== "delivered" && result.status !== "duplicate") {
+    throw new TypeError("Telegram destination history requires confirmed delivery.");
+  }
+  if (!message.conversationId.startsWith("telegram:")) {
+    throw new TypeError("Telegram destination history requires a Telegram conversation.");
+  }
+  const chatId = parseTelegramChatId(
+    message.conversationId.slice("telegram:".length),
+    "chat_id",
+  );
+  return telegramConversationId(chatId);
 }
 
 function record(
@@ -208,19 +217,7 @@ function record(
 }
 
 function identifier(value: unknown, label: string): string {
-  if (typeof value === "number") {
-    if (!Number.isSafeInteger(value)) throw new TypeError(`${label} must be a safe integer or string.`);
-    value = String(value);
-  }
-  if (typeof value !== "string"
-    || value.length === 0
-    || value.length > 128
-    || value !== value.trim()
-    || value.includes(":")
-    || /[\u0000-\u001f\u007f]/u.test(value)) {
-    throw new TypeError(`${label} must be a bounded identifier.`);
-  }
-  return value;
+  return parseTelegramChatId(value, label, true);
 }
 
 function positiveIntegerIdentifier(value: unknown, label: string): string {

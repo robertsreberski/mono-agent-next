@@ -50,4 +50,54 @@ describe("operator domain state", () => {
     });
     expect(() => reduceOperatorFrame(active, { type: "activity", turnId: "turn-b", text: "wrong" })).toThrow("expected turn-a");
   });
+
+  it("keeps compaction and session eviction sticky across later usage snapshots", () => {
+    const accepted = reduceOperatorFrame(initialOperatorState("a"), {
+      type: "accepted",
+      turnId: "turn-a",
+      conversationId: "a",
+      startedAt: "2026-01-02T03:04:05.000Z",
+    });
+    const compacted = reduceOperatorFrame(accepted, {
+      type: "usage",
+      turnId: "turn-a",
+      usage: {
+        inputTokens: 12,
+        outputTokens: 3,
+        contextWindow: 128_000,
+        contextUsed: 15,
+        compacted: true,
+        sessionEvicted: false,
+      },
+    });
+    const evicted = reduceOperatorFrame(compacted, {
+      type: "usage",
+      turnId: "turn-a",
+      usage: {
+        inputTokens: 14,
+        outputTokens: 4,
+        compacted: false,
+        sessionEvicted: true,
+      },
+    });
+    const latest = reduceOperatorFrame(evicted, {
+      type: "usage",
+      turnId: "turn-a",
+      usage: {
+        inputTokens: 16,
+        outputTokens: 5,
+        contextUsed: 18,
+        compacted: false,
+        sessionEvicted: false,
+      },
+    });
+    expect(latest.usage).toEqual({
+      inputTokens: 16,
+      outputTokens: 5,
+      contextWindow: 128_000,
+      contextUsed: 18,
+      compacted: true,
+      sessionEvicted: true,
+    });
+  });
 });

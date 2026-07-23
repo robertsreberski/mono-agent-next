@@ -261,10 +261,10 @@ export interface ModuleInstance {
 export type AttachmentKind = "image" | "audio" | "file";
 /** A transport-neutral attachment whose size and bytes have already been bounded. */
 export interface NormalizedAttachment {
-  readonly id: string;
+  /** At most 512 UTF-8 bytes. */ readonly id: string;
   readonly kind: AttachmentKind;
-  readonly name: string;
-  readonly mediaType: string;
+  /** At most 255 UTF-8 bytes. */ readonly name: string;
+  /** At most 255 UTF-8 bytes. */ readonly mediaType: string;
   readonly sizeBytes: number;
   readonly data: Uint8Array;
 }
@@ -647,8 +647,7 @@ export interface RuntimeToolDefinition {
   readonly name: string; readonly description: string; readonly inputSchema: JsonSchema;
 }
 export interface RuntimeSession {
-  /** Runtime-owned opaque identifier. Core must not interpret it. */
-  readonly id: string;
+  /** Runtime-owned opaque identifier of at most 512 UTF-8 bytes. */ readonly id: string;
   /** Canonical conversation whose provider-native continuation this is. */
   readonly conversationId: string;
   /** Exact runtime instance and model route that created this private session. */
@@ -942,6 +941,10 @@ export interface ChannelReplyAttachmentEvent { readonly type: "attachment"; read
 export interface ChannelReplyAskUserEvent { readonly type: "ask-user"; readonly ask: AskUserRequest; }
 export interface ChannelReplyApprovalEvent { readonly type: "approval"; readonly approval: ApprovalRequest; }
 export interface ChannelReplyUsageEvent { readonly type: "usage"; readonly usage: RuntimeUsage; }
+export interface ChannelReplyToolCallEvent { readonly type: "tool-call"; readonly call: RuntimeToolCall; }
+export interface ChannelReplyToolResultEvent { readonly type: "tool-result"; readonly result: RuntimeToolResult; }
+export interface ChannelReplyCompactionEvent { readonly type: "compaction"; readonly compaction: RuntimeCompaction; }
+export interface ChannelReplySessionEvictedEvent { readonly type: "session-evicted"; }
 export type ChannelReplyEvent =
   | ChannelReplyTextDeltaEvent
   | ChannelReplyTextReplaceEvent
@@ -949,7 +952,11 @@ export type ChannelReplyEvent =
   | ChannelReplyAttachmentEvent
   | ChannelReplyAskUserEvent
   | ChannelReplyApprovalEvent
-  | ChannelReplyUsageEvent;
+  | ChannelReplyUsageEvent
+  | ChannelReplyToolCallEvent
+  | ChannelReplyToolResultEvent
+  | ChannelReplyCompactionEvent
+  | ChannelReplySessionEvictedEvent;
 export interface ChannelReplySink { emit(event: ChannelReplyEvent): Awaitable<void>; }
 export interface ChannelTurnResult {
   readonly status: "completed" | "cancelled" | "rejected"; readonly text?: string;
@@ -1007,7 +1014,7 @@ export interface ChannelHost extends ModuleHost {
   openConversation?(request: ChannelOpenConversationRequest): Promise<ChannelOpenConversationResult>;
 }
 export interface ChannelOutboundMessage {
-  readonly conversationId: string;
+  /** A normalized destination of at most 4,096 UTF-8 bytes. */ readonly conversationId: string;
   readonly text: string;
   readonly attachments?: readonly ChannelAttachment[];
   readonly replyToMessageId?: string;
@@ -1017,8 +1024,16 @@ export interface ChannelOutboundMessage {
 export interface ChannelDeliveryResult {
   readonly status: "delivered" | "duplicate" | "unknown" | "failed";
   readonly idempotencyKey: string;
-  readonly messageId?: string;
+  /** Transport-owned identifier of at most 512 UTF-8 bytes. */ readonly messageId?: string;
   readonly diagnostic?: ModuleDiagnostic;
+}
+export interface ChannelSendToolContext {
+  readonly requestId: string; readonly conversationId: string; readonly callId: string; readonly signal: AbortSignal;
+}
+export interface ChannelSendTool extends RuntimeToolDefinition {
+  prepare(input: JsonValue, context: ChannelSendToolContext): Awaitable<Omit<ChannelOutboundMessage, "idempotencyKey">>;
+  /** Resolve history after confirmed delivery; the id must be at most 4,096 UTF-8 bytes. */
+  historyConversationId(message: ChannelOutboundMessage, result: ChannelDeliveryResult): string;
 }
 export interface ChannelCapabilities {
   readonly attachments: boolean;
@@ -1033,6 +1048,8 @@ export interface ChannelCapabilities {
 }
 export interface Channel extends ModuleInstance {
   readonly capabilities: ChannelCapabilities;
+  /** Model-visible delivery contributions, bound by Core to this exact selected instance. */
+  readonly sendTools?: readonly ChannelSendTool[];
   /**
    * Returns a bounded JSON discovery fragment after start. Core combines
    * fragments by top-level key and publishes them through an optional state

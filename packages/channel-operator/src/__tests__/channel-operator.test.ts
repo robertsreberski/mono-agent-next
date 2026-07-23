@@ -19,6 +19,7 @@ import {
   type OperatorFrame,
 } from "@mono-agent/operator";
 import {
+  assertChannelBehaviorCompliance,
   assertChannelInstanceCompliance,
   assertChannelModuleCompliance,
 } from "@mono-agent/module-sdk/testing";
@@ -467,7 +468,32 @@ describe("operator HTTP channel", () => {
           questions: [{ id: "choice", prompt: "Choose", allowFreeText: false, multiple: false, choices: [{ value: "yes", label: "Yes" }] }],
         },
       });
-      await reply.emit({ type: "usage", usage: { inputTokens: 3, outputTokens: 5 } });
+      await reply.emit({
+        type: "usage",
+        usage: {
+          inputTokens: 3,
+          outputTokens: 5,
+          contextWindow: 128_000,
+          contextUsed: 8,
+        },
+      });
+      await reply.emit({
+        type: "compaction",
+        compaction: {
+          compacted: true,
+          tokensBefore: 8,
+          tokensAfter: 4,
+        },
+      });
+      await reply.emit({
+        type: "usage",
+        usage: {
+          inputTokens: 4,
+          outputTokens: 6,
+          contextUsed: 5,
+        },
+      });
+      await reply.emit({ type: "session-evicted" });
       return { status: "completed", text: "done" };
     }, host);
     const client = new OperatorClient({ endpoint: channel.startInfo.endpoint, token: TOKEN });
@@ -485,7 +511,20 @@ describe("operator HTTP channel", () => {
 
     const frames = await readFrames(await postJson(channel.startInfo.turnsUrl, { conversationId: "conversation-controls", input: { text: "run" } }));
     expect(frames).toContainEqual(expect.objectContaining({ type: "ask_user", ask: expect.objectContaining({ interactionId: "ask-1" }) }));
-    expect(frames).toContainEqual(expect.objectContaining({ type: "usage", usage: expect.objectContaining({ inputTokens: 3, outputTokens: 5 }) }));
+    const usageFrames = frames.filter((frame) => frame.type === "usage");
+    expect(usageFrames).toHaveLength(4);
+    expect(usageFrames.at(-1)).toEqual({
+      type: "usage",
+      turnId: expect.any(String),
+      usage: {
+        inputTokens: 4,
+        outputTokens: 6,
+        contextWindow: 128_000,
+        contextUsed: 5,
+        compacted: true,
+        sessionEvicted: true,
+      },
+    });
     await expect(client.getPendingAsk("conversation-controls")).resolves.toMatchObject({ ask: { interactionId: "ask-1" } });
     await expect(client.answerAsk("conversation-controls", { interactionId: "ask-1", answers: { choice: ["yes"] } })).resolves.toEqual({ status: "accepted" });
     expect(answerAsk).toHaveBeenCalledOnce();
@@ -590,6 +629,74 @@ describe("mono-agent operator channel module", () => {
     await channel.stop?.({ signal: lifecycle.signal, reason: "shutdown" });
   });
 
+  it("passes the reusable channel behavior compliance contract", async () => {
+    const operatorIdentity = identity("compliance-agent", "Compliance Agent");
+    const openConversation = vi.fn<NonNullable<ChannelHost["openConversation"]>>(
+      async (request) => {
+        if (request.initialText === "ambiguous compliance") {
+          throw new Error("secret operator storage failure /private/token");
+        }
+        return {
+          conversationId: "opened-compliance",
+          createdAt: new Date().toISOString(),
+        };
+      },
+    );
+    await assertChannelBehaviorCompliance({
+      async create(signal) {
+        const channel = await monoAgentModule.create({
+          instanceId: "operator-compliance",
+          config: monoAgentModule.schema.parse({ auth: { token: TOKEN } }),
+          provenance: {
+            "/auth/token": {
+              source: "environment",
+              environmentName: "OPERATOR_TOKEN",
+            },
+          },
+          configDirectory: "/config",
+          workspaceDirectory: "/workspace",
+          dataDirectory: "/data",
+          logger: noopLogger(),
+          host: {
+            grantedCapabilities: new Set(["operator.identity.v1"]),
+            getCapability<T>(name: string): T | undefined {
+              return (name === "operator.identity.v1"
+                ? operatorIdentity
+                : undefined) as T | undefined;
+            },
+            async dispatch() { return { status: "completed" }; },
+            openConversation,
+          },
+          signal,
+        });
+        moduleChannels.add(channel);
+        return channel;
+      },
+      delivery: {
+        delivered: {
+          conversationId: "trigger:cron:compliance",
+          text: "compliance",
+          idempotencyKey: "operator-compliance",
+        },
+        conflicting: {
+          conversationId: "trigger:cron:compliance",
+          text: "conflicting compliance",
+          idempotencyKey: "operator-compliance",
+        },
+        unknown: {
+          conversationId: "trigger:cron:compliance",
+          text: "ambiguous compliance",
+          idempotencyKey: "operator-compliance-unknown",
+        },
+      },
+      secrets: [TOKEN, "secret operator"],
+      exercise(instance) {
+        expect(instance.capabilities.proactive).toBe(true);
+      },
+    });
+    expect(openConversation).toHaveBeenCalledTimes(2);
+  });
+
   it("collapses concurrent proactive opens and reports later duplicates", async () => {
     const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
     const operatorIdentity = identity("module-agent", "Module Agent");
@@ -608,6 +715,169 @@ describe("mono-agent operator channel module", () => {
       { status: "delivered", idempotencyKey: "open-once", messageId: "opened-1" },
     ]);
     await expect(channel.deliver!(message, new AbortController().signal)).resolves.toEqual({ status: "duplicate", idempotencyKey: "open-once", messageId: "opened-1" });
+    await expect(channel.deliver!({
+      ...message,
+      text: "conflicting payload",
+    }, new AbortController().signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "operator_proactive_idempotency_conflict" },
+    });
+    expect(openConversation).toHaveBeenCalledOnce();
+  });
+
+  it("bounds proactive metadata before fingerprinting and allows a valid retry", async () => {
+    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
+    const operatorIdentity = identity("module-agent", "Module Agent");
+    const openConversation =
+      vi.fn<NonNullable<ChannelHost["openConversation"]>>(async () => ({
+        conversationId: "opened-valid",
+        createdAt: new Date().toISOString(),
+      }));
+    const channel = await monoAgentModule.create({
+      instanceId: "operator",
+      config,
+      provenance: {},
+      configDirectory: "/config",
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: {
+        grantedCapabilities: new Set(["operator.identity.v1"]),
+        getCapability<T>(name: string): T | undefined {
+          return (name === "operator.identity.v1"
+            ? operatorIdentity
+            : undefined) as T | undefined;
+        },
+        async dispatch() { return { status: "completed" }; },
+        openConversation,
+      },
+      signal: new AbortController().signal,
+    });
+    moduleChannels.add(channel);
+    await expect(channel.deliver!({
+      conversationId: "",
+      text: "oversized",
+      idempotencyKey: "retry-after-invalid",
+      metadata: { detail: "x".repeat(65_537) },
+    }, new AbortController().signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "operator_proactive_invalid" },
+    });
+    await expect(channel.deliver!({
+      conversationId: "",
+      text: "valid",
+      idempotencyKey: "retry-after-invalid",
+    }, new AbortController().signal)).resolves.toMatchObject({
+      status: "delivered",
+    });
+    expect(openConversation).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed at proactive receipt capacity without evicting authority", async () => {
+    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
+    const operatorIdentity = identity("module-agent", "Module Agent");
+    const openConversation =
+      vi.fn<NonNullable<ChannelHost["openConversation"]>>(async (request) => ({
+        conversationId: `opened-${request.initialText}`,
+        createdAt: new Date().toISOString(),
+      }));
+    const channel = await monoAgentModule.create({
+      instanceId: "operator",
+      config,
+      provenance: {},
+      configDirectory: "/config",
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: {
+        grantedCapabilities: new Set(["operator.identity.v1"]),
+        getCapability<T>(name: string): T | undefined {
+          return (name === "operator.identity.v1"
+            ? operatorIdentity
+            : undefined) as T | undefined;
+        },
+        async dispatch() { return { status: "completed" }; },
+        openConversation,
+      },
+      signal: new AbortController().signal,
+    });
+    moduleChannels.add(channel);
+    const signal = new AbortController().signal;
+    for (let index = 0; index < 1_000; index += 1) {
+      await channel.deliver!({
+        conversationId: "",
+        text: `notice-${String(index)}`,
+        idempotencyKey: `key-${String(index)}`,
+      }, signal);
+    }
+    await expect(channel.deliver!({
+      conversationId: "",
+      text: "one too many",
+      idempotencyKey: "capacity",
+    }, signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "operator_proactive_receipt_capacity" },
+    });
+    await expect(channel.health?.({ signal })).resolves.toMatchObject({
+      status: "degraded",
+      details: { deliveryReceiptCapacityExhausted: true },
+    });
+    await expect(channel.deliver!({
+      conversationId: "",
+      text: "notice-0",
+      idempotencyKey: "key-0",
+    }, signal)).resolves.toMatchObject({ status: "duplicate" });
+    expect(openConversation).toHaveBeenCalledTimes(1_000);
+  });
+
+  it("keeps an ambiguous proactive open unknown without replaying or leaking its cause", async () => {
+    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
+    const operatorIdentity = identity("module-agent", "Module Agent");
+    const openConversation = vi.fn<NonNullable<ChannelHost["openConversation"]>>(
+      async () => {
+        throw new Error("secret storage detail /private/operator-token");
+      },
+    );
+    const host: ChannelHost = {
+      grantedCapabilities: new Set(["operator.identity.v1"]),
+      getCapability<T>(name: string): T | undefined {
+        return (name === "operator.identity.v1"
+          ? operatorIdentity
+          : undefined) as T | undefined;
+      },
+      async dispatch() { return { status: "completed" }; },
+      openConversation,
+    };
+    const channel = await monoAgentModule.create({
+      instanceId: "operator",
+      config,
+      provenance: {},
+      configDirectory: "/config",
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host,
+      signal: new AbortController().signal,
+    });
+    moduleChannels.add(channel);
+    const message = {
+      conversationId: "trigger:cron:one",
+      text: "proactive",
+      idempotencyKey: "ambiguous-open",
+    };
+    const first = await channel.deliver!(message, new AbortController().signal);
+    const second = await channel.deliver!(message, new AbortController().signal);
+    expect(first).toEqual(second);
+    expect(first).toEqual({
+      status: "unknown",
+      idempotencyKey: "ambiguous-open",
+      diagnostic: {
+        code: "operator_proactive_unknown",
+        severity: "error",
+        message: "Operator proactive delivery outcome is unknown.",
+      },
+    });
+    expect(JSON.stringify(first)).not.toContain("secret storage");
     expect(openConversation).toHaveBeenCalledOnce();
   });
 });

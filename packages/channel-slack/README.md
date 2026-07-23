@@ -88,11 +88,11 @@ bounded, process-local per-thread overrides. Activity uses
 reaction in ordinary channels. Activity entries remain a transient in-memory
 ledger and are never posted as durable chat messages. Shortcut/App Home
 envelopes pass through the same durable admission boundary before a configured
-prompt runs. Core proactive delivery -> exact channel/thread -> in-process
-idempotent Web API send. The instance-bound `SlackSendMessage` contribution
-prepares that same outbound contract; a thread keeps its exact history identity,
-while a new top-level post resolves destination history from Slack's confirmed
-message timestamp.
+prompt runs. Core proactive delivery -> durable Core/state receipt -> exact
+channel/thread -> fingerprint-guarded Web API send. The instance-bound
+`SlackSendMessage` contribution prepares that same outbound contract; a thread
+keeps its exact history identity, while a new top-level post resolves
+destination history from Slack's confirmed message timestamp.
 
 ### Durable inbox
 
@@ -192,11 +192,14 @@ Depends only on `@mono-agent/module-sdk` and platform HTTP/WebSocket primitives.
 It does not persist conversation transcripts or outbound delivery receipts,
 create Slack apps, select models, or claim a delivered result after an
 ambiguous Slack failure. Its durable records are limited to the bounded inbound
-admission queue and envelope deduplication receipts; Core records confirmed
-send-tool receipts in destination history. Slack replies are
-intentionally final-only and successful proactive-delivery deduplication is
-process-local. Slack exposes no bot-controlled silent-post field, so the
-package does not claim to enforce silent delivery or quiet hours.
+admission queue and envelope deduplication receipts. Core plus the selected
+state module is the only restart-safe outbound authority and records confirmed
+send-tool receipts in exact destination history. The adapter retains a bounded
+fingerprint-aware live-instance guard, keeps ambiguous outcomes unknown,
+rejects conflicting key reuse, and fails closed instead of evicting the guard
+at capacity. Slack replies are intentionally final-only. Slack exposes no
+bot-controlled silent-post field, so the package does not claim to enforce
+silent delivery or quiet hours.
 
 ## Related Documentation
 

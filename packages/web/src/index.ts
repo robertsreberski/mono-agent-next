@@ -23,6 +23,7 @@ export type {
   WebReplayView,
   WebThread,
   WebThreadDetail,
+  WebTurnTelemetry,
   WebTurnStatus,
 } from "./contracts.js";
 

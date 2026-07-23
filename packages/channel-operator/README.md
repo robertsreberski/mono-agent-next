@@ -69,9 +69,9 @@ fails if that grant is absent or malformed.
 1. Core resolves the schema-marked secret reference and runs the package-owned strict parser.
 2. `start()` binds an authenticated loopback HTTP listener and exposes its actual ephemeral URL.
 3. `POST /v1/turns` is parsed by `@mono-agent/operator`, inline attachments are decoded within the shared request bound, and quotes are verified against the active conversation's Core replay before dispatch through the injected `ChannelHost`.
-4. Channel reply events become only shared operator NDJSON frames, including AskUser and usage frames; the terminal frame carries the authoritative result.
+4. Channel reply events become only shared operator NDJSON frames, including AskUser and usage frames; standalone compaction and session-eviction events merge into sticky usage flags without erasing the latest token counts, and the terminal frame carries the authoritative result.
 5. Capability-gated routes project Core conversation listing, replay, redacted config, health, live input, and AskUser answers without package-local state substitutes.
-6. Client disconnect, explicit cancellation, drain, and stop abort the exact dispatch signal; proactive requests open a Core conversation with bounded in-process idempotency.
+6. Client disconnect, explicit cancellation, drain, and stop abort the exact dispatch signal; proactive requests open a Core conversation behind Core/state restart-safe delivery authority plus a bounded fingerprint-aware live-instance guard. Conflicting keys fail, ambiguous opens remain unknown, and exhausted guard capacity fails closed.
 
 ### Package structure
 
@@ -136,9 +136,11 @@ another channel.
 ## What This Package Does Not Own
 
 It does not invent agent identity, decode operator state, reduce product
-actions, persist product conversations, expose a non-loopback listener,
-terminate TLS, select models, or keep running after its host stops. TUI and web
-remain independently installed products.
+actions, persist product conversations or outbound receipts, expose a
+non-loopback listener, terminate TLS, select models, or keep running after its
+host stops. Core plus the selected state module is the only restart-safe
+outbound delivery authority. TUI and web remain independently installed
+products.
 
 ## Related Documentation
 

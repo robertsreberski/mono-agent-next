@@ -39,11 +39,21 @@ describe("OpenAI-compatible channel", () => {
       {
         id: "call-<&\"",
         name: "search<&\"",
-        input: { query: `<unsafe>${"x".repeat(20_000)}` },
+        input: {
+          token: "input-secret-value",
+          query: `<unsafe>${"x".repeat(20_000)}`,
+        },
       },
       {
         callId: "call-<&\"",
         content: [
+          {
+            type: "json",
+            value: {
+              authorization: "Bearer result-secret-value",
+              note: "password=hunter2",
+            },
+          },
           {
             type: "file",
             mediaType: "application/octet-stream",
@@ -64,7 +74,191 @@ describe("OpenAI-compatible channel", () => {
     expect(detail).toContain("&lt;result&gt;");
     expect(detail).toContain("__monoAgentTruncation");
     expect(detail).toContain("bytesOmitted");
+    expect(detail).toContain("[REDACTED]");
+    expect(detail).not.toContain("input-secret-value");
+    expect(detail).not.toContain("result-secret-value");
+    expect(detail).not.toContain("hunter2");
     expect(detail).not.toContain('"0":1');
+  });
+
+  it("redacts quoted credential assignments and Basic or Bearer authorization values", () => {
+    const detail = renderOpenWebUiToolDetail(
+      {
+        id: "call-redaction",
+        name: "lookup",
+        input: {
+          quotedJson: '{"password":"quoted-input-secret"}',
+          basicAuthorization: "Basic YTpi",
+        },
+      },
+      {
+        callId: "call-redaction",
+        content: [{
+          type: "text",
+          text: [
+            '{"api_key":"quoted-result-secret"}',
+            "Bearer eyJhbGciOiJIUzI1NiJ9.secret.signature",
+          ].join(" "),
+        }],
+      },
+    );
+
+    expect(detail).toContain("[REDACTED]");
+    expect(detail).not.toContain("quoted-input-secret");
+    expect(detail).not.toContain("quoted-result-secret");
+    expect(detail).not.toContain("YTpi");
+    expect(detail).not.toContain("eyJhbGciOiJIUzI1NiJ9.secret.signature");
+  });
+
+  it("renders completed tools into the JSON assistant content without delegating them to the client", async () => {
+    const { info } = await start(async (_request, reply) => {
+      await reply.emit({ type: "text-delta", delta: "before " });
+      await reply.emit({
+        type: "tool-call",
+        call: {
+          id: "call-json",
+          name: "lookup",
+          input: { query: "status", apiKey: "json-input-secret" },
+        },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: {
+          callId: "call-json",
+          content: [
+            { type: "json", value: { status: "ready", token: "json-result-secret" } },
+            {
+              type: "file",
+              mediaType: "application/octet-stream",
+              name: "private.bin",
+              data: new Uint8Array([9, 8, 7]),
+            },
+          ],
+        },
+      });
+      await reply.emit({ type: "text-delta", delta: "after" });
+      return { status: "completed", text: "before after" };
+    });
+
+    const response = await post(info, chatBody(false));
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      choices: Array<{ message: { content: string }; finish_reason: string }>;
+    };
+    const content = body.choices[0]!.message.content;
+    expect(content).toMatch(/^before <details type="tool_calls"[\s\S]*<\/details>\nafter$/u);
+    expect(body.choices[0]!.finish_reason).toBe("stop");
+    expect(content).toContain('id="call-json"');
+    expect(content).toContain('name="lookup"');
+    expect(content).toContain("bytesOmitted");
+    expect(content).toContain("[REDACTED]");
+    expect(content).not.toContain("json-input-secret");
+    expect(content).not.toContain("json-result-secret");
+    expect(body.choices[0]!.message).not.toHaveProperty("tool_calls");
+  });
+
+  it("streams each completed tool detail between the surrounding text deltas", async () => {
+    const { info } = await start(async (_request, reply) => {
+      await reply.emit({ type: "text-delta", delta: "before " });
+      await reply.emit({
+        type: "tool-call",
+        call: { id: "call-stream", name: "search", input: { query: "bounded" } },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: {
+          callId: "call-stream",
+          content: [{ type: "text", text: "found" }],
+        },
+      });
+      await reply.emit({ type: "text-delta", delta: "after" });
+      return { status: "completed", text: "before after" };
+    });
+
+    const response = await post(info, chatBody(true));
+    expect(response.status).toBe(200);
+    const stream = await response.text();
+    const content = deltaValues(stream);
+    expect(content).toHaveLength(3);
+    expect(content[0]).toBe("before ");
+    expect(content[1]).toMatch(/^<details type="tool_calls" done="true"[\s\S]*Tool Executed[\s\S]*found[\s\S]*<\/details>\n$/u);
+    expect(content[2]).toBe("after");
+    expect(content.join("")).toBe(`before ${content[1]}after`);
+    expect(stream.endsWith("data: [DONE]\n\n")).toBe(true);
+  });
+
+  it("fails closed on unmatched or unfinished tool event sequences", async () => {
+    let attempt = 0;
+    const { info } = await start(async (_request, reply) => {
+      attempt += 1;
+      if (attempt === 1) {
+        await reply.emit({
+          type: "tool-result",
+          result: { callId: "missing", content: [] },
+        });
+      } else {
+        await reply.emit({
+          type: "tool-call",
+          call: { id: "unfinished", name: "lookup", input: {} },
+        });
+      }
+      return { status: "completed", text: "must not render" };
+    });
+
+    const unmatched = await post(info, chatBody(false));
+    expect(unmatched.status).toBe(502);
+    expect(await errorCode(unmatched)).toBe("invalid_tool_event");
+
+    const unfinished = await post(info, chatBody(false));
+    expect(unfinished.status).toBe(502);
+    expect(await errorCode(unfinished)).toBe("incomplete_tool_event");
+  });
+
+  it("rejects reused tool-call ids for JSON and already-started SSE responses", async () => {
+    const { info } = await start(async (_request, reply) => {
+      await reply.emit({ type: "text-delta", delta: "before " });
+      await reply.emit({
+        type: "tool-call",
+        call: { id: "reused", name: "lookup", input: { attempt: 1 } },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: { callId: "reused", content: [{ type: "text", text: "first" }] },
+      });
+      await reply.emit({
+        type: "tool-call",
+        call: { id: "reused", name: "lookup", input: { attempt: 2 } },
+      });
+      return { status: "completed", text: "must not complete" };
+    });
+
+    await expectInvalidToolSequence(info, false, 0);
+    await expectInvalidToolSequence(info, true, 1);
+  });
+
+  it("bounds total tool calls per turn for JSON and already-started SSE responses", async () => {
+    const { info } = await start(async (_request, reply) => {
+      await reply.emit({ type: "text-delta", delta: "before " });
+      for (let index = 0; index < 256; index += 1) {
+        const id = `bounded-${String(index)}`;
+        await reply.emit({
+          type: "tool-call",
+          call: { id, name: "lookup", input: {} },
+        });
+        await reply.emit({
+          type: "tool-result",
+          result: { callId: id, content: [] },
+        });
+      }
+      await reply.emit({
+        type: "tool-call",
+        call: { id: "one-too-many", name: "lookup", input: {} },
+      });
+      return { status: "completed", text: "must not complete" };
+    });
+
+    await expectInvalidToolSequence(info, false, 0);
+    await expectInvalidToolSequence(info, true, 256);
   });
 
   it("requires env-only authentication, defaults to loopback, and gates non-loopback binds", () => {
@@ -373,6 +567,36 @@ async function errorCode(response: Response): Promise<unknown> {
 
 function deltaContent(stream: string): string {
   return [...stream.matchAll(/"content":"([^"]*)"/gu)].map((match) => match[1] ?? "").join("");
+}
+
+function deltaValues(stream: string): string[] {
+  return stream
+    .split("\n")
+    .filter((line) => line.startsWith("data: ") && line !== "data: [DONE]")
+    .map((line) => JSON.parse(line.slice(6)) as { choices?: Array<{ delta?: { content?: unknown } }> })
+    .flatMap((value) => {
+      const content = value.choices?.[0]?.delta?.content;
+      return typeof content === "string" ? [content] : [];
+    });
+}
+
+async function expectInvalidToolSequence(
+  info: OpenAiApiStartInfo,
+  stream: boolean,
+  completedToolDetails: number,
+): Promise<void> {
+  const response = await post(info, chatBody(stream));
+  if (!stream) {
+    expect(response.status).toBe(502);
+    expect(await errorCode(response)).toBe("invalid_tool_event");
+    return;
+  }
+  expect(response.status).toBe(200);
+  const body = await response.text();
+  expect(body.endsWith("data: [DONE]\n\n")).toBe(true);
+  expect(body).toContain('"code":"invalid_tool_event"');
+  expect(deltaValues(body).filter((value) =>
+    value.startsWith('<details type="tool_calls"'))).toHaveLength(completedToolDetails);
 }
 
 function authorityStatus(port: number, host: string): Promise<number> {
