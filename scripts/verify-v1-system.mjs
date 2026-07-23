@@ -464,12 +464,22 @@ function packedSystemConfig({ providerBaseUrl, otlpEndpoint, deliveryEndpoint })
     context: { mcp: { configPath: "./.mcp.json" } },
     memory: {
       $use: "@mono-agent/memory-local",
-      directory: "./.mono-agent/memory",
-      capture: { mode: "direct" },
+      root: "./.mono-agent/memory",
+      maxBytes: 96_000,
+      capture: {
+        enabled: true,
+        model: { runtime: "pi", model: "local:echo" },
+        timeoutMs: 10_000,
+      },
+      recallTool: { enabled: true },
     },
     state: {
       $use: "@mono-agent/state-local",
       root: "./.mono-agent/state",
+      runs: {
+        artifactsDirectory: "./.mono-agent/artifacts",
+        retentionDays: 30,
+      },
       discovery: {
         registryDirectory: "./.mono-agent/trace-sources",
         sourceId: "packed-system",
@@ -597,7 +607,11 @@ try {
   secondHost = undefined;
 
   const memory = await openMemoryLocal({
-    config: { directory: "./.mono-agent/memory", capture: { mode: "direct" } },
+    config: {
+      root: "./.mono-agent/memory",
+      capture: { enabled: false },
+      recallTool: { enabled: true },
+    },
     configDirectory,
     dataDirectory: resolve(configDirectory, ".mono-agent", "data", "memory", "memory"),
   });
@@ -748,9 +762,6 @@ function assertScenarioOutput(stdout) {
 }
 
 function assertProviderRequests(requests) {
-  if (requests.length !== 3) {
-    throw new Error(`Fake provider expected exactly three turns; received ${String(requests.length)}`);
-  }
   for (const request of requests) {
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
       throw new Error(`Unexpected provider request: ${JSON.stringify(request)}`);
@@ -759,15 +770,34 @@ function assertProviderRequests(requests) {
       throw new Error(`Provider request did not select the packed local model: ${request.body}`);
     }
   }
-  const userInputs = requests.map((request) => finalProviderUserText(request.parsed));
+  const captureRequests = requests.filter((request) => isStructuredCaptureRequest(request.parsed));
+  const userRequests = requests.filter((request) => !isStructuredCaptureRequest(request.parsed));
+  if (captureRequests.length !== 3 || userRequests.length !== 3) {
+    throw new Error(
+      `Fake provider expected three agent turns and three memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
+    );
+  }
+  const userInputs = userRequests.map((request) => finalProviderUserText(request.parsed));
   const expectedInputs = [MEMORY_QUERY, "Run the packed system cron proof.", MEMORY_QUERY];
   if (JSON.stringify(userInputs) !== JSON.stringify(expectedInputs)) {
     throw new Error(`Packed provider user inputs must be ${JSON.stringify(expectedInputs)}; found ${JSON.stringify(userInputs)}`);
   }
-  const memoryRecallRequest = requests[2];
+  const memoryRecallRequest = userRequests[2];
   if (!JSON.stringify(memoryRecallRequest.parsed.messages).includes(EXPECTED_REPLY)) {
     throw new Error("Fresh operator conversation did not receive Core-recalled memory in its Pi provider request");
   }
+  for (const request of captureRequests) {
+    const input = finalProviderUserText(request.parsed);
+    if (!input?.startsWith("User: ") || !input.includes(`Assistant: ${EXPECTED_REPLY}`)) {
+      throw new Error(`Memory capture did not receive an exact completed turn: ${JSON.stringify(input)}`);
+    }
+  }
+}
+
+function isStructuredCaptureRequest(request) {
+  return Array.isArray(request?.tools) && request.tools.some((tool) =>
+    tool?.function?.name === "mono_agent_structured_output"
+    || tool?.name === "mono_agent_structured_output");
 }
 
 function finalProviderUserText(request) {
@@ -944,6 +974,43 @@ async function startOpenAiCompatibleProvider() {
         model: "echo",
         choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
       }));
+      if (isStructuredCaptureRequest(parsed)) {
+        const capturedTurn = finalProviderUserText(parsed);
+        if (typeof capturedTurn !== "string" || capturedTurn.length === 0) {
+          throw new Error("structured capture request did not contain a completed turn");
+        }
+        response.write(sse({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: "echo",
+          choices: [{
+            index: 0,
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: `memory-capture-${String(requests.length)}`,
+                type: "function",
+                function: {
+                  name: "mono_agent_structured_output",
+                  arguments: JSON.stringify({ records: [{ text: capturedTurn }] }),
+                },
+              }],
+            },
+            finish_reason: null,
+          }],
+        }));
+        response.write(sse({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: "echo",
+          choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+          usage: { prompt_tokens: 8, completion_tokens: 8, total_tokens: 16 },
+        }));
+        response.end("data: [DONE]\n\n");
+        return;
+      }
       response.write(sse({
         id,
         object: "chat.completion.chunk",

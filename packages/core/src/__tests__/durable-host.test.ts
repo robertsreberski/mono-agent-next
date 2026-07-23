@@ -12,21 +12,11 @@ import {
   type RuntimeTurnRequest,
   type RuntimeTurnResult,
 } from "@mono-agent/module-sdk";
-import type {
-  StateTransactionRequest,
-  StateTransactionResult,
-} from "@mono-agent/module-sdk/internal";
-
 import {
   AgentAdmissionError,
   createAgentHost,
   type AgentHost,
 } from "../index.js";
-import {
-  decodeExecutionRecord,
-  encodeExecutionRecord,
-  sessionStateKey,
-} from "../execution-store.js";
 import {
   createFixtureProject,
   minimalConfig,
@@ -226,24 +216,7 @@ describe("durable AgentHost execution", () => {
     await entered.promise;
     expect(providerCalls).toBe(1);
 
-    const admission = [...state.records.entries()]
-      .find(([key]) => key.startsWith("core/admissions/"));
-    if (admission === undefined) throw new Error("durable admission was not written");
-    const [admissionKey, admissionRecord] = admission;
-    const decoded = decodeExecutionRecord(admissionRecord.value);
-    if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
-      throw new Error("durable admission has an unexpected shape");
-    }
-    await state.write({
-      key: admissionKey,
-      expectedVersion: admissionRecord.version,
-      value: encodeExecutionRecord({
-        ...decoded,
-        updatedAt: "2000-01-01T00:00:00.000Z",
-        leaseExpiresAt: "2000-01-01T00:00:01.000Z",
-      }),
-      signal: new AbortController().signal,
-    });
+    state.executionFixture.markAdmissionUncertain(input.requestId);
 
     const restarted = await trackedHost(project);
     let staleError: unknown;
@@ -444,11 +417,6 @@ describe("durable AgentHost execution", () => {
         },
       },
     });
-    const key = sessionStateKey(
-      "capability-migration",
-      "main",
-      "fixture:model",
-    );
     const first = await trackedHost(project);
     await first.submit({
       requestId: "capability-migration-1",
@@ -456,7 +424,6 @@ describe("durable AgentHost execution", () => {
       text: "store",
     });
     await first.stop();
-    expect(state.records.has(key)).toBe(true);
 
     sessionsSupported = false;
     const restarted = await trackedHost(project);
@@ -466,7 +433,6 @@ describe("durable AgentHost execution", () => {
       text: "migrate",
     });
     expect(observedSessions).toEqual([undefined, undefined]);
-    expect(state.records.has(key)).toBe(false);
 
     dishonestResult = true;
     await expect(restarted.submit({
@@ -479,7 +445,6 @@ describe("durable AgentHost execution", () => {
       failureCode: "runtime-result-unsettled",
     });
     expect(observedSessions.at(-1)).toBeUndefined();
-    expect(state.records.has(key)).toBe(false);
   });
 
   it("exact-evicts a continuous session when configuration migrates to per-message", async () => {
@@ -508,11 +473,6 @@ describe("durable AgentHost execution", () => {
     const originalConfig = JSON.parse(
       await readFile(project.configPath, "utf8"),
     ) as Record<string, unknown>;
-    const key = sessionStateKey(
-      "mode-migration",
-      "main",
-      "fixture:model",
-    );
     const first = await trackedHost(project);
     await first.submit({
       requestId: "mode-migration-1",
@@ -520,7 +480,6 @@ describe("durable AgentHost execution", () => {
       text: "continuous",
     });
     await first.stop();
-    expect(state.records.has(key)).toBe(true);
 
     await project.writeConfig({
       ...originalConfig,
@@ -537,7 +496,6 @@ describe("durable AgentHost execution", () => {
       text: "per-message",
     });
     await perMessage.stop();
-    expect(state.records.has(key)).toBe(false);
 
     await project.writeConfig(originalConfig);
     const continuousAgain = await trackedHost(project);
@@ -1420,12 +1378,15 @@ class SettlementFailingStateStore extends MemoryStateStore {
   failNextCompletedSettlement = false;
   completedSettlementFailures = 0;
 
-  override async transaction(
-    request: StateTransactionRequest,
-  ): Promise<StateTransactionResult> {
+  override beforeExecutionOperation(operation: string, input: unknown): void {
+    const value = input as {
+      readonly attempt?: { readonly status?: unknown };
+      readonly status?: unknown;
+    };
     if (
       this.failNextFailedAttemptEvidence
-      && request.puts.some((put) => isFailedAttemptEvent(put.value))
+      && operation === "run.record-attempt"
+      && value.attempt?.status === "failed"
     ) {
       this.failNextFailedAttemptEvidence = false;
       this.failedAttemptEvidenceFailures += 1;
@@ -1433,13 +1394,14 @@ class SettlementFailingStateStore extends MemoryStateStore {
     }
     if (
       this.failNextCompletedSettlement
-      && request.puts.some((put) => isCompletedAdmission(put.value))
+      && operation === "run.settle"
+      && value.status === "completed"
     ) {
       this.failNextCompletedSettlement = false;
       this.completedSettlementFailures += 1;
       throw new Error("injected completed-settlement transaction failure");
     }
-    return super.transaction(request);
+    super.beforeExecutionOperation(operation, input);
   }
 }
 
@@ -1624,42 +1586,4 @@ function abortError(): Error {
 function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.byteLength === right.byteLength
     && left.every((value, index) => value === right[index]);
-}
-
-function isCompletedAdmission(value: Uint8Array): boolean {
-  try {
-    const decoded = decodeExecutionRecord(value);
-    return typeof decoded === "object"
-      && decoded !== null
-      && !Array.isArray(decoded)
-      && Reflect.get(decoded, "kind") === "mono-agent.admission"
-      && Reflect.get(decoded, "status") === "settled"
-      && Reflect.get(decoded, "settledStatus") === "completed";
-  } catch {
-    return false;
-  }
-}
-
-function isFailedAttemptEvent(value: Uint8Array): boolean {
-  try {
-    const decoded = decodeExecutionRecord(value);
-    if (
-      typeof decoded !== "object"
-      || decoded === null
-      || Array.isArray(decoded)
-      || Reflect.get(decoded, "kind") !== "mono-agent.run-event"
-    ) {
-      return false;
-    }
-    const event = Reflect.get(decoded, "event");
-    if (typeof event !== "object" || event === null || Array.isArray(event)) return false;
-    const attempt = Reflect.get(event, "attempt");
-    return Reflect.get(event, "type") === "attempt"
-      && typeof attempt === "object"
-      && attempt !== null
-      && !Array.isArray(attempt)
-      && Reflect.get(attempt, "status") === "failed";
-  } catch {
-    return false;
-  }
 }

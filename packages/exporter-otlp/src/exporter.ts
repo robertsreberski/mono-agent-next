@@ -1,6 +1,8 @@
 import type {
   JsonObject,
   JsonValue,
+  ModuleDiagnostic,
+  ModuleDiagnosticsContext,
   ModuleHealth,
   ModuleStopContext,
 } from "@mono-agent/module-sdk";
@@ -29,6 +31,7 @@ interface QueuedRecord {
 interface PreparedRecord {
   readonly record: ExportRecord;
   readonly bytes: number;
+  readonly redactedValues: number;
 }
 
 export interface OtlpExporterOptions {
@@ -45,6 +48,8 @@ export class OtlpExporter implements Exporter {
   private deliveredRecords = 0;
   private rejectedRecords = 0;
   private droppedRecords = 0;
+  private redactedRecords = 0;
+  private redactedValues = 0;
   private lastError: OtlpExporterError | undefined;
   private interval: ReturnType<typeof setInterval> | undefined;
   private pumpPromise: Promise<void> | undefined;
@@ -78,7 +83,12 @@ export class OtlpExporter implements Exporter {
     let accepted = 0;
     let rejected = 0;
     for (const input of batch.records) {
-      const prepared = prepareRecord(input, this.config.includeSensitiveData);
+      const prepared = prepareRecord(
+        input,
+        this.config.includeSensitiveData,
+        this.config.contentPatternRedaction,
+        this.config.maxRecordBytes,
+      );
       if (prepared === undefined || prepared.bytes > this.config.maxRecordBytes) {
         rejected += 1;
         continue;
@@ -103,6 +113,10 @@ export class OtlpExporter implements Exporter {
       }
       this.queue.push({ ...prepared, wireBytes });
       this.queuedBytes += prepared.bytes;
+      if (prepared.redactedValues > 0) {
+        this.redactedRecords += 1;
+        this.redactedValues += prepared.redactedValues;
+      }
       accepted += 1;
     }
     this.rejectedRecords += rejected;
@@ -118,7 +132,7 @@ export class OtlpExporter implements Exporter {
       await this.flushInternal(combined);
     } catch (error) {
       if (timeout.aborted && !signal.aborted) {
-        throw new OtlpExporterError("OTLP_TIMEOUT", "OTLP flush exceeded its deadline.", error);
+        throw new OtlpExporterError("OTLP_TIMEOUT", "OTLP flush exceeded its deadline.");
       }
       throw error;
     }
@@ -145,7 +159,7 @@ export class OtlpExporter implements Exporter {
       await this.flushInternal(combined, true);
     } catch (error) {
       failure = timeout.aborted && !context.signal.aborted
-        ? new OtlpExporterError("OTLP_TIMEOUT", "OTLP shutdown flush exceeded its deadline.", error)
+        ? new OtlpExporterError("OTLP_TIMEOUT", "OTLP shutdown flush exceeded its deadline.")
         : error;
       this.droppedRecords += this.queue.length;
       this.queue.splice(0);
@@ -180,9 +194,49 @@ export class OtlpExporter implements Exporter {
     return {
       status: "healthy",
       checkedAt,
-      summary: "The bounded OTLP queue is available.",
+      summary: this.config.includeSensitiveData
+        ? "The bounded OTLP queue is available; sensitive body export is enabled."
+        : "The bounded OTLP queue is available.",
       details: this.healthDetails(),
     };
+  }
+
+  diagnostics(context: ModuleDiagnosticsContext): readonly ModuleDiagnostic[] {
+    throwIfAborted(context.signal);
+    const current = this.health(context);
+    const diagnostics: ModuleDiagnostic[] = [];
+
+    if (this.config.includeSensitiveData) {
+      diagnostics.push({
+        code: "exporter-otlp.sensitive-data",
+        severity: "warning",
+        message: this.config.contentPatternRedaction
+          ? "Sensitive OTLP body export is enabled with bounded credential-pattern redaction."
+          : "Sensitive OTLP body export is enabled without credential-pattern redaction.",
+      });
+    }
+
+    if (current.status === "degraded") {
+      diagnostics.push({
+        code: "exporter-otlp.queue",
+        severity: "error",
+        message: "The bounded OTLP queue has rejected or dropped records, or retains a delivery failure.",
+      });
+    } else if (current.status === "unknown") {
+      diagnostics.push({
+        code: "exporter-otlp.lifecycle",
+        severity: "info",
+        message: "The OTLP exporter is stopped.",
+      });
+    } else if (diagnostics.length === 0) {
+      diagnostics.push({
+        code: "exporter-otlp.queue",
+        severity: "info",
+        message: "The bounded OTLP queue is available.",
+      });
+    }
+
+    return Object.freeze(diagnostics.map((diagnostic) => Object.freeze(diagnostic)));
   }
 
   private kick(force = false, signal = new AbortController().signal): void {
@@ -269,7 +323,7 @@ export class OtlpExporter implements Exporter {
       try {
         next = parseEndpoint(new URL(location, url).toString());
       } catch (error) {
-        throw new OtlpExporterError("OTLP_REDIRECT_REJECTED", "The OTLP collector redirect is not allowed.", error);
+        throw new OtlpExporterError("OTLP_REDIRECT_REJECTED", "The OTLP collector redirect is not allowed.");
       }
       if (url.protocol === "https:" && next.protocol !== "https:") {
         throw new OtlpExporterError("OTLP_REDIRECT_REJECTED", "The OTLP collector attempted a protocol downgrade.");
@@ -295,10 +349,10 @@ export class OtlpExporter implements Exporter {
       return await this.transport.send({ url: url.toString(), headers, body, signal });
     } catch (error) {
       if (timeout.aborted && !parentSignal.aborted && !controller.signal.aborted) {
-        throw new OtlpExporterError("OTLP_TIMEOUT", "The OTLP request exceeded its deadline.", error);
+        throw new OtlpExporterError("OTLP_TIMEOUT", "The OTLP request exceeded its deadline.");
       }
       if (signal.aborted) {
-        throw new OtlpExporterError("OTLP_ABORTED", "The OTLP request was aborted.", error);
+        throw new OtlpExporterError("OTLP_ABORTED", "The OTLP request was aborted.");
       }
       throw error;
     } finally {
@@ -331,6 +385,17 @@ export class OtlpExporter implements Exporter {
       deliveredRecords: this.deliveredRecords,
       rejectedRecords: this.rejectedRecords,
       droppedRecords: this.droppedRecords,
+      redactedRecords: this.redactedRecords,
+      redactedValues: this.redactedValues,
+      includeSensitiveData: this.config.includeSensitiveData,
+      contentPatternRedaction: this.config.contentPatternRedaction,
+      ...(this.config.includeSensitiveData
+        ? {
+            warning: this.config.contentPatternRedaction
+              ? "Sensitive OTLP body export is enabled; retained text uses bounded credential-pattern redaction."
+              : "Sensitive OTLP body export is enabled without credential-pattern redaction.",
+          }
+        : {}),
     };
   }
 
@@ -341,7 +406,27 @@ export class OtlpExporter implements Exporter {
   }
 }
 
-function prepareRecord(record: ExportRecord, includeSensitiveData: boolean): PreparedRecord | undefined {
+const MAX_RECORD_NODES = 10_000;
+
+// Intentionally closed and high confidence. Every expression requires a
+// credential-specific prefix, length, and alphabet; prefix mentions in prose
+// do not match. Quantifiers are bounded to keep scanning time predictable.
+const CONTENT_SECRET_PATTERNS = [
+  /\bsk-[A-Za-z0-9]{48}\b/gu,
+  /\bsk-(?:proj-|svcacct-)[A-Za-z0-9_-]{47,511}[A-Za-z0-9]\b/gu,
+  /\bghp_[A-Za-z0-9]{36}\b/gu,
+  /\bgithub_pat_[A-Za-z0-9_]{19,511}[A-Za-z0-9]\b/gu,
+  /\bAKIA[A-Z0-9]{16}\b/gu,
+  /\bxox[baprs]-[A-Za-z0-9-]{19,511}[A-Za-z0-9]\b/gu,
+  /\bxapp-[A-Za-z0-9-]{19,511}[A-Za-z0-9]\b/gu,
+] as const;
+
+function prepareRecord(
+  record: ExportRecord,
+  includeSensitiveData: boolean,
+  contentPatternRedaction: boolean,
+  maxRecordBytes: number,
+): PreparedRecord | undefined {
   if (
     typeof record !== "object" ||
     record === null ||
@@ -357,34 +442,81 @@ function prepareRecord(record: ExportRecord, includeSensitiveData: boolean): Pre
     return undefined;
   }
   try {
-    validateJson(record.attributes, 0);
-    if (includeSensitiveData && record.body !== undefined) validateJson(record.body, 0);
-    const cloned = JSON.parse(JSON.stringify({
-      name: record.name,
+    const state: CloneState = {
+      remainingNodes: MAX_RECORD_NODES,
+      remainingBytes: maxRecordBytes,
+      redactedValues: 0,
+      contentPatternRedaction,
+    };
+    consumeBytes(state, Buffer.byteLength(record.name, "utf8"));
+    const cloned: ExportRecord = {
+      name: redactString(record.name, state),
       timestamp: record.timestamp,
-      attributes: record.attributes,
-      ...(includeSensitiveData && record.body !== undefined ? { body: record.body } : {}),
-    })) as ExportRecord;
+      attributes: cloneJson(record.attributes, state, 0) as JsonObject,
+      ...(includeSensitiveData && record.body !== undefined
+        ? { body: cloneJson(record.body, state, 0) }
+        : {}),
+    };
     const bytes = Buffer.byteLength(JSON.stringify(cloned), "utf8");
-    return { record: cloned, bytes };
+    return { record: cloned, bytes, redactedValues: state.redactedValues };
   } catch {
     return undefined;
   }
 }
 
-function validateJson(value: unknown, depth: number): asserts value is JsonValue {
+interface CloneState {
+  remainingNodes: number;
+  remainingBytes: number;
+  redactedValues: number;
+  readonly contentPatternRedaction: boolean;
+}
+
+function cloneJson(value: unknown, state: CloneState, depth: number): JsonValue {
   if (depth > 32) throw new Error("JSON nesting limit exceeded");
-  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  if (state.remainingNodes <= 0) throw new Error("JSON node limit exceeded");
+  state.remainingNodes -= 1;
+  if (value === null || typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    consumeBytes(state, Buffer.byteLength(value, "utf8"));
+    return redactString(value, state);
+  }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new Error("JSON number must be finite");
-    return;
+    return value;
   }
   if (Array.isArray(value)) {
-    for (const nested of value) validateJson(nested, depth + 1);
-    return;
+    return value.map((nested) => cloneJson(nested, state, depth + 1));
   }
   if (!isPlainObject(value)) throw new Error("JSON object must be plain");
-  for (const nested of Object.values(value)) validateJson(nested, depth + 1);
+  const output: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;
+  for (const key of Object.keys(value)) {
+    consumeBytes(state, Buffer.byteLength(key, "utf8"));
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor)) {
+      throw new Error("JSON object must contain only data properties");
+    }
+    output[key] = cloneJson(descriptor.value, state, depth + 1);
+  }
+  return output;
+}
+
+function consumeBytes(state: CloneState, bytes: number): void {
+  if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > state.remainingBytes) {
+    throw new Error("JSON byte limit exceeded");
+  }
+  state.remainingBytes -= bytes;
+}
+
+function redactString(value: string, state: CloneState): string {
+  if (!state.contentPatternRedaction) return value;
+  let redacted = value;
+  for (const pattern of CONTENT_SECRET_PATTERNS) {
+    redacted = redacted.replace(pattern, () => {
+      state.redactedValues += 1;
+      return "[redacted]";
+    });
+  }
+  return redacted;
 }
 
 function isPlainObject(value: unknown): value is JsonObject {
@@ -412,7 +544,7 @@ function isRedirect(status: number): boolean {
 function normalizeTransportError(error: unknown): OtlpExporterError {
   return error instanceof OtlpExporterError
     ? error
-    : new OtlpExporterError("OTLP_HTTP_FAILED", "The OTLP collector request failed.", error);
+    : new OtlpExporterError("OTLP_HTTP_FAILED", "The OTLP collector request failed.");
 }
 
 function canonicalNow(clock: () => Date): string {
@@ -431,7 +563,7 @@ async function waitForPromise(
   throwIfAborted(signal);
   await new Promise<void>((resolve, reject) => {
     const onAbort = () => {
-      reject(new OtlpExporterError("OTLP_ABORTED", "The OTLP wait was aborted.", signal.reason));
+      reject(new OtlpExporterError("OTLP_ABORTED", "The OTLP wait was aborted."));
     };
     signal.addEventListener("abort", onAbort, { once: true });
     void promise.then(

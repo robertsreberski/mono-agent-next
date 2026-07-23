@@ -15,14 +15,21 @@ export class AgentConfigError extends Error {
 }
 
 export class AgentModuleError extends Error {
-  readonly packageName?: string;
-  readonly configPath?: string;
+  readonly code?: string; readonly packageName?: string; readonly configPath?: string;
+  readonly moduleInstanceId?: string; readonly commandName?: string;
+  readonly phase?: "create" | "run" | "stop" | "run_and_stop";
 
-  constructor(message: string, options: { packageName?: string; configPath?: string; cause?: unknown } = {}) {
+  constructor(message: string, options: {
+    packageName?: string; configPath?: string; cause?: unknown; code?: string;
+    moduleInstanceId?: string; commandName?: string;
+    phase?: "create" | "run" | "stop" | "run_and_stop";
+  } = {}) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
     this.name = "AgentModuleError";
-    if (options.packageName !== undefined) this.packageName = options.packageName;
-    if (options.configPath !== undefined) this.configPath = options.configPath;
+    if (options.code !== undefined) this.code = options.code; if (options.packageName !== undefined) this.packageName = options.packageName;
+    if (options.configPath !== undefined) this.configPath = options.configPath; if (options.moduleInstanceId !== undefined) this.moduleInstanceId = options.moduleInstanceId;
+    if (options.commandName !== undefined) this.commandName = options.commandName;
+    if (options.phase !== undefined) this.phase = options.phase;
   }
 }
 

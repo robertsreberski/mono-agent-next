@@ -1,0 +1,48 @@
+{
+  "schema": "mono-agent.v0-final.bujo-copy.v1",
+  "storeId": "2b0878f4-0d9a-4fba-b7b4-72d7ee03aa5e",
+  "generation": "g-20260723T120000000Z-628d7737-ea51-47ae-9798-1cb2eb2d81ae",
+  "embedding": {
+    "id": "ollama:nomic-embed-text:v1.5",
+    "dimensions": 3
+  },
+  "records": [
+    {
+      "id": "v0:orchard",
+      "seq": 1,
+      "type": "note",
+      "status": "open",
+      "text": "The orchard apples are stored in the north cellar.",
+      "createdAt": "2026-07-20T10:00:00.000Z",
+      "conversationId": "v0-personal",
+      "tags": ["inventory", "home"],
+      "vector": [1, 0, 0]
+    },
+    {
+      "id": "v0:planning",
+      "seq": 2,
+      "type": "event",
+      "status": "scheduled",
+      "text": "Quarterly planning is next Tuesday afternoon.",
+      "createdAt": "2026-07-21T10:00:00.000Z",
+      "conversationId": "v0-work",
+      "tags": ["planning"],
+      "vector": [0, 1, 0]
+    },
+    {
+      "id": "v0:bicycle",
+      "seq": 3,
+      "type": "note",
+      "status": "open",
+      "text": "The blue bicycle lock code is recorded in the paper notebook.",
+      "createdAt": "2026-07-22T10:00:00.000Z",
+      "conversationId": "v0-personal",
+      "tags": ["bicycle"],
+      "vector": [0, 0, 1]
+    }
+  ],
+  "unresolvedMetadata": {
+    "bujo:capture-outbox:v0-sanitized": "{\"version\":1,\"state\":\"retryable\",\"attempts\":2}",
+    "bujo:index:source-fingerprint": "sanitized-v0-final-copy"
+  }
+}

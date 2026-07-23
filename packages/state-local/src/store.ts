@@ -1,7 +1,14 @@
 import { opendir } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { ModuleHealth, ModuleStopContext } from "@mono-agent/module-sdk";
+import type {
+  JsonValue,
+  ModuleCommand,
+  ModuleDiagnostic,
+  ModuleDiagnosticsContext,
+  ModuleHealth,
+  ModuleStopContext,
+} from "@mono-agent/module-sdk";
 import type {
   StateDeleteRequest,
   StateCompareAndSwapRequest,
@@ -40,6 +47,18 @@ import {
   type StateReadArtifactRequest,
 } from "./artifacts.js";
 import { StateLocalError, throwIfAborted } from "./errors.js";
+import {
+  STATE_LOCAL_EXECUTION_OPERATIONS,
+  StateLocalExecution,
+} from "./execution.js";
+import type { ExecutionMaintenanceResult } from "./execution-journal.js";
+import {
+  normalizeStateLocalMaintenanceRequest,
+  stateLocalMaintenanceInputSchema,
+  stateLocalMaintenanceRequestFromCommand,
+  type StateLocalMaintenanceRequest,
+  type StateLocalMaintenanceResult,
+} from "./maintenance.js";
 import {
   PresencePublisher,
   type StatePresenceDescriptor,
@@ -114,6 +133,8 @@ export interface StateLocalStoreOpenOptions {
 export class StateLocalStore implements StateStore {
   readonly root: string;
   readonly snapshotPath: string;
+  readonly commands: readonly ModuleCommand[];
+  readonly execution: StateLocalExecution;
   private readonly config: ResolvedStateLocalConfig;
   private readonly rootIdentity: FileIdentity;
   private readonly lease: ProcessLease;
@@ -150,6 +171,19 @@ export class StateLocalStore implements StateStore {
     this.snapshotByteLimit = snapshotByteLimit;
     this.clock = options.clock ?? (() => new Date());
     this.snapshotHooks = options.hooks?.snapshot;
+    this.commands = Object.freeze([{
+      name: "state-local:maintain",
+      kind: "maintenance",
+      description:
+        "Prune expired ephemeral presence and retention-eligible unpublished artifact reservations.",
+      inputSchema: stateLocalMaintenanceInputSchema,
+      run: async (input, context): Promise<JsonValue> => {
+        const result = await this.maintain(
+          stateLocalMaintenanceRequestFromCommand(input, context.signal),
+        );
+        return maintenanceResultToJson(result);
+      },
+    }]);
     const discovery = config.discovery;
     this.presence = discovery === undefined
       ? undefined
@@ -162,6 +196,13 @@ export class StateLocalStore implements StateStore {
           index: lease,
           ...(options.hooks?.presence === undefined ? {} : { hooks: options.hooks.presence }),
         });
+    this.execution = new StateLocalExecution(this, {
+      clock: this.clock,
+      releaseArtifact: (ref, signal) => this.runExclusive(signal, async () => {
+        await this.guardPaths();
+        return this.artifacts.releasePublished({ ref, signal });
+      }),
+    });
   }
 
   static async open(
@@ -201,11 +242,13 @@ export class StateLocalStore implements StateStore {
       } else {
         snapshot = parseSnapshot(encodedSnapshot, effectiveConfig);
       }
+      const clock = options.clock ?? (() => new Date());
       artifacts = await StateLocalArtifacts.open(
         effectiveConfig.runs?.artifactsDirectory ?? join(effectiveConfig.root, "artifacts"),
         rootIdentity,
         options.signal,
         options.hooks?.artifacts,
+        clock,
       );
       throwIfAborted(options.signal);
       return new StateLocalStore(
@@ -524,6 +567,102 @@ export class StateLocalStore implements StateStore {
     return this.config.runs?.retentionDays ?? DEFAULT_ARTIFACT_RETENTION_DAYS;
   }
 
+  async maintain(request: StateLocalMaintenanceRequest): Promise<StateLocalMaintenanceResult> {
+    const normalized = normalizeStateLocalMaintenanceRequest(request);
+    const now = this.clock();
+    if (!(now instanceof Date) || !Number.isFinite(now.valueOf())) {
+      throw new StateLocalError(
+        "STATE_INVALID_CONFIG",
+        "The local state clock returned an invalid date.",
+      );
+    }
+    const checkedAt = now.toISOString();
+    const artifactCutoffAt = new Date(
+      now.valueOf() - this.artifactRetentionDays * 24 * 60 * 60_000,
+    ).toISOString();
+    const presenceResult = await this.runExclusive(normalized.signal, async () => {
+      await this.guardPaths();
+      const expired = [...this.snapshot.records.values()]
+        .filter((record) => {
+          if (!record.key.startsWith(INTERNAL_PRESENCE_PREFIX)) return false;
+          return Date.parse(decodePresenceRecord(record.value, record.key).expiresAt) <= now.valueOf();
+        })
+        .sort((left, right) =>
+          left.key < right.key ? -1 : left.key > right.key ? 1 : 0);
+      const selectedPresence = expired.slice(0, normalized.limit);
+      let expiredPresenceRemoved = 0;
+      if (!normalized.dryRun && selectedPresence.length > 0) {
+        const records = new Map(this.snapshot.records);
+        let totalBytes = this.snapshot.totalBytes;
+        for (const record of selectedPresence) {
+          if (!records.delete(record.key)) {
+            throw new StateLocalError(
+              "STATE_CORRUPT",
+              "Expired presence disappeared during serialized maintenance.",
+            );
+          }
+          totalBytes -= record.value.byteLength;
+        }
+        const next = nextVersion(this.snapshot);
+        await this.commit({
+          generation: next.generation,
+          listGeneration: this.snapshot.listGeneration,
+          records,
+          totalBytes,
+        });
+        expiredPresenceRemoved = selectedPresence.length;
+      }
+      return {
+        candidates: expired.length,
+        removed: expiredPresenceRemoved,
+        truncated: expired.length > selectedPresence.length,
+      };
+    });
+    const executionResult = await this.execution.perform({
+      operation: "maintenance.run",
+      input: {
+        cutoffAt: artifactCutoffAt,
+        dryRun: normalized.dryRun,
+        limit: Math.min(normalized.limit, 1_000),
+      },
+      signal: normalized.signal,
+    }) as ExecutionMaintenanceResult;
+    const artifactResult = await this.runExclusive(normalized.signal, async () => {
+      await this.guardPaths();
+      const artifactResult = await this.artifacts.maintain({
+        cutoffAt: artifactCutoffAt,
+        dryRun: normalized.dryRun,
+        limit: normalized.limit,
+        signal: normalized.signal,
+      });
+      return artifactResult;
+    });
+    return Object.freeze({
+      checkedAt,
+      artifactCutoffAt,
+      dryRun: normalized.dryRun,
+      expiredPresenceCandidates: presenceResult.candidates,
+      expiredPresenceRemoved: presenceResult.removed,
+      unpublishedArtifactCandidates: artifactResult.candidates,
+      unpublishedArtifactRemoved: artifactResult.removed,
+      reclaimedArtifactBytes: artifactResult.reclaimedBytes,
+      terminalRunCandidates: executionResult.terminalRunCandidates,
+      terminalRunsRemoved: executionResult.terminalRunsRemoved,
+      runEventsRemoved: executionResult.runEventsRemoved,
+      terminalAdmissionsRemoved: executionResult.terminalAdmissionsRemoved,
+      terminalDeliveryCandidates: executionResult.terminalDeliveryCandidates,
+      terminalDeliveriesRemoved: executionResult.terminalDeliveriesRemoved,
+      staleSessionCandidates: executionResult.staleSessionCandidates,
+      staleSessionsRemoved: executionResult.staleSessionsRemoved,
+      publishedArtifactsReleased: executionResult.publishedArtifactsReleased,
+      pendingRunRetentionCheckpoints: executionResult.pendingCheckpoints,
+      truncated:
+        presenceResult.truncated ||
+        artifactResult.truncated ||
+        executionResult.truncated,
+    });
+  }
+
   upsertPresence(request: StatePresenceUpsertRequest): Promise<StatePresenceRecord> {
     return this.runExclusive(request.signal, async () => {
       await this.guardPaths();
@@ -669,6 +808,62 @@ export class StateLocalStore implements StateStore {
         };
       }
     });
+  }
+
+  async diagnostics(
+    context: ModuleDiagnosticsContext,
+  ): Promise<readonly ModuleDiagnostic[]> {
+    throwIfAborted(context.signal);
+    if (this.closed || this.closing) {
+      return Object.freeze([stateLocalDiagnostic(
+        "state-local.closed",
+        "error",
+        "The selected local state store is closed and unavailable.",
+        "Create a fresh selected state instance before running diagnostics again.",
+      )]);
+    }
+    try {
+      const health = await this.health({ signal: context.signal });
+      throwIfAborted(context.signal);
+      if (health.status !== "healthy") {
+        return Object.freeze([stateLocalDiagnostic(
+          health.status === "unhealthy"
+            ? "state-local.integrity"
+            : "state-local.unavailable",
+          health.status === "unhealthy" ? "error" : "warning",
+          health.status === "unhealthy"
+            ? "Local state identity or integrity could not be proven."
+            : "Local state is not currently available for verified operation.",
+          "Keep the agent stopped; preserve state and artifacts together, then inspect from a verified copy.",
+        )]);
+      }
+      const protocol = await this.execution.perform({
+        operation: "protocol.describe",
+        signal: context.signal,
+      });
+      throwIfAborted(context.signal);
+      if (!isExpectedExecutionProtocol(protocol)) {
+        return Object.freeze([stateLocalDiagnostic(
+          "state-local.execution-protocol",
+          "error",
+          "The local state execution protocol identity is incompatible.",
+          "Keep the agent stopped and use matching lockstep @mono-agent package versions.",
+        )]);
+      }
+      return Object.freeze([stateLocalDiagnostic(
+        "state-local.integrity",
+        "info",
+        "Owner-private local state identity, writer lease, and execution protocol v1 are verified.",
+      )]);
+    } catch {
+      if (context.signal.aborted) throwIfAborted(context.signal);
+      return Object.freeze([stateLocalDiagnostic(
+        "state-local.integrity",
+        "error",
+        "Local state identity or integrity could not be proven.",
+        "Keep the agent stopped; preserve state and artifacts together, then inspect from a verified copy.",
+      )]);
+    }
   }
 
   async stop(context: ModuleStopContext): Promise<void> {
@@ -1295,5 +1490,93 @@ function decodeScanCursor(cursor: string | undefined, prefix: string): string | 
       "State scan cursor contains an invalid key.",
       error,
     );
+  }
+}
+
+function maintenanceResultToJson(result: StateLocalMaintenanceResult): JsonValue {
+  return {
+    checkedAt: result.checkedAt,
+    artifactCutoffAt: result.artifactCutoffAt,
+    dryRun: result.dryRun,
+    expiredPresenceCandidates: result.expiredPresenceCandidates,
+    expiredPresenceRemoved: result.expiredPresenceRemoved,
+    unpublishedArtifactCandidates: result.unpublishedArtifactCandidates,
+    unpublishedArtifactRemoved: result.unpublishedArtifactRemoved,
+    reclaimedArtifactBytes: result.reclaimedArtifactBytes,
+    terminalRunCandidates: result.terminalRunCandidates,
+    terminalRunsRemoved: result.terminalRunsRemoved,
+    runEventsRemoved: result.runEventsRemoved,
+    terminalAdmissionsRemoved: result.terminalAdmissionsRemoved,
+    terminalDeliveryCandidates: result.terminalDeliveryCandidates,
+    terminalDeliveriesRemoved: result.terminalDeliveriesRemoved,
+    staleSessionCandidates: result.staleSessionCandidates,
+    staleSessionsRemoved: result.staleSessionsRemoved,
+    publishedArtifactsReleased: result.publishedArtifactsReleased,
+    pendingRunRetentionCheckpoints: result.pendingRunRetentionCheckpoints,
+    truncated: result.truncated,
+  };
+}
+
+function stateLocalDiagnostic(
+  code: string,
+  severity: ModuleDiagnostic["severity"],
+  message: string,
+  hint?: string,
+): ModuleDiagnostic {
+  return Object.freeze({
+    code,
+    severity,
+    message,
+    ...(hint === undefined ? {} : { hint }),
+  });
+}
+
+function isExpectedExecutionProtocol(value: unknown): boolean {
+  try {
+    if (
+      value === null
+      || typeof value !== "object"
+      || Array.isArray(value)
+      || ![Object.prototype, null].includes(Object.getPrototypeOf(value))
+    ) return false;
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== 3
+      || !["protocol", "version", "operations"].every((key) => keys.includes(key))
+    ) return false;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const protocol = descriptors.protocol;
+    const version = descriptors.version;
+    const operationsDescriptor = descriptors.operations;
+    if (
+      protocol === undefined
+      || !("value" in protocol)
+      || protocol.value !== "mono-agent.state-execution"
+      || version === undefined
+      || !("value" in version)
+      || version.value !== 1
+      || operationsDescriptor === undefined
+      || !("value" in operationsDescriptor)
+      || !Array.isArray(operationsDescriptor.value)
+      || Object.getPrototypeOf(operationsDescriptor.value) !== Array.prototype
+    ) return false;
+    const operations = operationsDescriptor.value as readonly unknown[];
+    const operationKeys = Reflect.ownKeys(operations);
+    if (
+      operations.length !== STATE_LOCAL_EXECUTION_OPERATIONS.length
+      || operationKeys.length !== operations.length + 1
+      || operationKeys.some((key) =>
+        key !== "length"
+        && (typeof key !== "string" || !/^(0|[1-9]\d*)$/u.test(key)))
+    ) return false;
+    const operationDescriptors = Object.getOwnPropertyDescriptors(operations);
+    return STATE_LOCAL_EXECUTION_OPERATIONS.every((operation, index) => {
+      const descriptor = operationDescriptors[String(index)];
+      return descriptor !== undefined
+        && "value" in descriptor
+        && descriptor.value === operation;
+    });
+  } catch {
+    return false;
   }
 }

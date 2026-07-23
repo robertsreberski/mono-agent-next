@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -7,12 +7,7 @@ import {
   RuntimeTurnError,
   type AgentInteractionHandler,
   type ApprovalDecision,
-  type ArtifactRef,
 } from "@mono-agent/module-sdk";
-import type {
-  StateScanRequest,
-  StateTransactionRequest,
-} from "@mono-agent/module-sdk/internal";
 
 const mcpMocks = vi.hoisted(() => ({
   close: undefined as (() => Promise<void>) | undefined,
@@ -29,7 +24,11 @@ vi.mock("../mcp.js", async (importOriginal) => {
   };
 });
 
-import { createAgentHost } from "../index.js";
+import {
+  createAgentHost,
+  diagnoseAgent,
+  runAgentModuleCommand,
+} from "../index.js";
 import type { AgentConfig } from "../types.js";
 import {
   completed,
@@ -39,6 +38,7 @@ import {
   type FixtureController,
   type FixtureProject,
 } from "./fixture.js";
+import { MemoryStateStore } from "./durable-state-fixture.js";
 
 const projects: FixtureProject[] = [];
 
@@ -49,6 +49,395 @@ afterEach(async () => {
 });
 
 describe("agent host lifecycle", () => {
+  it("runs one selected module command without starting it or creating transports", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-command-${suffix}`;
+    const channel = `@fixture/channel-command-${suffix}`;
+    const events: string[] = [];
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create() {
+            events.push("create:runtime");
+            return runtimeInstance(async () => completed("unused"), {
+              commands: [{
+                name: "fixture:status",
+                kind: "authentication",
+                description: "Read fixture status.",
+                run() {
+                  events.push("command:runtime");
+                  return { status: "ready" };
+                },
+              }],
+              start() { events.push("start:runtime"); },
+              stop() { events.push("stop:runtime"); },
+            });
+          },
+        },
+      },
+      {
+        name: channel,
+        kind: "channel",
+        controller: {
+          create() {
+            events.push("create:channel");
+            return {
+              capabilities: {
+                attachments: false,
+                liveInput: false,
+                askUser: false,
+                approvals: false,
+                proactive: false,
+                runtimeControl: false,
+                verbatim: false,
+                cancellation: false,
+              },
+              start() { events.push("start:channel"); },
+              stop() { events.push("stop:channel"); },
+            };
+          },
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      channels: { transport: { $use: channel } },
+    }));
+
+    await expect(runAgentModuleCommand(
+      project.configPath,
+      "main",
+      "fixture:status",
+    )).resolves.toEqual({
+      module: "main",
+      command: "fixture:status",
+      value: { status: "ready" },
+    });
+    expect(events).toEqual(["create:runtime", "command:runtime", "stop:runtime"]);
+    await expect(runAgentModuleCommand(
+      project.configPath,
+      "main",
+      "fixture:missing",
+    )).rejects.toThrow(/does not expose command fixture:missing/u);
+    expect(events).toEqual([
+      "create:runtime",
+      "command:runtime",
+      "stop:runtime",
+      "create:runtime",
+      "stop:runtime",
+    ]);
+  });
+
+  it("redacts selected-module command create, run, aggregate, and stop failures with bounded context", async () => {
+    const secret = "module-command-env-secret-7c1d9b";
+    const runtime = `@fixture/runtime-command-secret-${randomUUID().toLowerCase()}`;
+    let hostileReads = 0;
+    const coded = (code: string, phase: string, value: unknown) =>
+      Object.assign(new Error(`${phase} rejected ${String(value)}`), { code });
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      schema: {
+        type: "object",
+        properties: {
+          apiKey: {
+            type: "string",
+            "x-mono-agent-env-eligible": true,
+            "x-mono-agent-secret": true,
+          },
+          phase: {
+            type: "string",
+            enum: ["success", "create", "run", "aggregate", "accessor-errors", "proxy-errors", "stop", "both"],
+          },
+        },
+        required: ["apiKey", "phase"],
+        additionalProperties: false,
+      },
+      controller: {
+        create(context) {
+          const config = isRecord(context) && isRecord(context.config) ? context.config : {};
+          const phase = config.phase;
+          const apiKey = config.apiKey;
+          if (phase === "create") throw coded("FIXTURE_CREATE", "create", apiKey);
+          return runtimeInstance(async () => completed("unused"), {
+            commands: [{
+              name: "fixture:secret",
+              kind: "authentication",
+              description: "Exercise command error projection.",
+              run() {
+                if (phase === "run" || phase === "both") throw coded("FIXTURE_RUN", "run", apiKey);
+                if (phase === "aggregate") {
+                  throw new AggregateError([
+                    coded("FIXTURE_AGGREGATE_INNER", "aggregate inner", apiKey),
+                  ], `aggregate rejected ${String(apiKey)}`);
+                }
+                if (phase === "accessor-errors" || phase === "proxy-errors") {
+                  const entries: unknown[] = [];
+                  Object.defineProperty(entries, "0", {
+                    enumerable: true,
+                    get() {
+                      hostileReads += 1;
+                      throw coded("FIXTURE_HOSTILE_READ", "hostile aggregate read", apiKey);
+                    },
+                  });
+                  const errors = phase === "proxy-errors"
+                    ? new Proxy(entries, {
+                        getOwnPropertyDescriptor() {
+                          hostileReads += 1;
+                          throw coded("FIXTURE_PROXY_READ", "proxy aggregate read", apiKey);
+                        },
+                      })
+                    : entries;
+                  const failure = new AggregateError([], `hostile aggregate rejected ${String(apiKey)}`);
+                  Object.defineProperty(failure, "errors", { value: errors });
+                  throw failure;
+                }
+                return { status: "ready", credential: apiKey, [String(apiKey)]: "secret-key" };
+              },
+            }],
+            stop() {
+              if (phase === "stop" || phase === "both") throw coded("FIXTURE_STOP", "stop", apiKey);
+            },
+          });
+        },
+      },
+    }]);
+    const invoke = async (phase: string) => {
+      const config = minimalConfig(runtime);
+      (config.runtimes as Record<string, unknown>).main = {
+        $use: runtime,
+        apiKey: { $env: "FIXTURE_COMMAND_API_KEY" },
+        phase,
+      };
+      await project.writeConfig(config);
+      return runAgentModuleCommand(
+        project.configPath,
+        "main",
+        "fixture:secret",
+        undefined,
+        { environment: { FIXTURE_COMMAND_API_KEY: secret } },
+      );
+    };
+
+    const successful = await invoke("success");
+    expect(successful).toMatchObject({
+      value: { status: "ready", credential: "[REDACTED]" },
+    });
+    expect(JSON.stringify(successful)).not.toContain(secret);
+    expect(successful.value).toMatchObject({ "[REDACTED]": "secret-key" });
+    for (const [phase, code, causeCodes] of [
+      ["create", "module_command_create_failed", ["FIXTURE_CREATE"]],
+      ["run", "module_command_run_failed", ["FIXTURE_RUN"]],
+      ["aggregate", "module_command_run_failed", ["FIXTURE_AGGREGATE_INNER"]],
+      ["accessor-errors", "module_command_run_failed", []],
+      ["proxy-errors", "module_command_run_failed", []],
+      ["stop", "module_command_stop_failed", ["FIXTURE_STOP"]],
+      ["both", "module_command_run_and_stop_failed", ["FIXTURE_RUN", "FIXTURE_STOP"]],
+    ] as const) {
+      let failure: unknown;
+      try {
+        await invoke(phase);
+      } catch (error) {
+        failure = error;
+      }
+      const projected = projectErrorTree(failure);
+      expect(projected).toMatchObject({
+        name: "AgentModuleError",
+        code,
+        packageName: runtime,
+        configPath: "runtimes.main",
+        moduleInstanceId: "main",
+        commandName: "fixture:secret",
+        phase: phase === "aggregate" || phase.endsWith("-errors")
+          ? "run" : phase === "both" ? "run_and_stop" : phase,
+      });
+      expect(JSON.stringify(projected)).toContain("[REDACTED]");
+      expect(JSON.stringify(projected)).not.toContain(secret);
+      expect(collectProjectedCodes(projected)).toEqual(expect.arrayContaining([...causeCodes]));
+      if (phase.endsWith("-errors")) expect(JSON.stringify(projected)).toContain("Unsafe aggregate error details were omitted");
+      expect(projected.message?.length).toBeLessThanOrEqual(4_096);
+    }
+    expect(hostileReads).toBe(0);
+  });
+
+  it("diagnoses selected modules without starting their serving lifecycle", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-diagnostics-${suffix}`;
+    const channel = `@fixture/channel-diagnostics-${suffix}`;
+    const events: string[] = [];
+    const diagnostics = (label: string) => ({
+      diagnostics() {
+        events.push(`diagnostics:${label}`);
+        return [{ code: `${label}_ready`, severity: "info", message: `${label} ready` }];
+      },
+      start() { events.push(`start:${label}`); },
+      stop() { events.push(`stop:${label}`); },
+    });
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create() {
+            events.push("create:runtime");
+            return runtimeInstance(async () => completed("unused"), diagnostics("runtime"));
+          },
+        },
+      },
+      {
+        name: channel,
+        kind: "channel",
+        controller: {
+          create() {
+            events.push("create:channel");
+            return {
+              capabilities: {
+                attachments: false,
+                liveInput: false,
+                askUser: false,
+                approvals: false,
+                proactive: false,
+                runtimeControl: false,
+                verbatim: false,
+                cancellation: false,
+              },
+              ...diagnostics("channel"),
+            };
+          },
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      channels: { transport: { $use: channel } },
+    }));
+
+    await expect(diagnoseAgent(project.configPath)).resolves.toEqual([
+      {
+        kind: "runtime",
+        instanceId: "main",
+        diagnostics: [{ code: "runtime_ready", severity: "info", message: "runtime ready" }],
+      },
+      {
+        kind: "channel",
+        instanceId: "transport",
+        diagnostics: [{ code: "channel_ready", severity: "info", message: "channel ready" }],
+      },
+    ]);
+    expect(events).toEqual([
+      "create:runtime",
+      "diagnostics:runtime",
+      "stop:runtime",
+      "create:channel",
+      "diagnostics:channel",
+      "stop:channel",
+    ]);
+  });
+
+  it("maps non-serving module health failures into offline diagnostics without starting work", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-health-diagnostics-${suffix}`;
+    const sandbox = `@fixture/sandbox-health-diagnostics-${suffix}`;
+    const events: string[] = [];
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create: () => runtimeInstance(async () => completed("unused"), {
+            start() { events.push("start:runtime"); },
+            stop() { events.push("stop:runtime"); },
+          }),
+        },
+      },
+      {
+        name: sandbox,
+        kind: "sandbox",
+        controller: {
+          create: () => ({
+            async execute() {
+              return {
+                exitCode: 0,
+                stdout: new Uint8Array(),
+                stderr: new Uint8Array(),
+                timedOut: false,
+              };
+            },
+            health() {
+              events.push("health:sandbox");
+              return {
+                status: "unhealthy" as const,
+                checkedAt: "2026-07-23T10:00:00.000Z",
+                summary: "Pinned SRT integrity is broken.",
+              };
+            },
+            start() { events.push("start:sandbox"); },
+            stop() { events.push("stop:sandbox"); },
+          }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      policy: {
+        tools: { default: "deny", allow: [] },
+        approvals: { default: "allow" },
+        sandbox: { $use: sandbox },
+      },
+    }));
+
+    const result = await diagnoseAgent(project.configPath);
+    expect(result.find(({ kind }) => kind === "sandbox")).toEqual({
+      kind: "sandbox",
+      instanceId: "sandbox",
+      diagnostics: [{
+        code: "module_health_unhealthy",
+        severity: "error",
+        message: "Pinned SRT integrity is broken.",
+      }],
+    });
+    expect(events).toContain("health:sandbox");
+    expect(events).not.toContain("start:runtime");
+    expect(events).not.toContain("start:sandbox");
+  });
+
+  it("diagnoses an incompatible state execution protocol before startup", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-state-protocol-${suffix}`;
+    const stateName = `@fixture/state-protocol-${suffix}`;
+    const state = new MemoryStateStore();
+    Object.defineProperty(state, "execution", {
+      configurable: true,
+      value: {
+        perform() {
+          return {
+            protocol: "mono-agent.state-execution",
+            version: 999,
+            operations: [],
+          };
+        },
+      },
+    });
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: { create: () => runtimeInstance(async () => completed("unused")) },
+      },
+      { name: stateName, kind: "state", controller: { create: () => state } },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, { state: { $use: stateName } }));
+
+    await expect(diagnoseAgent(project.configPath)).resolves.toContainEqual({
+      kind: "state",
+      instanceId: "state",
+      diagnostics: [{
+        code: "state_execution_protocol_incompatible",
+        severity: "error",
+        message: expect.stringMatching(/malformed protocol/u),
+      }],
+    });
+  });
+
   it("rejects created instances that do not satisfy their selected slot contract", async () => {
     const cases = [
       {
@@ -1787,6 +2176,8 @@ describe("turn admission and routing", () => {
     const suffix = randomUUID().toLowerCase();
     const primary = `@fixture/runtime-hostile-error-${suffix}`;
     const fallback = `@fixture/runtime-hostile-error-fallback-${suffix}`;
+    const stateName = `@fixture/state-hostile-error-${suffix}`;
+    const state = stateFixtureController();
     let accessorReads = 0;
     let fallbackCalls = 0;
     const project = await fixture([
@@ -1830,6 +2221,7 @@ describe("turn admission and routing", () => {
           }),
         },
       },
+      { name: stateName, kind: "state", controller: state.controller },
     ]);
     await project.writeConfig(minimalConfig(primary, {
       runtimes: { primary: { $use: primary }, fallback: { $use: fallback } },
@@ -1837,6 +2229,7 @@ describe("turn admission and routing", () => {
         primary: { runtime: "primary", model: "fixture:primary" },
         fallbacks: [{ runtime: "fallback", model: "fixture:fallback" }],
       },
+      state: { $use: stateName },
     }));
     const host = await createAgentHost(project.configPath);
 
@@ -2169,7 +2562,7 @@ describe("turn admission and routing", () => {
     await host.stop();
   });
 
-  it("persists attachment transcripts above the state record limit as restart-safe chunks", async () => {
+  it("persists attachment transcripts above the state record limit through state-owned artifacts", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtime = `@fixture/runtime-chunked-${suffix}`;
     const stateName = `@fixture/state-chunked-${suffix}`;
@@ -2201,19 +2594,6 @@ describe("turn admission and routing", () => {
         }],
       });
     }
-    const conversationRecord = [...state.records.entries()]
-      .find(([key]) => key.startsWith("core/conversations/"))?.[1];
-    expect(conversationRecord).toBeDefined();
-    const manifest = JSON.parse(new TextDecoder().decode(conversationRecord?.value)) as Record<string, unknown>;
-    expect(manifest).toMatchObject({
-      schemaVersion: 2,
-      kind: "mono-agent.conversation-chunks.v1",
-      conversationId: "chunked",
-      encoding: "gzip-json",
-    });
-    const chunks = [...state.records.entries()].filter(([key]) => key.startsWith("core/conversation-chunks/"));
-    expect(chunks.length).toBeGreaterThan(1);
-    expect(chunks.every(([, record]) => record.value.byteLength <= 256 * 1024)).toBe(true);
     await first.stop();
 
     const second = await createAgentHost(project.configPath);
@@ -2221,12 +2601,15 @@ describe("turn admission and routing", () => {
     expect(replay.messages).toHaveLength(4);
     const replayed = replay.messages
       .filter((message) => message.role === "user")
-      .map((message) => message.content.find((part) => part.type === "attachment"))
-      .map((part) => part?.type === "attachment" ? part.attachment.data : undefined);
+      .map((message) => message.content.find((part) => part.type === "file"))
+      .map((part) => part?.type === "file" ? part.data : undefined);
     expect(replayed).toHaveLength(2);
     for (const [index, data] of payloads.entries()) {
-      expect(replayed[index]?.byteLength).toBe(data.byteLength);
-      expect(Buffer.compare(Buffer.from(replayed[index] ?? []), Buffer.from(data))).toBe(0);
+      const value = replayed[index];
+      expect(value).toBeInstanceOf(Uint8Array);
+      if (!(value instanceof Uint8Array)) throw new Error("replayed file bytes are missing");
+      expect(value.byteLength).toBe(data.byteLength);
+      expect(Buffer.compare(Buffer.from(value), Buffer.from(data))).toBe(0);
     }
     await second.stop();
   });
@@ -3762,222 +4145,67 @@ function stateFixtureController(
   readonly controller: FixtureController;
   readonly records: Map<string, { value: Uint8Array; version: string; updatedAt: string }>;
 } {
-  const records = new Map<string, { value: Uint8Array; version: string; updatedAt: string }>();
-  const artifacts = new Map<string, { readonly ref: ArtifactRef; readonly data: Uint8Array }>();
-  let version = 0;
+  const state = new MemoryStateStore();
+  state.shouldFailExecution = (operation) =>
+    operation === "run.settle" && shouldFailWrite();
+  state.onArtifact = (request) => {
+    if (
+      artifactWrites !== undefined
+      && request.mediaType === "application/vnd.mono-agent.tool-result+json"
+      && request.fileName === "tool-result.json"
+    ) {
+      artifactWrites.push(new Uint8Array(request.data));
+    }
+  };
   const controller: FixtureController = {
-    create() {
-      return {
-        async read(request: { key: string }) {
-          const record = records.get(request.key);
-          return record === undefined ? undefined : { key: request.key, ...record };
-        },
-        async write(request: { key: string; value: Uint8Array; expectedVersion?: string }) {
-          if (request.value.byteLength > 1024 * 1024) throw new Error("fixture state record exceeds 1 MiB");
-          if (shouldFailWrite()) {
-            throw new RuntimeTurnError({
-              code: "fixture_state_write_failed",
-              message: "fixture state write failed",
-              retryability: "retryable",
-              sideEffects: "none",
-            });
-          }
-          const current = records.get(request.key);
-          if (request.expectedVersion !== undefined && current?.version !== request.expectedVersion) {
-            throw new Error("fixture state CAS mismatch");
-          }
-          const result = { version: String(++version), updatedAt: new Date().toISOString() };
-          records.set(request.key, { value: new Uint8Array(request.value), ...result });
-          return result;
-        },
-        async compareAndSwap(request: { key: string; value: Uint8Array; expectedVersion: string | null }) {
-          if (request.value.byteLength > 1024 * 1024) throw new Error("fixture state record exceeds 1 MiB");
-          const current = records.get(request.key);
-          const matches = request.expectedVersion === null
-            ? current === undefined
-            : current?.version === request.expectedVersion;
-          if (!matches) return { status: "conflict", ...(current === undefined ? {} : { currentVersion: current.version }) };
-          const result = { version: String(++version), updatedAt: new Date().toISOString() };
-          const record = { key: request.key, value: new Uint8Array(request.value), ...result };
-          records.set(request.key, { value: record.value, ...result });
-          return { status: "applied", record };
-        },
-        async transaction(request: StateTransactionRequest) {
-          if (shouldFailWrite() && request.puts.length > 0) {
-            throw new RuntimeTurnError({
-              code: "fixture_state_write_failed",
-              message: "fixture state write failed",
-              retryability: "retryable",
-              sideEffects: "none",
-            });
-          }
-          const operations = [
-            ...request.checks,
-            ...request.puts,
-            ...request.deletes,
-          ];
-          const conflicts = operations.flatMap((operation) => {
-            const current = records.get(operation.key);
-            const matches = operation.expectedVersion === null
-              ? current === undefined
-              : current?.version === operation.expectedVersion;
-            return matches
-              ? []
-              : [{
-                  key: operation.key,
-                  ...(current === undefined ? {} : { currentVersion: current.version }),
-                }];
-          });
-          if (conflicts.length > 0) return { status: "conflict" as const, conflicts };
-          for (const put of request.puts) {
-            if (put.value.byteLength > 1024 * 1024) {
-              throw new Error("fixture state record exceeds 1 MiB");
-            }
-          }
-          const draft = new Map(records);
-          const written = request.puts.map((put) => {
-            const result = {
-              version: String(++version),
-              updatedAt: new Date().toISOString(),
-            };
-            const value = new Uint8Array(put.value);
-            draft.set(put.key, { value, ...result });
-            return { key: put.key, value: new Uint8Array(value), ...result };
-          });
-          const deletedKeys: string[] = [];
-          for (const deletion of request.deletes) {
-            if (draft.delete(deletion.key)) deletedKeys.push(deletion.key);
-          }
-          records.clear();
-          for (const [key, record] of draft) records.set(key, record);
-          return { status: "applied" as const, records: written, deletedKeys };
-        },
-        async scan(request: StateScanRequest) {
-          const after = request.cursor === undefined
-            ? undefined
-            : decodeFixtureStateCursor(request.cursor, request.prefix);
-          const matching = [...records.entries()]
-            .filter(([key]) =>
-              key.startsWith(request.prefix)
-              && (after === undefined || key > after))
-            .sort(([left], [right]) => left.localeCompare(right));
-          const selected = matching.slice(0, request.limit);
-          return {
-            records: selected.map(([key, record]) => ({
-              key,
-              ...record,
-              value: new Uint8Array(record.value),
-            })),
-            ...(matching.length > selected.length
-              ? {
-                  cursor: encodeFixtureStateCursor(
-                    request.prefix,
-                    selected[selected.length - 1]![0],
-                  ),
-                }
-              : {}),
-          };
-        },
-        async delete(request: { key: string; expectedVersion?: string }) {
-          const current = records.get(request.key);
-          if (
-            request.expectedVersion !== undefined
-            && current?.version !== request.expectedVersion
-          ) {
-            throw new Error("fixture state CAS mismatch");
-          }
-          return records.delete(request.key);
-        },
-        async list(request: { prefix?: string; cursor?: string; limit?: number }) {
-          const prefix = request.prefix ?? "";
-          const after = request.cursor === undefined
-            ? undefined
-            : decodeFixtureStateCursor(request.cursor, prefix);
-          const matching = [...records.entries()]
-            .filter(([key]) =>
-              key.startsWith(prefix)
-              && (after === undefined || key > after))
-            .sort(([left], [right]) => left.localeCompare(right));
-          const selected = matching.slice(0, request.limit ?? 100);
-          return {
-            records: selected.map(([key, record]) => ({
-              key,
-              ...record,
-              value: new Uint8Array(record.value),
-            })),
-            ...(matching.length > selected.length
-              ? {
-                  cursor: encodeFixtureStateCursor(
-                    prefix,
-                    selected[selected.length - 1]![0],
-                  ),
-                }
-              : {}),
-          };
-        },
-        async upsertPresence(request: { presence: unknown }) { return request.presence; },
-        async removePresence() { return false; },
-        async listPresence() { return []; },
-        ...(artifactWrites === undefined ? {} : {
-          async putArtifact(request: {
-            data: Uint8Array;
-            mediaType: string;
-            fileName?: string;
-          }) {
-            const data = new Uint8Array(request.data);
-            const digest = createHash("sha256").update(data).digest("hex");
-            const ref = {
-              id: `artifact:sha256:${digest}`,
-              sha256: `sha256:${digest}` as const,
-              sizeBytes: data.byteLength,
-              mediaType: request.mediaType,
-              ...(request.fileName === undefined ? {} : { fileName: request.fileName }),
-            };
-            artifacts.set(ref.id, { ref, data });
-            if (
-              request.mediaType === "application/vnd.mono-agent.tool-result+json"
-              && request.fileName === "tool-result.json"
-            ) {
-              artifactWrites.push(new Uint8Array(data));
-            }
-            return ref;
-          },
-          async readArtifact(request: { ref: ArtifactRef; maxBytes: number }) {
-            const artifact = artifacts.get(request.ref.id);
-            if (artifact === undefined) throw new Error("fixture artifact is missing");
-            if (artifact.data.byteLength > request.maxBytes) {
-              throw new Error("fixture artifact exceeds its read bound");
-            }
-            return new Uint8Array(artifact.data);
-          },
-          async listArtifacts() {
-            return { artifacts: [...artifacts.values()].map(({ ref }) => ref) };
-          },
-          async deleteArtifact(request: { ref: ArtifactRef }) {
-            return artifacts.delete(request.ref.id);
-          },
-        }),
-      };
-    },
+    create: () => state,
   };
-  return { controller, records };
-}
-
-function encodeFixtureStateCursor(prefix: string, key: string): string {
-  return Buffer.from(JSON.stringify({ prefix, key }), "utf8").toString("base64url");
-}
-
-function decodeFixtureStateCursor(cursor: string, expectedPrefix: string): string {
-  const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as {
-    readonly prefix: string;
-    readonly key: string;
-  };
-  if (decoded.prefix !== expectedPrefix) throw new Error("fixture state cursor prefix mismatch");
-  return decoded.key;
+  return { controller, records: state.records };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+interface ProjectedError {
+  readonly name?: string;
+  readonly message?: string;
+  readonly code?: string;
+  readonly packageName?: string;
+  readonly configPath?: string;
+  readonly moduleInstanceId?: string;
+  readonly commandName?: string;
+  readonly phase?: string;
+  readonly cause?: ProjectedError;
+  readonly errors?: readonly ProjectedError[];
+}
+
+function projectErrorTree(error: unknown, depth = 0): ProjectedError {
+  if (depth > 8 || !isRecord(error)) return { message: String(error) };
+  const value = error as Record<string, unknown>;
+  const aggregateErrors = Array.isArray(value.errors)
+    ? value.errors.map((entry) => projectErrorTree(entry, depth + 1))
+    : undefined;
+  return {
+    ...(typeof value.name === "string" ? { name: value.name } : {}),
+    ...(typeof value.message === "string" ? { message: value.message } : {}),
+    ...(typeof value.code === "string" ? { code: value.code } : {}),
+    ...(typeof value.packageName === "string" ? { packageName: value.packageName } : {}),
+    ...(typeof value.configPath === "string" ? { configPath: value.configPath } : {}),
+    ...(typeof value.moduleInstanceId === "string" ? { moduleInstanceId: value.moduleInstanceId } : {}),
+    ...(typeof value.commandName === "string" ? { commandName: value.commandName } : {}),
+    ...(typeof value.phase === "string" ? { phase: value.phase } : {}),
+    ...(value.cause === undefined ? {} : { cause: projectErrorTree(value.cause, depth + 1) }),
+    ...(aggregateErrors === undefined ? {} : { errors: aggregateErrors }),
+  };
+}
+
+function collectProjectedCodes(error: ProjectedError): readonly string[] {
+  return [
+    ...(error.code === undefined ? [] : [error.code]),
+    ...(error.cause === undefined ? [] : collectProjectedCodes(error.cause)),
+    ...(error.errors ?? []).flatMap((entry) => collectProjectedCodes(entry)),
+  ];
 }
 
 function runExecutionRouteErrors(error: unknown): readonly unknown[] {

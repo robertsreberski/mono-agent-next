@@ -17,6 +17,7 @@ const MAX_DATE_MILLISECONDS = 8_640_000_000_000_000;
 
 export const EXECUTION_STATE_PREFIXES = Object.freeze({
   conversations: "core/conversations/",
+  conversationChunks: "core/conversation-chunks/",
   sessions: "core/sessions/",
   admissions: "core/admissions/",
   artifactIntents: "core/artifact-intents/",
@@ -24,6 +25,7 @@ export const EXECUTION_STATE_PREFIXES = Object.freeze({
   runHistory: "core/runs/history/",
   runEvents: "core/runs/events/",
   deliveries: "core/deliveries/",
+  retentionCheckpoints: "core/retention/checkpoints/",
 } as const);
 
 export interface ExecutionArtifactDescriptor {
@@ -46,6 +48,12 @@ export interface ExecutionPut<T> {
   readonly value: T;
 }
 
+export interface ExecutionBytePut {
+  readonly key: string;
+  readonly expectedVersion: string | null;
+  readonly value: Uint8Array;
+}
+
 export interface ExecutionDelete {
   readonly key: string;
   readonly expectedVersion: string | null;
@@ -57,6 +65,7 @@ export interface ExecutionTransaction {
     readonly expectedVersion: string | null;
   }[];
   readonly puts?: readonly ExecutionPut<unknown>[];
+  readonly bytePuts?: readonly ExecutionBytePut[];
   readonly deletes?: readonly ExecutionDelete[];
   readonly signal: AbortSignal;
 }
@@ -95,6 +104,20 @@ export class ExecutionStore {
     return record === undefined ? undefined : decodeRecord(record, parser);
   }
 
+  async readBytes(
+    key: string,
+    signal: AbortSignal,
+  ): Promise<ExecutionRecord<Uint8Array> | undefined> {
+    const record = await this.#state.read({ key, signal });
+    if (record === undefined) return undefined;
+    return Object.freeze({
+      key: record.key,
+      value: new Uint8Array(record.value),
+      version: record.version,
+      updatedAt: record.updatedAt,
+    });
+  }
+
   async scan<T>(
     prefix: string,
     cursor: string | undefined,
@@ -122,8 +145,12 @@ export class ExecutionStore {
   ): Promise<ExecutionTransactionResult> {
     const checks = request.checks ?? [];
     const puts = request.puts ?? [];
+    const bytePuts = request.bytePuts ?? [];
     const deletes = request.deletes ?? [];
-    if (checks.length + puts.length + deletes.length > EXECUTION_TRANSACTION_MAX_MUTATIONS) {
+    if (
+      checks.length + puts.length + bytePuts.length + deletes.length
+      > EXECUTION_TRANSACTION_MAX_MUTATIONS
+    ) {
       throw new RangeError("execution transaction exceeds its mutation limit");
     }
     const result = await this.#state.transaction({
@@ -131,11 +158,18 @@ export class ExecutionStore {
         key: check.key,
         expectedVersion: check.expectedVersion,
       })),
-      puts: puts.map((put) => ({
-        key: put.key,
-        expectedVersion: put.expectedVersion,
-        value: encodeExecutionRecord(put.value),
-      })),
+      puts: [
+        ...puts.map((put) => ({
+          key: put.key,
+          expectedVersion: put.expectedVersion,
+          value: encodeExecutionRecord(put.value),
+        })),
+        ...bytePuts.map((put) => ({
+          key: put.key,
+          expectedVersion: put.expectedVersion,
+          value: executionBytes(put.value),
+        })),
+      ],
       deletes: deletes.map((entry) => ({
         key: entry.key,
         expectedVersion: entry.expectedVersion,
@@ -241,6 +275,24 @@ export function conversationStateKey(conversationId: string): string {
   return `${EXECUTION_STATE_PREFIXES.conversations}${identityDigest(conversationId, "conversationId")}`;
 }
 
+export function conversationChunkPrefix(conversationId: string): string {
+  return `${EXECUTION_STATE_PREFIXES.conversationChunks}${identityDigest(conversationId, "conversationId")}/`;
+}
+
+export function conversationChunkStateKey(
+  conversationId: string,
+  index: number,
+  digest: string,
+): string {
+  if (!Number.isSafeInteger(index) || index < 0 || index > 999) {
+    throw new RangeError("conversation transcript chunk index is outside its bound");
+  }
+  if (!/^[a-f0-9]{64}$/u.test(digest)) {
+    throw new TypeError("conversation transcript chunk digest is invalid");
+  }
+  return `${conversationChunkPrefix(conversationId)}${String(index).padStart(3, "0")}-${digest}`;
+}
+
 export function admissionStateKey(requestId: string): string {
   return `${EXECUTION_STATE_PREFIXES.admissions}${identityDigest(requestId, "requestId")}`;
 }
@@ -289,6 +341,10 @@ export function deliveryStateKey(idempotencyKey: string): string {
   return `${EXECUTION_STATE_PREFIXES.deliveries}${identityDigest(idempotencyKey, "idempotencyKey")}`;
 }
 
+export function retentionCheckpointStateKey(runId: string): string {
+  return `${EXECUTION_STATE_PREFIXES.retentionCheckpoints}${identityDigest(runId, "runId")}`;
+}
+
 export function describeExecutionArtifact(
   data: Uint8Array,
   mediaType: string,
@@ -330,6 +386,16 @@ export function encodeExecutionRecord(value: unknown): Uint8Array {
     throw new RangeError(`execution record exceeds ${String(EXECUTION_RECORD_MAX_BYTES)} bytes`);
   }
   return new Uint8Array(bytes);
+}
+
+function executionBytes(value: Uint8Array): Uint8Array {
+  if (!(value instanceof Uint8Array)) {
+    throw new TypeError("execution byte record must be bytes");
+  }
+  if (value.byteLength > EXECUTION_RECORD_MAX_BYTES) {
+    throw new RangeError(`execution record exceeds ${String(EXECUTION_RECORD_MAX_BYTES)} bytes`);
+  }
+  return new Uint8Array(value);
 }
 
 function snapshotExecutionJson(

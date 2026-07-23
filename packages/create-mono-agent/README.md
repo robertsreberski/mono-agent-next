@@ -22,8 +22,9 @@ Project tooling (`tier: alias` in the first-party package catalog).
 Create one no-clobber project directory containing an exact template dependency
 closure, strict agent config, bootstrap schema, agent instructions, and a
 names-only environment example. `minimal` is the default; `personal` and
-`multi-runtime` are explicit. Outside `init` and `setup`, the `mono-agent` bin
-delegates to `@mono-agent/cli`.
+`multi-runtime` are explicit. It also transactionally installs its bundled v1
+`mono-agent-composer` skill. Outside `init`, `setup`, and `install-skill`, the
+`mono-agent` bin delegates to `@mono-agent/cli`.
 
 ## Install / Usage
 
@@ -42,6 +43,10 @@ npm create mono-agent@0.15.0 my-agent -- --install --package-manager npm
 npm install --global create-mono-agent@0.15.0
 mono-agent init ./my-agent
 mono-agent validate --config ./my-agent/mono-agent.config.json
+
+# Install only the bundled composer skill; both targets are the default.
+mono-agent install-skill
+mono-agent install-skill --target codex --force
 ```
 
 Explicit installation supports pnpm and npm. Yarn is intentionally unavailable
@@ -67,6 +72,36 @@ names, and unknown templates fail closed. Files are prepared in a private
 sibling staging directory and published only after the full template and any
 explicit installation succeed.
 
+`install-skill` accepts `--target claude|codex|both` (default `both`), refuses
+existing installs unless `--force` is explicit, validates the bounded bundled
+manifest and every regular source file, and stages a complete owner-private
+tree before commit. Home, `.claude`/`.codex`, and their `skills` directory must
+be real directories owned by the current user with no group/other write bits;
+standard `0750`/`0755` ancestors are accepted and never chmodded. Directories
+created by this command, every staged/final tree, journals, locks, and files
+remain owner-private (`0700`/`0600`). If an authority check fails, remove only
+group/other write permission from the named real directory (for example,
+`chmod go-w <path>`) and retry.
+
+An external owner-private lock serializes cooperating installers. A fsynced
+prepare/commit journal records reservation intent before the canonical name can
+appear and uses separately journaled reservations while restoring exact prior
+installs after process termination. Ambiguous or substituted identities are
+retained at named recovery paths instead of recursively deleted. Successful
+`--force` installs likewise report and retain the exact prior tree as a backup.
+Platforms without current-UID, `O_NOFOLLOW`, or `O_DIRECTORY` proof fail closed
+as unsupported. The command installs no npm package and does not pair docs MCP.
+
+Node does not expose a portable no-replace rename for directories. Publication
+therefore uses an atomic absent-name `mkdir` reservation under a
+current-user-owned, non-writable-by-others parent, then revalidates that exact
+empty inode and every authority immediately before and after rename. The
+external lock closes races between cooperating installers. A non-cooperating
+process running as the same user remains inside the filesystem authority
+boundary and can race the final check-to-rename interval; substitutions
+observed by either adjacent check fail closed and are left untouched for manual
+recovery.
+
 ## Architecture
 
 ### Data flow
@@ -77,6 +112,9 @@ create-mono-agent argv -> validate template/target -> private stage
                       -> optional install -> publish runnable project
 
 mono-agent init/setup -> same scaffolder
+mono-agent install-skill -> validated bundle -> private sibling stage
+                         -> durable journal + exact reservation
+                         -> commit, rollback, or retained recovery path
 mono-agent other      -> @mono-agent/cli runCli
 ```
 
@@ -87,6 +125,7 @@ mono-agent other      -> @mono-agent/cli runCli
 | `src/scaffold.ts` | Transaction, no-clobber checks, optional installer, and file publication. |
 | `src/templates.ts` | Deterministic three-template config, schema, manifest, instructions, and secret-name files. |
 | `src/cli.ts` | npm-create/init routing and argument validation. |
+| `src/skill-installer.ts` | Bounded manifest validation and transactional Claude/Codex skill installation. |
 | `src/bin/create-mono-agent.ts` | Unambiguous npm-create entry point. |
 | `src/bin/mono-agent.ts` | Global CLI/init entry point. |
 
@@ -97,6 +136,7 @@ mono-agent other      -> @mono-agent/cli runCli
 | Export | Use |
 | --- | --- |
 | `scaffoldAgent(options)` | Transactionally create one selected project template. |
+| `installComposerSkill(options)` | Transactionally install the bundled composer skill. |
 | `runCreateMonoAgentCli(argv, io?, options?)` | Exercise create/init/delegation without spawning a process. |
 | `renderProject(options)` | Render any template; defaults to `minimal`. |
 | `renderMinimalProject`, `renderPersonalProject`, `renderMultiRuntimeProject` | Explicit deterministic renderers. |
@@ -110,7 +150,11 @@ Every symbol exported by each public code entrypoint is listed below.
 **`create-mono-agent`**
 
 ```text
+COMPOSER_SKILL_TARGETS
+ComposerSkillInstallResult
+ComposerSkillTarget
 CreateMonoAgentCliOptions
+InstallComposerSkillOptions
 InstallPackageManager
 MinimalProjectOptions
 PROJECT_TEMPLATES
@@ -122,6 +166,7 @@ RenderedProjectFile
 ScaffoldAgentOptions
 ScaffoldError
 ScaffoldResult
+installComposerSkill
 isProjectTemplate
 renderMinimalProject
 renderMultiRuntimeProject

@@ -5,7 +5,11 @@ export {
   AgentModuleError,
   RunExecutionError,
 } from "./errors.js";
-export { createAgentHost } from "./host.js";
+export {
+  createAgentHost,
+  diagnoseAgent,
+  runAgentModuleCommand,
+} from "./host.js";
 export { inspectAgent } from "./inspect.js";
 export { composeAgentConfigSchema, explainAgentConfig } from "./schema.js";
 
@@ -29,6 +33,7 @@ export type {
   AgentLiveInputStatus,
   AgentLoadOptions,
   AgentModuleCommandResult,
+  AgentModuleDiagnostics,
   AgentPolicyConfig,
   AgentResponse,
   AgentResponseMessage,

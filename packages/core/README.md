@@ -54,6 +54,11 @@ Configuration is strict JSON. Selecting a package with `$use` never installs
 or scans for code: the package must already be a literal direct dependency and
 must be represented by the project lockfile.
 
+Module secret and environment annotations are enforced across applicable
+`allOf`, `anyOf`, `oneOf`, and `if`/`then`/`else` branches. Unresolved schema
+references and annotations hidden under unsupported applicators fail module
+loading; branch evaluation is complexity-bounded and fails closed.
+
 Project MCP configuration applies the same fail-closed network and secret
 posture. Remote MCP URLs use HTTPS. Plain HTTP is accepted only when the URL
 host is a literal loopback IP address in `127.0.0.0/8` or `::1`; `localhost`
@@ -151,9 +156,9 @@ ambiguous or stale outcome remains `unknown` and is never resent.
 | `schema.ts` | Exact schema composition and redacted explanation. |
 | `mcp.ts` | Ordinary project stdio and HTTP MCP clients plus Core tool identity. |
 | `native-tool-policy.ts` | Runtime-owned tool, approval, request-narrowing, and sandbox-policy intersection. |
-| `transcript.ts` | Strict provider-neutral append-only replay records and interaction evidence. |
-| `execution-store.ts` | Bounded state transaction/scan and artifact adapter. |
-| `run-journal.ts` | Admission, run events, settlement, session, artifact-intent, and delivery idempotency. |
+| `state-execution-client.ts` | Typed, bounded, fail-closed client for the state module's opaque execution protocol. Durable storage formats remain state-owned. |
+| `bounded-value.ts` | Shared descriptor-safe snapshots and exact object/array boundary checks. |
+| `run-history-tool.ts` | Conversation-scoped, redacted, untrusted historical run evidence for capable runtimes. |
 | `host.ts` | Admission, serialized turns, exact sessions, safe fallback, settlement, lifecycle, and health. |
 
 ## Public API
@@ -168,6 +173,9 @@ ambiguous or stale outcome remains `unknown` and is never resent.
 | Explain config ownership without leaking env values | `explainAgentConfig` |
 | Inspect the selected graph without starting it | `inspectAgent` |
 | Start a bounded foreground agent | `createAgentHost` |
+| Diagnose selected modules without starting serving transports | `diagnoseAgent` |
+| Run one selected module command without starting the agent | `runAgentModuleCommand` |
+| Classify a redacted module-command lifecycle failure | `AgentModuleError.code`, `.moduleInstanceId`, `.commandName`, and `.phase` |
 | Submit or safely retry one request | `AgentHost.submit` with a stable `requestId` |
 | Page durable run summaries | `AgentHost.listRuns` |
 | Inspect one safe run/event/transcript projection | `AgentHost.readRun` |
@@ -205,6 +213,7 @@ AgentLiveInput
 AgentLiveInputStatus
 AgentLoadOptions
 AgentModuleCommandResult
+AgentModuleDiagnostics
 AgentModuleError
 AgentPolicyConfig
 AgentResponse
@@ -234,9 +243,11 @@ RuntimeRoute
 SelectedModuleConfig
 composeAgentConfigSchema
 createAgentHost
+diagnoseAgent
 explainAgentConfig
 inspectAgent
 loadAgentConfig
+runAgentModuleCommand
 validateAgentConfig
 ```
 

@@ -305,12 +305,28 @@ function personalConfig(agentId: string, displayName: string): Record<string, un
     },
     memory: {
       $use: "@mono-agent/memory-local",
-      directory: "./.mono-agent/memory",
-      capture: { mode: "direct" },
+      root: "./.mono-agent/memory",
+      maxBytes: 96_000,
+      capture: {
+        enabled: true,
+        model: { runtime: "pi", model: "openai-codex:gpt-5.4-mini" },
+        timeoutMs: 360_000,
+      },
+      embeddings: {
+        provider: "ollama",
+        endpoint: "http://127.0.0.1:11434",
+        model: "nomic-embed-text:v1.5",
+        dimensions: 768,
+      },
+      recallTool: { enabled: true },
     },
     state: {
       $use: "@mono-agent/state-local",
       root: "./.mono-agent/state",
+      runs: {
+        artifactsDirectory: "./.mono-agent/artifacts",
+        retentionDays: 30,
+      },
       discovery: {
         registryDirectory: "./.mono-agent/trace-sources",
         sourceId: agentId,

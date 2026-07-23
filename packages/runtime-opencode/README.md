@@ -59,6 +59,13 @@ configuration, exact session permissions, and per-prompt
 `"tools":{"*":false}` provide independent containment layers. `pure` remains a
 compatibility field and only accepts `true`.
 
+The selected instance exposes `opencode:auth` before it starts. Its default
+`status` action reports only the count of configured provider-environment
+entries, or that none are configured; values and names remain undisclosed and
+unverified. `models` and `login` return explicit unsupported results because
+model discovery requires a running authenticated server and this command does
+not emulate interactive login.
+
 ## Architecture
 
 ### Data flow
@@ -95,6 +102,7 @@ failures expose only bounded, redacted, accessor-free `Error` cause snapshots.
 | Source | Responsibility |
 | --- | --- |
 | `config.ts` | Strict limits, stable version, and environment secrets. |
+| `auth-command.ts` | Non-serving, redacted authentication status and unsupported-action results. |
 | `environment.ts` | Isolated HOME/XDG and process-owned deny/auth settings. |
 | `process.ts` | Bounded direct-process startup, version, and shutdown handling. |
 | `server.ts` | Authenticated HTTP/SSE protocol and deny-all assertions. |
@@ -107,7 +115,7 @@ failures expose only bounded, redacted, accessor-free `Error` cause snapshots.
 
 | Export | Use it for |
 | --- | --- |
-| `monoAgentModule` | Select this runtime in a v1 runtime slot. |
+| `monoAgentModule` | Select this runtime and access its `opencode:auth` command. |
 | `RuntimeOpenCodeConfig` | Type programmatic module configuration. |
 | `RuntimeOpenCodeError` | Inspect typed retry and side-effect metadata. |
 

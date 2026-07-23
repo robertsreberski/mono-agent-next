@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mono Agent Composer"
+  short_description: "Build and validate a config-first mono-agent v1 project"
+  default_prompt: "Build this mono-agent v1 project from a strict config, validate it, and prove one real foreground smoke test."

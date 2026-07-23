@@ -84,6 +84,7 @@ const LIMIT_KEYS = [
 ] as const;
 const ENVIRONMENT_KEYS = ["inherit", "allow"] as const;
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+const RESERVED_ENVIRONMENT_PREFIX = /^(?:LD_|DYLD_)/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const CONTROL = /[\u0000-\u001f\u007f]/u;
 
@@ -135,10 +136,19 @@ function environmentNames(input: unknown, path: string): readonly string[] {
   if (!Array.isArray(input)) fail(path, "must be an array");
   const names = input.map((value, index) => {
     if (typeof value !== "string" || !ENVIRONMENT_NAME.test(value)) fail(`${path}[${index}]`, "is not a valid environment name");
+    if (isReservedSandboxEnvironmentName(value)) {
+      fail(`${path}[${index}]`, "is reserved for the host runtime");
+    }
     return value;
   });
   if (new Set(names).size !== names.length) fail(path, "must not contain duplicates");
   return Object.freeze([...names]);
+}
+
+export function isReservedSandboxEnvironmentName(name: string): boolean {
+  return name === "NODE_OPTIONS"
+    || name === "NODE_PATH"
+    || RESERVED_ENVIRONMENT_PREFIX.test(name);
 }
 
 function plainObject(input: unknown, path: string, allowed: readonly string[]): Record<string, unknown> {
@@ -181,5 +191,12 @@ function integerSchema(minimum: number, maximum: number, fallback: number): Read
 }
 
 function environmentNameSchema(): Readonly<Record<string, unknown>> {
-  return { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]*$" };
+  return {
+    type: "string",
+    allOf: [
+      { pattern: "^[A-Za-z_][A-Za-z0-9_]*$" },
+      { not: { enum: ["NODE_OPTIONS", "NODE_PATH"] } },
+      { not: { pattern: "^(?:LD_|DYLD_)" } },
+    ],
+  };
 }

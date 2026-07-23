@@ -19,22 +19,34 @@ Application frontend over the core infrastructure.
 
 ## Responsibility
 
-Expose validation, schema, explain, and foreground-start commands without
-hard-coding a runtime, channel, product, or platform.
+Expose validation, selected-module diagnostics and commands, schema, explain,
+inspection, and foreground start without hard-coding a runtime, channel,
+product, or platform.
 
 ## Install / Usage
 
 ```bash
 pnpm add @mono-agent/cli@0.15.0
 mono-agent validate --config ./mono-agent.config.json
+mono-agent doctor --config ./mono-agent.config.json --json
 mono-agent config schema --config ./mono-agent.config.json --write
 mono-agent config explain --config ./mono-agent.config.json routing.primary
+mono-agent memory memory-local:audit --config ./mono-agent.config.json
+mono-agent auth pi:auth --module primary --config ./mono-agent.config.json
 mono-agent start --config ./mono-agent.config.json
 ```
 
 `start` runs in the foreground. Its first line is a JSON `started` event with
 the actual endpoints reported by selected channels. `SIGINT` and `SIGTERM`
 drain and stop the host before the command returns.
+
+`doctor` combines strict Core validation with bounded diagnostics from only
+the selected typed modules. `auth`, `sandbox`, `runs`, and `memory` accept an
+exact module-owned command name; they validate the selected slot and never
+guess a provider or package prefix. `--name <command>` remains an exact alias
+for the positional token, and `module command` remains the generic form.
+Command results and lifecycle failures redact environment-resolved secrets;
+failures retain a bounded stable code plus module, command, and phase context.
 
 ## Architecture
 
@@ -89,9 +101,9 @@ memory, state, exporter, sandbox, renderer, or service-manager dependency.
 
 ## What This Package Does Not Own
 
-It does not define configuration schemas, load modules, execute turns, provide
-authentication, install packages, supervise background services, or implement
-provider/channel behavior.
+It does not define configuration schemas, load modules, execute turns,
+implement authentication or maintenance, install packages or skills,
+supervise background services, or implement provider/channel behavior.
 
 ## Related Documentation
 

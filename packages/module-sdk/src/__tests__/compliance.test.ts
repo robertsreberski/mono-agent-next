@@ -179,6 +179,27 @@ describe("public compliance assertions", () => {
     expect(() => assertRuntimeModuleCompliance(invalidReferenceSchema)).toThrow(
       "module schema has an invalid cross-slot reference annotation",
     );
+    let schemaAccessorReads = 0;
+    const accessorSchema = { type: "object" };
+    Object.defineProperty(accessorSchema, "properties", {
+      enumerable: true,
+      get() {
+        schemaAccessorReads += 1;
+        return {};
+      },
+    });
+    expect(() => assertRuntimeModuleCompliance({
+      ...invalidReferenceSchema,
+      schema: { jsonSchema: accessorSchema, parse: () => ({}) },
+    })).toThrow("module schema graph.properties must be a data property");
+    expect(schemaAccessorReads).toBe(0);
+    const inheritedAnnotation = Object.assign(Object.create({
+      [MODULE_SCHEMA_SLOT_REFERENCE]: { slot: "channel" },
+    }) as Record<string, unknown>, { type: "number" });
+    expect(() => assertRuntimeModuleCompliance({
+      ...invalidReferenceSchema,
+      schema: { jsonSchema: inheritedAnnotation, parse: () => ({}) },
+    })).toThrow("module schema graph must contain only plain objects and arrays");
     expect(() => assertChannelModuleCompliance({
       ...reservedSchema,
       schema,

@@ -1,18 +1,37 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
-import type { ModuleHealth, ModuleHealthContext, ModuleStopContext } from "@mono-agent/module-sdk";
+import type {
+  ModuleCommand,
+  ModuleDiagnostic,
+  ModuleDiagnosticsContext,
+  ModuleHealth,
+  ModuleHealthContext,
+  ModuleStopContext,
+} from "@mono-agent/module-sdk";
 import type { Sandbox, SandboxCommand, SandboxResult } from "@mono-agent/module-sdk/internal";
 
-import { parseSandboxSrtConfig, type SandboxSrtConfig } from "./config.js";
+import {
+  isReservedSandboxEnvironmentName,
+  parseSandboxSrtConfig,
+  type SandboxSrtConfig,
+} from "./config.js";
 import { SandboxSrtError } from "./errors.js";
 import {
+  createSandboxSrtStatusCommands,
+  type SandboxSrtStatus,
+} from "./status-command.js";
+import {
+  bindTrustedExecutable,
+  bindTrustedSettings,
   resolveTrustedExecutable,
   resolveTrustedSettings,
   verifyTrustedExecutable,
   verifyTrustedSettings,
   type TrustedFile,
+  type TrustedFileBinding,
 } from "./security.js";
 
 export interface OpenSandboxSrtOptions {
@@ -25,6 +44,7 @@ interface ActiveChild {
 }
 
 export class SandboxSrt implements Sandbox {
+  readonly commands: readonly ModuleCommand[];
   readonly config: SandboxSrtConfig;
   readonly executable: TrustedFile;
   readonly settings: TrustedFile;
@@ -37,6 +57,7 @@ export class SandboxSrt implements Sandbox {
     this.config = config;
     this.executable = executable;
     this.settings = settings;
+    this.commands = createSandboxSrtStatusCommands((signal) => this.#status(signal));
   }
 
   static async open(options: OpenSandboxSrtOptions): Promise<SandboxSrt> {
@@ -53,32 +74,51 @@ export class SandboxSrt implements Sandbox {
     throwIfAborted(command.signal);
     const prepared = await this.#prepare(command);
     this.#assertOpen();
-    await this.#verifySelection();
-    this.#assertOpen();
-    throwIfAborted(command.signal);
-
-    const child = spawn(
-      this.executable.path,
-      ["--settings", this.settings.path, prepared.command, ...prepared.arguments],
-      {
-        cwd: prepared.workingDirectory,
-        env: prepared.environment,
-        shell: false,
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-        detached: process.platform !== "win32",
-      },
-    );
+    const bindings = await this.#bindSelection();
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      this.#assertOpen();
+      throwIfAborted(command.signal);
+      const launch = boundLaunch(this.executable, bindings.executable, bindings.settings);
+      child = spawn(
+        launch.command,
+        [...launch.arguments, prepared.command, ...prepared.arguments],
+        {
+          cwd: prepared.workingDirectory,
+          env: prepared.environment,
+          shell: false,
+          stdio: [
+            "pipe",
+            "pipe",
+            "pipe",
+            bindings.executable.descriptor,
+            bindings.settings.descriptor,
+          ],
+          windowsHide: true,
+          detached: true,
+        },
+      ) as ChildProcessWithoutNullStreams;
+    } catch (error) {
+      await closeBindings(bindings);
+      if (error instanceof SandboxSrtError || command.signal.aborted) throw error;
+      throw new SandboxSrtError("execution_failed", "SRT process could not be started.");
+    }
     let resolveDone: (() => void) | undefined;
     const done = new Promise<void>((resolveDonePromise) => {
       resolveDone = resolveDonePromise;
     });
     const active = { child, done };
     this.#active.add(active);
+    const result = collectChild(
+      child,
+      command.signal,
+      prepared.timeoutMs,
+      this.config.limits.maxOutputBytes,
+      prepared.stdin,
+    );
     try {
-      const result = await collectChild(child, command.signal, prepared.timeoutMs, this.config.limits.maxOutputBytes, prepared.stdin);
-      await this.#verifySelection();
-      return result;
+      await closeBindings(bindings);
+      return await result;
     } finally {
       this.#active.delete(active);
       resolveDone?.();
@@ -86,13 +126,92 @@ export class SandboxSrt implements Sandbox {
   }
 
   async health(context: ModuleHealthContext): Promise<ModuleHealth> {
-    if (this.#closed) return health("unhealthy", "SRT sandbox is closed.");
+    if (this.#closed) {
+      return health(
+        "unhealthy",
+        "SRT sandbox is closed.",
+        this.#healthDetails("closed"),
+      );
+    }
     try {
       throwIfAborted(context.signal);
       await this.#verifySelection();
-      return health("healthy", "Integrity-pinned SRT executable and settings are ready.");
+      return health(
+        "healthy",
+        "Integrity-pinned SRT executable and settings are ready.",
+        this.#healthDetails("verified"),
+      );
     } catch {
-      return health("unhealthy", "SRT executable or settings integrity could not be proven.");
+      return health(
+        "unhealthy",
+        "SRT executable or settings integrity could not be proven.",
+        this.#healthDetails("unverified"),
+      );
+    }
+  }
+
+  async diagnostics(
+    context: ModuleDiagnosticsContext,
+  ): Promise<readonly ModuleDiagnostic[]> {
+    const status = await this.#status(context.signal);
+    if (status.status === "ready") {
+      return Object.freeze([Object.freeze({
+        code: "sandbox-srt.integrity",
+        severity: "info",
+        message: "SRT executable and settings integrity is verified.",
+      })]);
+    }
+    return Object.freeze([Object.freeze({
+      code: status.status === "closed"
+        ? "sandbox-srt.closed"
+        : "sandbox-srt.integrity",
+      severity: "error",
+      message: status.status === "closed"
+        ? "The selected SRT sandbox is closed."
+        : "SRT executable or settings integrity could not be proven.",
+    })]);
+  }
+
+  async #status(signal: AbortSignal): Promise<SandboxSrtStatus> {
+    if (this.#closed) {
+      return Object.freeze({
+        status: "closed",
+        mode: "native",
+        integrity: "closed",
+        networkAvailability: "unavailable",
+        activeCommands: this.#active.size,
+        executableSha256: this.executable.sha256,
+        settingsSha256: this.settings.sha256,
+        code: "sandbox_closed",
+        message: "The selected SRT sandbox is closed.",
+      });
+    }
+    try {
+      throwIfAborted(signal);
+      await this.#verifySelection();
+      throwIfAborted(signal);
+      return Object.freeze({
+        status: "ready",
+        mode: "native",
+        integrity: "verified",
+        networkAvailability: "settings-controlled",
+        activeCommands: this.#active.size,
+        executableSha256: this.executable.sha256,
+        settingsSha256: this.settings.sha256,
+      });
+    } catch {
+      throwIfAborted(signal);
+      return Object.freeze({
+        status: "degraded",
+        mode: "native",
+        integrity: "unverified",
+        networkAvailability: "unavailable",
+        activeCommands: this.#active.size,
+        executableSha256: this.executable.sha256,
+        settingsSha256: this.settings.sha256,
+        code: "sandbox_integrity_unverified",
+        message: "The selected SRT executable or settings could not be verified.",
+      });
     }
   }
 
@@ -122,6 +241,29 @@ export class SandboxSrt implements Sandbox {
       verifyTrustedExecutable(this.executable),
       verifyTrustedSettings(this.settings),
     ]);
+  }
+
+  async #bindSelection(): Promise<{
+    readonly executable: TrustedFileBinding;
+    readonly settings: TrustedFileBinding;
+  }> {
+    const executable = await bindTrustedExecutable(this.executable);
+    try {
+      const settings = await bindTrustedSettings(this.settings);
+      return Object.freeze({ executable, settings });
+    } catch (error) {
+      await executable.close();
+      throw error;
+    }
+  }
+
+  #healthDetails(integrity: "verified" | "unverified" | "closed"): Readonly<Record<string, string | number>> {
+    return Object.freeze({
+      integrity,
+      activeCommands: this.#active.size,
+      executableSha256: this.executable.sha256,
+      settingsSha256: this.settings.sha256,
+    });
   }
 
   #assertOpen(): void {
@@ -182,12 +324,175 @@ export async function openSandboxSrt(options: OpenSandboxSrtOptions): Promise<Sa
   return await SandboxSrt.open(options);
 }
 
+interface BoundLaunch {
+  readonly command: string;
+  readonly arguments: readonly string[];
+}
+
+const BOUND_EXECUTABLE_DESCRIPTOR = 3;
+const BOUND_SETTINGS_DESCRIPTOR = 4;
+const NODE_SRT_SHEBANG = "#!/usr/bin/env node";
+const BOUND_NODE_SPECIFIER = "mono-agent-srt:bound-entry";
+const UNBUNDLED_ENTRY_CODE = "ERR_MONO_AGENT_SRT_NOT_SELF_CONTAINED";
+
+function boundLaunch(
+  executable: TrustedFile,
+  executableBinding: TrustedFileBinding,
+  settingsBinding: TrustedFileBinding,
+): BoundLaunch {
+  if (
+    executableBinding.descriptor < 0
+    || settingsBinding.descriptor < 0
+  ) {
+    throw new SandboxSrtError(
+      "sandbox_unavailable",
+      "SRT descriptor binding is unavailable.",
+    );
+  }
+  if (
+    executableBinding.firstLine === NODE_SRT_SHEBANG
+    && (process.platform === "linux" || process.platform === "darwin")
+  ) {
+    return boundNodeLaunch(
+      executable,
+      process.platform === "linux" ? "/proc/self/fd" : "/dev/fd",
+    );
+  }
+  if (process.platform === "linux") {
+    if (executableBinding.firstLine?.startsWith("#!") === true) {
+      throw new SandboxSrtError(
+        "sandbox_unavailable",
+        "SRT descriptor-bound execution is unavailable for this executable.",
+      );
+    }
+    return Object.freeze({
+      command: `/proc/self/fd/${BOUND_EXECUTABLE_DESCRIPTOR}`,
+      arguments: Object.freeze([
+        "--settings",
+        `/proc/self/fd/${BOUND_SETTINGS_DESCRIPTOR}`,
+      ]),
+    });
+  }
+  if (process.platform === "darwin") {
+    throw new SandboxSrtError(
+      "sandbox_unavailable",
+      "SRT descriptor-bound execution is unavailable for this executable.",
+    );
+  }
+  throw new SandboxSrtError(
+    "sandbox_unavailable",
+    "SRT descriptor-bound execution is unavailable on this platform.",
+  );
+}
+
+function boundNodeLaunch(
+  executable: TrustedFile,
+  descriptorRoot: "/dev/fd" | "/proc/self/fd",
+): BoundLaunch {
+  const targetUrl = `${pathToFileURL(executable.path).href}?mono-agent-bound-entry`;
+  const loaderSource = [
+    'import { readFile } from "node:fs/promises";',
+    "function notSelfContained() {",
+    'const error = new Error("The bound SRT entrypoint must be self-contained.");',
+    `error.code = ${JSON.stringify(UNBUNDLED_ENTRY_CODE)};`,
+    "return error;",
+    "}",
+    "function hasDynamicImport(source) {",
+    "let cursor = 0;",
+    "while ((cursor = source.indexOf(\"import\", cursor)) >= 0) {",
+    "const before = cursor === 0 ? \"\" : source[cursor - 1];",
+    "const after = source[cursor + 6] ?? \"\";",
+    'if (/[A-Za-z0-9_$]/u.test(before) || /[A-Za-z0-9_$]/u.test(after)) { cursor += 6; continue; }',
+    "let next = cursor + 6;",
+    "for (;;) {",
+    'while (/\\s/u.test(source[next] ?? "")) next += 1;',
+    'if (source.startsWith("/*", next)) {',
+    'const end = source.indexOf("*/", next + 2);',
+    "if (end < 0) return true;",
+    "next = end + 2;",
+    "continue;",
+    "}",
+    'if (source.startsWith("//", next)) {',
+    'const end = source.indexOf("\\n", next + 2);',
+    "if (end < 0) return false;",
+    "next = end + 1;",
+    "continue;",
+    "}",
+    "break;",
+    "}",
+    'if (source[next] === "(") return true;',
+    "cursor += 6;",
+    "}",
+    "return false;",
+    "}",
+    "export async function resolve(specifier, context, nextResolve) {",
+    `if (specifier === ${JSON.stringify(BOUND_NODE_SPECIFIER)}) {`,
+    `return { url: ${JSON.stringify(targetUrl)}, shortCircuit: true };`,
+    "}",
+    `if (context.parentURL === ${JSON.stringify(targetUrl)} && !specifier.startsWith("node:")) {`,
+    "throw notSelfContained();",
+    "}",
+    "return nextResolve(specifier, context);",
+    "}",
+    "export async function load(url, context, nextLoad) {",
+    `if (url === ${JSON.stringify(targetUrl)}) {`,
+    `const source = await readFile("${descriptorRoot}/${BOUND_EXECUTABLE_DESCRIPTOR}", "utf8");`,
+    "if (hasDynamicImport(source)) throw notSelfContained();",
+    'return { format: "module", source, shortCircuit: true };',
+    "}",
+    "return nextLoad(url, context);",
+    "}",
+  ].join("");
+  const loaderUrl = `data:text/javascript,${encodeURIComponent(loaderSource)}`;
+  const registrationSource = [
+    'import { register } from "node:module";',
+    `register(${JSON.stringify(loaderUrl)}, import.meta.url);`,
+  ].join("");
+  const registrationUrl = `data:text/javascript,${encodeURIComponent(registrationSource)}`;
+  const bootstrap = [
+    `process.argv.splice(1, 0, ${JSON.stringify(executable.path)});`,
+    "try {",
+    `await import(${JSON.stringify(BOUND_NODE_SPECIFIER)});`,
+    "} catch (error) {",
+    `if (error?.code !== ${JSON.stringify(UNBUNDLED_ENTRY_CODE)}) throw error;`,
+    'process.stderr.write("The bound SRT entrypoint is not self-contained.");',
+    "process.exitCode = 126;",
+    "}",
+  ].join("");
+  return Object.freeze({
+    command: process.execPath,
+    arguments: Object.freeze([
+      "--import",
+      registrationUrl,
+      "--input-type=module",
+      "--eval",
+      bootstrap,
+      "--",
+      "--settings",
+      `${descriptorRoot}/${BOUND_SETTINGS_DESCRIPTOR}`,
+    ]),
+  });
+}
+
+async function closeBindings(bindings: {
+  readonly executable: TrustedFileBinding;
+  readonly settings: TrustedFileBinding;
+}): Promise<void> {
+  await Promise.allSettled([
+    bindings.executable.close(),
+    bindings.settings.close(),
+  ]);
+}
+
 function buildEnvironment(
   supplied: Readonly<Record<string, string>> | undefined,
   config: SandboxSrtConfig,
 ): Readonly<Record<string, string>> {
   const result: Record<string, string> = {};
   for (const name of config.environment.inherit) {
+    if (isReservedSandboxEnvironmentName(name)) {
+      invalid("Sandbox environment contains a reserved runtime injection variable.");
+    }
     const value = process.env[name];
     if (value !== undefined) result[name] = value;
   }
@@ -198,6 +503,9 @@ function buildEnvironment(
     }
     const allowed = new Set(config.environment.allow);
     for (const name of Object.keys(supplied).sort()) {
+      if (isReservedSandboxEnvironmentName(name)) {
+        invalid("Sandbox environment contains a reserved runtime injection variable.");
+      }
       if (!allowed.has(name)) invalid(`Sandbox environment variable ${JSON.stringify(name)} is not allowlisted.`);
       const descriptor = Object.getOwnPropertyDescriptor(supplied, name);
       if (descriptor === undefined || !("value" in descriptor)) invalid("Sandbox environment must contain only data properties.");
@@ -263,8 +571,8 @@ async function collectChild(
     child.stderr.on("data", (chunk: Buffer) => collect(stderr, chunk));
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) onAbort();
-    child.once("error", (error) => {
-      failure ??= new SandboxSrtError("execution_failed", "SRT process could not be started.", { cause: error });
+    child.once("error", () => {
+      failure ??= new SandboxSrtError("execution_failed", "SRT process could not be started.");
     });
     child.once("close", (exitCode, exitSignal) => {
       if (settled) return;
@@ -321,6 +629,10 @@ function invalid(message: string): never {
   throw new SandboxSrtError("invalid_command", message);
 }
 
-function health(status: "healthy" | "unhealthy", summary: string): ModuleHealth {
-  return Object.freeze({ status, checkedAt: new Date().toISOString(), summary });
+function health(
+  status: "healthy" | "unhealthy",
+  summary: string,
+  details: Readonly<Record<string, string | number>>,
+): ModuleHealth {
+  return Object.freeze({ status, checkedAt: new Date().toISOString(), summary, details });
 }

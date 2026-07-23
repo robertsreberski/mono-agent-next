@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAgentHost } from "../host.js";
@@ -19,6 +19,57 @@ afterEach(async () => {
 });
 
 describe("complete agent plane", () => {
+  it("fails startup before runtimes when the selected state protocol is incompatible", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtimeName = `@fixture/runtime-protocol-${suffix}`;
+    const stateName = `@fixture/state-protocol-${suffix}`;
+    const state = new MemoryStateStore();
+    let stateStarts = 0;
+    Object.defineProperty(state, "start", {
+      configurable: true,
+      value() { stateStarts += 1; },
+    });
+    Object.defineProperty(state, "execution", {
+      configurable: true,
+      value: {
+        async perform() {
+          return {
+            protocol: "mono-agent.state-execution",
+            version: 2,
+            operations: [],
+          };
+        },
+      },
+    });
+    let runtimeCreates = 0;
+    const validRuntime = runtimeController(() => completed("unused"));
+    const project = await createFixtureProject([
+      {
+        name: runtimeName,
+        kind: "runtime",
+        controller: {
+          create(context) {
+            runtimeCreates += 1;
+            return validRuntime.create(context);
+          },
+        },
+      },
+      {
+        name: stateName,
+        kind: "state",
+        controller: { create: () => state },
+      },
+    ]);
+    projects.push(project);
+    await project.writeConfig(minimalConfig(runtimeName, {
+      state: { $use: stateName },
+    }));
+
+    await expect(createAgentHost(project.configPath)).rejects.toThrow(/malformed protocol/u);
+    expect(stateStarts).toBe(0);
+    expect(runtimeCreates).toBe(0);
+  });
+
   it("publishes the exact started operator identity through owner-private state discovery", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtimeName = `@fixture/runtime-${suffix}`;
@@ -177,7 +228,6 @@ describe("complete agent plane", () => {
     const memoryName = `@fixture/memory-${suffix}`;
     const exporterName = `@fixture/exporter-${suffix}`;
     const state = new MemoryStateStore();
-    const records = state.records;
     const captures: unknown[] = [];
     const exports: unknown[] = [];
     const requests: Array<Record<string, unknown>> = [];
@@ -268,15 +318,16 @@ describe("complete agent plane", () => {
     expect(JSON.stringify(secondRequest.messages)).toContain("durable preference");
     expect(captures).toHaveLength(2);
     expect(exports).toHaveLength(2);
-    expect([...records.keys()].some((key) => key.startsWith("core/conversations/"))).toBe(true);
   });
 
   it("executes trigger commands once and delivers through the explicitly selected proactive channel", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtimeName = `@fixture/runtime-${suffix}`;
+    const stateName = `@fixture/state-trigger-${suffix}`;
     const triggerName = `@fixture/trigger-${suffix}`;
     const channelName = `@fixture/channel-${suffix}`;
     const deliveries: unknown[] = [];
+    const state = new MemoryStateStore();
     let turns = 0;
     const project = await createFixtureProject([
       {
@@ -286,6 +337,11 @@ describe("complete agent plane", () => {
           turns += 1;
           return completed("scheduled answer");
         }),
+      },
+      {
+        name: stateName,
+        kind: "state",
+        controller: { create: () => state },
       },
       {
         name: channelName,
@@ -339,6 +395,7 @@ describe("complete agent plane", () => {
     ]);
     projects.push(project);
     await project.writeConfig(minimalConfig(runtimeName, {
+      state: { $use: stateName },
       channels: { notify: { $use: channelName } },
       triggers: { cron: { $use: triggerName } },
     }));
@@ -361,14 +418,155 @@ describe("complete agent plane", () => {
     await host.stop();
   });
 
-  it("retries failed delivery claims and atomically reclaims stale started trigger leases", async () => {
+  it("suppresses only the exact proactive sentinel while retaining the completed run", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtimeName = `@fixture/runtime-suppression-${suffix}`;
+    const stateName = `@fixture/state-suppression-${suffix}`;
+    const triggerName = `@fixture/trigger-suppression-${suffix}`;
+    const channelName = `@fixture/channel-suppression-${suffix}`;
+    const state = new MemoryStateStore();
+    const deliveries: string[] = [];
+    let sequence = 0;
+    const project = await createFixtureProject([
+      {
+        name: runtimeName,
+        kind: "runtime",
+        controller: runtimeController((request) =>
+          completed((request as { messages: readonly { content: readonly { text?: string }[] }[] })
+            .messages.at(-1)?.content[0]?.text ?? "")),
+      },
+      {
+        name: stateName,
+        kind: "state",
+        controller: { create: () => state },
+      },
+      {
+        name: channelName,
+        kind: "channel",
+        controller: {
+          create: () => ({
+            capabilities: {
+              attachments: false,
+              liveInput: false,
+              askUser: false,
+              approvals: false,
+              proactive: true,
+              runtimeControl: false,
+              verbatim: false,
+              cancellation: false,
+            },
+            async deliver(message: { text: string; idempotencyKey: string }) {
+              deliveries.push(message.text);
+              return { status: "delivered", idempotencyKey: message.idempotencyKey };
+            },
+          }),
+        },
+      },
+      {
+        name: triggerName,
+        kind: "trigger",
+        controller: {
+          create(context: unknown) {
+            const triggerHost = (context as {
+              host: { emit(event: unknown, signal: AbortSignal): Promise<unknown> };
+            }).host;
+            return {
+              commands: [
+                {
+                  name: "cron:invoke",
+                  kind: "maintenance",
+                  description: "Exercise exact proactive suppression.",
+                  async run(input: unknown) {
+                    sequence += 1;
+                    return triggerHost.emit({
+                      id: `suppression-${sequence}`,
+                      triggerInstanceId: "cron",
+                      prompt: String(input),
+                      createdAt: new Date().toISOString(),
+                      deliveryChannel: "notify",
+                      metadata: { destination: "operator-admin" },
+                    }, new AbortController().signal);
+                  },
+                },
+                {
+                  name: "cron:repeat-suppressed",
+                  kind: "maintenance",
+                  description: "Replay the suppressed fixture event.",
+                  run: () => triggerHost.emit({
+                    id: "suppression-1",
+                    triggerInstanceId: "cron",
+                    prompt: "NOTHING_TO_REPORT",
+                    createdAt: new Date().toISOString(),
+                    deliveryChannel: "notify",
+                  }, new AbortController().signal),
+                },
+                {
+                  name: "cron:no-delivery",
+                  kind: "maintenance",
+                  description: "Exercise duplicate rejection without delivery.",
+                  run: () => triggerHost.emit({
+                    id: "no-delivery",
+                    triggerInstanceId: "cron",
+                    prompt: "ordinary report",
+                    createdAt: new Date().toISOString(),
+                  }, new AbortController().signal),
+                },
+              ],
+            };
+          },
+        },
+      },
+    ]);
+    projects.push(project);
+    await project.writeConfig(minimalConfig(runtimeName, {
+      state: { $use: stateName },
+      channels: { notify: { $use: channelName } },
+      triggers: { cron: { $use: triggerName } },
+    }));
+
+    const host = await createAgentHost(project.configPath);
+    for (const text of [
+      "NOTHING_TO_REPORT",
+      "prefix NOTHING_TO_REPORT suffix",
+      "nothing_to_report",
+      " NOTHING_TO_REPORT",
+      "NOTHING_TO_REPORT ",
+    ]) {
+      await expect(host.runModuleCommand("cron", "cron:invoke", text)).resolves.toMatchObject({
+        value: { status: "accepted" },
+      });
+    }
+    expect(deliveries).toEqual([
+      "prefix NOTHING_TO_REPORT suffix",
+      "nothing_to_report",
+      " NOTHING_TO_REPORT",
+      "NOTHING_TO_REPORT ",
+    ]);
+    await expect(host.runModuleCommand("cron", "cron:repeat-suppressed")).resolves.toMatchObject({
+      value: { status: "rejected", reason: "duplicate trigger event" },
+    });
+    await expect(host.runModuleCommand("cron", "cron:no-delivery")).resolves.toMatchObject({
+      value: { status: "accepted" },
+    });
+    await expect(host.runModuleCommand("cron", "cron:no-delivery")).resolves.toMatchObject({
+      value: { status: "rejected", reason: "duplicate trigger event" },
+    });
+    expect((await host.replay("operator-admin")).messages).toEqual([]);
+    const history = await host.listRuns();
+    expect(history.runs).toHaveLength(6);
+    const suppressed = history.runs.find(({ requestId }) => requestId === "suppression-1");
+    expect(suppressed).toMatchObject({ status: "completed" });
+    expect(JSON.stringify(await host.readRun(suppressed!.runId))).toContain("NOTHING_TO_REPORT");
+    await host.stop();
+  });
+
+  it("retries failed delivery from the cached run and preserves unknown outcomes across restart", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtimeName = `@fixture/runtime-trigger-recovery-${suffix}`;
     const stateName = `@fixture/state-trigger-recovery-${suffix}`;
     const triggerName = `@fixture/trigger-recovery-${suffix}`;
     const channelName = `@fixture/channel-trigger-recovery-${suffix}`;
     const state = new MemoryStateStore();
-    const records = state.records;
     let turns = 0;
     let deliveries = 0;
     let deliveryStatus: "delivered" | "failed" | "unknown" = "failed";
@@ -448,8 +646,6 @@ describe("complete agent plane", () => {
     await expect(host.runModuleCommand("cron", "cron:invoke", "failed-delivery")).resolves.toMatchObject({
       value: { status: "rejected", reason: "Trigger delivery ended with failed" },
     });
-    const failedKey = `core/triggers/${createHash("sha256").update("failed-delivery").digest("hex")}`;
-    expect(JSON.parse(new TextDecoder().decode(records.get(failedKey)?.value))).toMatchObject({ status: "failed" });
     deliveryStatus = "delivered";
     await expect(host.runModuleCommand("cron", "cron:invoke", "failed-delivery")).resolves.toMatchObject({
       value: { status: "accepted" },
@@ -458,40 +654,28 @@ describe("complete agent plane", () => {
     // provider turn itself remains exactly-once.
     expect(turns).toBe(1);
     expect(deliveries).toBe(2);
+    await expect(host.runModuleCommand("cron", "cron:invoke", "failed-delivery")).resolves.toMatchObject({
+      value: { status: "rejected", reason: "duplicate trigger event" },
+    });
+    expect(turns).toBe(1);
+    expect(deliveries).toBe(2);
     deliveryStatus = "unknown";
     await expect(host.runModuleCommand("cron", "cron:invoke", "unknown-delivery")).resolves.toMatchObject({
       value: { status: "rejected", reason: "Trigger delivery ended with unknown" },
-    });
-    const unknownKey = `core/triggers/${createHash("sha256").update("unknown-delivery").digest("hex")}`;
-    expect(JSON.parse(new TextDecoder().decode(records.get(unknownKey)?.value))).toMatchObject({
-      status: "delivery_unknown",
-      delivery: { status: "unknown" },
     });
     await expect(host.runModuleCommand("cron", "cron:invoke", "unknown-delivery")).resolves.toMatchObject({
       value: { status: "rejected", reason: "duplicate trigger event" },
     });
     expect(turns).toBe(2);
     expect(deliveries).toBe(3);
-    deliveryStatus = "delivered";
     await host.stop();
 
-    const staleId = "stale-started";
-    const staleKey = `core/triggers/${createHash("sha256").update(staleId).digest("hex")}`;
-    await state.write({
-      key: staleKey,
-      value: new TextEncoder().encode(JSON.stringify({
-        status: "started",
-        event: { id: staleId },
-        startedAt: "2020-01-01T00:00:00.000Z",
-        leaseExpiresAt: "2020-01-01T00:30:00.000Z",
-      })),
-      signal: new AbortController().signal,
-    });
     const restarted = await createAgentHost(project.configPath);
-    await expect(restarted.runModuleCommand("cron", "cron:invoke", staleId)).resolves.toMatchObject({
-      value: { status: "accepted" },
+    await expect(restarted.runModuleCommand("cron", "cron:invoke", "unknown-delivery")).resolves.toMatchObject({
+      value: { status: "rejected", reason: "Trigger delivery ended with unknown" },
     });
-    expect(turns).toBe(3);
+    expect(turns).toBe(2);
+    expect(deliveries).toBe(3);
     await restarted.stop();
   });
 });

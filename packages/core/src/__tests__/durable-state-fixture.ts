@@ -20,6 +20,7 @@ import type {
   StateRecord,
   StateScanRequest,
   StateScanResult,
+  StateExecution,
   StateStore,
   StateTransactionRequest,
   StateTransactionResult,
@@ -27,9 +28,17 @@ import type {
   StateWriteResult,
 } from "@mono-agent/module-sdk/internal";
 
+import { InMemoryStateExecution } from "./in-memory-state-execution.js";
+
 export class MemoryStateStore implements StateStore {
   readonly records = new Map<string, StateRecord>();
   readonly artifacts = new Map<string, Uint8Array>();
+  readonly executionFixture = new InMemoryStateExecution(this);
+  readonly execution: StateExecution = this.executionFixture;
+  shouldFailExecution: (operation: string, input: unknown) => boolean = () => false;
+  onArtifact:
+    | ((request: StatePutArtifactRequest, ref: ArtifactRef) => void)
+    | undefined;
   transactionCalls = 0;
   failNextTransaction = false;
   failTransactionAt: number | undefined;
@@ -167,13 +176,15 @@ export class MemoryStateStore implements StateStore {
     const digest = createHash("sha256").update(request.data).digest("hex");
     const id = `artifact:sha256:${digest}`;
     this.artifacts.set(id, new Uint8Array(request.data));
-    return {
+    const ref: ArtifactRef = {
       id,
       sha256: `sha256:${digest}`,
       sizeBytes: request.data.byteLength,
       mediaType: request.mediaType,
       ...(request.fileName === undefined ? {} : { fileName: request.fileName }),
     };
+    this.onArtifact?.(request, ref);
+    return ref;
   }
 
   async readArtifact(request: StateReadArtifactRequest): Promise<Uint8Array> {
@@ -208,6 +219,12 @@ export class MemoryStateStore implements StateStore {
   }
 
   async publishHostPresence(_request: StateHostPresenceRequest): Promise<void> {}
+
+  beforeExecutionOperation(operation: string, input: unknown): void {
+    if (this.shouldFailExecution(operation, input)) {
+      throw new Error("injected execution failure");
+    }
+  }
 
   #record(key: string, value: Uint8Array): StateRecord {
     this.#version += 1;

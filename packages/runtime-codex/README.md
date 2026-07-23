@@ -54,6 +54,13 @@ The runtime requires exactly `codex-cli 0.145.0`. It starts
 from a fresh non-project process directory, and fails closed on malformed or
 oversized protocol output.
 
+The selected instance exposes `codex:auth` before it starts. Its default
+`status` action reports only whether module-config API-key auth or unverified
+ambient native login was selected; it never returns credential values or
+spawns app-server. `models` and `login` return explicit unsupported results
+because there is no bounded non-serving native catalog and this command does
+not emulate interactive login.
+
 ## Architecture
 
 ### Data flow
@@ -110,6 +117,7 @@ apply the configured session-unavailable policy deterministically.
 | Source | Responsibility |
 | --- | --- |
 | `config.ts` | Strict limits and environment-secret annotation. |
+| `auth-command.ts` | Non-serving, redacted authentication status and unsupported-action results. |
 | `json-rpc.ts` | Bounded, timeout-aware, direct-process JSON-RPC client. |
 | `runtime.ts` | Codex protocol lifecycle and event normalization. |
 | `index.ts` | Typed module definition. |
@@ -120,7 +128,7 @@ apply the configured session-unavailable policy deterministically.
 
 | Export | Use it for |
 | --- | --- |
-| `monoAgentModule` | Select this runtime in a v1 runtime slot. |
+| `monoAgentModule` | Select this runtime and access its `codex:auth` command. |
 | `RuntimeCodexConfig` | Type programmatic module configuration. |
 | `RuntimeCodexError` | Inspect typed retry and side-effect metadata. |
 

@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 
 import type { JsonObject, JsonValue, MemoryRecord } from "@mono-agent/module-sdk";
 
-import type { MemoryLocalLimitsConfig } from "./config.js";
 import { MemoryLocalError } from "./errors.js";
 
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/u;
@@ -16,9 +15,17 @@ export interface ValidatedMemoryRecord {
   readonly byteSize: number;
 }
 
+export interface MemoryRecordLimits {
+  readonly maxRecords: number;
+  readonly maxTotalBytes: number;
+  readonly maxTextBytes: number;
+  readonly maxMetadataBytes: number;
+  readonly maxRecallResults: number;
+}
+
 export function validateMemoryRecord(
   input: MemoryRecord,
-  limits: MemoryLocalLimitsConfig,
+  limits: MemoryRecordLimits,
 ): ValidatedMemoryRecord {
   if (input === null || typeof input !== "object" || Array.isArray(input)) invalid("record must be an object");
   if (typeof input.id !== "string" || !IDENTIFIER.test(input.id)) invalid("record.id has an invalid identifier");

@@ -19,8 +19,9 @@ Runtime module.
 
 Own Pi model resolution, atomically persisted API-key/OAuth credentials,
 isolated native provider attempts, durably reserved resumable session forks,
-live steering, governed literal edits and web search, and translation between
-Pi events and the mono-agent runtime slot.
+live steering, governed literal edits and web search, schema-constrained
+responses, output-token bounds, and translation between Pi events and the
+mono-agent runtime slot.
 
 ## Install / Usage
 
@@ -75,9 +76,27 @@ Relative `auth.path` and `sessions.root` values resolve from the directory that
 contains the loaded agent config. The agent workspace remains the execution
 working directory for native Pi attempts.
 
-This runtime reports `approvals: true` and `sandbox: false`, both globally and
-for exact model routes. Core-owned tools still execute through Core. Three
-runtime-owned tools are advertised before provider dispatch:
+The runtime exposes one module-owned authentication command immediately after
+creation; it does not require the serving lifecycle to start:
+
+```bash
+mono-agent auth pi:auth --module primary \
+  --config ./mono-agent.config.json \
+  --input-json '{"action":"status"}'
+```
+
+`status` reads only non-secret credential metadata and the current Pi registry.
+`models` returns at most 1,024 deterministic `provider:model` references from
+that registry; `"refresh":true` is the explicit opt-in to Pi's bounded model
+refresh and is the only command path that may access provider model endpoints.
+`login` returns a stable unsupported result because module commands do not
+provide Pi's interactive `AuthInteraction` prompt surface. Command results
+never contain keys, tokens, or raw provider/storage errors.
+
+This runtime reports `approvals: true`, `structuredOutput: true`,
+`maxOutputTokens: true`, and `sandbox: false`, both globally and for exact
+model routes. Core-owned tools still execute through Core. Three runtime-owned
+tools are advertised before ordinary provider dispatch:
 
 - `NodeRepl`: `read`, `write`, `execute`, and `network`;
 - `Edit`: `read` and `write`;
@@ -110,6 +129,19 @@ routes using these native tools require `sandbox.mode: "off"`. Operators should
 treat an approved REPL call as granting the code full authority within the
 runtime process's operating-system permissions.
 
+Schema-constrained turns use a narrower execution path. When Core supplies
+`RuntimeTurnRequest.options.responseSchema`, the runtime removes `NodeRepl`,
+`Edit`, and `WebSearch` and does not require the native-tool approval callback.
+It adds one internal Pi tool whose parameters are the exact requested JSON
+schema and whose first successful call terminates the turn. That internal call
+is returned as `structuredOutput` and is not projected as a model-visible tool
+event. Core-owned request tools remain subject to Core's ordinary tool policy.
+Loose JSON text or a turn that never calls the schema tool fails closed.
+
+`RuntimeTurnRequest.options.maxOutputTokens` must be a positive safe integer.
+The runtime caps Pi's model output budget to the smaller of that value and the
+model's own maximum.
+
 ## Architecture
 
 ### Data flow
@@ -118,9 +150,10 @@ runtime process's operating-system permissions.
    instance.
 2. The runtime resolves the `provider:model` route through Pi's built-in model
    registry or an explicitly configured local provider.
-3. Core's pre-provider negotiation accepts the exact Node REPL, Edit, and
-   WebSearch authority descriptors and supplies the fail-closed approval
-   callback.
+3. For an ordinary turn, Core's pre-provider negotiation accepts the exact
+   Node REPL, Edit, and WebSearch authority descriptors and supplies the
+   fail-closed approval callback. For a schema-constrained turn, the runtime
+   suppresses those native tools and substitutes its terminating schema tool.
 4. A fresh native Pi `AgentHarness` attempt is seeded from Core's canonical
    messages, or an explicitly linked native session is forked for continuation.
 5. The harness exposes the three governed native tools. The Node.js REPL child
@@ -143,13 +176,14 @@ before model resolution or any provider request.
 
 | Source | Responsibility |
 | --- | --- |
+| `auth-command.ts` | Strict pre-start credential status, bounded model discovery, and honest login support reporting. |
 | `config.ts` | Strict runtime configuration schema and validation. |
 | `credentials.ts` | Descriptor-validated owner-private API-key/OAuth loading and identity-checked atomic refresh rotation. |
 | `edit.ts` | Bounded literal workspace editing with no-follow identity checks and atomic replacement. |
 | `models.ts` | Built-in models plus bounded, redirect-safe local-provider discovery. |
 | `node-repl.ts`, `node-repl-worker.ts` | Bounded run-scoped Node REPL child lifecycle and evaluation. |
 | `sessions.ts` | Durable owner-private reservation/commit markers and atomic fresh/forked native attempts. |
-| `runtime.ts` | Native harness lifecycle, sessions, live input, events, tools, and settlement. |
+| `runtime.ts` | Native harness lifecycle, sessions, live input, events, tools, schema-constrained output, token bounds, and settlement. |
 | `web-search.ts` | Bounded checked HTTP lifecycle and strict search-result parsing. |
 | `index.ts` | The typed `monoAgentModule` definition. |
 
@@ -192,7 +226,9 @@ It does not choose cross-runtime fallbacks, persist the canonical transcript,
 load agent configuration, run channels, install packages, own MCP processes,
 render approval interactions, implement sandboxing, or widen tool policy. Core
 retains those responsibilities. The runtime requests a correlated Core decision
-for every native-tool call and never interprets provider output as approval.
+for every runtime-owned native-tool call on an ordinary turn and never
+interprets provider output as approval. Schema-constrained turns deliberately
+remove those native tools rather than silently approving them.
 
 ## Related Documentation
 

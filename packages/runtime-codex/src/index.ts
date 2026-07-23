@@ -1,5 +1,6 @@
 import { defineRuntimeModule } from "@mono-agent/module-sdk";
 
+import { codexAuthCommands } from "./auth-command.js";
 import { parseRuntimeCodexConfig, runtimeCodexJsonSchema, type RuntimeCodexConfig } from "./config.js";
 import { validateRuntimeCodexModel } from "./model.js";
 import { createRuntimeCodex } from "./runtime.js";
@@ -19,12 +20,13 @@ export const monoAgentModule = defineRuntimeModule({
   schema: { jsonSchema: runtimeCodexJsonSchema, parse: parseRuntimeCodexConfig },
   validateModel: validateRuntimeCodexModel,
   create(context) {
-    return createRuntimeCodex({
+    const runtime = createRuntimeCodex({
       config: context.config,
       instanceId: context.instanceId,
       workspaceDirectory: context.workspaceDirectory,
       dataDirectory: context.dataDirectory,
     });
+    return { ...runtime, commands: codexAuthCommands(context.config) };
   },
 });
 

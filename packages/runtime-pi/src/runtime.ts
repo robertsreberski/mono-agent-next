@@ -49,6 +49,7 @@ import type {
   TurnMessage,
 } from "@mono-agent/module-sdk";
 
+import { createRuntimePiAuthCommands } from "./auth-command.js";
 import type { RuntimePiConfig } from "./config.js";
 import { parsePiModelReference } from "./config.js";
 import { ReadOnlyPiCredentialStore, redactRuntimePiText, resolveRuntimePiPath } from "./credentials.js";
@@ -101,6 +102,7 @@ const EMPTY_USAGE: Usage = {
 const NODE_REPL_APPROVAL_PREVIEW_MAX_BYTES = 1_024;
 const NATIVE_APPROVAL_PREVIEW_MAX_BYTES = 1_024;
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+const STRUCTURED_OUTPUT_TOOL_NAME = "mono_agent_structured_output";
 
 type RuntimeState = "created" | "running" | "draining" | "stopped";
 
@@ -356,6 +358,28 @@ function piTools(
       return { content: runtimeToolResultToPiContent(result.content), details: { runtimeResult: result } };
     },
   }));
+}
+
+function structuredOutputTool(
+  schema: Readonly<Record<string, unknown>>,
+  accept: (value: JsonValue) => void,
+): AgentTool {
+  return {
+    name: STRUCTURED_OUTPUT_TOOL_NAME,
+    label: "Structured output",
+    description:
+      "Return the final response by calling this tool exactly once with an object matching its schema.",
+    parameters: schema as TSchema,
+    executionMode: "sequential",
+    async execute(_toolCallId, params) {
+      accept(jsonValue(params));
+      return {
+        content: [{ type: "text", text: "Structured output accepted." }],
+        details: {},
+        terminate: true,
+      };
+    },
+  };
 }
 
 function boundedUtf8Prefix(
@@ -783,11 +807,11 @@ function exactCapabilities(attachments: boolean): RuntimeCapabilities {
     mcp: true,
     attachments,
     approvals: true,
-    structuredOutput: false,
+    structuredOutput: true,
     sandbox: false,
     sessions: true,
     maxTurns: true,
-    maxOutputTokens: false,
+    maxOutputTokens: true,
     artifactResults: true,
     liveInput: true,
   };
@@ -877,6 +901,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
     : resolveRuntimePiPath(options.config.sessions.root, options.configDirectory);
   const credentialStore = new ReadOnlyPiCredentialStore(authPath);
   const registry = createRuntimePiModelRegistry(options.config, credentialStore, options.models);
+  const commands = createRuntimePiAuthCommands(credentialStore, registry.models);
   const sessions = new RuntimePiSessionManager({
     cwd,
     namespace: options.instanceId,
@@ -892,16 +917,17 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
   });
 
   return {
+    commands,
     capabilities: {
       tools: true,
       mcp: true,
       attachments: false,
       approvals: true,
-      structuredOutput: false,
+      structuredOutput: true,
       sandbox: false,
       sessions: true,
       maxTurns: true,
-      maxOutputTokens: false,
+      maxOutputTokens: true,
       artifactResults: true,
       liveInput: true,
     },
@@ -989,15 +1015,11 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
     async runTurn(request: RuntimeTurnRequest, context: RuntimeTurnContext): Promise<RuntimeTurnResult> {
       if (state !== "running") throw new RuntimePiError("RUNTIME_NOT_RUNNING", `runtime-pi is ${state}`);
       if (request.signal.aborted) return { status: "cancelled" };
-      if (request.options?.responseSchema !== undefined) {
-        throw new RuntimePiError(
-          "UNSUPPORTED",
-          "runtime-pi does not support structured response schemas",
-          { retryable: false },
-        );
-      }
       assertSessionLinkage(request, options.instanceId);
-      if (context.requestApproval === undefined) {
+      if (
+        request.options?.responseSchema === undefined
+        && context.requestApproval === undefined
+      ) {
         throw new RuntimePiError(
           "UNSUPPORTED",
           "runtime-pi requires Core's approval callback for its native tools",
@@ -1005,7 +1027,9 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
         );
       }
       const nativeToolNames = new Set(runtimePiNativeTools.map((tool) => tool.id));
-      const conflict = request.tools.find((tool) => nativeToolNames.has(tool.name));
+      const conflict = request.tools.find((tool) =>
+        nativeToolNames.has(tool.name)
+        || tool.name === STRUCTURED_OUTPUT_TOOL_NAME);
       if (conflict !== undefined) {
         throw new RuntimePiError(
           "UNSUPPORTED",
@@ -1030,6 +1054,23 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
             secrets: registry.configuredSecrets,
           },
         );
+      }
+      const requestedMaxOutputTokens = request.options?.maxOutputTokens;
+      if (
+        requestedMaxOutputTokens !== undefined
+        && (!Number.isSafeInteger(requestedMaxOutputTokens) || requestedMaxOutputTokens <= 0)
+      ) {
+        throw new RuntimePiError(
+          "UNSUPPORTED",
+          "runtime-pi maxOutputTokens must be a positive safe integer",
+          { retryable: false },
+        );
+      }
+      if (requestedMaxOutputTokens !== undefined) {
+        model = {
+          ...model,
+          maxTokens: Math.min(model.maxTokens, requestedMaxOutputTokens),
+        };
       }
       const reference = parsePiModelReference(request.model);
       const prompt = finalUser(request.messages);
@@ -1067,6 +1108,8 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
 
             const toolResults = new Map<string, RuntimeToolResult>();
             const toolErrors = new Set<string>();
+            let structuredOutput: JsonValue | undefined;
+            const responseSchema = request.options?.responseSchema;
             const effort = thinkingLevel(request.options?.effort, model);
             const authoredSystemPrompt = systemPrompt(request.messages);
             const nodeRepl = createNodeReplController(cwd);
@@ -1077,7 +1120,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
               model,
               thinkingLevel: effort.level,
               ...(authoredSystemPrompt === undefined ? {} : { systemPrompt: authoredSystemPrompt }),
-              tools: [
+              tools: responseSchema === undefined ? [
                 ...piTools(
                   request.tools,
                   context,
@@ -1106,6 +1149,21 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                   request.signal,
                   () => { committedSideEffects = true; },
                 ),
+              ] : [
+                ...piTools(
+                  request.tools,
+                  context,
+                  toolResults,
+                  toolErrors,
+                  request.signal,
+                  () => { committedSideEffects = true; },
+                ),
+                structuredOutputTool(responseSchema, (value) => {
+                  if (structuredOutput !== undefined) {
+                    throw new Error("Structured output was submitted more than once.");
+                  }
+                  structuredOutput = value;
+                }),
               ],
               streamOptions: {
                 timeoutMs: options.config.retry.timeoutMs,
@@ -1159,11 +1217,13 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                 if (update.type === "text_delta") await context.emit({ type: "text-delta", delta: update.delta });
                 else if (update.type === "thinking_delta") await context.emit({ type: "thinking-delta", delta: update.delta });
               } else if (event.type === "tool_execution_start") {
+                if (event.toolName === STRUCTURED_OUTPUT_TOOL_NAME) return;
                 await context.emit({
                   type: "tool-call",
                   call: { id: event.toolCallId, name: event.toolName, input: jsonValue(event.args) },
                 });
               } else if (event.type === "tool_execution_end") {
+                if (event.toolName === STRUCTURED_OUTPUT_TOOL_NAME) return;
                 const result = toolResults.get(event.toolCallId)
                   ?? (nativeToolNames.has(event.toolName)
                     ? nativeToolExecutionResult(
@@ -1246,11 +1306,19 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                   },
                 );
               }
+              if (responseSchema !== undefined && structuredOutput === undefined) {
+                throw new RuntimePiError(
+                  "PROVIDER_FAILED",
+                  "Pi completed without the required structured output.",
+                  { committedSideEffects, retryable: false },
+                );
+              }
               return {
                 completed: true,
                 value: {
                   status: "completed",
                   message,
+                  ...(structuredOutput === undefined ? {} : { structuredOutput }),
                   usage,
                   session: linkedSession,
                   metadata: { provider: reference.provider, model: reference.model, stopReason: result.stopReason },

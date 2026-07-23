@@ -150,12 +150,28 @@ describe("project templates", () => {
     expect([...files.keys()]).not.toContain(".mono-agent/memory/.first-run-memory-initializing");
     expect(memory).toEqual({
       $use: "@mono-agent/memory-local",
-      directory: "./.mono-agent/memory",
-      capture: { mode: "direct" },
+      root: "./.mono-agent/memory",
+      maxBytes: 96_000,
+      capture: {
+        enabled: true,
+        model: { runtime: "pi", model: "openai-codex:gpt-5.4-mini" },
+        timeoutMs: 360_000,
+      },
+      embeddings: {
+        provider: "ollama",
+        endpoint: "http://127.0.0.1:11434",
+        model: "nomic-embed-text:v1.5",
+        dimensions: 768,
+      },
+      recallTool: { enabled: true },
     });
     expect(state).toMatchObject({
       $use: "@mono-agent/state-local",
       root: "./.mono-agent/state",
+      runs: {
+        artifactsDirectory: "./.mono-agent/artifacts",
+        retentionDays: 30,
+      },
       discovery: { sourceId: "personal-agent", sourceLabel: "Personal Agent" },
     });
     expect(config).toMatchObject({

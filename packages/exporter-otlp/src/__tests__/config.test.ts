@@ -35,6 +35,28 @@ describe("OTLP exporter config", () => {
     });
   });
 
+  it("keeps retained-text credential scanning explicit and disabled by default", () => {
+    const defaults = parseOtlpExporterConfig({
+      endpoint: "https://collector.example/v1/traces",
+      projectName: "test",
+    });
+    expect(defaults).toMatchObject({
+      includeSensitiveData: false,
+      contentPatternRedaction: false,
+    });
+
+    expect(parseOtlpExporterConfig({
+      endpoint: "https://collector.example/v1/traces",
+      projectName: "test",
+      contentPatternRedaction: true,
+    }).contentPatternRedaction).toBe(true);
+    expect(() => parseOtlpExporterConfig({
+      endpoint: "https://collector.example/v1/traces",
+      projectName: "test",
+      contentPatternRedaction: "yes",
+    })).toThrow(/contentPatternRedaction/u);
+  });
+
   it.each([
     "http://localhost:4318/v1/traces",
     "http://192.168.1.5:4318/v1/traces",

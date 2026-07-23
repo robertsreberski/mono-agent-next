@@ -20,8 +20,8 @@ First-party reserved state module in the execution layer.
 Own the local `StateStore` implementation: atomic records, exact compare-and-swap
 (CAS), bounded multi-key transactions, deterministic list and forward-scan
 cursors, a live process lease, corruption detection, and optional lifecycle
-presence publication. The on-disk directory and every file are private to the
-current operating-system owner.
+presence publication, plus bounded package-owned maintenance. The on-disk
+directory and every file are private to the current operating-system owner.
 
 ## Install / Usage
 
@@ -40,6 +40,10 @@ pnpm add @mono-agent/state-local
     "maxRecordBytes": 1048576,
     "maxRecords": 100000,
     "maxTotalBytes": 67108864,
+    "runs": {
+      "artifactsDirectory": "./.mono-agent/artifacts",
+      "retentionDays": 30
+    },
     "discovery": {
       "registryDirectory": "./.mono-agent/trace-sources",
       "sourceId": "personal-agent",
@@ -83,6 +87,49 @@ mode `0600`. Existing paths with different owners, modes, link counts, types,
 or device/inode identities are rejected. After an uncertain commit or
 path-identity change, the instance is poisoned and must be closed and reopened.
 
+`StateLocalStore.maintain()` and the `state-local:maintain` module command run a
+bounded pass over package-owned state. The pass removes expired hidden presence
+records and unpublished artifact reservations older than
+`runs.retentionDays`. `dryRun` reports the same bounded candidates without
+mutation. Published content-addressed blobs, legacy unindexed blobs, Core run
+records, and delivery-idempotency records are never inferred to be unreferenced
+or deleted by this command.
+
+Selected-module diagnostics are non-serving and read-only. They verify the
+existing owner-private path identities, writer lease, and exact state-execution
+protocol without starting the module, publishing presence, or running
+maintenance. Closed, poisoned, unsafe, or incompatible state produces a fixed
+bounded error without paths, record bytes, or underlying failure text.
+
+### Durable operations
+
+- **Ownership and schema:** the state snapshot uses
+  `mono-agent.state-local.v1`. Artifact index rows written by the maintenance
+  implementation use schema version 2; legacy published rows remain readable
+  but deliberately receive no deletion authority.
+- **Atomicity and idempotency:** record changes use the descriptor-bound
+  transactional index and exact versions. Artifact publication first commits a
+  reservation, then descriptor identity, then published status. Repeating
+  maintenance after a crash resumes an exact removal claim or observes an
+  already removed reservation.
+- **Retention:** `retentionDays` applies only to unpublished, package-proven
+  artifact reservations. Core owns terminal run/index/reference retirement and
+  must release those records before any future referenced-artifact collection.
+  Expired ephemeral presence can be removed independently.
+- **Backup and restore:** stop the store and copy the complete state root and
+  configured artifacts directory as one set. Restore both directories with
+  their exact owner-only modes before reopening. The discovery descriptor is a
+  repairable cache; the transactional publication record remains in the state
+  root.
+- **Reset and purge:** there is no in-process delete-all operation. Stop the
+  store, audit or export required records, and move the complete state and
+  artifacts directories aside together before creating a fresh pair. Deleting
+  only one directory creates corruption, not a partial reset.
+- **Corruption and redaction:** malformed, oversized, insecure, aliased,
+  identity-swapped, or incomplete published data fails closed and is preserved
+  for inspection. Record and artifact bytes are opaque and never included in
+  health summaries or maintenance results.
+
 ## Architecture
 
 ### Data flow
@@ -115,20 +162,39 @@ path-identity change, the instance is poisoned and must be closed and reopened.
    A transactional checksum/generation record is authoritative; the public
    fixed-size descriptor is updated through a pinned single-link inode and repaired
    after a torn write without renaming or clobbering a replacement pathname.
-8. Artifact bytes are fsynced under immutable random blob names before their
-   digest metadata is committed to a transactional index. Readers and listings
-   expose only indexed blobs and rehash them; bounded crash orphans remain
-   private and unaddressable.
+8. Artifact publication durably reserves a random blob name and digest before
+   creation, records the created descriptor identity, then promotes the row to
+   published only after the bytes are fsynced and rehashed. Readers and listings
+   expose only published rows.
+9. Maintenance can remove only expired unpublished reservations with durable
+   provenance. It first commits a random removal claim, moves and re-verifies
+   the exact inode, unlinks it, syncs the directory, and commits a tombstone.
+   A crash at any boundary is resumable. Older unindexed crash blobs and all
+   published blobs remain private and untouched.
+10. The package-owned `mono-agent.state-execution` protocol implements the
+    physical transcript, conversation, run, admission, session, artifact
+    intent, and delivery-idempotency formats. Core consumes only bounded opaque
+    operations and never reads those records directly.
+11. Diagnostics recheck existing path and lease guards plus the package-owned
+    execution protocol identity. They do not start lifecycle services, publish
+    discovery, mutate durable state, or expose raw failures.
 
 ### Package structure
 
 | Source | Responsibility |
 | --- | --- |
 | `config.ts` | Strict bounded module config and config-directory path resolution. |
+| `artifacts.ts` | Content-addressed publication reservations, reads, listings, and crash-recoverable unpublished retention. |
+| `execution.ts` | Strict versioned dispatch for the opaque state-execution protocol. |
+| `execution-types.ts` | Package-private execution input, record, and result contracts. |
+| `execution-store.ts` | Bounded typed record/transaction adapter over the local state store. |
+| `execution-transcript.ts` | Canonical transcript and conversation persistence owned by state-local. |
+| `execution-journal.ts` | Run admission/events/settlement, sessions, artifact intents, and delivery idempotency. |
+| `maintenance.ts` | Strict bounded maintenance request/command contracts and result counters. |
 | `secure-fs.ts` | Owner/mode/link checks, no-follow reads, pinned framed index log, reserved-sidecar checks, and process lease. |
 | `snapshot.ts` | Canonical snapshot validation, serialization, keys, versions, and record copies. |
 | `presence.ts` | Private lifecycle heartbeat descriptors. |
-| `store.ts` | Linearized StateStore operations, CAS, pagination, poisoning, and lifecycle. |
+| `store.ts` | Linearized StateStore operations, CAS, pagination, poisoning, non-serving diagnostics, and lifecycle. |
 | `index.ts` | The typed reserved `monoAgentModule` definition. |
 
 ## Public API
@@ -139,7 +205,9 @@ path-identity change, the instance is poisoned and must be closed and reopened.
 | --- | --- |
 | `monoAgentModule` | Select this package in the reserved v1 state slot. |
 | `StateLocalConfig` | Type programmatic state module configuration. |
-| `StateLocalStore` | Use the concrete store when explicit presence publication is required. |
+| `StateLocalStore` | Use the concrete store for explicit presence publication or bounded maintenance. |
+| `StateLocalMaintenanceRequest` | Configure a bounded direct maintenance pass. |
+| `StateLocalMaintenanceResult` | Inspect exact presence/orphan candidate and removal counters. |
 | `StateLocalError` | Branch on stable fail-closed state error codes. |
 
 <!-- public-api-inventory:start -->
@@ -161,6 +229,8 @@ StateLocalConfigError
 StateLocalDiscoveryConfig
 StateLocalError
 StateLocalErrorCode
+StateLocalMaintenanceRequest
+StateLocalMaintenanceResult
 StateLocalRunsConfig
 StateLocalStore
 StateLocalStoreHooks
@@ -187,10 +257,14 @@ or third-party storage libraries.
 
 ## What This Package Does Not Own
 
-It does not decide transcript, run, delivery, or idempotency key shapes; Core
-maps those domains into the generic state contract. It does not retain run
-artifacts outside that contract, choose retention policy, discover remote
-agents, serve operator endpoints, load configuration, or migrate v0 data.
+It owns the physical transcript, run, admission, session, artifact-intent, and
+delivery-idempotency formats behind its versioned opaque protocol. It does not
+choose runtime routes, decide fallback or interaction semantics, infer that a
+published artifact is unreferenced, discover remote agents, serve operator
+endpoints, load the agent envelope, or import v0 state. Core remains responsible
+for semantic admission and settlement decisions, cursor-paged public run
+history, memory-run separation, and safe release policy; Core must not read or
+write state-local's package-private records directly.
 
 ## Related Documentation
 
@@ -211,9 +285,12 @@ The focused suite covers CAS and multi-key transaction conflicts, all-or-none
 transaction restart recovery, long escaped-key snapshot reopening,
 prefix-bound forward scans, strict hostile typed-array input, persistence,
 crash/post-check recovery,
-immutable artifact publication and rehashing, bounded invisible artifact
-orphans, torn presence-cache repair, operator-replacement preservation, generic
-and presence corruption preservation, duplicate writer exclusion,
-exact/create-only CAS, hidden presence expiry and instance-safe removal,
-deterministic cursors, owner-private modes, symlink and hard-link rejection, and
-final directory/index device-inode swaps.
+immutable artifact publication and rehashing, reservation and removal-claim
+crash recovery, dry-run/retention bounds, published and legacy-byte
+preservation, torn presence-cache repair, expired-presence maintenance,
+operator-replacement preservation, generic and presence corruption
+preservation, duplicate writer exclusion, exact/create-only CAS, hidden
+presence expiry and instance-safe removal, deterministic cursors, owner-private
+modes, symlink and hard-link rejection, final directory/index device-inode
+swaps, and redacted diagnostics over path, lease, and execution protocol
+identity.
