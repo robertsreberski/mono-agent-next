@@ -2,17 +2,12 @@ import { createHash } from "node:crypto";
 
 import type {
   ChannelSendTool,
-  ChannelDeliveryResult,
-  ChannelOutboundMessage,
   JsonSchema,
   JsonValue,
 } from "@mono-agent/module-sdk";
 
 import type { TelegramConfig } from "./config.js";
-import {
-  parseTelegramChatId,
-  telegramConversationId,
-} from "./destination.js";
+import { parseTelegramChatId } from "./destination.js";
 
 const MAX_TELEGRAM_MESSAGE_CHARACTERS = 4_096;
 const MAX_TELEGRAM_CAPTION_CHARACTERS = 1_024;
@@ -88,12 +83,6 @@ export function createTelegramSendTools(
             : { metadata: { telegram: { replyOptions: options } } }),
         };
       },
-      historyConversationId(
-        message: ChannelOutboundMessage,
-        result: ChannelDeliveryResult,
-      ) {
-        return confirmedTelegramDestination(message, result);
-      },
     } satisfies ChannelSendTool),
     Object.freeze({
       name: "TelegramSendFile",
@@ -162,31 +151,8 @@ export function createTelegramSendTools(
             : { metadata: { telegram: { attachmentCaption: caption } } }),
         };
       },
-      historyConversationId(
-        message: ChannelOutboundMessage,
-        result: ChannelDeliveryResult,
-      ) {
-        return confirmedTelegramDestination(message, result);
-      },
     } satisfies ChannelSendTool),
   ]);
-}
-
-function confirmedTelegramDestination(
-  message: ChannelOutboundMessage,
-  result: ChannelDeliveryResult,
-): string {
-  if (result.status !== "delivered" && result.status !== "duplicate") {
-    throw new TypeError("Telegram destination history requires confirmed delivery.");
-  }
-  if (!message.conversationId.startsWith("telegram:")) {
-    throw new TypeError("Telegram destination history requires a Telegram conversation.");
-  }
-  const chatId = parseTelegramChatId(
-    message.conversationId.slice("telegram:".length),
-    "chat_id",
-  );
-  return telegramConversationId(chatId);
 }
 
 function record(

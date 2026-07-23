@@ -1,12 +1,9 @@
 import type {
   ChannelSendTool,
-  ChannelDeliveryResult,
-  ChannelOutboundMessage,
   JsonValue,
 } from "@mono-agent/module-sdk";
 
 import {
-  parseSlackDestination,
   parseSlackIdentifier,
 } from "./destination.js";
 
@@ -51,34 +48,8 @@ export function createSlackSendTools(): readonly ChannelSendTool[] {
           text,
         };
       },
-      historyConversationId(
-        message: ChannelOutboundMessage,
-        result: ChannelDeliveryResult,
-      ) {
-        if (result.status !== "delivered" && result.status !== "duplicate") {
-          throw new TypeError("Slack destination history requires confirmed delivery.");
-        }
-        const destination = exactDestination(message.conversationId);
-        if (destination.threadId !== undefined) {
-          return message.conversationId;
-        }
-        const messageId = parseSlackIdentifier(result.messageId, "confirmed message id");
-        return `slack:${destination.channelId}:${messageId}`;
-      },
     } satisfies ChannelSendTool),
   ]);
-}
-
-function exactDestination(
-  conversationId: string,
-): { readonly channelId: string; readonly threadId?: string } {
-  if (!conversationId.startsWith("slack:")) {
-    throw new TypeError("Slack destination history requires a Slack conversation.");
-  }
-  return parseSlackDestination(
-    conversationId.slice("slack:".length),
-    "Slack destination history",
-  );
 }
 
 function record(

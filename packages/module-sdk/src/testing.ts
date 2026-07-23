@@ -124,9 +124,12 @@ export function assertChannelInstanceCompliance(value: unknown): asserts value i
   assertOptionalFunction(instance.deliver, "channel instance deliver");
   assertOptionalFunction(instance.resolveDefaultDeliveryConversationId,
     "channel instance resolveDefaultDeliveryConversationId");
+  assertOptionalFunction(instance.resolveDeliveryHistory, "channel instance resolveDeliveryHistory");
   const sendTools = assertChannelSendTools(readOwnDataProperty(instance, "sendTools", "channel instance"));
   if (capabilities.proactive !== (typeof instance.deliver === "function"))
     fail("channel proactive capability and deliver function must match");
+  if (capabilities.proactive !== (typeof instance.resolveDeliveryHistory === "function"))
+    fail("channel proactive capability and resolveDeliveryHistory function must match");
   if (sendTools > 0 && capabilities.proactive !== true)
     fail("channel sendTools require proactive capability and delivery");
 }
@@ -180,7 +183,7 @@ function assertChannelSendTools(value: unknown): number {
       tool, "inputSchema", `channel instance sendTools[${index}]`, true,
     ), `channel instance sendTools[${index}].inputSchema`);
     assertSchemaGraph(schema);
-    for (const method of ["prepare", "historyConversationId"] as const) if (typeof readOwnDataProperty(
+    for (const method of ["prepare"] as const) if (typeof readOwnDataProperty(
       tool, method, `channel instance sendTools[${index}]`, true,
     ) !== "function") fail(`channel instance sendTools[${index}].${method} must be a function`);
   }

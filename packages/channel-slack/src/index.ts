@@ -10,7 +10,7 @@ import {
   slackConfigSchema,
 } from "./config.js";
 import { SlackDelivery } from "./delivery.js";
-import { parseSlackDestination, slackConversationId } from "./destination.js";
+import { parseSlackDestination, parseSlackIdentifier, slackConversationId } from "./destination.js";
 import { SlackInbox } from "./inbox.js";
 import {
   createSlackSendTools,
@@ -463,6 +463,21 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
           context.config.defaultDestination,
           "Slack default destination",
         ));
+    },
+    resolveDeliveryHistory(message, result) {
+      if (!message.conversationId.startsWith("slack:")) {
+        throw new TypeError("Slack delivery history requires a Slack conversation.");
+      }
+      const destination = parseSlackDestination(
+        message.conversationId.slice("slack:".length),
+        "Slack delivery history",
+      );
+      return {
+        conversationId: slackConversationId(destination.threadId === undefined
+          ? { channelId: destination.channelId,
+              threadId: parseSlackIdentifier(result.messageId, "confirmed message id") }
+          : destination),
+      };
     },
     get running() { return running; },
     async start(startContext) {

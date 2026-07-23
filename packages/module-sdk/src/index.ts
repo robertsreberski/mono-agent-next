@@ -920,6 +920,7 @@ export interface RuntimeModuleDefinition<TConfig = unknown, TInstance extends Ru
 }
 export interface ChannelAttachment extends NormalizedAttachment {}
 export interface ChannelActor { readonly id: string; readonly displayName?: string; }
+export interface ChannelCompletionDelivery { readonly channel: string; readonly destination?: string; }
 export interface ChannelInboundRequest {
   readonly requestId: string;
   readonly conversationId: string;
@@ -931,6 +932,7 @@ export interface ChannelInboundRequest {
   readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
+  readonly completionDelivery?: ChannelCompletionDelivery;
   readonly signal: AbortSignal;
   readonly metadata?: JsonObject;
 }
@@ -1033,8 +1035,6 @@ export interface ChannelSendToolContext {
 }
 export interface ChannelSendTool extends RuntimeToolDefinition {
   prepare(input: JsonValue, context: ChannelSendToolContext): Awaitable<Omit<ChannelOutboundMessage, "idempotencyKey">>;
-  /** Resolve history after confirmed delivery; the id must be at most 4,096 UTF-8 bytes. */
-  historyConversationId(message: ChannelOutboundMessage, result: ChannelDeliveryResult): string;
 }
 export interface ChannelCapabilities {
   readonly attachments: boolean;
@@ -1053,6 +1053,10 @@ export interface Channel extends ModuleInstance {
   readonly sendTools?: readonly ChannelSendTool[];
   /** Canonicalize an explicitly requested adapter-owned default before durable delivery admission. */
   resolveDefaultDeliveryConversationId?(): string | undefined;
+  /** Resolve the canonical history projection after confirmed delivery. */
+  resolveDeliveryHistory?(message: ChannelOutboundMessage, result: ChannelDeliveryResult): {
+    /** Canonical destination conversation of at most 4,096 UTF-8 bytes. */ readonly conversationId: string;
+  };
   /**
    * Returns a bounded JSON discovery fragment after start. Core combines
    * fragments by top-level key and publishes them through an optional state

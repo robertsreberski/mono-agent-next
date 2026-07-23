@@ -313,7 +313,7 @@ describe("durable proactive delivery", () => {
     expect(plainSends).toBe(0);
   });
 
-  it("never confirms an adapter delivery when durable settlement returns conflict", async () => {
+  it("never confirms an adapter delivery when atomic history settlement returns conflict", async () => {
     let sends = 0;
     const fixture = await createDurableDeliveryFixture({
       notify: async (message) => {
@@ -322,12 +322,12 @@ describe("durable proactive delivery", () => {
       },
     });
     fixture.state.mapExecutionResult = (operation, _input, result) =>
-      operation === "delivery.settle" ? { status: "conflict" } : result;
+      operation === "delivery.settle-with-history" ? { status: "conflict" } : result;
     const host = await fixture.start();
     await expect(host.deliver("notify", outboundMessage("settlement-conflict", "hello")))
       .resolves.toMatchObject({
         status: "unknown",
-        diagnostic: { code: "channel_delivery_settlement_unknown" },
+        diagnostic: { code: "channel_delivery_history_unknown" },
       });
     expect(sends).toBe(1);
   });
@@ -423,6 +423,9 @@ async function createDurableDeliveryFixture(
             ...(resolveDefaultDeliveryConversationId === undefined
               ? {}
               : { resolveDefaultDeliveryConversationId }),
+            resolveDeliveryHistory: (message: ChannelOutboundMessage) => ({
+              conversationId: message.conversationId,
+            }),
             deliver: handler,
           }),
         },

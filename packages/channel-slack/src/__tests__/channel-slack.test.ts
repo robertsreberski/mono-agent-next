@@ -130,35 +130,39 @@ describe("slack channel", () => {
       channelId: "C1",
       text: "Scheduled digest",
     }));
-    expect(tool.historyConversationId(
+    expect(channel.resolveDeliveryHistory?.(
       { ...topLevel, idempotencyKey: "tool-top-level" },
       result,
-    )).toBe("slack:C1:1712345678.000100");
+    )).toEqual({
+      conversationId: "slack:C1:1712345678.000100",
+    });
 
     const threaded = await tool.prepare({
       channel: "C1",
       thread_ts: "1700000000.000001",
       text: "Thread reply",
     }, { ...toolContext, callId: "call-2" });
-    expect(tool.historyConversationId(
+    expect(channel.resolveDeliveryHistory?.(
       { ...threaded, idempotencyKey: "tool-thread" },
       result,
-    )).toBe("slack:C1:1700000000.000001");
-    expect(() => tool.historyConversationId(
+    )).toEqual({
+      conversationId: "slack:C1:1700000000.000001",
+    });
+    expect(() => channel.resolveDeliveryHistory?.(
       { ...topLevel, idempotencyKey: "tool-unknown" },
       {
         status: "unknown",
         idempotencyKey: "tool-unknown",
       },
-    )).toThrow(/confirmed delivery/u);
-    expect(() => tool.historyConversationId(
+    )).toThrow(/confirmed message id/u);
+    expect(() => channel.resolveDeliveryHistory?.(
       { ...topLevel, idempotencyKey: "tool-no-receipt" },
       {
         status: "delivered",
         idempotencyKey: "tool-no-receipt",
       },
     )).toThrow(/confirmed message id/u);
-    expect(() => tool.historyConversationId(
+    expect(() => channel.resolveDeliveryHistory?.(
       { ...topLevel, idempotencyKey: "tool-bad-receipt" },
       {
         status: "delivered",

@@ -16,6 +16,7 @@ minimumReleaseAge: 0
 # Security floors for production transitive ranges. Keep these exact so the
 # advisory gate and every packed consumer resolve the reviewed fixed versions.
 overrides:
+  brace-expansion: 5.0.8
   fast-uri: 3.1.4
   protobufjs: 7.6.5
   sharp: 0.35.3

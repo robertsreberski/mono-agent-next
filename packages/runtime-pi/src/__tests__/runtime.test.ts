@@ -183,6 +183,26 @@ describe("Pi-native runtime module", () => {
     await stop(runtime);
   });
 
+  it("keeps provider-native tool order aligned with preflight authority", async () => {
+    const { runtime, faux } = fauxRuntime();
+    let providerToolNames: string[] = [];
+    faux.setResponses([
+      (context) => {
+        providerToolNames = context.tools?.map((tool) => tool.name) ?? [];
+        return fauxAssistantMessage([fauxText("ordered")]);
+      },
+    ]);
+    await start(runtime);
+    const preflight = await runtime.preflightModel?.({
+      model: "faux:faux-model",
+      signal: abortSignal(),
+    });
+    await expect(runtime.runTurn(request("tool order"), turnContext().context))
+      .resolves.toMatchObject({ status: "completed" });
+    expect(providerToolNames).toEqual(preflight?.nativeTools?.map((tool) => tool.id));
+    await stop(runtime);
+  });
+
   it("delegates Pi tool calls through the host context and emits normalized tool events", async () => {
     const { runtime, faux } = fauxRuntime();
     faux.setResponses([
@@ -724,9 +744,45 @@ describe("Pi-native runtime module", () => {
         approval: "core-callback",
         sandbox: "unsupported",
       }, {
+        id: "Read",
+        displayName: "Read",
+        effects: ["read"],
+        approval: "core-callback",
+        sandbox: "unsupported",
+      }, {
+        id: "Write",
+        displayName: "Write",
+        effects: ["write"],
+        approval: "core-callback",
+        sandbox: "unsupported",
+      }, {
         id: "Edit",
         displayName: "Edit",
         effects: ["read", "write"],
+        approval: "core-callback",
+        sandbox: "unsupported",
+      }, {
+        id: "Glob",
+        displayName: "Glob",
+        effects: ["read"],
+        approval: "core-callback",
+        sandbox: "unsupported",
+      }, {
+        id: "Grep",
+        displayName: "Grep",
+        effects: ["read", "write", "execute", "network"],
+        approval: "core-callback",
+        sandbox: "unsupported",
+      }, {
+        id: "Bash",
+        displayName: "Bash",
+        effects: ["read", "write", "execute", "network"],
+        approval: "core-callback",
+        sandbox: "unsupported",
+      }, {
+        id: "WebFetch",
+        displayName: "Web Fetch",
+        effects: ["network"],
         approval: "core-callback",
         sandbox: "unsupported",
       }, {

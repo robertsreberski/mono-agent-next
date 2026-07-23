@@ -83,7 +83,7 @@ describe("channel kernel", () => {
     await expect(createAgentHost(reserved.configPath)).rejects.toThrow(/RunHistory conflicts/u);
   });
 
-  it("governs send tools and retries an atomic post-commit response loss without resending", async () => {
+  it("atomically records an operator-style empty open through post-commit loss and restart", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtime = `@fixture/runtime-channel-history-${suffix}`;
     const stateName = `@fixture/state-channel-history-${suffix}`;
@@ -91,6 +91,9 @@ describe("channel kernel", () => {
     const state = new MemoryStateStore();
     let sends = 0;
     let results: unknown[] = [];
+    let delivered: ChannelOutboundMessage | undefined;
+    let destination: string | undefined;
+    const openRequests: unknown[] = [];
     const project = await tracked([
       {
         name: runtime, kind: "runtime",
@@ -108,10 +111,32 @@ describe("channel kernel", () => {
       { name: stateName, kind: "state", controller: { create: () => state } },
       {
         name: channelName, kind: "channel",
-        controller: { create: () => channel([sendTool("ChannelSend", "destination")], async (message) => {
-          sends += 1;
-          return { status: "delivered", idempotencyKey: message.idempotencyKey, messageId: "message-1" };
-        }) },
+        controller: { create(context) {
+          const openConversation = method(methodRecord(context, "channel context").host, "openConversation");
+          return {
+            ...channel([sendTool("ChannelSend", "operator:new-conversation")], async (message, signal) => {
+              sends += 1;
+              delivered = message;
+              const request = {
+                metadata: { source: "operator-proactive", idempotencyKey: message.idempotencyKey },
+                signal,
+              };
+              openRequests.push(request);
+              const opened = await openConversation(request) as { conversationId: string };
+              destination = opened.conversationId;
+              return {
+                status: "delivered",
+                idempotencyKey: message.idempotencyKey,
+                messageId: opened.conversationId,
+              };
+            }),
+            resolveDefaultDeliveryConversationId: () => "operator:new-conversation",
+            resolveDeliveryHistory(_message: ChannelOutboundMessage, result: { messageId?: string }) {
+              if (result.messageId === undefined) throw new Error("missing opened conversation");
+              return { conversationId: result.messageId };
+            },
+          };
+        } },
       },
     ]);
     await project.writeConfig(minimalConfig(runtime, {
@@ -138,15 +163,25 @@ describe("channel kernel", () => {
       requestId: "history-request", conversationId: "producer", text: "go", interactionHandler: handler,
     });
     expect(sends).toBe(1);
+    expect(openRequests).toHaveLength(1);
+    expect(openRequests[0]).not.toHaveProperty("initialText");
     expect(approvals).toEqual(["ChannelSend"]);
     expect(results[0]).not.toHaveProperty("isError");
-    expect((await host.replay("destination")).messages).toEqual([
+    expect((await host.replay(destination!)).messages).toEqual([
       expect.objectContaining({ role: "assistant", content: [{ type: "text", text: "hello" }] }),
     ]);
     await host.stop();
     hosts.splice(hosts.indexOf(host), 1);
     const restarted = await started(project);
-    expect((await restarted.replay("destination")).messages).toHaveLength(1);
+    await expect(restarted.deliver("notify", delivered!)).resolves.toMatchObject({
+      status: "duplicate",
+      messageId: destination,
+    });
+    expect(sends).toBe(1);
+    expect(openRequests).toHaveLength(1);
+    expect((await restarted.replay(destination!)).messages).toEqual([
+      expect.objectContaining({ role: "assistant", content: [{ type: "text", text: "hello" }] }),
+    ]);
   });
 
   it("keeps an unknown delivery sticky and blocks later same-turn send effects", async () => {
@@ -477,7 +512,6 @@ describe("channel kernel", () => {
         controller: { create: () => channel([{
           ...sendTool("ChannelSend", "unused"),
           prepare: () => ({ conversationId: destination, text: "hello" }),
-          historyConversationId: (message: ChannelOutboundMessage) => message.conversationId,
         }], async (message) => {
           sends += 1;
           return { status: "delivered", idempotencyKey: message.idempotencyKey };
@@ -628,7 +662,14 @@ function channel(
     status: "delivered", idempotencyKey: message.idempotencyKey, messageId: "message",
   }),
 ): Channel {
-  return { capabilities: channelCapabilities, sendTools: sendTools as NonNullable<Channel["sendTools"]>, deliver };
+  return {
+    capabilities: channelCapabilities,
+    sendTools: sendTools as NonNullable<Channel["sendTools"]>,
+    resolveDeliveryHistory: (message) => ({
+      conversationId: message.conversationId,
+    }),
+    deliver,
+  };
 }
 
 function sendTool(name: string, destination: string) {
@@ -639,7 +680,6 @@ function sendTool(name: string, destination: string) {
       return { conversationId: destination,
         text: isRecord(input) && typeof input.text === "string" ? input.text : "hello" };
     },
-    historyConversationId() { return destination; },
   };
 }
 

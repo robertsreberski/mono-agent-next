@@ -3,6 +3,7 @@ import { lstat, open, readdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 
 import { parseDocument } from "yaml";
+import type { ChannelCompletionDelivery } from "@mono-agent/module-sdk";
 
 import {
   MAX_RUN_MS,
@@ -23,6 +24,7 @@ export interface WebhookRoute {
   readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
+  readonly notify?: ChannelCompletionDelivery;
   readonly maxRunMs?: number;
   readonly source: string;
 }
@@ -36,6 +38,7 @@ const ROUTE_KEYS = new Set([
   "runtime",
   "model",
   "effort",
+  "notify",
   "maxRunMs",
 ]);
 
@@ -124,6 +127,7 @@ export function parseWebhookRouteMarkdown(
   const runtime = optionalString(metadata.runtime, `${fileName} runtime`);
   const model = optionalString(metadata.model, `${fileName} model`);
   const effort = optionalString(metadata.effort, `${fileName} effort`);
+  const notify = parseWebhookNotify(metadata.notify, `${fileName} notify`);
   const maxRunMs = optionalInteger(metadata.maxRunMs, `${fileName} maxRunMs`, 1, MAX_RUN_MS);
   if (!enabled) return undefined;
   return Object.freeze({
@@ -134,8 +138,26 @@ export function parseWebhookRouteMarkdown(
     ...(runtime === undefined ? {} : { runtime }),
     ...(model === undefined ? {} : { model }),
     ...(effort === undefined ? {} : { effort }),
+    ...(notify === undefined ? {} : { notify }),
     ...(maxRunMs === undefined ? {} : { maxRunMs }),
     source: fileName,
+  });
+}
+
+export function parseWebhookNotify(
+  value: unknown,
+  label = "notify",
+): ChannelCompletionDelivery | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "string") return Object.freeze({ channel: string(value, label) });
+  const input = record(value, label);
+  exact(input, new Set(["channel", "destination"]), label);
+  const destination = input.destination === undefined
+    ? undefined
+    : string(input.destination, `${label}.destination`, 4_096);
+  return Object.freeze({
+    channel: string(input.channel, `${label}.channel`),
+    ...(destination === undefined ? {} : { destination }),
   });
 }
 
@@ -183,7 +205,7 @@ function exact(value: Record<string, unknown>, keys: ReadonlySet<string>, label:
 function string(value: unknown, label: string, max = 512): string {
   if (typeof value !== "string"
     || value.length === 0
-    || value.length > max
+    || Buffer.byteLength(value, "utf8") > max
     || value !== value.trim()
     || /[\u0000-\u001f\u007f]/u.test(value)) {
     throw new WebhookConfigError(`${label} must be a non-empty bounded string without surrounding whitespace.`);

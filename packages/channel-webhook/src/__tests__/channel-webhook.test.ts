@@ -37,7 +37,11 @@ import {
 } from "../server.js";
 import { monoAgentModule, type WebhookModuleChannel } from "../index.js";
 import { WebhookDelivery } from "../delivery.js";
-import { loadWebhookRoutesFromDirectory, parseWebhookRouteMarkdown } from "../routes.js";
+import {
+  loadWebhookRoutesFromDirectory,
+  parseWebhookNotify,
+  parseWebhookRouteMarkdown,
+} from "../routes.js";
 
 const channels = new Set<WebhookChannel>();
 const moduleChannels = new Set<WebhookModuleChannel>();
@@ -382,6 +386,133 @@ describe("webhook HTTP channel", () => {
       abortSignal: expect.any(AbortSignal),
     }));
     expect(channel.health()).toMatchObject({ status: "healthy", activeRequests: 0 });
+  });
+
+  it("collapses concurrent and sequential sync Idempotency-Key retries and conflicts on changed bodies", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const submit = vi.fn<WebhookSubmit>(async () => {
+      await gate;
+      return { text: "idempotent result" };
+    });
+    const { info } = await startChannel({}, submit);
+    const headers = { "idempotency-key": "sync-operation-1" };
+    const first = invoke(info.invokeUrl, { text: "same bytes" }, TEST_API_KEY, headers);
+    const concurrent = invoke(info.invokeUrl, { text: "same bytes" }, TEST_API_KEY, headers);
+    await vi.waitFor(() => expect(submit).toHaveBeenCalledOnce());
+    release();
+    const responses = await Promise.all([first, concurrent]);
+    const bodies = await Promise.all(responses.map(async (response) => response.json())) as Array<{
+      requestId: string;
+    }>;
+    expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+    expect(bodies[1]?.requestId).toBe(bodies[0]?.requestId);
+
+    const sequential = await invoke(
+      info.invokeUrl,
+      { text: "same bytes" },
+      TEST_API_KEY,
+      headers,
+    );
+    expect((await sequential.json() as { requestId: string }).requestId).toBe(bodies[0]?.requestId);
+    const conflict = await invoke(
+      info.invokeUrl,
+      { text: "different bytes" },
+      TEST_API_KEY,
+      headers,
+    );
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({
+      error: { code: "idempotency_conflict" },
+    });
+    expect(submit).toHaveBeenCalledOnce();
+  });
+
+  it("keeps route-local Idempotency-Key authority and preserves random behavior without the header", async () => {
+    const submit = vi.fn<WebhookSubmit>(async () => ({ text: "done" }));
+    const config = parseWebhookConfig({ apiKey: TEST_API_KEY });
+    const channel = createWebhookChannel({
+      config,
+      submit,
+      requestIdNamespace: "webhook-instance",
+      routes: [
+        { name: "one", path: "/one", mode: "sync", prompt: "", source: "one.md" },
+        { name: "two", path: "/two", mode: "sync", prompt: "", source: "two.md" },
+      ],
+    });
+    channels.add(channel);
+    const info = await channel.start();
+    const headers = { "idempotency-key": "shared-key" };
+    const first = await invoke(`${info.baseUrl}/one`, { text: "same" }, TEST_API_KEY, headers);
+    const second = await invoke(`${info.baseUrl}/two`, { text: "same" }, TEST_API_KEY, headers);
+    const randomA = await invoke(`${info.baseUrl}/one`, { text: "without key" });
+    const randomB = await invoke(`${info.baseUrl}/one`, { text: "without key" });
+    const bodies = await Promise.all([first, second, randomA, randomB].map(async (response) =>
+      response.json() as Promise<{ requestId: string }>));
+    expect(bodies[0]?.requestId).not.toBe(bodies[1]?.requestId);
+    expect(bodies[2]?.requestId).not.toBe(bodies[3]?.requestId);
+    expect(submit).toHaveBeenCalledTimes(4);
+  });
+
+  it("returns the same async status authority after terminal Idempotency-Key retries", async () => {
+    const submit = vi.fn<WebhookSubmit>(async () => ({ text: "async done" }));
+    const { channel, info } = await startChannel({ mode: "async" }, submit);
+    const headers = { "idempotency-key": "async-operation-1" };
+    const accepted = await invoke(info.invokeUrl, { text: "work" }, TEST_API_KEY, headers);
+    const original = await accepted.json() as { requestId: string; statusUrl: string };
+    await vi.waitFor(() => expect(channel.getStatus(original.requestId)?.status).toBe("succeeded"));
+    const retry = await invoke(info.invokeUrl, { text: "work" }, TEST_API_KEY, headers);
+    const duplicate = await retry.json() as { requestId: string; statusUrl: string };
+    expect(retry.status).toBe(202);
+    expect(duplicate).toMatchObject(original);
+    const terminal = await fetch(`${info.baseUrl}${duplicate.statusUrl}`, {
+      headers: { authorization: `Bearer ${TEST_API_KEY}` },
+    });
+    expect(await terminal.json()).toMatchObject({
+      status: "succeeded",
+      requestId: original.requestId,
+      text: "async done",
+    });
+    expect(submit).toHaveBeenCalledOnce();
+  });
+
+  it("rejects malformed, duplicate, and oversized Idempotency-Key headers", async () => {
+    const submit = vi.fn<WebhookSubmit>(async () => ({ text: "unexpected" }));
+    const { info } = await startChannel({}, submit);
+    for (const value of ["", "x".repeat(513)]) {
+      const response = await rawInvoke(info, [["Idempotency-Key", value]]);
+      expect(response.status).toBe(400);
+      if (response.body.length > 0) expect(response.body).toContain("invalid_idempotency_key");
+    }
+    const duplicate = await rawInvoke(info, [
+      ["Idempotency-Key", "one"],
+      ["Idempotency-Key", "two"],
+    ]);
+    expect(duplicate.status).toBe(400);
+    if (duplicate.body.length > 0) expect(duplicate.body).toContain("invalid_idempotency_key");
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("derives stable request IDs from the instance namespace across listener restart", async () => {
+    const config = parseWebhookConfig({ apiKey: TEST_API_KEY });
+    const start = async () => {
+      const channel = createWebhookChannel({
+        config,
+        requestIdNamespace: "incoming",
+        submit: async () => ({ text: "done" }),
+      });
+      channels.add(channel);
+      return { channel, info: await channel.start() };
+    };
+    const first = await start();
+    const headers = { "idempotency-key": "restart-operation" };
+    const before = await invoke(first.info.invokeUrl, { text: "same" }, TEST_API_KEY, headers);
+    const beforeId = (await before.json() as { requestId: string }).requestId;
+    await first.channel.stop();
+    channels.delete(first.channel);
+    const restarted = await start();
+    const after = await invoke(restarted.info.invokeUrl, { text: "same" }, TEST_API_KEY, headers);
+    expect((await after.json() as { requestId: string }).requestId).toBe(beforeId);
   });
 });
 
@@ -841,7 +972,10 @@ describe("mono-agent channel module", () => {
       model: "openai-codex:gpt-test",
       effort: "high",
       attachments: [],
-      metadata: { source: "module-test" },
+      metadata: {
+        source: "module-test",
+        webhook: { route: "default", bodySha256: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+      },
       sender: { id: "webhook", displayName: "incoming" },
     });
     expect(inbound?.signal).toBeInstanceOf(AbortSignal);
@@ -1020,6 +1154,9 @@ describe("mono-agent channel module", () => {
       "runtime: pi",
       "model: provider:route-model",
       "effort: high",
+      "notify:",
+      "  channel: telegram",
+      "  destination: telegram:42",
       "maxRunMs: 1000",
       "---",
       privatePrompt,
@@ -1080,7 +1217,11 @@ describe("mono-agent channel module", () => {
       runtime: "pi",
       model: "provider:request-model",
       effort: "high",
-      metadata: { source: "pager", webhook: { route: "triage" } },
+      completionDelivery: { channel: "telegram", destination: "telegram:42" },
+      metadata: {
+        source: "pager",
+        webhook: { route: "triage", bodySha256: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+      },
     });
     const accepted = await invoke(triage!.invokeUrl, { text: "async by default" }, "route-key");
     expect(accepted.status).toBe(202);
@@ -1092,6 +1233,18 @@ describe("mono-agent channel module", () => {
   });
 
   it("rejects duplicate, unsafe, and malformed route definitions before listening", async () => {
+    expect(parseWebhookNotify("telegram")).toEqual({ channel: "telegram" });
+    expect(parseWebhookNotify({
+      channel: "slack", destination: "slack:C1",
+    })).toEqual({ channel: "slack", destination: "slack:C1" });
+    expect(parseWebhookNotify({ channel: "telegram" })).toEqual({ channel: "telegram" });
+    expect(() => parseWebhookNotify("😀".repeat(512))).toThrow(/bounded/u);
+    expect(() => parseWebhookNotify("é".repeat(300))).toThrow(/bounded/u);
+    expect(() => parseWebhookNotify({
+      channel: "telegram", destination: "é".repeat(2_049),
+    })).toThrow(/bounded/u);
+    expect(() => parseWebhookNotify({ channel: "telegram", destination: "telegram:1", extra: true }))
+      .toThrow(/unknown/u);
     expect(() => parseWebhookRouteMarkdown("missing.md", "---\nname: missing\n---\nbody", "sync")).toThrow(/path is required/u);
     expect(() => parseWebhookRouteMarkdown("unknown.md", "---\npath: /hook\nsurprise: true\n---\nbody", "sync")).toThrow(/unknown/u);
     const root = mkdtempSync(join(tmpdir(), "mono-agent-webhook-duplicates-"));
@@ -1125,14 +1278,45 @@ async function invoke(
   invokeUrl: string,
   body: Readonly<Record<string, unknown>>,
   apiKey = TEST_API_KEY,
+  extraHeaders: Readonly<Record<string, string>> = {},
 ): Promise<Response> {
   return fetch(invokeUrl, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       authorization: `Bearer ${apiKey}`,
+      ...extraHeaders,
     },
     body: JSON.stringify(body),
+  });
+}
+
+function rawInvoke(
+  info: { readonly host: string; readonly port: number; readonly invokeUrl: string },
+  idempotencyHeaders: readonly (readonly [string, string])[],
+): Promise<{ readonly status: number; readonly body: string }> {
+  return new Promise((resolve, reject) => {
+    const headers = [
+      ["Authorization", `Bearer ${TEST_API_KEY}`],
+      ["Content-Type", "application/json"],
+      ...idempotencyHeaders,
+    ] as const;
+    const request = httpRequest({
+      hostname: info.host,
+      port: info.port,
+      method: "POST",
+      path: new URL(info.invokeUrl).pathname,
+      headers: headers.flat(),
+    }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.once("end", () => resolve({
+        status: response.statusCode ?? 0,
+        body: Buffer.concat(chunks).toString("utf8"),
+      }));
+    });
+    request.once("error", reject);
+    request.end(JSON.stringify({ text: "raw request" }));
   });
 }
 

@@ -1113,6 +1113,26 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
             const effort = thinkingLevel(request.options?.effort, model);
             const authoredSystemPrompt = systemPrompt(request.messages);
             const nodeRepl = createNodeReplController(cwd);
+            const codingTools = responseSchema === undefined
+              ? (await import("./coding-tools.js")).createRuntimePiCodingTools({
+                  workspaceDirectory: cwd,
+                  turnSignal: request.signal,
+                  authorize: (descriptor, toolCallId, summary, signal) =>
+                    requireNativeApproval(
+                      context,
+                      descriptor,
+                      toolCallId,
+                      summary,
+                      signal,
+                    ),
+                  record: (result) => {
+                    toolResults.set(result.callId, result);
+                  },
+                  onToolAttempt: () => {
+                    committedSideEffects = true;
+                  },
+                })
+              : [];
             const harness = new AgentHarness({
               env: sessions.env,
               session: attempt.session,
@@ -1136,6 +1156,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                   request.signal,
                   () => { committedSideEffects = true; },
                 ),
+                ...codingTools.slice(0, 2),
                 editTool(
                   context,
                   cwd,
@@ -1143,6 +1164,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                   request.signal,
                   () => { committedSideEffects = true; },
                 ),
+                ...codingTools.slice(2),
                 webSearchTool(
                   context,
                   toolResults,

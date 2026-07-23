@@ -231,6 +231,15 @@ describe("public compliance assertions", () => {
     })).toThrow("channel proactive capability and deliver function must match");
     expect(() => assertChannelInstanceCompliance({
       capabilities: {
+        attachments: false, liveInput: false, askUser: false, proactive: true,
+        runtimeControl: false, verbatim: false, cancellation: true,
+      },
+      deliver: async (message: { idempotencyKey: string }) => ({
+        status: "delivered" as const, idempotencyKey: message.idempotencyKey,
+      }),
+    })).toThrow("channel proactive capability and resolveDeliveryHistory function must match");
+    expect(() => assertChannelInstanceCompliance({
+      capabilities: {
         attachments: false, liveInput: false, askUser: false, proactive: false,
         runtimeControl: false, verbatim: false, cancellation: true,
       },
@@ -254,6 +263,9 @@ describe("public compliance assertions", () => {
         stop() { calls.push("stop"); },
         health: () => ({ status: "healthy", checkedAt: new Date().toISOString() }),
         diagnostics: () => [{ code: "fixture", severity: "info", message: "safe" }],
+        resolveDeliveryHistory: (message) => ({
+          conversationId: message.conversationId,
+        }),
         async deliver(message) {
           if (message.idempotencyKey === "unknown") {
             return { status: "unknown", idempotencyKey: message.idempotencyKey };
@@ -296,25 +308,25 @@ describe("public compliance assertions", () => {
       name: "SendMessage", description: "Send one message.",
       inputSchema: { type: "object", additionalProperties: false },
       prepare: () => ({ conversationId: "chat", text: "hello" }),
-      historyConversationId: () => "chat",
     };
+    const resolveDeliveryHistory = () => ({ conversationId: "chat" });
     expect(() => assertChannelInstanceCompliance({
       capabilities, deliver: async () => ({ status: "delivered", idempotencyKey: "key" }),
-      sendTools: [sendTool],
+      resolveDeliveryHistory, sendTools: [sendTool],
     })).not.toThrow();
     expect(() => assertChannelInstanceCompliance({
       capabilities: { ...capabilities, proactive: false }, sendTools: [sendTool],
     })).toThrow("channel sendTools require proactive capability and delivery");
     expect(() => assertChannelInstanceCompliance({
       capabilities, deliver: async () => ({ status: "delivered", idempotencyKey: "key" }),
-      sendTools: [sendTool, sendTool],
+      resolveDeliveryHistory, sendTools: [sendTool, sendTool],
     })).toThrow("duplicate SendMessage");
     let reads = 0;
     const accessor = { ...sendTool };
     Object.defineProperty(accessor, "prepare", { get() { reads += 1; return () => ({}); } });
     expect(() => assertChannelInstanceCompliance({
       capabilities, deliver: async () => ({ status: "delivered", idempotencyKey: "key" }),
-      sendTools: [accessor],
+      resolveDeliveryHistory, sendTools: [accessor],
     })).toThrow("prepare must be a data property");
     expect(reads).toBe(0);
   });

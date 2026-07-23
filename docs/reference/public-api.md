@@ -18,7 +18,7 @@ pnpm run generate:source-beta-docs
 
 | Package | Public entrypoints | Named exports | Package API |
 | --- | ---: | ---: | --- |
-| `@mono-agent/module-sdk` | 5 | 331 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
+| `@mono-agent/module-sdk` | 5 | 332 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
 | `@mono-agent/core` | 1 | 59 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/core/README.md) |
 | `@mono-agent/cli` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/cli/README.md) |
 | `@mono-agent/runtime-pi` | 1 | 6 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-pi/README.md) |
@@ -27,7 +27,7 @@ pnpm run generate:source-beta-docs
 | `@mono-agent/runtime-opencode` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-opencode/README.md) |
 | `@mono-agent/channel-telegram` | 1 | 31 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-telegram/README.md) |
 | `@mono-agent/channel-slack` | 1 | 36 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-slack/README.md) |
-| `@mono-agent/channel-webhook` | 1 | 42 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-webhook/README.md) |
+| `@mono-agent/channel-webhook` | 1 | 44 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-webhook/README.md) |
 | `@mono-agent/channel-openai-api` | 1 | 25 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-openai-api/README.md) |
 | `@mono-agent/channel-operator` | 1 | 20 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-operator/README.md) |
 | `@mono-agent/trigger-cron` | 1 | 29 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/trigger-cron/README.md) |
@@ -73,6 +73,7 @@ ChannelAttachment
 ChannelCancelRequest
 ChannelCancelResult
 ChannelCapabilities
+ChannelCompletionDelivery
 ChannelConversationListRequest
 ChannelConversationListResult
 ChannelConversationSummary
@@ -643,6 +644,7 @@ WebhookModuleChannel
 WebhookOutboundConfig
 WebhookRequestStatus
 WebhookRoute
+WebhookSubmissionError
 WebhookSubmit
 WebhookTerminalStatus
 WebhookTurnResult
@@ -652,6 +654,7 @@ loadWebhookRoutesFromDirectory
 monoAgentModule
 parseWebhookConfig
 parseWebhookMode
+parseWebhookNotify
 parseWebhookPath
 parseWebhookRouteMarkdown
 webhookConfigSchema

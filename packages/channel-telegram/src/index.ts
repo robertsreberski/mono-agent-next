@@ -18,7 +18,7 @@ import {
 import { createTelegramBotApiClient, type TelegramBotClient, type TelegramBotClientFactory, type TelegramMessageUpdate, type TelegramUpdate } from "./bot.js";
 import { type TelegramConfig, telegramConfigSchema } from "./config.js";
 import { TelegramDelivery } from "./delivery.js";
-import { telegramConversationId } from "./destination.js";
+import { resolveTelegramChatId, telegramConversationId } from "./destination.js";
 import {
   createTelegramSendTools,
 } from "./send-tools.js";
@@ -300,6 +300,11 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
       return context.config.defaultDestination === undefined
         ? undefined
         : telegramConversationId(context.config.defaultDestination);
+    },
+    resolveDeliveryHistory(message) {
+      const chatId = resolveTelegramChatId(message.conversationId, undefined);
+      if (chatId === undefined) throw new TypeError("Telegram delivery history destination is invalid.");
+      return { conversationId: telegramConversationId(chatId) };
     },
     get running() { return running; },
     async start(startContext) {

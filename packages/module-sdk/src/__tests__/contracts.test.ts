@@ -69,6 +69,9 @@ const channel: Channel = {
   async deliver(message) {
     return { status: "delivered", idempotencyKey: message.idempotencyKey };
   },
+  resolveDeliveryHistory(message) {
+    return { conversationId: message.conversationId };
+  },
 };
 
 const memory: Memory = {

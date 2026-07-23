@@ -481,7 +481,6 @@ describe("agent host lifecycle", () => {
           sendTools: [{
             name: "Send", description: "Send.", inputSchema: { type: "object" },
             prepare: () => ({ conversationId: "destination", text: "hello" }),
-            historyConversationId: () => "destination",
           }],
         },
         expected: /channel sendTools require proactive capability and delivery/u,

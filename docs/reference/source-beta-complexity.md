@@ -17,44 +17,44 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `751a824532b4f2e8cd439c2a9c427a4ffee5db57ecffcefba725b564b849a155`
+Source manifest digest: `e047805d984df97ca4ebed4b9276b78735fe90862a021cece9015d781d3b1122`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 188 | 73310 |
-| Tests | 128 | 56848 |
-| Repository and product tooling | 62 | 22449 |
+| Production | 191 | 75134 |
+| Tests | 130 | 58098 |
+| Repository and product tooling | 62 | 22463 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **378** | **152607** |
+| **Total executable source** | **383** | **155695** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 389.9 lines.
+Average production file size is 393.4 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 73310 | 130000 | within limit |
-| kernel-production | 14998 | 15000 | within limit |
+| repository-production | 75134 | 130000 | within limit |
+| kernel-production | 14974 | 15000 | within limit |
 
 ## Largest package ownership surfaces
 
 | Package | Production files | Production lines | Test lines |
 | --- | ---: | ---: | ---: |
 | `@mono-agent/state-local` | 14 | 12164 | 4264 |
-| `@mono-agent/core` | 18 | 11937 | 13961 |
-| `@mono-agent/runtime-pi` | 12 | 5935 | 3166 |
+| `@mono-agent/core` | 18 | 11906 | 14133 |
+| `@mono-agent/runtime-pi` | 15 | 7640 | 4020 |
 | `@mono-agent/memory-local` | 11 | 5021 | 2507 |
 | `create-mono-agent` | 7 | 3505 | 1289 |
 | `@mono-agent/service-macos` | 13 | 3153 | 1196 |
-| `@mono-agent/module-sdk` | 5 | 2630 | 1421 |
-| `@mono-agent/channel-slack` | 8 | 2629 | 1115 |
+| `@mono-agent/channel-webhook` | 5 | 2654 | 1347 |
+| `@mono-agent/module-sdk` | 5 | 2637 | 1436 |
 
 The complete package table is retained in the generated report model exposed by
 `pnpm --silent run report:source-beta -- --json`.
@@ -67,7 +67,7 @@ The complete package table is retained in the generated report model exposed by
 | First-party dependency edges | 21 |
 | First-party dependency cycles | 0 |
 | Public code entrypoints | 28 |
-| Public named exports | 930 |
+| Public named exports | 933 |
 | Distinct scaffold config paths | 104 |
 
 The first-party package graph is acyclic.

@@ -5,6 +5,7 @@ import type {
   RuntimeNativeToolDescriptor,
 } from "@mono-agent/module-sdk";
 
+import { runtimePiCodingNativeTools } from "./coding-tool-descriptors.js";
 import { parsePiModelReference, parseRuntimePiConfig } from "./config.js";
 
 export const runtimePiNodeReplTool: RuntimeNativeToolDescriptor = Object.freeze({
@@ -34,7 +35,9 @@ export const runtimePiWebSearchTool: RuntimeNativeToolDescriptor = Object.freeze
 export const runtimePiNativeTools: readonly RuntimeNativeToolDescriptor[] =
   Object.freeze([
     runtimePiNodeReplTool,
+    ...runtimePiCodingNativeTools.slice(0, 2),
     runtimePiEditTool,
+    ...runtimePiCodingNativeTools.slice(2),
     runtimePiWebSearchTool,
   ]);
 

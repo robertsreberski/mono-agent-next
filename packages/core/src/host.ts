@@ -8,6 +8,7 @@ import {
   parseArtifactRef, parseAskUserRequest, parseAskUserAnswer, snapshotRuntimeTurnError,
   type ArtifactRef, type ApprovalDecision, type ApprovalRequest, type AskUserAnswer,
   type AskUserRequest, type Channel, type ChannelAttachment, type ChannelCapabilities,
+  type ChannelCompletionDelivery,
   type ChannelConversationListRequest, type ChannelConversationListResult,
   type ChannelDeliveryResult, type ChannelHost, type ChannelInboundRequest,
   type ChannelModuleDefinition, type ChannelOpenConversationRequest,
@@ -93,7 +94,13 @@ interface RunningModule {
   readonly loaded: LoadedAgentModule;
   readonly instance: ModuleInstance;
 }
+type VerbatimEntry = Extract<AgentTranscriptEntry, { readonly kind: "verbatim" }>;
+type DeliveryIntent = Awaited<ReturnType<StateExecutionClient["prepareDelivery"]>> | undefined;
 interface BoundChannelTool { readonly instanceId: string; readonly channel: Channel; readonly name: string; readonly tool: ChannelSendTool }
+interface ChannelDeliveryOutcome {
+  readonly result: ChannelDeliveryResult;
+  readonly destinationConversationId?: string;
+}
 interface ActiveTurn {
   readonly id: string;
   readonly requestId: string;
@@ -189,7 +196,7 @@ class AgentHostImplementation implements AgentHost {
   }>();
   readonly #inflightDeliveries = new Map<string, {
     readonly fingerprint: DurableFingerprint;
-    readonly promise: Promise<ChannelDeliveryResult>;
+    readonly promise: Promise<ChannelDeliveryOutcome>;
   }>();
   readonly #transcripts = new Map<string, CanonicalTranscript>();
   readonly #idleWaiters = new Set<() => void>();
@@ -476,76 +483,59 @@ class AgentHostImplementation implements AgentHost {
     };
   }
   async deliver(channelInstanceId: string, message: ChannelOutboundMessage): Promise<ChannelDeliveryResult> {
+    return (await this.#deliver(channelInstanceId, message, this.#hostAbort.signal)).result;
+  }
+  async #deliver(
+    channelInstanceId: string, message: ChannelOutboundMessage, signal: AbortSignal,
+  ): Promise<ChannelDeliveryOutcome> {
     const channel = this.#channelInstances.get(channelInstanceId);
-    const normalized = normalizeOutboundMessage(
-      message,
-      channel?.resolveDefaultDeliveryConversationId?.bind(channel),
-    );
-    if (channel?.deliver === undefined) {
-      return {
-        status: "failed",
-        idempotencyKey: normalized.idempotencyKey,
-        diagnostic: {
-          code: "channel_delivery_unsupported",
-          severity: "error",
-          message: `Channel ${channelInstanceId} does not support proactive delivery`,
-        },
-      };
+    const normalized = normalizeOutboundMessage(message,
+      channel?.resolveDefaultDeliveryConversationId?.bind(channel));
+    assertBoundedText(deliveryHistoryText(normalized), "channel delivery history text", DEFAULT_MESSAGE_BYTES);
+    if (channel?.deliver === undefined || channel.resolveDeliveryHistory === undefined) {
+      return { result: deliveryFailure(normalized.idempotencyKey, "channel_delivery_unsupported",
+        `Channel ${channelInstanceId} does not support proactive delivery`) };
     }
     const fingerprint = deliveryFingerprint(channelInstanceId, normalized);
     const existing = this.#inflightDeliveries.get(normalized.idempotencyKey);
     if (existing !== undefined) {
       if (existing.fingerprint === fingerprint) return existing.promise;
-      return deliveryFailure(
-        normalized.idempotencyKey,
+      return { result: deliveryFailure(normalized.idempotencyKey,
         "channel_delivery_idempotency_conflict",
-        "The idempotency key is already active for a different delivery",
-      );
+        "The idempotency key is already active for a different delivery") };
     }
-    const delivery = this.#deliverOnce(channelInstanceId, channel, normalized, fingerprint);
+    const delivery = this.#deliverOnce(channelInstanceId, channel, normalized, fingerprint,
+      AbortSignal.any([this.#hostAbort.signal, signal]));
     const tracked = delivery.finally(() => {
       const current = this.#inflightDeliveries.get(normalized.idempotencyKey);
-      if (current?.promise === tracked) {
-        this.#inflightDeliveries.delete(normalized.idempotencyKey);
-      }
+      if (current?.promise === tracked) this.#inflightDeliveries.delete(normalized.idempotencyKey);
     });
-    this.#inflightDeliveries.set(normalized.idempotencyKey, {
-      fingerprint,
-      promise: tracked,
-    });
+    this.#inflightDeliveries.set(normalized.idempotencyKey, { fingerprint, promise: tracked });
     return tracked;
   }
   async #deliverOnce(
-    channelInstanceId: string,
-    channel: Channel,
-    message: ChannelOutboundMessage,
-    fingerprint: DurableFingerprint,
-  ): Promise<ChannelDeliveryResult> {
-    const signal = this.#hostAbort.signal;
+    channelInstanceId: string, channel: Channel, message: ChannelOutboundMessage,
+    fingerprint: DurableFingerprint, signal: AbortSignal,
+  ): Promise<ChannelDeliveryOutcome> {
     const intent = this.#execution === undefined
       ? undefined
       : await this.#execution.prepareDelivery({
-          idempotencyKey: message.idempotencyKey,
-          fingerprint,
-          channelInstanceId,
-          signal,
+          idempotencyKey: message.idempotencyKey, fingerprint, channelInstanceId, signal,
         });
     if (intent?.status === "duplicate") {
-      return {
-        status: "duplicate",
-        idempotencyKey: message.idempotencyKey,
+      const result: ChannelDeliveryResult = {
+        status: "duplicate", idempotencyKey: message.idempotencyKey,
         ...(intent.messageId === undefined ? {} : { messageId: intent.messageId }),
       };
+      return this.#confirmDeliveryHistory(channelInstanceId, channel, message, fingerprint, result, intent);
     }
     if (intent?.status === "conflict") {
-      return deliveryFailure(
-        message.idempotencyKey,
+      return { result: deliveryFailure(message.idempotencyKey,
         "channel_delivery_idempotency_conflict",
-        "The idempotency key was already used for a different delivery",
-      );
+        "The idempotency key was already used for a different delivery") };
     }
     if (intent?.status === "join" || intent?.status === "unknown") {
-      return deliveryUnknown(
+      return { result: deliveryUnknown(
         message.idempotencyKey,
         intent.status === "join"
           ? "channel_delivery_in_progress"
@@ -553,28 +543,24 @@ class AgentHostImplementation implements AgentHost {
         intent.status === "join"
           ? "A matching delivery is already in progress"
           : "The prior delivery outcome is unknown and will not be replayed",
-      );
+      ) };
+    }
+    if (signal.aborted) {
+      await this.#settlePreparedDelivery(intent, fingerprint, message, {
+        status: "failed", code: "channel-delivery-cancelled-before-send",
+      }, true);
+      return { result: deliveryFailure(message.idempotencyKey, "channel_delivery_cancelled",
+        "The channel delivery was cancelled before sending") };
     }
     let rawResult: unknown;
     try {
       rawResult = await channel.deliver!(message, signal);
     } catch (error) {
-      if (intent?.status === "send") {
-        await this.#execution!.settleDelivery({
-          idempotencyKey: message.idempotencyKey,
-          fingerprint,
-          attempt: intent.attempt,
-          token: intent.token,
-          status: "unknown",
-          code: "channel-delivery-threw",
-          signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-        }).catch(() => undefined);
-      }
-      return deliveryUnknown(
-        message.idempotencyKey,
-        "channel_delivery_unknown",
-        `The channel delivery outcome is unknown: ${this.#redact(errorMessage(error))}`,
-      );
+      await this.#settlePreparedDelivery(intent, fingerprint, message, {
+        status: "unknown", code: "channel-delivery-threw",
+      }, true);
+      return { result: deliveryUnknown(message.idempotencyKey, "channel_delivery_unknown",
+        `The channel delivery outcome is unknown: ${this.#redact(errorMessage(error))}`) };
     }
     let result: ChannelDeliveryResult;
     try {
@@ -582,52 +568,98 @@ class AgentHostImplementation implements AgentHost {
     } catch (error) {
       const mismatch = error instanceof TypeError
         && error.message === "channel delivery result idempotency key is invalid";
-      if (intent?.status === "send") await this.#execution!.settleDelivery({
-        idempotencyKey: message.idempotencyKey, fingerprint, attempt: intent.attempt,
-        token: intent.token, status: "unknown",
+      await this.#settlePreparedDelivery(intent, fingerprint, message, {
+        status: "unknown",
         code: mismatch ? "channel-delivery-idempotency-mismatch" : "channel-delivery-malformed-result",
-        signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-      }).catch(() => undefined);
-      return deliveryUnknown(message.idempotencyKey,
+      }, true);
+      return { result: deliveryUnknown(message.idempotencyKey,
         mismatch ? "channel_delivery_idempotency_mismatch" : "channel_delivery_unknown",
-        `The channel delivery outcome is unknown: ${this.#redact(errorMessage(error))}`);
+        `The channel delivery outcome is unknown: ${this.#redact(errorMessage(error))}`) };
     }
-    if (intent?.status !== "send") return immutableClone(result);
-    const settlement = result.status === "delivered" || result.status === "duplicate"
-      ? {
-          status: "delivered" as const,
-          ...(result.messageId === undefined ? {} : { messageId: result.messageId }),
-        }
-      : result.status === "failed"
-        ? {
-            status: "failed" as const,
-            code: result.diagnostic?.code ?? "channel-delivery-failed",
-          }
-        : {
-            status: "unknown" as const,
-            code: result.diagnostic?.code ?? "channel-delivery-unknown",
-          };
+    if (result.status === "delivered" || result.status === "duplicate") {
+      return this.#confirmDeliveryHistory(channelInstanceId, channel, message, fingerprint, result, intent);
+    }
+    if (intent?.status !== "send") return { result: immutableClone(result) };
     try {
-      const settled = await this.#execution!.settleDelivery({
-        idempotencyKey: message.idempotencyKey,
-        fingerprint,
-        attempt: intent.attempt,
-        token: intent.token,
-        ...settlement,
-        signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-      });
-      const confirmed = settlement.status === "delivered"
-        ? settled.status === "duplicate" && settled.messageId === settlement.messageId
-        : settlement.status === "failed" ? settled.status === "join" : settled.status === "unknown";
-      if (!confirmed) throw new Error(`delivery settlement returned ${settled.status}`);
+      const settled = await this.#settlePreparedDelivery(intent, fingerprint, message,
+        { status: result.status, code: result.diagnostic?.code ?? `channel-delivery-${result.status}` });
+      const confirmed = result.status === "failed"
+        ? settled?.status === "join"
+        : settled?.status === "unknown";
+      if (!confirmed) throw new Error(`delivery settlement returned ${settled?.status ?? "nothing"}`);
     } catch (error) {
-      return deliveryUnknown(
-        message.idempotencyKey,
-        "channel_delivery_settlement_unknown",
-        `The channel response could not be durably settled: ${this.#redact(errorMessage(error))}`,
-      );
+      return { result: deliveryUnknown(message.idempotencyKey, "channel_delivery_settlement_unknown",
+        `The channel response could not be durably settled: ${this.#redact(errorMessage(error))}`) };
     }
-    return immutableClone(result);
+    return { result: immutableClone(result) };
+  }
+  async #confirmDeliveryHistory(
+    channelInstanceId: string, channel: Channel, message: ChannelOutboundMessage,
+    fingerprint: DurableFingerprint, result: ChannelDeliveryResult, intent: DeliveryIntent,
+  ): Promise<ChannelDeliveryOutcome> {
+    const settlementSignal = AbortSignal.timeout(this.#options.lifecycleTimeoutMs);
+    try {
+      const resolution = normalizeDeliveryHistoryResolution(channel.resolveDeliveryHistory!(message, result),
+        `${channelInstanceId} delivery history resolution`);
+      const destination = resolution.conversationId;
+      const text = deliveryHistoryText(message);
+      const entry = Object.freeze({
+        kind: "verbatim",
+        entryId: `delivery:${createHash("sha256").update(`${channelInstanceId}\0${message.idempotencyKey}`).digest("hex")}`,
+        runId: message.idempotencyKey, requestId: message.idempotencyKey,
+        conversationId: destination, role: "assistant", text,
+      } as const);
+      const entryFingerprint = durableFingerprint({
+        schemaVersion: 1, kind: "mono-agent.delivery-history-fingerprint",
+        channelInstanceId, deliveryFingerprint: fingerprint, messageId: result.messageId ?? null,
+        destination, entry,
+      });
+      if (this.#execution !== undefined) {
+        if (intent?.status === "send") {
+          const settled = await this.#execution.retryDeliveryWithHistory({
+            idempotencyKey: message.idempotencyKey, fingerprint,
+            attempt: intent.attempt, token: intent.token,
+            ...(result.messageId === undefined ? {} : { messageId: result.messageId }),
+            conversationId: destination, entry, entryFingerprint, signal: settlementSignal,
+          });
+          if (settled.status === "conflict" || settled.conversationId !== destination
+            || settled.entryId !== entry.entryId)
+            throw new Error("channel delivery history identity conflict");
+        }
+        this.#loadedConversations.delete(destination);
+        const transcript = await this.#loadConversation(destination, settlementSignal);
+        const stored = transcript?.entries.find(
+          (candidate) => candidate.entryId === entry.entryId);
+        if (stored === undefined || JSON.stringify({ ...stored, recordedAt: undefined })
+          !== JSON.stringify(entry)) throw new Error("channel delivery history identity conflict");
+      } else {
+        const localEntry: AgentTranscriptEntry = { ...entry, recordedAt: new Date().toISOString() };
+        const current = this.#transcripts.get(destination);
+        const prior = current?.entries.find((candidate) => candidate.entryId === entry.entryId);
+        if (prior !== undefined && JSON.stringify({ ...prior, recordedAt: undefined })
+          !== JSON.stringify(entry)) throw new Error("channel delivery history identity conflict");
+        if (prior === undefined) this.#appendLocalVerbatim(destination, [localEntry], localEntry.recordedAt);
+      }
+      return { result: immutableClone(result), destinationConversationId: destination };
+    } catch (error) {
+      await this.#settlePreparedDelivery(intent, fingerprint, message,
+        { status: "unknown", code: "channel-delivery-history-unknown" }, true);
+      return { result: deliveryUnknown(message.idempotencyKey, "channel_delivery_history_unknown",
+        `The delivery destination history could not be confirmed: ${this.#redact(errorMessage(error))}`) };
+    }
+  }
+  async #settlePreparedDelivery(
+    intent: DeliveryIntent, fingerprint: DurableFingerprint, message: ChannelOutboundMessage,
+    settlement: Readonly<{ status: "delivered" | "failed" | "unknown";
+      messageId?: string; code?: string }>, bestEffort = false,
+  ): Promise<Awaited<ReturnType<StateExecutionClient["settleDelivery"]>> | undefined> {
+    if (intent?.status !== "send") return undefined;
+    const pending = this.#execution!.settleDelivery({
+      idempotencyKey: message.idempotencyKey, fingerprint,
+      attempt: intent.attempt, token: intent.token, ...settlement,
+      signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
+    });
+    return bestEffort ? pending.catch(() => undefined) : pending;
   }
   async runModuleCommand(moduleInstanceId: string, commandName: string, input?: unknown): Promise<AgentModuleCommandResult> {
     const running = this.#running.find((candidate) => candidate.loaded.instanceId === moduleInstanceId);
@@ -1303,16 +1335,7 @@ class AgentHostImplementation implements AgentHost {
     }
     const conversationId = `proactive:${randomUUID()}`;
     const createdAt = new Date().toISOString();
-    const messages: readonly TurnMessage[] = request.initialText === undefined || request.initialText.length === 0
-      ? []
-      : [{
-          id: `${conversationId}:initial`,
-          role: "assistant",
-          content: [{ type: "text", text: request.initialText }],
-          createdAt,
-        }];
-    this.#history.set(conversationId, immutableClone(messages));
-    const initialEntries: readonly AgentTranscriptEntry[] =
+    const initialEntries: readonly VerbatimEntry[] =
       request.initialText === undefined || request.initialText.length === 0
         ? []
         : [Object.freeze({
@@ -1320,11 +1343,7 @@ class AgentHostImplementation implements AgentHost {
             runId: `${conversationId}:open`, requestId: `${conversationId}:open`,
             conversationId, recordedAt: createdAt, role: "assistant", text: request.initialText,
           })];
-    const transcript: CanonicalTranscript = Object.freeze({
-      schemaVersion: 1, kind: "mono-agent.canonical-transcript",
-      conversationId, revision: 1, entries: Object.freeze(initialEntries),
-    });
-    this.#transcripts.set(conversationId, transcript);
+    this.#appendLocalVerbatim(conversationId, initialEntries, createdAt);
     this.#commitConversationMetadata({
       conversationId,
       createdAt,
@@ -1332,7 +1351,6 @@ class AgentHostImplementation implements AgentHost {
       ...(request.title === undefined ? {} : { title: request.title }),
       ...(request.metadata === undefined ? {} : { metadata: request.metadata }),
     });
-    this.#loadedConversations.add(conversationId);
     return { conversationId, createdAt };
   }
   async #dispatchChannel(
@@ -1349,6 +1367,7 @@ class AgentHostImplementation implements AgentHost {
       if (channel === undefined || capabilities === undefined) {
         throw new Error(`Channel ${channelInstanceId} is not started`);
       }
+      const completionDelivery = normalizeCompletionDelivery(request.completionDelivery);
       const input = normalizeSubmitInput({
         requestId: request.requestId,
         conversationId: request.conversationId,
@@ -1393,13 +1412,34 @@ class AgentHostImplementation implements AgentHost {
               reply.emit({ type: "approval", approval })
           : undefined,
       );
+      if (response.status === "completed" && response.text.length > 0
+        && completionDelivery !== undefined) {
+        const outcome = await this.#deliver(completionDelivery.channel, {
+          conversationId: completionDelivery.destination ?? "",
+          text: response.text,
+          idempotencyKey: `channel-completion:${createHash("sha256")
+            .update(`${channelInstanceId}\0${request.requestId}`).digest("hex")}`,
+          metadata: {
+            sourceChannel: channelInstanceId,
+            sourceConversationId: request.conversationId,
+            sourceRequestId: request.requestId,
+          },
+        }, request.signal);
+        if (outcome.result.status !== "delivered" && outcome.result.status !== "duplicate") {
+          throw new Error(`Channel completion delivery ended with ${outcome.result.status}`);
+        }
+      }
       if (!emittedText && response.text.length > 0) await reply.emit({ type: "text-replace", text: response.text });
       return { status: response.status === "completed" ? "completed" : "cancelled", text: response.text };
     } catch (error) {
       if (isAbort(error)) return { status: "cancelled" };
+      const conflict = error instanceof AgentAdmissionError && error.code === "request_conflict";
       return {
         status: "rejected",
-        diagnostics: [{ code: "turn_failed", severity: "error", message: this.#redact(errorMessage(error)) }],
+        diagnostics: [{
+          code: conflict ? "request_conflict" : "turn_failed", severity: "error",
+          message: conflict ? "Request identity conflicts with prior input" : this.#redact(errorMessage(error)),
+        }],
       };
     }
   }
@@ -1415,141 +1455,29 @@ class AgentHostImplementation implements AgentHost {
           .digest("hex")}`;
         if (active.pendingChannelHistory.size > 0)
           throw new Error("A prior channel delivery lacks confirmed destination history");
+        const prepared = boundedOwnDataRecord(await binding.tool.prepare(raw as JsonValue, {
+          requestId: input.requestId!, conversationId: input.conversationId,
+          callId: options.callId, signal: callSignal,
+        }), `${binding.name} prepared delivery`, true);
+        assertOwnKeys(prepared, ["conversationId", "text", "attachments", "replyToMessageId", "metadata"],
+          `${binding.name} prepared delivery`);
         active.pendingChannelHistory.add(idempotencyKey);
-        let message: ChannelOutboundMessage;
-        let text: string;
-        let fingerprint: DurableFingerprint;
-        let intent: Awaited<ReturnType<StateExecutionClient["prepareDelivery"]>> | undefined;
+        let outcome: ChannelDeliveryOutcome;
         try {
-          const prepared = boundedOwnDataRecord(await binding.tool.prepare(raw as JsonValue, {
-            requestId: input.requestId!, conversationId: input.conversationId,
-            callId: options.callId, signal: callSignal,
-          }), `${binding.name} prepared delivery`, true);
-          assertOwnKeys(prepared, ["conversationId", "text", "attachments", "replyToMessageId", "metadata"], `${binding.name} prepared delivery`);
-          message = normalizeOutboundMessage({ ...prepared, idempotencyKey } as unknown as ChannelOutboundMessage);
-          const attachmentText = (message.attachments ?? []).map((item) => `[sent attachment: ${item.name}]`);
-          text = [message.text, ...attachmentText].filter((part) => part.length > 0).join("\n");
-          assertBoundedText(text, "channel tool projected history", DEFAULT_MESSAGE_BYTES);
-          fingerprint = deliveryFingerprint(binding.instanceId, message);
-          intent = this.#execution === undefined ? undefined : await this.#execution.prepareDelivery({
-            idempotencyKey, fingerprint, channelInstanceId: binding.instanceId, signal: callSignal,
-          });
+          outcome = await this.#deliver(binding.instanceId,
+            { ...prepared, idempotencyKey } as unknown as ChannelOutboundMessage, callSignal);
         } catch (error) {
           active.pendingChannelHistory.delete(idempotencyKey);
           throw error;
         }
-        if (intent?.status === "conflict") {
-          active.pendingChannelHistory.delete(idempotencyKey);
-          throw new Error("Channel delivery identity conflict");
-        }
-        if (intent?.status === "join" || intent?.status === "unknown")
-          throw new Error(`Channel delivery ${intent.status}; its outcome is not safe to retry`);
-        let result: ChannelDeliveryResult;
-        if (intent?.status === "duplicate") {
-          result = { status: "duplicate", idempotencyKey,
-            ...(intent.messageId === undefined ? {} : { messageId: intent.messageId }) };
-        } else {
-          if (callSignal.aborted) {
-            if (intent?.status === "send") await this.#execution!.settleDelivery({
-              idempotencyKey, fingerprint, attempt: intent.attempt, token: intent.token,
-              status: "failed", code: "channel-delivery-cancelled-before-send",
-              signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-            }).catch(() => undefined);
-            active.pendingChannelHistory.delete(idempotencyKey);
-            throw abortError();
-          }
-          try {
-            result = normalizeChannelDeliveryResult(
-              await binding.channel.deliver!(message, callSignal), idempotencyKey);
-          } catch (error) {
-            if (intent?.status === "send") await this.#execution!.settleDelivery({
-              idempotencyKey, fingerprint, attempt: intent.attempt, token: intent.token,
-              status: "unknown", code: "channel-delivery-threw",
-              signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-            }).catch(() => undefined);
-            throw error;
-          }
-          if (result.status === "failed") {
-            active.pendingChannelHistory.delete(idempotencyKey);
-            if (intent?.status === "send") await this.#execution!.settleDelivery({
-              idempotencyKey, fingerprint, attempt: intent.attempt, token: intent.token,
-              status: "failed", code: result.diagnostic?.code ?? "channel-delivery-failed",
-              signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-            });
-            throw new Error("Channel delivery failed");
-          }
-          if (result.status === "unknown") {
-            if (intent?.status === "send") await this.#execution!.settleDelivery({
-              idempotencyKey, fingerprint, attempt: intent.attempt, token: intent.token,
-              status: "unknown", code: result.diagnostic?.code ?? "channel-delivery-unknown",
-              signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-            }).catch(() => undefined);
-            throw new Error("Channel delivery outcome is unknown");
-          }
-        }
-        const destination = binding.tool.historyConversationId(message, result);
-        assertRouteText(destination, "channel tool history conversationId", 4_096);
-        const entry = Object.freeze({
-          kind: "verbatim",
-          entryId: `delivery:${createHash("sha256").update(`${binding.instanceId}\0${idempotencyKey}`).digest("hex")}`,
-          runId: idempotencyKey, requestId: input.requestId!, conversationId: destination,
-          role: "assistant", text,
-        } as const);
-        const entryFingerprint = durableFingerprint({
-          schemaVersion: 1, kind: "mono-agent.delivery-history-fingerprint",
-          channelInstanceId: binding.instanceId, tool: binding.tool.name,
-          deliveryFingerprint: fingerprint, messageId: result.messageId ?? null, destination, entry,
-        });
-        if (this.#execution !== undefined) {
-          if (intent?.status === "send") {
-            let settled: Awaited<ReturnType<StateExecutionClient["settleDeliveryWithHistory"]>> | undefined;
-            let failure: unknown;
-            for (let attempt = 0; attempt < 2 && settled === undefined; attempt += 1) {
-              try {
-                settled = await this.#execution.settleDeliveryWithHistory({
-                  idempotencyKey, fingerprint, attempt: intent.attempt, token: intent.token,
-                  ...(result.messageId === undefined ? {} : { messageId: result.messageId }),
-                  conversationId: destination, entry, entryFingerprint,
-                  signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-                });
-              } catch (error) { failure = error; }
-            }
-            if (settled === undefined) throw failure;
-            if (settled.status === "conflict"
-              || settled.conversationId !== destination || settled.entryId !== entry.entryId)
-              throw new Error("Channel delivery history identity conflict");
-          }
-          const settlementSignal = AbortSignal.timeout(this.#options.lifecycleTimeoutMs);
-          const conversation = await this.#execution.loadConversation(destination, settlementSignal);
-          if (conversation === undefined) throw new Error("Channel delivery history outcome is unknown");
-          const stored = conversation.transcript.entries.find((candidate) => candidate.entryId === entry.entryId);
-          if (stored === undefined || JSON.stringify({ ...stored, recordedAt: undefined })
-            !== JSON.stringify(entry)) throw new Error("Channel delivery history identity conflict");
-          await this.#commitConversationView(conversation, settlementSignal);
-        } else {
-          const localEntry: AgentTranscriptEntry = { ...entry, recordedAt: new Date().toISOString() };
-          const current = this.#transcripts.get(destination);
-          const prior = current?.entries.find((candidate) => candidate.entryId === localEntry.entryId);
-          if (prior !== undefined && JSON.stringify({ ...prior, recordedAt: undefined })
-            !== JSON.stringify({ ...localEntry, recordedAt: undefined }))
-            throw new Error("Channel delivery history identity conflict");
-          if (prior === undefined) {
-            const transcript: CanonicalTranscript = Object.freeze({
-              schemaVersion: 1, kind: "mono-agent.canonical-transcript", conversationId: destination,
-              revision: (current?.revision ?? 0) + 1,
-              entries: Object.freeze([...(current?.entries ?? []), localEntry]),
-            });
-            this.#transcripts.set(destination, transcript);
-            this.#history.set(destination, immutableClone([
-              ...(this.#history.get(destination) ?? []),
-              { id: localEntry.entryId, role: "assistant", content: [{ type: "text", text }], createdAt: localEntry.recordedAt },
-            ]));
-            this.#loadedConversations.add(destination);
-            this.#conversationUpdatedAt.set(destination, localEntry.recordedAt);
-          }
-        }
-        active.pendingChannelHistory.delete(idempotencyKey);
-        return { status: result.status, destinationConversationId: destination, ...(result.messageId === undefined ? {} : { messageId: result.messageId }) };
+        if (outcome.result.status !== "unknown") active.pendingChannelHistory.delete(idempotencyKey);
+        if (outcome.result.status === "failed") throw new Error("Channel delivery failed");
+        if (outcome.result.status === "unknown") throw new Error("Channel delivery outcome is unknown");
+        return {
+          status: outcome.result.status,
+          destinationConversationId: outcome.destinationConversationId!,
+          ...(outcome.result.messageId === undefined ? {} : { messageId: outcome.result.messageId }),
+        };
       },
     };
   }
@@ -2989,18 +2917,38 @@ class AgentHostImplementation implements AgentHost {
       this.#sessionUpdatedAt.set(key, updatedAt);
     }
   }
-  async #loadConversation(conversationId: string, signal: AbortSignal): Promise<void> {
-    if (this.#loadedConversations.has(conversationId)) return;
+  async #loadConversation(conversationId: string, signal: AbortSignal): Promise<CanonicalTranscript | undefined> {
+    if (this.#loadedConversations.has(conversationId)) return this.#transcripts.get(conversationId);
     if (this.#execution === undefined) {
       this.#loadedConversations.add(conversationId);
-      return;
+      return this.#transcripts.get(conversationId);
     }
     const conversation = await this.#execution.loadConversation(conversationId, signal);
     if (conversation === undefined) {
       this.#loadedConversations.add(conversationId);
-      return;
+      return undefined;
     }
     await this.#commitConversationView(conversation, signal);
+    return conversation.transcript;
+  }
+  #appendLocalVerbatim(
+    conversationId: string, entries: readonly VerbatimEntry[], updatedAt: string,
+  ): void {
+    const current = this.#transcripts.get(conversationId);
+    this.#transcripts.set(conversationId, Object.freeze({
+      schemaVersion: 1, kind: "mono-agent.canonical-transcript", conversationId,
+      revision: (current?.revision ?? 0) + 1,
+      entries: Object.freeze([...(current?.entries ?? []), ...entries]),
+    }));
+    this.#history.set(conversationId, immutableClone([
+      ...(this.#history.get(conversationId) ?? []),
+      ...entries.map((entry) => ({
+        id: entry.entryId, role: entry.role,
+        content: [{ type: "text" as const, text: entry.text }], createdAt: entry.recordedAt,
+      })),
+    ]));
+    this.#loadedConversations.add(conversationId);
+    this.#conversationUpdatedAt.set(conversationId, updatedAt);
   }
   async #commitConversationView(
     conversation: {
@@ -4045,8 +3993,7 @@ function snapshotChannelSendTools(value: unknown, instanceId: string): readonly 
       maxDepth: 32, label: "JSON", freeze: true, requireOrdinaryArrays: true,
     }).value;
     return Object.freeze({ name: tool.name as string, description, inputSchema,
-      prepare: tool.prepare as ChannelSendTool["prepare"],
-      historyConversationId: tool.historyConversationId as ChannelSendTool["historyConversationId"] });
+      prepare: tool.prepare as ChannelSendTool["prepare"] });
   }));
 }
 function bindChannelTools(
@@ -4341,6 +4288,28 @@ function deliveryFingerprint(
     metadata: message.metadata ?? null,
   });
 }
+function deliveryHistoryText(message: ChannelOutboundMessage): string {
+  return [message.text, ...(message.attachments ?? []).map((item) =>
+    `[sent attachment: ${item.name}]`)].filter((part) => part.length > 0).join("\n");
+}
+function normalizeCompletionDelivery(value: unknown): ChannelCompletionDelivery | undefined {
+  if (value === undefined) return undefined;
+  const input = ownDataRecord(value, "channel completion delivery", ["channel", "destination"]);
+  const channel = routeText(input.channel, "channel completion delivery channel", 512);
+  const destination = input.destination === undefined ? undefined
+    : routeText(input.destination, "channel completion delivery destination", 4_096);
+  return Object.freeze({
+    channel, ...(destination === undefined ? {} : { destination }),
+  });
+}
+function normalizeDeliveryHistoryResolution(
+  value: unknown,
+  label: string,
+): { readonly conversationId: string } {
+  const input = ownDataRecord(value, label, ["conversationId"]);
+  const conversationId = routeText(input.conversationId, `${label} conversationId`, 4_096);
+  return { conversationId };
+}
 function durableFingerprint(value: unknown): DurableFingerprint {
   const encoded = JSON.stringify(value, (_key, entry: unknown) => (
     isRecord(entry)
@@ -4370,25 +4339,17 @@ function normalizeChannelDeliveryResult(value: unknown, idempotencyKey: string):
     }),
   }) as ChannelDeliveryResult;
 }
-function deliveryFailure(
-  idempotencyKey: string,
-  code: string,
-  message: string,
-): ChannelDeliveryResult {
-  return Object.freeze({
-    status: "failed",
-    idempotencyKey,
-    diagnostic: Object.freeze({ code, severity: "error", message }),
-  });
+function deliveryFailure(idempotencyKey: string, code: string, message: string): ChannelDeliveryResult {
+  return deliveryDiagnostic("failed", idempotencyKey, code, message);
 }
-function deliveryUnknown(
-  idempotencyKey: string,
-  code: string,
-  message: string,
+function deliveryUnknown(idempotencyKey: string, code: string, message: string): ChannelDeliveryResult {
+  return deliveryDiagnostic("unknown", idempotencyKey, code, message);
+}
+function deliveryDiagnostic(
+  status: "failed" | "unknown", idempotencyKey: string, code: string, message: string,
 ): ChannelDeliveryResult {
   return Object.freeze({
-    status: "unknown",
-    idempotencyKey,
+    status, idempotencyKey,
     diagnostic: Object.freeze({ code, severity: "error", message }),
   });
 }
@@ -5006,6 +4967,11 @@ function assertRouteText(value: string, name: string, maxBytes: number): void {
   if (value.length === 0 || value !== value.trim() || /[\u0000-\u001f\u007f]/u.test(value)) {
     throw new TypeError(`${name} must be a non-empty trimmed string without control characters`);
   }
+}
+function routeText(value: unknown, name: string, maxBytes: number): string {
+  if (typeof value !== "string") throw new TypeError(`${name} must be string`);
+  assertRouteText(value, name, maxBytes);
+  return value;
 }
 function isJsonObject(value: unknown): value is JsonObject {
   return isRecord(value) && isJsonValue(value);

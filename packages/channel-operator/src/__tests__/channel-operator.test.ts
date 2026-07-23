@@ -742,7 +742,7 @@ describe("mono-agent operator channel module", () => {
     const operatorIdentity = identity("compliance-agent", "Compliance Agent");
     const openConversation = vi.fn<NonNullable<ChannelHost["openConversation"]>>(
       async (request) => {
-        if (request.initialText === "ambiguous compliance") {
+        if (request.metadata?.idempotencyKey === "operator-compliance-unknown") {
           throw new Error("secret operator storage failure /private/token");
         }
         return {
@@ -830,6 +830,10 @@ describe("mono-agent operator channel module", () => {
       { status: "delivered", idempotencyKey: "open-once", messageId: "opened-1" },
     ]);
     await expect(channel.deliver!(message, new AbortController().signal)).resolves.toEqual({ status: "duplicate", idempotencyKey: "open-once", messageId: "opened-1" });
+    expect(channel.resolveDeliveryHistory?.(
+      message,
+      { status: "delivered", idempotencyKey: "open-once", messageId: "opened-1" },
+    )).toEqual({ conversationId: "opened-1" });
     await expect(channel.deliver!({
       ...message,
       text: "conflicting payload",
@@ -838,6 +842,7 @@ describe("mono-agent operator channel module", () => {
       diagnostic: { code: "operator_proactive_idempotency_conflict" },
     });
     expect(openConversation).toHaveBeenCalledOnce();
+    expect(openConversation.mock.calls[0]?.[0]).not.toHaveProperty("initialText");
   });
 
   it("fingerprints Unicode metadata keys in deterministic UTF-8 byte order", async () => {
@@ -1003,7 +1008,7 @@ describe("mono-agent operator channel module", () => {
     const operatorIdentity = identity("module-agent", "Module Agent");
     const openConversation = vi.fn<NonNullable<ChannelHost["openConversation"]>>(
       async (request) => {
-        if (request.initialText === "proactive") {
+        if (request.metadata?.idempotencyKey === "ambiguous-open") {
           throw new Error("secret storage detail /private/operator-token");
         }
         return {

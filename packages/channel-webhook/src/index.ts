@@ -24,6 +24,7 @@ import {
   type WebhookChannelStartInfo,
   type WebhookInboundRequest,
   type WebhookSubmit,
+  WebhookSubmissionError,
 } from "./server.js";
 import { WebhookDelivery } from "./delivery.js";
 import { loadWebhookRoutesFromDirectory } from "./routes.js";
@@ -80,6 +81,9 @@ function createWebhookModuleChannel(
     const inbound: ChannelInboundRequest = toChannelInboundRequest(context.instanceId, request);
     const result = await context.host.dispatch(inbound, reply);
     if (result.status !== "completed") {
+      if (result.diagnostics?.some(({ code }) => code === "request_conflict") === true) {
+        throw new WebhookSubmissionError("idempotency_conflict");
+      }
       throw new Error("Webhook-dispatched turn did not complete.");
     }
     return { text: result.text ?? replyText };
@@ -100,6 +104,7 @@ function createWebhookModuleChannel(
       transport = createWebhookChannel({
         config: context.config,
         submit,
+        requestIdNamespace: context.instanceId,
         ...(routes === undefined ? {} : { routes }),
       });
       info = await transport.start();
@@ -192,6 +197,9 @@ function createWebhookModuleChannel(
       ? {}
       : {
           resolveDefaultDeliveryConversationId: () => defaultDeliveryConversationId,
+          resolveDeliveryHistory: (message) => ({
+            conversationId: message.conversationId,
+          }),
           deliver: (message, signal) => delivery.deliver(message, signal),
         }),
   };
@@ -214,15 +222,17 @@ function toChannelInboundRequest(
     ...(request.runtime === undefined ? {} : { runtime: request.runtime }),
     ...(request.model === undefined ? {} : { model: request.model }),
     ...(request.effort === undefined ? {} : { effort: request.effort }),
-    signal: request.abortSignal,
-    ...(request.metadata === undefined && request.routeName === undefined
+    ...(request.completionDelivery === undefined
       ? {}
-      : {
-          metadata: {
-            ...(request.metadata ?? {}),
-            ...(request.routeName === undefined ? {} : { webhook: { route: request.routeName } }),
-          },
-        }),
+      : { completionDelivery: request.completionDelivery }),
+    signal: request.abortSignal,
+    metadata: {
+      ...(request.metadata ?? {}),
+      webhook: {
+        ...(request.routeName === undefined ? {} : { route: request.routeName }),
+        bodySha256: request.bodySha256,
+      },
+    },
   };
 }
 
