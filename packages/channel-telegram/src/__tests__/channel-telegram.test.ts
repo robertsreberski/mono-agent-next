@@ -118,17 +118,17 @@ describe("telegram channel", () => {
         expect.objectContaining({ label: "No" }),
       ],
     }));
-    expect(messageTool.historyConversationId(
+    expect(channel.resolveDeliveryHistory?.(
       { ...preparedMessage, idempotencyKey: "tool-message" },
       messageResult,
-    )).toBe("telegram:42");
-    expect(() => messageTool.historyConversationId(
-      { ...preparedMessage, idempotencyKey: "tool-unknown" },
+    )).toEqual({ conversationId: "telegram:42" });
+    expect(() => channel.resolveDeliveryHistory?.(
+      { ...preparedMessage, conversationId: "telegram:42:shadow", idempotencyKey: "tool-invalid" },
       {
-        status: "unknown",
-        idempotencyKey: "tool-unknown",
+        status: "delivered",
+        idempotencyKey: "tool-invalid",
       },
-    )).toThrow(/confirmed delivery/u);
+    )).toThrow(/invalid/u);
 
     const fileTool = channel.sendTools[1]!;
     const preparedFile = await fileTool.prepare({

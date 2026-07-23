@@ -3,15 +3,18 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { isIP, type AddressInfo, type Socket } from "node:net";
 import { hostname as systemHostname } from "node:os";
 
+import type { ChannelCompletionDelivery } from "@mono-agent/module-sdk";
+
 import {
   isLoopbackHost,
   MAX_RUN_MS,
   parseWebhookMode,
   parseWebhookPath,
+  WebhookConfigError,
   type WebhookConfig,
   type WebhookMode,
 } from "./config.js";
-import type { WebhookRoute } from "./routes.js";
+import { parseWebhookNotify, type WebhookRoute } from "./routes.js";
 
 const SHUTDOWN_DRAIN_MS = 1_000;
 const MAX_TEXT_LENGTH = 1_000_000;
@@ -34,7 +37,10 @@ export interface WebhookInboundRequest {
   readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
+  readonly completionDelivery?: ChannelCompletionDelivery;
   readonly routeName?: string;
+  /** Lowercase SHA-256 of the exact authenticated request bytes. */
+  readonly bodySha256: string;
   readonly metadata?: WebhookJsonObject;
   readonly abortSignal: AbortSignal;
 }
@@ -75,7 +81,7 @@ export type WebhookRequestStatus =
       readonly startedAt: string;
       readonly completedAt: string;
       readonly error: {
-        readonly code: "request_failed" | "timeout" | "cancelled";
+        readonly code: "request_failed" | "idempotency_conflict" | "timeout" | "cancelled";
         readonly message: string;
       };
     };
@@ -117,6 +123,7 @@ export interface CreateWebhookChannelOptions {
   readonly config: WebhookConfig;
   readonly submit: WebhookSubmit;
   readonly routes?: readonly WebhookRoute[];
+  readonly requestIdNamespace?: string;
 }
 
 interface ParsedInvocation {
@@ -139,6 +146,17 @@ interface ActiveRequest {
   readonly controller: AbortController;
   readonly completion: Promise<WebhookTerminalStatus>;
 }
+interface IdempotentRequest {
+  readonly fingerprint: string;
+  readonly requestId: string;
+  readonly conversationId: string;
+  readonly statusUrl: string;
+  readonly receivedAt: string;
+  readonly mode: WebhookMode;
+  readonly completion: Promise<WebhookTerminalStatus>;
+  terminal: boolean;
+  updatedAtMs: number;
+}
 
 class HttpError extends Error {
   constructor(
@@ -151,8 +169,15 @@ class HttpError extends Error {
   }
 }
 
+export class WebhookSubmissionError extends Error {
+  constructor(readonly code: "idempotency_conflict") {
+    super(code);
+    this.name = "WebhookSubmissionError";
+  }
+}
+
 class ExecutionError extends Error {
-  constructor(readonly code: "request_failed" | "timeout" | "cancelled") {
+  constructor(readonly code: "request_failed" | "idempotency_conflict" | "timeout" | "cancelled") {
     super(code);
     this.name = "ExecutionError";
   }
@@ -161,6 +186,10 @@ class ExecutionError extends Error {
 export function createWebhookChannel(options: CreateWebhookChannelOptions): WebhookChannel {
   assertStartSafety(options.config);
   const routes = normalizeRoutes(options.config, options.routes);
+  const requestIdNamespace = options.requestIdNamespace ?? "standalone";
+  if (!validRouteString(requestIdNamespace)) {
+    throw new Error("Webhook request id namespace is invalid.");
+  }
   const routesByPath = new Map(routes.map((route) => [route.path, route]));
 
   let server: Server | undefined;
@@ -171,10 +200,12 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
   let degradedMessage: string | undefined;
   const statuses = new Map<string, StoredStatus>();
   const active = new Map<string, ActiveRequest>();
+  const idempotentRequests = new Map<string, IdempotentRequest>();
   const sockets = new Set<Socket>();
 
   const health = (): WebhookChannelHealth => {
     pruneStatuses(statuses, options.config.retentionMs);
+    pruneIdempotentRequests(idempotentRequests, options.config.retentionMs);
     if (degradedMessage !== undefined) {
       return {
         status: "degraded",
@@ -192,6 +223,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
 
   const getStatus = (requestId: string): WebhookRequestStatus | undefined => {
     pruneStatuses(statuses, options.config.retentionMs);
+    pruneIdempotentRequests(idempotentRequests, options.config.retentionMs);
     return statuses.get(requestId)?.status;
   };
 
@@ -359,11 +391,18 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
     }
 
     let invocation: ParsedInvocation;
+    let idempotencyKey: string | undefined;
+    let bodyFingerprint = "";
     try {
       const body = await readBoundedJsonBody(request, options.config.maxBodyBytes);
       if (options.config.signatureSecret !== undefined && !verifySignature(request.headers["x-mono-agent-signature"], body.raw, options.config.signatureSecret)) {
         throw new HttpError(401, "invalid_signature", "Unauthorized.");
       }
+      idempotencyKey = readIdempotencyKey(
+        request.headers["idempotency-key"],
+        request.headersDistinct["idempotency-key"],
+      );
+      bodyFingerprint = createHash("sha256").update(body.raw).digest("hex");
       invocation = applyRoute(parseInvocation(body.value), route);
     } catch (error) {
       const failure = error instanceof HttpError
@@ -379,7 +418,32 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       return;
     }
 
-    const requestId = randomUUID();
+    const identity = idempotencyKey === undefined ? undefined : `${route.name}\0${idempotencyKey}`;
+    pruneIdempotentRequests(idempotentRequests, options.config.retentionMs);
+    const prior = identity === undefined ? undefined : idempotentRequests.get(identity);
+    if (prior !== undefined) {
+      if (prior.fingerprint !== bodyFingerprint) {
+        sendJson(response, 409, safeErrorBody("idempotency_conflict",
+          "Idempotency-Key was already used with a different request body."));
+        return;
+      }
+      if (prior.mode === "async") {
+        sendJson(response, 202, acceptedStatus(prior));
+        return;
+      }
+      sendTerminalStatus(response, await prior.completion);
+      return;
+    }
+    if (identity !== undefined) {
+      if (!reserveIdempotentCapacity(idempotentRequests, options.config.maxStoredRequests)) {
+        sendJson(response, 503, safeErrorBody("request_capacity",
+          "The idempotent request capacity is full."));
+        return;
+      }
+    }
+    const requestId = idempotencyKey === undefined
+      ? randomUUID()
+      : stableWebhookRequestId(requestIdNamespace, route.path, idempotencyKey);
     const conversationId = invocation.conversationId ?? `webhook:${route.name}:${requestId}`;
     const receivedAt = new Date().toISOString();
     const requestStatusUrl = `${statusBasePath(route.path)}/${encodeURIComponent(requestId)}`;
@@ -411,6 +475,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
         mode,
         route,
         invocation,
+        bodySha256: bodyFingerprint,
       });
       setStatus(statuses, {
         status: "running",
@@ -423,6 +488,8 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       void execution.completion.then((status) => {
         setStatus(statuses, status, isTerminalStatus(status));
       });
+      if (identity !== undefined) rememberIdempotentRequest(
+        idempotentRequests, identity, bodyFingerprint, mode, accepted, execution.completion);
       sendJson(response, 202, accepted);
       return;
     }
@@ -435,7 +502,13 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       mode,
       route,
       invocation,
+      bodySha256: bodyFingerprint,
     });
+    if (identity !== undefined) rememberIdempotentRequest(idempotentRequests, identity,
+      bodyFingerprint, mode, {
+        status: "accepted", requestId, conversationId,
+        statusUrl: requestStatusUrl, receivedAt,
+      }, execution.completion);
     const onClose = (): void => {
       if (!response.writableEnded) {
         execution.controller.abort(new ExecutionError("cancelled"));
@@ -447,16 +520,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
     if (response.destroyed) {
       return;
     }
-    if (status.status === "succeeded") {
-      sendJson(response, 200, status);
-      return;
-    }
-    const statusCode = status.error.code === "timeout"
-      ? 504
-      : status.error.code === "cancelled"
-        ? 503
-        : 500;
-    sendJson(response, statusCode, status);
+    sendTerminalStatus(response, status);
   };
 
   const beginSubmission = (input: {
@@ -467,6 +531,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
     readonly mode: WebhookMode;
     readonly route: WebhookRoute;
     readonly invocation: ParsedInvocation;
+    readonly bodySha256: string;
   }): ActiveRequest => {
     const controller = new AbortController();
     const startedAt = new Date().toISOString();
@@ -478,7 +543,9 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       ...(input.invocation.runtime === undefined ? {} : { runtime: input.invocation.runtime }),
       ...(input.invocation.model === undefined ? {} : { model: input.invocation.model }),
       ...(input.invocation.effort === undefined ? {} : { effort: input.invocation.effort }),
+      ...(input.route.notify === undefined ? {} : { completionDelivery: input.route.notify }),
       routeName: input.route.name,
+      bodySha256: input.bodySha256,
       ...(input.invocation.metadata === undefined ? {} : { metadata: input.invocation.metadata }),
       abortSignal: controller.signal,
     };
@@ -581,6 +648,12 @@ function normalizeRoutes(
   const names = new Set<string>();
   const paths = new Set<string>();
   for (const candidate of candidates) {
+    let notify;
+    try { notify = parseWebhookNotify(candidate.notify, "Webhook route notify"); }
+    catch (error: unknown) {
+      if (error instanceof WebhookConfigError) throw error;
+      throw new Error("Webhook route configuration is invalid.");
+    }
     if (!/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(candidate.name)
       || parseWebhookPath(candidate.path) !== candidate.path
       || parseWebhookMode(candidate.mode) !== candidate.mode
@@ -600,7 +673,7 @@ function normalizeRoutes(
     }
     names.add(candidate.name);
     paths.add(candidate.path);
-    routes.push(Object.freeze({ ...candidate }));
+    routes.push(Object.freeze({ ...candidate, ...(notify === undefined ? {} : { notify }) }));
   }
   for (const route of routes) {
     if (routes.some((other) => other !== route
@@ -677,9 +750,8 @@ async function executeSubmission(
     }
     return result;
   } catch (error) {
-    if (error instanceof ExecutionError) {
-      throw error;
-    }
+    if (error instanceof ExecutionError) throw error;
+    if (error instanceof WebhookSubmissionError) throw new ExecutionError(error.code);
     throw new ExecutionError("request_failed");
   } finally {
     clearTimeout(timeout);
@@ -888,10 +960,35 @@ function verifySignature(value: string | string[] | undefined, body: Buffer, sec
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
+function readIdempotencyKey(
+  value: string | string[] | undefined,
+  distinct: readonly string[] | undefined,
+): string | undefined {
+  if (value === undefined) return undefined;
+  if (distinct?.length !== 1 || typeof value !== "string"
+    || value.length === 0 || value !== value.trim()
+    || Buffer.byteLength(value, "utf8") > 512 || /[\u0000-\u001f\u007f]/u.test(value)) {
+    throw new HttpError(400, "invalid_idempotency_key",
+      "Idempotency-Key must be one non-empty bounded value without control characters.");
+  }
+  return value;
+}
+
+function stableWebhookRequestId(namespace: string, route: string, key: string): string {
+  const bytes = createHash("sha256").update(
+    `mono-agent:webhook-request:v1\0${namespace}\0${route}\0${key}`, "utf8").digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x80;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function safeExecutionError(
-  code: "request_failed" | "timeout" | "cancelled",
-): { readonly code: "request_failed" | "timeout" | "cancelled"; readonly message: string } {
+  code: "request_failed" | "idempotency_conflict" | "timeout" | "cancelled",
+): { readonly code: typeof code; readonly message: string } {
   switch (code) {
+    case "idempotency_conflict":
+      return { code, message: "The request identity conflicts with prior input." };
     case "timeout":
       return { code, message: "The request timed out." };
     case "cancelled":
@@ -945,7 +1042,7 @@ function matchStatusRequestId(pathname: string, basePath: string): string | unde
   if (encoded.length === 0 || encoded.includes("/")) return undefined;
   try {
     const decoded = decodeURIComponent(encoded);
-    return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(decoded)
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[48][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(decoded)
       ? decoded
       : undefined;
   } catch {
@@ -965,6 +1062,37 @@ function setStatus(
   });
 }
 
+function rememberIdempotentRequest(
+  requests: Map<string, IdempotentRequest>,
+  identity: string,
+  fingerprint: string,
+  mode: WebhookMode,
+  accepted: Extract<WebhookRequestStatus, { readonly status: "accepted" | "running" }>,
+  completion: Promise<WebhookTerminalStatus>,
+): void {
+  const entry: IdempotentRequest = {
+    fingerprint, requestId: accepted.requestId, conversationId: accepted.conversationId,
+    statusUrl: accepted.statusUrl, receivedAt: accepted.receivedAt, mode, completion,
+    terminal: false, updatedAtMs: Date.now(),
+  };
+  requests.set(identity, entry);
+  void completion.then(() => { entry.terminal = true; entry.updatedAtMs = Date.now(); });
+}
+
+function acceptedStatus(entry: IdempotentRequest): WebhookRequestStatus {
+  return {
+    status: "accepted", requestId: entry.requestId, conversationId: entry.conversationId,
+    statusUrl: entry.statusUrl, receivedAt: entry.receivedAt,
+  };
+}
+
+function sendTerminalStatus(response: ServerResponse, status: WebhookTerminalStatus): void {
+  const code = status.status === "succeeded" ? 200
+    : status.error.code === "idempotency_conflict" ? 409
+    : status.error.code === "timeout" ? 504 : status.error.code === "cancelled" ? 503 : 500;
+  sendJson(response, code, status);
+}
+
 function isTerminalStatus(status: WebhookRequestStatus): boolean {
   return status.status === "succeeded" || status.status === "failed" || status.status === "cancelled";
 }
@@ -976,6 +1104,30 @@ function pruneStatuses(statuses: Map<string, StoredStatus>, retentionMs: number)
       statuses.delete(requestId);
     }
   }
+}
+
+function pruneIdempotentRequests(
+  requests: Map<string, IdempotentRequest>,
+  retentionMs: number,
+): void {
+  const cutoff = Date.now() - retentionMs;
+  for (const [identity, entry] of requests) {
+    if (entry.terminal && entry.updatedAtMs <= cutoff) requests.delete(identity);
+  }
+}
+
+function reserveIdempotentCapacity(
+  requests: Map<string, IdempotentRequest>,
+  maximum: number,
+): boolean {
+  if (requests.size < maximum) return true;
+  const terminal = [...requests.entries()].filter(([, entry]) => entry.terminal)
+    .sort((left, right) => left[1].updatedAtMs - right[1].updatedAtMs);
+  for (const [identity] of terminal) {
+    requests.delete(identity);
+    if (requests.size < maximum) return true;
+  }
+  return false;
 }
 
 function reserveStatusCapacity(

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
+import { parse } from "yaml";
 
 import { assertPackedDependencyResolution } from "../dependency-policy.mjs";
 import {
@@ -14,6 +15,7 @@ import {
   buildPackedConsumerManifest,
   declaredInternalPackageClosure,
   declaredInternalPackageNames,
+  PACKED_CONSUMER_SECURITY_OVERRIDES,
   parsePackedConsumerArgs,
 } from "../verify-packed-consumer.mjs";
 import {
@@ -61,9 +63,18 @@ describe("packed consumer verification", () => {
       "@mono-agent/a": "file:/tmp/a.tgz",
       "@mono-agent/z": "file:/tmp/z.tgz",
     });
+    expect(manifest.overrides).toEqual(PACKED_CONSUMER_SECURITY_OVERRIDES);
     expect(() => buildPackedConsumerManifest({ engines: { node: ">=20" } }, [])).toThrow(
       /template engines\.node must be >=22\.19\.0/u,
     );
+  });
+
+  test("projects the exact workspace security floors into packed npm consumers", () => {
+    const workspace = parse(fs.readFileSync(
+      new URL("../../../pnpm-workspace.yaml", import.meta.url),
+      "utf8",
+    ));
+    expect(PACKED_CONSUMER_SECURITY_OVERRIDES).toEqual(workspace.overrides);
   });
 
   test("derives every concrete runtime export from a packed manifest", () => {
@@ -109,6 +120,11 @@ describe("packed consumer verification", () => {
       "@mono-agent/target": "file:/tmp/target.tgz",
     });
     expect(manifest.overrides).toEqual({
+      "brace-expansion": "5.0.8",
+      "fast-uri": "3.1.4",
+      protobufjs: "7.6.5",
+      sharp: "0.35.3",
+      ws: "8.21.1",
       "@mono-agent/declared": "file:/tmp/declared.tgz",
       "@mono-agent/hidden": "file:/tmp/hidden.tgz",
       "@mono-agent/peer": "file:/tmp/peer.tgz",

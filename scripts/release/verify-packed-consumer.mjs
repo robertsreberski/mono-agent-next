@@ -14,6 +14,16 @@ import { RELEASE_REPOSITORY, validateRelease } from "./validate-release.mjs";
 
 const CONSUMER_FIXTURE = path.join(REPO_ROOT, "scripts", "release", "fixtures", "packed-consumer");
 
+// npm consumers do not inherit pnpm-workspace.yaml. Project the exact reviewed
+// production security floors into every combined and isolated packed install.
+export const PACKED_CONSUMER_SECURITY_OVERRIDES = Object.freeze({
+  "brace-expansion": "5.0.8",
+  "fast-uri": "3.1.4",
+  protobufjs: "7.6.5",
+  sharp: "0.35.3",
+  ws: "8.21.1",
+});
+
 export function parsePackedConsumerArgs(argv) {
   let tag = process.env.GITHUB_REF_NAME ?? null;
   let requireMinimum = false;
@@ -59,6 +69,7 @@ export function buildPackedConsumerManifest(template, packedPackages) {
         .sort((a, b) => a.name.localeCompare(b.name))
         .map((pkg) => [pkg.name, `file:${pkg.tarballPath}`]),
     ),
+    overrides: PACKED_CONSUMER_SECURITY_OVERRIDES,
   };
 }
 
@@ -80,12 +91,15 @@ export function buildIsolatedConsumerManifest(template, targetPackage, packedPac
     // An override does not install a package by itself. It only ensures every
     // declared internal edge at any depth resolves to this frozen tarball set,
     // while an undeclared edge remains absent from the isolated consumer.
-    overrides: Object.fromEntries(
-      packedPackages
-        .filter((pkg) => pkg.name !== targetPackage.name)
-        .sort((a, b) => a.name.localeCompare(b.name))
-        .map((pkg) => [pkg.name, `file:${pkg.tarballPath}`]),
-    ),
+    overrides: {
+      ...PACKED_CONSUMER_SECURITY_OVERRIDES,
+      ...Object.fromEntries(
+        packedPackages
+          .filter((pkg) => pkg.name !== targetPackage.name)
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((pkg) => [pkg.name, `file:${pkg.tarballPath}`]),
+      ),
+    },
   };
 }
 

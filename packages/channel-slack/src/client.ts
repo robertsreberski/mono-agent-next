@@ -1,6 +1,7 @@
 import type { ChannelAttachment } from "@mono-agent/module-sdk";
 
 import type { SlackConfig } from "./config.js";
+import { isSlackMessageTimestamp } from "./destination.js";
 import type { SlackRemoteFile } from "./socket.js";
 
 export interface SlackPostRequest {
@@ -28,7 +29,7 @@ export interface SlackHomeView {
 export interface SlackApiClient {
   download(file: SlackRemoteFile, maxBytes: number, signal: AbortSignal): Promise<ChannelAttachment>;
   postMessage(request: SlackPostRequest): Promise<{ readonly messageId: string }>;
-  postFile(request: SlackFilePostRequest): Promise<{ readonly messageId: string }>;
+  postFile(request: SlackFilePostRequest): Promise<{ readonly messageId?: string }>;
   setAssistantStatus?(
     channelId: string,
     threadId: string,
@@ -60,7 +61,7 @@ export function createSlackWebApiClient(config: SlackConfig, fetchImpl: typeof f
     },
     async postMessage(request) {
       const value = await api("chat.postMessage", { channel: request.channelId, text: request.text, ...(request.threadId === undefined ? {} : { thread_ts: request.threadId }), ...(request.buttons === undefined || request.buttons.length === 0 ? {} : { blocks: [{ type: "section", text: { type: "mrkdwn", text: request.text } }, { type: "actions", elements: request.buttons.slice(0, 5).map((button) => ({ type: "button", text: { type: "plain_text", text: button.label }, action_id: "mono_agent_ask", value: button.value })) }] }) }, request.signal);
-      if (typeof value.ts !== "string") throw new Error("Slack chat.postMessage returned no timestamp.");
+      if (!isSlackMessageTimestamp(value.ts)) throw new Error("Slack chat.postMessage returned no timestamp.");
       return { messageId: value.ts };
     },
     async postFile(request) {
@@ -72,7 +73,9 @@ export function createSlackWebApiClient(config: SlackConfig, fetchImpl: typeof f
       const sent = await fetchImpl(uploadUrl, { method: "POST", redirect: "error", body: bytes, signal: request.signal });
       if (!sent.ok) throw new Error(`Slack file upload failed with HTTP ${sent.status}.`);
       const completed = await api("files.completeUploadExternal", { files: [{ id: upload.file_id, title: request.attachment.name }], channel_id: request.channelId, ...(request.threadId === undefined ? {} : { thread_ts: request.threadId }) }, request.signal);
-      return { messageId: typeof completed.ts === "string" ? completed.ts : upload.file_id };
+      return isSlackMessageTimestamp(completed.ts)
+        ? { messageId: completed.ts }
+        : {};
     },
     async setAssistantStatus(channelId, threadId, status, signal) {
       await api("assistant.threads.setStatus", {

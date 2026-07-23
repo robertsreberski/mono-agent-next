@@ -73,6 +73,9 @@ mode: async
 runtime: pi
 model: provider:model
 effort: high
+notify:
+  channel: telegram
+  destination: telegram:42
 maxRunMs: 3600000
 ---
 Classify the incident and summarize the next action.
@@ -81,6 +84,11 @@ Classify the incident and summarize the next action.
 The prompt is prepended to caller text but never returned in route discovery or
 status data. Route names and paths are unique; symlinks, oversized files,
 unknown fields, and route/status namespace collisions fail before listening.
+`notify` requests completion delivery through another selected channel instance
+after a successful non-empty turn. It may also be the channel-instance string
+alone when that channel owns a configured default destination. The invocation
+does not report success unless Core confirms both transport delivery and its
+canonical conversation history.
 Without `routesDirectory`, the source-compatible single `path` route remains;
 `mode` is retained only as an alias for `defaultMode`.
 
@@ -89,6 +97,7 @@ Invoke the channel with a bearer token:
 ```bash
 curl --fail-with-body \
   -H "Authorization: Bearer $MONO_AGENT_WEBHOOK_API_KEY" \
+  -H "Idempotency-Key: build-42" \
   -H "Content-Type: application/json" \
   --data '{"text":"Summarize the current worktree","conversationId":"build-42"}' \
   http://127.0.0.1:3210/webhook/invoke
@@ -99,6 +108,14 @@ The request may include `text`, `conversationId`, `runtime`, `model`, `effort`,
 defaults. Sync mode returns the terminal result. Async mode returns `202` with a
 `requestId` and route-local `statusUrl`; polling uses the same bearer
 authentication.
+
+`Idempotency-Key` is optional and bounded. When present, the channel derives a
+stable request id from the selected channel instance, route, and key. Identical
+concurrent or retained retries join the same submission; the same key with a
+different raw body returns `409`. With durable Core state, the stable request id
+also makes a post-restart retry return the previously settled response without
+rerunning the model, while a changed body remains a `409` conflict. The
+route-local async polling record itself remains bounded process memory.
 
 When `signatureSecret` is set, invocations must also carry
 `X-Mono-Agent-Signature: sha256=<hex>` computed over the exact raw request
@@ -132,11 +149,16 @@ belongs behind a trusted TLS reverse proxy with rate limiting.
    JSON request shape.
 5. The selected private prompt and route defaults are merged with the request,
    then the channel calls the injected `submit` capability with an abort signal.
-6. Sync responses settle on the same connection. Async terminal states remain in
+6. An optional idempotency key maps to a stable Core request identity. Bounded
+   process memory joins active requests and preserves their local status, while
+   durable Core admission supplies the restart-safe response/conflict decision.
+7. After successful execution, optional route notification uses Core's durable
+   delivery-and-history path before the invocation can report success.
+8. Sync responses settle on the same connection. Async terminal states remain in
    bounded process memory until retention or capacity eviction.
-7. `stop()` stops admission, aborts active work, drains within a fixed bound, and
+9. `stop()` stops admission, aborts active work, drains within a fixed bound, and
    closes listener connections idempotently.
-8. Optional proactive delivery targets only the configured URL, bounds payload
+10. Optional proactive delivery targets only the configured URL, bounds payload
    and response bytes, disables redirects, and signs the exact transmitted body.
 
 ### Package structure
@@ -199,6 +221,7 @@ WebhookModuleChannel
 WebhookOutboundConfig
 WebhookRequestStatus
 WebhookRoute
+WebhookSubmissionError
 WebhookSubmit
 WebhookTerminalStatus
 WebhookTurnResult
@@ -208,6 +231,7 @@ loadWebhookRoutesFromDirectory
 monoAgentModule
 parseWebhookConfig
 parseWebhookMode
+parseWebhookNotify
 parseWebhookPath
 parseWebhookRouteMarkdown
 webhookConfigSchema
@@ -224,11 +248,12 @@ capability supplied by core.
 
 ## What This Package Does Not Own
 
-It does not select or execute models, persist conversations or delivery
-receipts, provide durable async jobs, install modules, terminate TLS, expose
-public rate limiting, or manage operating-system services. Async request status
-and successful-delivery deduplication are process-local and are lost on restart
-by design.
+It does not select or execute models, own conversation or delivery persistence,
+provide durable async polling jobs, install modules, terminate TLS, expose
+public rate limiting, or manage operating-system services. Async polling status
+is process-local. Restart-safe request admission, response caching, completion
+delivery, and delivery-history settlement belong to Core and require a durable
+state module.
 
 ## Related Documentation
 

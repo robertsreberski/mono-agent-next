@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createAgentHost } from "../host.js";
@@ -145,6 +145,9 @@ describe("complete agent plane", () => {
               },
               async deliver(message: { idempotencyKey: string }) {
                 return { status: "delivered", idempotencyKey: message.idempotencyKey };
+              },
+              resolveDeliveryHistory(message: { conversationId: string }) {
+                return { conversationId: message.conversationId };
               },
               readHostPresence() {
                 return {
@@ -320,6 +323,123 @@ describe("complete agent plane", () => {
     expect(exports).toHaveLength(2);
   });
 
+  it("replays webhook completion delivery once across restart and conflicts on changed raw bytes", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtimeName = `@fixture/runtime-webhook-${suffix}`;
+    const stateName = `@fixture/state-webhook-${suffix}`;
+    const sourceName = `@fixture/channel-webhook-${suffix}`;
+    const targetName = `@fixture/channel-notify-${suffix}`;
+    const state = new MemoryStateStore();
+    let providerTurns = 0;
+    let sends = 0;
+    let dispatch: ((request: Record<string, unknown>, reply: {
+      emit(event: unknown): Promise<void>;
+    }) => Promise<Record<string, unknown>>) | undefined;
+    const project = await createFixtureProject([
+      {
+        name: runtimeName,
+        kind: "runtime",
+        controller: runtimeController(() => {
+          providerTurns += 1;
+          return completed("webhook answer");
+        }),
+      },
+      { name: stateName, kind: "state", controller: { create: () => state } },
+      {
+        name: sourceName,
+        kind: "channel",
+        controller: {
+          create(context: unknown) {
+            const sourceHost = (context as { host: { dispatch: typeof dispatch } }).host;
+            dispatch = sourceHost.dispatch!.bind(sourceHost) as typeof dispatch;
+            return {
+              capabilities: {
+                attachments: false, liveInput: false, askUser: false, approvals: false,
+                proactive: false, runtimeControl: false, verbatim: true, cancellation: false,
+              },
+            };
+          },
+        },
+      },
+      {
+        name: targetName,
+        kind: "channel",
+        controller: {
+          create: () => ({
+            capabilities: {
+              attachments: false, liveInput: false, askUser: false, approvals: false,
+              proactive: true, runtimeControl: false, verbatim: true, cancellation: false,
+            },
+            resolveDeliveryHistory: () => ({ conversationId: "telegram:42" }),
+            async deliver(message: { idempotencyKey: string }) {
+              sends += 1;
+              return {
+                status: "delivered",
+                idempotencyKey: message.idempotencyKey,
+                messageId: "telegram-message-1",
+              };
+            },
+          }),
+        },
+      },
+    ]);
+    projects.push(project);
+    await project.writeConfig(minimalConfig(runtimeName, {
+      state: { $use: stateName },
+      channels: {
+        incoming: { $use: sourceName },
+        notify: { $use: targetName },
+      },
+    }));
+    const rawHash = (raw: string): string =>
+      createHash("sha256").update(raw).digest("hex");
+    const request = (raw: string, text = "same") => ({
+      requestId: "webhook-stable-request",
+      conversationId: "webhook:triage:webhook-stable-request",
+      sender: { id: "webhook", displayName: "incoming" },
+      text,
+      attachments: [],
+      receivedAt: "2026-07-23T10:00:00.000Z",
+      completionDelivery: { channel: "notify", destination: "telegram:42" },
+      metadata: { webhook: { route: "triage", bodySha256: rawHash(raw) } },
+      signal: new AbortController().signal,
+    });
+    const reply = { async emit() {} };
+    const first = await createAgentHost(project.configPath);
+    expect(await dispatch!(request('{"text":"same"}'), reply)).toMatchObject({
+      status: "completed",
+      text: "webhook answer",
+    });
+    expect(providerTurns).toBe(1);
+    expect(sends).toBe(1);
+    expect((await first.replay("telegram:42")).messages).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: [{ type: "text", text: "webhook answer" }],
+      }),
+    ]);
+    await first.stop();
+
+    const restarted = await createAgentHost(project.configPath);
+    expect(await dispatch!(request('{"text":"same"}'), reply)).toMatchObject({
+      status: "completed",
+      text: "webhook answer",
+    });
+    for (const changed of [
+      request('{ "text": "same" }'),
+      request('{"text":"different"}', "different"),
+    ]) {
+      expect(await dispatch!(changed, reply)).toMatchObject({
+        status: "rejected",
+        diagnostics: [{ code: "request_conflict" }],
+      });
+    }
+    expect(providerTurns).toBe(1);
+    expect(sends).toBe(1);
+    expect((await restarted.replay("telegram:42")).messages).toHaveLength(1);
+    await restarted.stop();
+  });
+
   it("executes a cron-style default notification once through the selected proactive channel", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtimeName = `@fixture/runtime-${suffix}`;
@@ -359,6 +479,9 @@ describe("complete agent plane", () => {
               cancellation: false,
             },
             resolveDefaultDeliveryConversationId: () => "telegram:42",
+            resolveDeliveryHistory: (message: { conversationId: string }) => ({
+              conversationId: message.conversationId,
+            }),
             async deliver(message: unknown) {
               deliveries.push(message);
               const idempotencyKey = (message as { idempotencyKey: string }).idempotencyKey;
@@ -456,6 +579,9 @@ describe("complete agent plane", () => {
               verbatim: false,
               cancellation: false,
             },
+            resolveDeliveryHistory: (message: { conversationId: string }) => ({
+              conversationId: message.conversationId,
+            }),
             async deliver(message: { text: string; idempotencyKey: string }) {
               deliveries.push(message.text);
               return { status: "delivered", idempotencyKey: message.idempotencyKey };
@@ -553,7 +679,8 @@ describe("complete agent plane", () => {
     await expect(host.runModuleCommand("cron", "cron:no-delivery")).resolves.toMatchObject({
       value: { status: "rejected", reason: "duplicate trigger event" },
     });
-    expect((await host.replay("operator-admin")).messages).toEqual([]);
+    expect((await host.replay("operator-admin")).messages.map((message) =>
+      message.content[0]?.type === "text" ? message.content[0].text : "")).toEqual(deliveries);
     const history = await host.listRuns();
     expect(history.runs).toHaveLength(6);
     const suppressed = history.runs.find(({ requestId }) => requestId === "suppression-1");
@@ -612,6 +739,9 @@ describe("complete agent plane", () => {
               verbatim: false,
               cancellation: false,
             },
+            resolveDeliveryHistory: (message: { conversationId: string }) => ({
+              conversationId: message.conversationId,
+            }),
             async deliver(message: { idempotencyKey: string }) {
               deliveries += 1;
               return { status: deliveryStatus, idempotencyKey: message.idempotencyKey };

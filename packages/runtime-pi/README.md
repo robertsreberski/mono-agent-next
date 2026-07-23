@@ -19,9 +19,9 @@ Runtime module.
 
 Own Pi model resolution, atomically persisted API-key/OAuth credentials,
 isolated native provider attempts, durably reserved resumable session forks,
-live steering, governed literal edits and web search, schema-constrained
-responses, output-token bounds, and translation between Pi events and the
-mono-agent runtime slot.
+live steering, governed Personal-compatible coding and web tools,
+schema-constrained responses, output-token bounds, and translation between Pi
+events and the mono-agent runtime slot.
 
 ## Install / Usage
 
@@ -95,11 +95,18 @@ never contain keys, tokens, or raw provider/storage errors.
 
 This runtime reports `approvals: true`, `structuredOutput: true`,
 `maxOutputTokens: true`, and `sandbox: false`, both globally and for exact
-model routes. Core-owned tools still execute through Core. Three runtime-owned
+model routes. Core-owned tools still execute through Core. Nine runtime-owned
 tools are advertised before ordinary provider dispatch:
 
 - `NodeRepl`: `read`, `write`, `execute`, and `network`;
+- `Read`: `read`;
+- `Write`: `write`;
 - `Edit`: `read` and `write`;
+- `Glob`: `read`;
+- `Grep`: `read`, `write`, `execute`, and `network` because Pi may install
+  ripgrep when it is absent;
+- `Bash`: `read`, `write`, `execute`, and `network`;
+- `WebFetch`: `network`;
 - `WebSearch`: `network`.
 
 Every descriptor uses `approval: "core-callback"` and
@@ -111,16 +118,45 @@ uses the configured interaction handler. A missing or mismatched approval
 bridge fails before provider access, and denial happens before filesystem,
 process, or network effects.
 
-Approval summaries bind decisions to exact paths, queries, limits, and
-`replace_all`, plus complete UTF-8 byte lengths, SHA-256 digests, and bounded
-escaped previews of code and replacement strings. `Edit` accepts only an
-existing, owner-controlled, single-link regular UTF-8 file below the workspace,
-rejects every symlink component, and performs identity-and-digest checked
-literal replacement through a same-directory atomic rename. `WebSearch` uses a
-fixed HTTPS endpoint, bounded response and output sizes, checked same-origin
-redirects, a whole-request timeout, strict content type and UTF-8 decoding, and
-distinguishes a recognized empty result page from transport, HTTP, or parser
-failure.
+Approval summaries bind decisions to exact paths, workdirs, queries, commands,
+limits, and `replace_all`, plus complete UTF-8 byte lengths, SHA-256 digests,
+and bounded escaped previews for effectful strings. `Read`, `Write`, `Glob`,
+`Grep`, and `Bash` accept the established PascalCase Personal Agent argument
+surface, including absolute paths and per-call workdirs. Relative paths resolve
+from the workdir or agent workspace. The legacy zero-based Read `offset` is
+translated to Pi's one-based offset, and predecessor-compatible negative
+offsets are clamped to zero; an explicit `start_line` below one or a conflict
+after offset normalization fails before approval.
+Read snapshots are capped at 16 MiB before materialization. Images retain Pi's
+resize behavior and are additionally capped at 4.5 MiB of encoded payload
+before the result reaches provider context or runtime recording; an oversized
+image is omitted with an explicit tool-result notice.
+Bash accepts legacy millisecond timeouts, caps every command at 600 seconds,
+kills the process tree on cancellation, keeps the provider preview within Pi's
+2,000-line/50-KiB output bound, and kills output-flooding commands above a
+1-MiB hard capture limit without persisting unbounded full output. `Glob` wraps
+Pi Find with a cancellation-aware local traversal capped at 100,000 filesystem
+entries and 15 seconds. `Grep` retains `content`,
+`files_with_matches`, and `count` projections. Files/count projections prepend
+an explicit `PARTIAL` diagnostic when Pi reaches its match or byte limit, so a
+dense early file cannot make an incomplete projection appear exhaustive.
+
+`Edit` remains deliberately narrower: it accepts only an existing,
+owner-controlled, single-link regular UTF-8 file below the workspace, rejects
+every symlink component, and performs identity-and-digest checked literal
+replacement through a same-directory atomic rename. `WebFetch` permits public
+HTTPS only, rejects credential and unrecognized request headers, validates all
+DNS answers, pins one accepted public address into each TLS connection, and
+revalidates every bounded redirect and retry. Transient network failures and
+HTTP 5xx responses receive two bounded backoff retries. Each attempt has a
+timeout and the complete retry sequence has a bounded overall deadline.
+Response size, output size, elapsed time, content type, and UTF-8 are bounded.
+`WebFetch` returns fetched text for the calling model to interpret and does not
+accept a second model-processing prompt.
+`WebSearch` uses a fixed HTTPS endpoint,
+bounded response and output sizes, checked same-origin redirects, a
+whole-request timeout, strict content type and UTF-8 decoding, and distinguishes
+a recognized empty result page from transport, HTTP, or parser failure.
 
 The REPL child inherits the host's `process.env`; approved code can inspect
 environment values in addition to the declared filesystem, subprocess, and
@@ -130,8 +166,8 @@ treat an approved REPL call as granting the code full authority within the
 runtime process's operating-system permissions.
 
 Schema-constrained turns use a narrower execution path. When Core supplies
-`RuntimeTurnRequest.options.responseSchema`, the runtime removes `NodeRepl`,
-`Edit`, and `WebSearch` and does not require the native-tool approval callback.
+`RuntimeTurnRequest.options.responseSchema`, the runtime removes all nine
+runtime-owned tools and does not require the native-tool approval callback.
 It adds one internal Pi tool whose parameters are the exact requested JSON
 schema and whose first successful call terminates the turn. That internal call
 is returned as `structuredOutput` and is not projected as a model-visible tool
@@ -150,15 +186,15 @@ model's own maximum.
    instance.
 2. The runtime resolves the `provider:model` route through Pi's built-in model
    registry or an explicitly configured local provider.
-3. For an ordinary turn, Core's pre-provider negotiation accepts the exact
-   Node REPL, Edit, and WebSearch authority descriptors and supplies the
-   fail-closed approval callback. For a schema-constrained turn, the runtime
-   suppresses those native tools and substitutes its terminating schema tool.
+3. For an ordinary turn, Core's pre-provider negotiation accepts the nine exact
+   authority descriptors and supplies the fail-closed approval callback. For a
+   schema-constrained turn, the runtime suppresses those native tools and
+   substitutes its terminating schema tool.
 4. A fresh native Pi `AgentHarness` attempt is seeded from Core's canonical
    messages, or an explicitly linked native session is forked for continuation.
-5. The harness exposes the three governed native tools. The Node.js REPL child
-   is lazy and run-scoped; Edit and WebSearch independently validate and bound
-   each approved call.
+5. The harness exposes the nine governed native tools. The Node.js REPL child
+   is lazy and run-scoped; every coding and web adapter independently validates
+   and bounds each approved call.
 6. Persistent attempts create an owner-private reservation before the Pi JSONL
    session, bind the reservation token into the session header, and atomically
    commit the marker only after successful settlement. Startup removes only
@@ -177,6 +213,8 @@ before model resolution or any provider request.
 | Source | Responsibility |
 | --- | --- |
 | `auth-command.ts` | Strict pre-start credential status, bounded model discovery, and honest login support reporting. |
+| `coding-tool-descriptors.ts` | Import-safe native-tool authority metadata used during synchronous model validation. |
+| `coding-tools.ts` | Governed Personal-compatible wrappers around Pi coding tools plus WebFetch. |
 | `config.ts` | Strict runtime configuration schema and validation. |
 | `credentials.ts` | Descriptor-validated owner-private API-key/OAuth loading and identity-checked atomic refresh rotation. |
 | `edit.ts` | Bounded literal workspace editing with no-follow identity checks and atomic replacement. |
@@ -185,6 +223,7 @@ before model resolution or any provider request.
 | `sessions.ts` | Durable owner-private reservation/commit markers and atomic fresh/forked native attempts. |
 | `runtime.ts` | Native harness lifecycle, sessions, live input, events, tools, schema-constrained output, token bounds, and settlement. |
 | `web-search.ts` | Bounded checked HTTP lifecycle and strict search-result parsing. |
+| `web-fetch.ts` | DNS-pinned public-HTTPS fetching with redirect and response bounds. |
 | `index.ts` | The typed `monoAgentModule` definition. |
 
 ## Public API

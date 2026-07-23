@@ -94,13 +94,16 @@ describe("slack channel", () => {
     const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({
       messageId: "1712345678.000100",
     }));
+    const postFile = vi.fn<SlackApiClient["postFile"]>(async () => ({
+      messageId: "F123ABC456",
+    }));
     const channel = createSlackChannel({
       context: context(
         parseSlackConfig({ ...CONFIG, defaultDestination: "C1:1712345678.000100" }),
         async () => ({ status: "completed" }),
       ),
       socketFactory: () => ({ async start() {}, async stop() {} }),
-      clientFactory: () => client({ postMessage }),
+      clientFactory: () => client({ postMessage, postFile }),
     });
     expect(channel.resolveDefaultDeliveryConversationId?.())
       .toBe("slack:C1:1712345678.000100");
@@ -130,42 +133,87 @@ describe("slack channel", () => {
       channelId: "C1",
       text: "Scheduled digest",
     }));
-    expect(tool.historyConversationId(
+    expect(channel.resolveDeliveryHistory?.(
       { ...topLevel, idempotencyKey: "tool-top-level" },
       result,
-    )).toBe("slack:C1:1712345678.000100");
+    )).toEqual({
+      conversationId: "slack:C1:1712345678.000100",
+    });
 
     const threaded = await tool.prepare({
       channel: "C1",
       thread_ts: "1700000000.000001",
       text: "Thread reply",
     }, { ...toolContext, callId: "call-2" });
-    expect(tool.historyConversationId(
+    expect(channel.resolveDeliveryHistory?.(
       { ...threaded, idempotencyKey: "tool-thread" },
       result,
-    )).toBe("slack:C1:1700000000.000001");
-    expect(() => tool.historyConversationId(
+    )).toEqual({
+      conversationId: "slack:C1:1700000000.000001",
+    });
+    const attachment = {
+      id: "report",
+      kind: "file" as const,
+      name: "report.txt",
+      mediaType: "text/plain",
+      sizeBytes: 6,
+      data: new TextEncoder().encode("report"),
+    };
+    const attachmentOnly = {
+      conversationId: "slack:C1",
+      text: "",
+      attachments: [attachment],
+      idempotencyKey: "attachment-only",
+    };
+    const attachmentResult = await channel.deliver!(
+      attachmentOnly,
+      toolContext.signal,
+    );
+    expect(attachmentResult).toEqual({
+      status: "delivered",
+      idempotencyKey: "attachment-only",
+    });
+    expect(channel.resolveDeliveryHistory?.(
+      attachmentOnly,
+      attachmentResult,
+    )).toEqual({
+      conversationId: "slack:C1",
+    });
+    const mixed = {
+      ...attachmentOnly,
+      text: "Attached report",
+      idempotencyKey: "mixed",
+    };
+    const mixedResult = await channel.deliver!(mixed, toolContext.signal);
+    expect(mixedResult).toMatchObject({
+      status: "delivered",
+      messageId: "1712345678.000100",
+    });
+    expect(channel.resolveDeliveryHistory?.(mixed, mixedResult)).toEqual({
+      conversationId: "slack:C1:1712345678.000100",
+    });
+    expect(() => channel.resolveDeliveryHistory?.(
       { ...topLevel, idempotencyKey: "tool-unknown" },
       {
         status: "unknown",
         idempotencyKey: "tool-unknown",
       },
     )).toThrow(/confirmed delivery/u);
-    expect(() => tool.historyConversationId(
+    expect(channel.resolveDeliveryHistory?.(
       { ...topLevel, idempotencyKey: "tool-no-receipt" },
       {
         status: "delivered",
         idempotencyKey: "tool-no-receipt",
       },
-    )).toThrow(/confirmed message id/u);
-    expect(() => tool.historyConversationId(
+    )).toEqual({ conversationId: "slack:C1" });
+    expect(channel.resolveDeliveryHistory?.(
       { ...topLevel, idempotencyKey: "tool-bad-receipt" },
       {
         status: "delivered",
         idempotencyKey: "tool-bad-receipt",
-        messageId: "1712345678.000100 redirect",
+        messageId: "F123ABC456",
       },
-    )).toThrow(/confirmed message id/u);
+    )).toEqual({ conversationId: "slack:C1" });
     await expect(channel.deliver!({
       ...await tool.prepare({ channel: "C2", text: "forbidden" }, toolContext),
       idempotencyKey: "tool-forbidden",
@@ -548,6 +596,42 @@ describe("slack channel", () => {
     const client = createSlackWebApiClient(parseSlackConfig(CONFIG), fetchImpl);
     await expect(client.download({ id: "F", name: "secret.txt", mediaType: "text/plain", privateUrl: "https://evilslack.com/file" }, 1024, new AbortController().signal)).rejects.toThrow(/not trusted/u);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("does not report Slack's file id as a message timestamp", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/files.getUploadURLExternal")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          upload_url: "https://files.slack.com/upload/v1",
+          file_id: "F123ABC456",
+        }), { status: 200 });
+      }
+      if (url === "https://files.slack.com/upload/v1") {
+        return new Response("", { status: 200 });
+      }
+      if (url.endsWith("/files.completeUploadExternal")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          files: [{ id: "F123ABC456", title: "report.txt" }],
+        }), { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    });
+    const client = createSlackWebApiClient(parseSlackConfig(CONFIG), fetchImpl);
+    await expect(client.postFile({
+      channelId: "C1",
+      attachment: {
+        id: "report",
+        kind: "file",
+        name: "report.txt",
+        mediaType: "text/plain",
+        sizeBytes: 6,
+        data: new TextEncoder().encode("report"),
+      },
+      signal: new AbortController().signal,
+    })).resolves.toEqual({});
   });
 
   it("calls Slack's assistant thread status API with bounded auth transport", async () => {

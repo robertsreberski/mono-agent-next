@@ -116,6 +116,9 @@ export class StateExecutionClient {
     const { signal, ...payload } = input;
     return deliveryWithHistory(await this.call("delivery.settle-with-history", payload, signal));
   }
+  async retryDeliveryWithHistory(input: DeliveryWithHistoryInput): Promise<DeliveryWithHistory> {
+    try { return await this.settleDeliveryWithHistory(input); } catch { return this.settleDeliveryWithHistory(input); }
+  }
 
   private async call(operation: string, input: unknown, signal: AbortSignal): Promise<unknown> {
     const value = await this.execution.perform({ operation, input, signal });

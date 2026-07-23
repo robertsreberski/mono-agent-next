@@ -175,6 +175,12 @@ function createOperatorModuleChannel(
       resolveDefaultDeliveryConversationId() {
         return PROACTIVE_NEW_CONVERSATION_ID;
       },
+      resolveDeliveryHistory(_message, result) {
+        if (result.messageId === undefined) {
+          throw new TypeError("Operator delivery history requires the opened conversation id.");
+        }
+        return { conversationId: result.messageId };
+      },
       deliver(value, signal): Promise<ChannelDeliveryResult> {
         const prepared = prepareOperatorDelivery(value);
         if ("failure" in prepared) return Promise.resolve(prepared.failure);
@@ -217,7 +223,7 @@ function createOperatorModuleChannel(
         let receipt: OperatorDeliveryReceipt;
         const execution = (async (): Promise<ChannelDeliveryResult> => {
           try {
-            const opened = await context.host.openConversation!({ initialText: message.text, metadata: { ...(message.metadata ?? {}), source: "operator-proactive", idempotencyKey: message.idempotencyKey }, signal });
+            const opened = await context.host.openConversation!({ metadata: { ...(message.metadata ?? {}), source: "operator-proactive", idempotencyKey: message.idempotencyKey }, signal });
             return { status: "delivered", idempotencyKey: message.idempotencyKey, messageId: opened.conversationId };
           } catch {
             return { status: "unknown", idempotencyKey: message.idempotencyKey, diagnostic: { code: "operator_proactive_unknown", severity: "error", message: "Operator proactive delivery outcome is unknown." } };

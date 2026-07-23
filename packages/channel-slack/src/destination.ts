@@ -14,6 +14,11 @@ export function parseSlackIdentifier(value: unknown, label: string): string {
   return value;
 }
 
+export function isSlackMessageTimestamp(value: unknown): value is string {
+  return typeof value === "string"
+    && /^[0-9]{1,16}\.[0-9]{6}$/u.test(value);
+}
+
 export function parseSlackDestination(
   value: unknown,
   label: string,

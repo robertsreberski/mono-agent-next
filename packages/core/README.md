@@ -142,9 +142,13 @@ session-unavailable failure evicts the supplied pointer and retries that same
 route exactly once from canonical history without a session, before ordinary
 fallback is considered.
 
-Proactive channel delivery uses the same fail-closed discipline: a known
-failure may be retried only by another explicit `deliver()` call, while an
-ambiguous or stale outcome remains `unknown` and is never resent.
+Proactive channel delivery, model-invoked channel send tools, trigger delivery,
+and inbound-channel completion notification use one fail-closed path. Every
+confirmed transport result resolves to a canonical destination conversation.
+With durable state, Core atomically settles the delivery receipt and verbatim
+history projection. A known failure may be retried only by another explicit
+call, while an ambiguous or stale outcome remains `unknown` and is never
+resent.
 
 ### Package structure
 
