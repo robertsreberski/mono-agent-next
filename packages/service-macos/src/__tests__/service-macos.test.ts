@@ -27,11 +27,19 @@ import {
   applyServiceMacosPlan,
   inspectServiceMacos,
   parseServiceMacosConfig,
+  planRestartServiceMacos,
   planServiceMacos,
   planServiceMacosRemoval,
+  planStartServiceMacos,
+  planStopServiceMacos,
+  readServiceMacosLogs,
   recoverServiceMacosTransactions,
   removeServiceMacosPlan,
+  restartServiceMacos,
   runServiceMacosCli,
+  startServiceMacos,
+  statusServiceMacos,
+  stopServiceMacos,
   type CommandResult,
   type CommandRunner,
   type ServiceMacosRuntimePaths,
@@ -41,6 +49,7 @@ import {
   installServiceMacosTransactionTestHook,
 } from "../transaction-test-hooks.js";
 import { bindServiceLogs, maintainServiceLogs, readServiceReadiness, resetServiceLogs, writeServiceReadiness } from "../logs.js";
+import { runForegroundService } from "../runner.js";
 
 const validAgent = async (): Promise<AgentValidationResult> => ({ ok: true, issues: [] });
 const FAKE_SERVICE_PID = 2_147_483_647;
@@ -55,7 +64,10 @@ describe("service-macos config", () => {
       configVersion: 1,
       services: {
         "personal-agent": {
-          agentConfig: "/Users/example/personal-agent/mono-agent.config.json",
+          target: {
+            kind: "agent",
+            config: "/Users/example/personal-agent/mono-agent.config.json",
+          },
           startAtLogin: true,
           restartPolicy: "on-failure",
           logs: { directory: "/Users/example/.mono-agent/logs" },
@@ -69,8 +81,26 @@ describe("service-macos config", () => {
     expect(() => parseServiceMacosConfig({ configVersion: 1, services: {}, inferred: true })).toThrow(/unknown field/u);
     expect(() => parseServiceMacosConfig({
       configVersion: 1,
-      services: { bad: { agentConfig: "relative.json", startAtLogin: true, restartPolicy: "always", logs: { directory: "/tmp" } } },
+      services: {
+        bad: {
+          target: { kind: "agent", config: "relative.json" },
+          startAtLogin: true,
+          restartPolicy: "always",
+          logs: { directory: "/tmp" },
+        },
+      },
     })).toThrow(/absolute path/u);
+    expect(() => parseServiceMacosConfig({
+      configVersion: 1,
+      services: {
+        legacy: {
+          agentConfig: "/tmp/mono-agent.config.json",
+          startAtLogin: true,
+          restartPolicy: "always",
+          logs: { directory: "/tmp" },
+        },
+      },
+    })).toThrow(/unknown field/u);
   });
 });
 
@@ -286,7 +316,7 @@ describe("service-macos reconciliation", () => {
     const encoded = /<string>--activation<\/string>\s*<string>([A-Za-z0-9_-]+)<\/string>/u
       .exec(plan.entries[0]!.desiredPlist)?.[1];
     expect(encoded).toBeDefined();
-    const agentConfig = plan.entries[0]!.service.agentConfig;
+    const agentConfig = plan.entries[0]!.service.target.config;
     await writeFile(agentConfig, "{\"changed\":true}\n", { mode: 0o600 });
     let stderr = "";
     await expect(runServiceMacosCli([
@@ -295,6 +325,151 @@ describe("service-macos reconciliation", () => {
       stderr: (value) => { stderr += value; },
     })).resolves.toBe(1);
     expect(stderr).toMatch(/Runner inputs do not match the planned activation/u);
+  });
+
+  it("runs an explicitly selected web target only after exact HTTP health readiness", async () => {
+    const fixture = await createFixture();
+    const project = join(fixture.root, "agent");
+    const webConfig = join(project, "web.config.json");
+    const environmentFile = join(fixture.root, "web.env");
+    const registry = join(fixture.root, "registry");
+    await mkdir(registry, { mode: 0o700 });
+    await writeFile(environmentFile, "WEB_TOKEN=0123456789abcdef0123456789abcdef\n", { mode: 0o600 });
+    await writeFile(webConfig, `${JSON.stringify({
+      configVersion: 1,
+      listen: { host: "127.0.0.1", port: 0 },
+      auth: { token: { $env: "WEB_TOKEN" } },
+      dataDirectory: join(fixture.root, "web-state"),
+      agentRegistries: [registry],
+    })}\n`, { mode: 0o600 });
+    await writeFile(join(project, "package.json"), `${JSON.stringify({
+      dependencies: { "@mono-agent/web": "0.15.0" },
+    })}\n`, { mode: 0o600 });
+    const serviceConfig = JSON.parse(await readFile(fixture.configPath, "utf8")) as {
+      services: Record<string, Record<string, unknown>>;
+    };
+    serviceConfig.services["personal-agent"]!.target = { kind: "web", config: webConfig };
+    serviceConfig.services["personal-agent"]!.environmentFile = environmentFile;
+    await writeFile(fixture.configPath, `${JSON.stringify(serviceConfig)}\n`, { mode: 0o600 });
+
+    const plan = await planServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+    });
+    expect(plan.entries[0]?.binding).toMatchObject({
+      targetKind: "web",
+      targetConfig: webConfig,
+      directDependencyName: "@mono-agent/web",
+      directDependencyVersion: "0.15.0",
+      nodePath: fixture.runtime.nodePath,
+      runnerScriptPath: fixture.runtime.runnerScriptPath,
+    });
+    const encoded = /<string>--activation<\/string>\s*<string>([A-Za-z0-9_-]+)<\/string>/u
+      .exec(plan.entries[0]!.desiredPlist)?.[1];
+    expect(encoded).toBeDefined();
+    await writeFile(plan.entries[0]!.target.stdoutPath, "", { mode: 0o600 });
+    await writeFile(plan.entries[0]!.target.stderrPath, "", { mode: 0o600 });
+    let stdout = "";
+    let stderr = "";
+    const exit = await runServiceMacosCli([
+      "run-service",
+      "--config",
+      webConfig,
+      "--environment-file",
+      environmentFile,
+      "--activation",
+      encoded!,
+    ], {
+      stdout: (value) => {
+        stdout += value;
+      },
+      stderr: (value) => {
+        stderr += value;
+      },
+      signalSource: {
+        once(signal, listener) {
+          if (signal === "SIGTERM") setImmediate(listener);
+        },
+        removeListener() {
+          return undefined;
+        },
+      },
+    });
+    expect(exit, stderr).toBe(0);
+    const started = JSON.parse(stdout) as { targetKind: string; port: number };
+    expect(started).toMatchObject({ event: "started", targetKind: "web" });
+    expect(started.port).toBeGreaterThan(0);
+    expect(JSON.parse(await readFile(plan.entries[0]!.target.readinessPath, "utf8")))
+      .toMatchObject({ event: "stopped", pid: process.pid });
+    await expect(fetch(`http://127.0.0.1:${String(started.port)}/healthz`)).rejects.toThrow();
+  });
+
+  it("stops a started web target when a fingerprinted input disappears post-start", async () => {
+    const fixture = await createFixture();
+    const project = join(fixture.root, "agent");
+    const webConfig = join(project, "web.config.json");
+    const environmentFile = join(fixture.root, "web.env");
+    const registry = join(fixture.root, "registry");
+    await mkdir(registry, { mode: 0o700 });
+    await writeFile(
+      environmentFile,
+      "WEB_TOKEN=0123456789abcdef0123456789abcdef\n",
+      { mode: 0o600 },
+    );
+    await writeFile(webConfig, `${JSON.stringify({
+      configVersion: 1,
+      listen: { host: "127.0.0.1", port: 0 },
+      auth: { token: { $env: "WEB_TOKEN" } },
+      dataDirectory: join(fixture.root, "web-state"),
+      agentRegistries: [registry],
+    })}\n`, { mode: 0o600 });
+    await writeFile(join(project, "package.json"), `${JSON.stringify({
+      dependencies: { "@mono-agent/web": "0.15.0" },
+    })}\n`, { mode: 0o600 });
+    const serviceConfig = JSON.parse(await readFile(fixture.configPath, "utf8")) as {
+      services: Record<string, Record<string, unknown>>;
+    };
+    serviceConfig.services["personal-agent"]!.target = {
+      kind: "web",
+      config: webConfig,
+    };
+    serviceConfig.services["personal-agent"]!.environmentFile = environmentFile;
+    await writeFile(
+      fixture.configPath,
+      `${JSON.stringify(serviceConfig)}\n`,
+      { mode: 0o600 },
+    );
+    const plan = await planServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+    });
+    const entry = plan.entries[0]!;
+    const encoded = /<string>--activation<\/string>\s*<string>([A-Za-z0-9_-]+)<\/string>/u
+      .exec(entry.desiredPlist)?.[1];
+    expect(encoded).toBeDefined();
+    let startedPort = 0;
+
+    await expect(runForegroundService({
+      configPath: webConfig,
+      environmentFile,
+      activation: encoded!,
+    }, () => undefined, {
+      once() {
+        return undefined;
+      },
+      removeListener() {
+        return undefined;
+      },
+    }, {
+      async afterManagedStart(startInfo) {
+        startedPort = (startInfo as { port: number }).port;
+        await unlink(entry.binding.lockfilePath);
+      },
+    })).rejects.toMatchObject({ code: "ENOENT" });
+
+    expect(startedPort).toBeGreaterThan(0);
+    await expect(fetch(`http://127.0.0.1:${String(startedPort)}/healthz`))
+      .rejects.toThrow();
   });
 
   it("rejects writable service, agent, environment, and runtime inputs", async () => {
@@ -484,6 +659,269 @@ describe("service-macos reconciliation", () => {
     expect(fixture.runner.exited).not.toContain(target);
   });
 
+  it("uses fingerprinted single-service stop, start, restart, status, and bounded logs", async () => {
+    const fixture = await createFixture();
+    await installManagedFixture(fixture);
+    const target = `gui/${String(fixture.runtime.uid)}/ai.mono-agent.personal-agent`;
+
+    const stopPlan = await planStopServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      serviceId: "personal-agent",
+    });
+    expect(stopPlan.fingerprint).toMatch(/^service-macos:stop:v1:[a-f0-9]{64}$/u);
+    await expect(stopServiceMacos(stopPlan, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+    })).rejects.toBeInstanceOf(ServiceMacosMutationDisabledError);
+    const stopped = await stopServiceMacos(stopPlan, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      allowMutation: true,
+    });
+    expect(stopped).toMatchObject({ loaded: false, file: { exists: true } });
+    expect(fixture.runner.loaded).not.toContain(target);
+
+    const status = await statusServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      serviceId: "personal-agent",
+    });
+    expect(status).toMatchObject({
+      operation: "status",
+      serviceId: "personal-agent",
+      observation: { loaded: false, file: { exists: true } },
+    });
+    expect(status.fingerprint).toMatch(/^service-macos:status:v1:[a-f0-9]{64}$/u);
+
+    await writeFile(status.observation.target.stdoutPath, "0123456789", { mode: 0o600 });
+    await writeFile(status.observation.target.stderrPath, "abcdefghij", { mode: 0o600 });
+    const logs = await readServiceMacosLogs(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      serviceId: "personal-agent",
+      maxBytes: 4,
+    });
+    expect(logs.stdout).toMatchObject({
+      exists: true,
+      totalBytes: 10,
+      returnedBytes: 4,
+      truncated: true,
+      content: "6789",
+    });
+    expect(logs.stderr.content).toBe("ghij");
+    expect(logs.fingerprint).toMatch(/^service-macos:logs:v1:[a-f0-9]{64}$/u);
+
+    const startPlan = await planStartServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+      serviceId: "personal-agent",
+    });
+    expect(startPlan.entries).toEqual([
+      expect.objectContaining({ serviceId: "personal-agent", action: "load" }),
+    ]);
+    const started = await startServiceMacos(startPlan, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+      allowMutation: true,
+    });
+    expect(started).toMatchObject({ loaded: true, ready: true });
+
+    const restartPlan = await planRestartServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+      serviceId: "personal-agent",
+    });
+    expect(restartPlan.entries).toEqual([
+      expect.objectContaining({ serviceId: "personal-agent", action: "restart" }),
+    ]);
+    const restarted = await restartServiceMacos(restartPlan, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+      allowMutation: true,
+    });
+    expect(restarted).toMatchObject({ loaded: true, ready: true });
+  });
+
+  it("uses a transactional update when restart inputs change the desired plist", async () => {
+    const fixture = await createFixture();
+    await installManagedFixture(fixture);
+    const target = `gui/${String(fixture.runtime.uid)}/ai.mono-agent.personal-agent`;
+    await mutateAgent(fixture, "restart-with-new-closure");
+
+    const plan = await planRestartServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+      serviceId: "personal-agent",
+    });
+    expect(plan.entries).toMatchObject([
+      {
+        serviceId: "personal-agent",
+        action: "update",
+        observed: { loaded: true, ready: true },
+      },
+    ]);
+
+    const restarted = await restartServiceMacos(plan, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+      allowMutation: true,
+    });
+    expect(restarted).toMatchObject({
+      loaded: true,
+      launchdState: "running",
+      ready: true,
+      file: { digest: plan.entries[0]!.desiredDigest },
+    });
+    expect(await readFile(plan.entries[0]!.target.plistPath, "utf8"))
+      .toBe(plan.entries[0]!.desiredPlist);
+    expect(fixture.runner.loaded).toContain(target);
+  });
+
+  it("restores and explicitly starts the prior loaded service when a changed restart fails", async () => {
+    const fixture = await createFixture();
+    const originalConfig = JSON.parse(await readFile(fixture.configPath, "utf8")) as {
+      services: Record<string, Record<string, unknown>>;
+    };
+    originalConfig.services["personal-agent"]!.startAtLogin = false;
+    originalConfig.services["personal-agent"]!.restartPolicy = "never";
+    await writeFile(
+      fixture.configPath,
+      `${JSON.stringify(originalConfig)}\n`,
+      { mode: 0o600 },
+    );
+    const installed = await installManagedFixture(fixture);
+    const entry = installed.entries[0]!;
+    const prior = await readFile(entry.target.plistPath, "utf8");
+    const priorInode = (await lstat(entry.target.plistPath, { bigint: true })).ino;
+    const target = entry.target.launchdTarget;
+
+    const changedConfig = JSON.parse(await readFile(fixture.configPath, "utf8")) as {
+      services: Record<string, Record<string, unknown>>;
+    };
+    const replacementLogs = join(fixture.root, "replacement-logs");
+    await mkdir(replacementLogs, { mode: 0o700 });
+    changedConfig.services["personal-agent"]!.startAtLogin = true;
+    changedConfig.services["personal-agent"]!.restartPolicy = "on-failure";
+    changedConfig.services["personal-agent"]!.logs = {
+      directory: replacementLogs,
+      maxBytes: 1_024,
+      retainFiles: 2,
+    };
+    await writeFile(
+      fixture.configPath,
+      `${JSON.stringify(changedConfig)}\n`,
+      { mode: 0o600 },
+    );
+    await mutateAgent(fixture, "failed-restart-with-new-closure");
+    const plan = await planRestartServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+      serviceId: "personal-agent",
+    });
+    expect(plan.entries[0]).toMatchObject({ action: "update" });
+    fixture.runner.calls.length = 0;
+    fixture.runner.onBootout = async () => {
+      fixture.runner.onBootout = undefined;
+      await rename(replacementLogs, `${replacementLogs}.planned`);
+      await mkdir(replacementLogs, { mode: 0o700 });
+    };
+
+    await expect(restartServiceMacos(plan, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+      allowMutation: true,
+    })).rejects.toThrow(/log directory changed/iu);
+
+    expect(await readFile(entry.target.plistPath, "utf8")).toBe(prior);
+    expect((await lstat(entry.target.plistPath, { bigint: true })).ino).toBe(priorInode);
+    expect(fixture.runner.loaded).toContain(target);
+    expect(fixture.runner.idle).not.toContain(target);
+    expect(fixture.runner.calls).toContainEqual({
+      command: LAUNCHCTL_PATH,
+      arguments_: ["kickstart", target],
+    });
+  });
+
+  it("preflights unsafe readiness and log artifacts before restarting a healthy label", async () => {
+    for (const artifact of ["readiness", "stdout"] as const) {
+      const fixture = await createFixture();
+      const installed = await installManagedFixture(fixture);
+      const entry = installed.entries[0]!;
+      const target = entry.target.launchdTarget;
+      const path = artifact === "readiness"
+        ? entry.target.readinessPath
+        : entry.target.stdoutPath;
+      if (artifact === "stdout") {
+        await writeFile(path, "unsafe log\n", { mode: 0o644 });
+        await chmod(path, 0o644);
+      } else {
+        await chmod(path, 0o644);
+      }
+      const plan = await planRestartServiceMacos(fixture.configPath, {
+        runtime: fixture.runtime,
+        runner: fixture.runner,
+        validateAgent: validAgent,
+        serviceId: "personal-agent",
+      });
+      fixture.runner.calls.length = 0;
+
+      await expect(restartServiceMacos(plan, {
+        runtime: fixture.runtime,
+        runner: fixture.runner,
+        validateAgent: validAgent,
+        allowMutation: true,
+      })).rejects.toThrow(/owner-private|managed file|mode|0600/u);
+      expect(fixture.runner.loaded).toContain(target);
+      expect(fixture.runner.calls.some((call) => call.arguments_[0] === "bootout"))
+        .toBe(false);
+    }
+  });
+
+  it("requires exact service selection for lifecycle CLI commands", async () => {
+    const fixture = await createFixture();
+    let stderr = "";
+    expect(await runServiceMacosCli([
+      "status",
+      "--config",
+      fixture.configPath,
+    ], {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      stderr: (value) => {
+        stderr += value;
+      },
+    })).toBe(2);
+    expect(stderr).toMatch(/status requires --service <id>/u);
+
+    let stdout = "";
+    expect(await runServiceMacosCli([
+      "status",
+      "--config",
+      fixture.configPath,
+      "--service",
+      "personal-agent",
+    ], {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      stdout: (value) => {
+        stdout += value;
+      },
+    })).toBe(0);
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: true,
+      status: { serviceId: "personal-agent", observation: { loaded: false } },
+    });
+  });
+
   it("restores the prior loaded service when bootstrap exits zero without retaining it", async () => {
     const fixture = await createFixture();
     const installed = await installManagedFixture(fixture);
@@ -530,6 +968,7 @@ describe("service-macos reconciliation", () => {
     const removalPlan = await planServiceMacosRemoval(fixture.configPath, {
       runtime: fixture.runtime,
       runner: fixture.runner,
+      serviceId: "personal-agent",
     });
     expect(removalPlan).toMatchObject({
       operation: "remove",
@@ -556,6 +995,7 @@ describe("service-macos reconciliation", () => {
     const idempotent = await planServiceMacosRemoval(fixture.configPath, {
       runtime: fixture.runtime,
       runner: fixture.runner,
+      serviceId: "personal-agent",
     });
     expect(idempotent.entries[0]?.action).toBe("noop");
   });
@@ -568,6 +1008,7 @@ describe("service-macos reconciliation", () => {
     const driftPlan = await planServiceMacosRemoval(drift.configPath, {
       runtime: drift.runtime,
       runner: drift.runner,
+      serviceId: "personal-agent",
     });
     await writeFile(plistPath, "operator replacement", { mode: 0o600 });
     drift.runner.calls.length = 0;
@@ -587,6 +1028,7 @@ describe("service-macos reconciliation", () => {
     const rollbackPlan = await planServiceMacosRemoval(rollback.configPath, {
       runtime: rollback.runtime,
       runner: rollback.runner,
+      serviceId: "personal-agent",
     });
     rollback.runner.failPrintAfter = 3;
     await expect(removeServiceMacosPlan(rollbackPlan, {
@@ -608,6 +1050,7 @@ describe("service-macos reconciliation", () => {
       const plan = await planServiceMacosRemoval(fixture.configPath, {
         runtime: fixture.runtime,
         runner: fixture.runner,
+        serviceId: "personal-agent",
       });
       fixture.runner.printCount = 0;
       fixture.runner.printOverride = { count: 3, stdout };
@@ -631,6 +1074,7 @@ describe("service-macos reconciliation", () => {
     const plan = await planServiceMacosRemoval(fixture.configPath, {
       runtime: fixture.runtime,
       runner: fixture.runner,
+      serviceId: "personal-agent",
     });
     fixture.runner.printCount = 0;
     fixture.runner.hangPrintAt = 3;
@@ -684,6 +1128,7 @@ describe("service-macos reconciliation", () => {
     const plan = await planServiceMacosRemoval(fixture.configPath, {
       runtime: fixture.runtime,
       runner: fixture.runner,
+      serviceId: "personal-agent",
     });
     fixture.runner.printCount = 0;
     fixture.runner.onPrint = async (count) => {
@@ -780,6 +1225,7 @@ describe("service-macos reconciliation", () => {
     const plan = await planServiceMacosRemoval(fixture.configPath, {
       runtime: fixture.runtime,
       runner: fixture.runner,
+      serviceId: "personal-agent",
     });
     fixture.runner.onBootout = async () => {
       const replacement = join(fixture.runtime.launchAgentsDirectory, ".operator-after-quarantine");
@@ -1034,7 +1480,9 @@ async function createFixture(): Promise<Fixture> {
   await mkdir(logs, { mode: 0o700 });
   const agentConfig = join(project, "mono-agent.config.json");
   await writeFile(agentConfig, "{}\n", { mode: 0o600 });
-  await writeFile(join(project, "package.json"), "{}\n", { mode: 0o600 });
+  await writeFile(join(project, "package.json"), `${JSON.stringify({
+    dependencies: { "@mono-agent/core": "0.15.0" },
+  })}\n`, { mode: 0o600 });
   await writeFile(join(project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", { mode: 0o600 });
   const nodePath = join(root, "node");
   await writeFile(nodePath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
@@ -1045,7 +1493,7 @@ async function createFixture(): Promise<Fixture> {
     configVersion: 1,
     services: {
       "personal-agent": {
-        agentConfig,
+        target: { kind: "agent", config: agentConfig },
         startAtLogin: true,
         restartPolicy: "on-failure",
         logs: { directory: logs, maxBytes: 1_024, retainFiles: 2 },

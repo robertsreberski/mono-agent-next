@@ -72,6 +72,41 @@ The Ollama endpoint must use HTTPS or literal-loopback HTTP. Vector failures
 open a bounded circuit breaker and recall degrades to FTS instead of returning
 invented or unchecked matches.
 
+For a v0-final BuJo service, create an owner-private online SQLite snapshot at
+a new absolute path, then adopt only that copy with its exact reported source
+identity and tree digests. SQLite online backup includes committed WAL state
+without stopping or writing the predecessor:
+
+```bash
+mono-agent-memory-local snapshot-v0 \
+  --source-root /absolute/path/to/v0-memory \
+  --target-root /absolute/path/to/rehearsal-memory
+
+mono-agent-memory-local adopt-v0 \
+  --live-source-root /absolute/path/to/v0-memory \
+  --target-root /absolute/path/to/rehearsal-memory \
+  --expected-source-state-sha256 <snapshot-source-state-sha256> \
+  --expected-tree-sha256 <snapshot-tree-sha256> \
+  --confirm <same-snapshot-tree-sha256>
+```
+
+`snapshot-v0` never writes the source and refuses an existing target.
+It accepts the canonical initialized marker used by v0-final and the older
+marker-absent BuJo shape, but refuses an in-flight or malformed marker.
+`sourceStateSha256` binds stable live-root provenance: the canonical root,
+marker, active generation and manifest, and the active database inode. It
+intentionally tolerates ordinary in-place database and WAL writes made by the
+running predecessor after the point-in-time snapshot. `expectedTreeSha256`
+instead binds every copied file and byte to that snapshot. `adopt-v0` refuses
+aliases, unrelated source provenance, changed copied content, transient writer
+state in the copy, unsafe permissions, incomplete indexes or intake, and
+targets that already have a permanent marker. It keeps the copied database
+descriptor-bound and rechecks the copied tree through commit. It changes the
+copied root only: the same exclusively created marker inode advances from
+`initializing:<uuid>` to
+`initialized:<same-uuid>` after the strict pre-commit audit. Keep the original
+v0 root and a separate restorable backup through rollback.
+
 ## Architecture
 
 ### Data flow
@@ -114,6 +149,8 @@ invented or unchecked matches.
 | `consolidation.ts` | Bounded projection rendering, crash-safe publication, duplicate reporting, and projection audit. |
 | `commands.ts` | Namespaced maintenance commands and explicit destructive authorization. |
 | `store.ts` | Identity commit, capture/recall/forget, consolidation, audit, backup, rebuild, and retry. |
+| `migration.ts` | Immutable v0 snapshot, digest confirmation, strict copied-root adoption, and bounded evidence. |
+| `cli.ts` | Standalone snapshot/adoption argument and JSON output contract. |
 | `errors.ts` | Stable fail-closed error codes. |
 | `index.ts` | Memory module definition and curated exports. |
 
@@ -133,9 +170,9 @@ warnings or errors, and an unsafe, corrupt, or in-flight identity returns one
 sanitized integrity error. The diagnostics callback does not capture, embed,
 retry, consolidate, rebuild, or start the module.
 
-The sanitized v0-final fixture rehearses copied-data audit, backup, both old
-and new readers, capture idempotency, rebuild, and rollback without mutating
-the source store.
+The sanitized v0-final fixture snapshots a source with no v1 marker, adopts
+only the copy, and rehearses audit, backup, both old and new readers, capture
+idempotency, rebuild, and rollback without mutating the source store.
 
 ## Public API
 
@@ -147,6 +184,9 @@ the source store.
 | `MemoryLocalConfig` | Type authored module configuration. |
 | `MemoryLocal` | Run recall, capture, forget, and operator maintenance. |
 | `openMemoryLocal` | Open a store directly for migration rehearsal or inspection. |
+| `snapshotV0MemoryLocalRoot` | Create and verify a private, immutable-source v0 snapshot. |
+| `adoptV0MemoryLocalCopy` | Confirm and strictly adopt only an audited copied root. |
+| `runMemoryLocalCli` | Embed the standalone migration CLI contract. |
 | `MemoryLocalConsolidateResult` | Consume bounded duplicate and projection publication evidence. |
 | `OllamaMemoryEmbeddingProvider` | Supply the supported local vector provider. |
 | `MemoryLocalError` | Branch on stable fail-closed error codes. |
@@ -159,6 +199,7 @@ Every symbol exported by each public code entrypoint is listed below.
 **`@mono-agent/memory-local`**
 
 ```text
+AdoptV0MemoryLocalCopyOptions
 DEFAULT_EMBEDDING_BREAKER_FAILURES
 DEFAULT_EMBEDDING_BREAKER_RESET_MS
 DEFAULT_EMBEDDING_TIMEOUT_MS
@@ -175,6 +216,8 @@ MEMORY_LOCAL_DATABASE_FILENAME
 MEMORY_LOCAL_FUTURE_LOG_FILENAME
 MEMORY_LOCAL_INDEX_FILENAME
 MEMORY_LOCAL_MARKER_FILENAME
+MEMORY_LOCAL_V0_ADOPTION_SCHEMA
+MEMORY_LOCAL_V0_SNAPSHOT_SCHEMA
 MEMORY_LOCAL_WRITER_LEASE_FILENAME
 MemoryEmbeddingProvider
 MemoryLocal
@@ -183,6 +226,7 @@ MemoryLocalAuditRequest
 MemoryLocalBackupRequest
 MemoryLocalBackupResult
 MemoryLocalCaptureConfig
+MemoryLocalCliOptions
 MemoryLocalConfig
 MemoryLocalConsolidateRequest
 MemoryLocalConsolidateResult
@@ -198,13 +242,20 @@ MemoryLocalRebuildResult
 MemoryLocalRecallToolConfig
 MemoryLocalRetryRequest
 MemoryLocalRetryResult
+MemoryLocalV0AdoptionResult
+MemoryLocalV0DatabaseEvidence
+MemoryLocalV0SnapshotResult
 OllamaMemoryEmbeddingProvider
 OpenMemoryLocalOptions
+SnapshotV0MemoryLocalRootOptions
+adoptV0MemoryLocalCopy
 default
 memoryLocalJsonSchema
 monoAgentModule
 openMemoryLocal
 parseMemoryLocalConfig
+runMemoryLocalCli
+snapshotV0MemoryLocalRoot
 ```
 
 <!-- public-api-inventory:end -->
@@ -245,5 +296,6 @@ pnpm --filter @mono-agent/memory-local test
 The suite covers same-inode first-run identity, unsafe path/link/mode failures,
 exclusive writers, BuJo/FTS/vector recall, embedding degradation, capture
 receipts and retries, audit/backup/rebuild/forget, deterministic consolidation
-and command authorization, and copied-data
-migration/rollback rehearsal.
+and command authorization, immutable-source snapshotting, digest-bound
+copied-root adoption, adversarial marker failures, and migration/rollback
+rehearsal.

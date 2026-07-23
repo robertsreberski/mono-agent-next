@@ -29,6 +29,9 @@
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "mono-agent-memory-local": "./dist/bin/memory-local.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

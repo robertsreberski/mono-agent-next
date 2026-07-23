@@ -45,8 +45,10 @@ interface TransactionGuard {
 }
 const journalFiles = new WeakMap<TransactionJournal, ServiceFileObservation>();
 export interface ServiceMacosTransactionLifecycle {
+  readonly preflight: () => Promise<void>;
   readonly inspectLoaded: () => Promise<boolean>; readonly bootoutRequired: () => Promise<void>;
   readonly bootoutIfPresent: () => Promise<void>; readonly bootstrap: () => Promise<void>;
+  readonly bootstrapRestored: () => Promise<void>;
   readonly proveReady: (readinessToken: string) => Promise<void>; readonly proveInstalledReady: () => Promise<void>;
 }
 export interface ReplaceServicePlistTransaction {
@@ -495,7 +497,7 @@ async function rollbackTransaction(
       throw new ServiceMacosDriftError(`Restored plist identity proof failed for ${target.serviceId}.`);
     }
     if (journal.expectedLoaded) {
-      await lifecycle.bootstrap();
+      await lifecycle.bootstrapRestored();
       await lifecycle.proveInstalledReady();
     }
     const verifiedCanonical = await observeOwnerPrivatePlist(target.plistPath, expectedUid);

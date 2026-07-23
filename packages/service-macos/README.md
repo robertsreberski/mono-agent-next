@@ -18,8 +18,8 @@ Host product.
 ## Responsibility
 
 Inspect, plan, and explicitly apply exact user LaunchAgent definitions for
-validated mono-agent configs without importing agent, channel, memory, or
-product lifecycle into core.
+validated mono-agent or web product configs without importing channel, memory,
+or host-product lifecycle into core.
 
 ## Install / Usage
 
@@ -42,10 +42,15 @@ Apply requires the conspicuous mutation flag:
 mono-agent-service-macos apply --config ./service-macos.json --allow-mutation
 ```
 
-Removal is also fingerprinted and explicitly authorized:
+Each deliberate lifecycle operation selects exactly one configured service:
 
 ```bash
-mono-agent-service-macos remove --config ./service-macos.json --allow-mutation
+mono-agent-service-macos start --config ./service-macos.json --service personal-agent --allow-mutation
+mono-agent-service-macos stop --config ./service-macos.json --service personal-agent --allow-mutation
+mono-agent-service-macos restart --config ./service-macos.json --service personal-agent --allow-mutation
+mono-agent-service-macos status --config ./service-macos.json --service personal-agent
+mono-agent-service-macos logs --config ./service-macos.json --service personal-agent
+mono-agent-service-macos remove --config ./service-macos.json --service personal-agent --allow-mutation
 ```
 
 Removal unloads only the configured LaunchAgent labels and deletes their
@@ -66,13 +71,23 @@ launchd unload and death of the previously observed PID. A running or unknown
 job without a provable PID fails closed, and every `launchctl` call has an
 independent wall timeout, including calls made through an injected runner.
 Repeating removal after success is a no-op.
+An explicit restart uses the transactional update path whenever the desired
+plist digest changed; the direct restart path is reserved for an exact
+installed plist. Existing managed log, archive, and readiness artifacts are
+preflighted before an exact restart unloads a healthy process. If an update
+fails after unload, rollback reads the restored plist's own activation and log
+binding, then explicitly starts and proves that prior service without depending
+on the failed desired log directory.
 An explicitly authorized apply or removal automatically recovers a known
 interrupted transaction before creating a new plan. Inspect and plan remain
 read-only and refuse unresolved transactions.
 
 The service file uses `configVersion: 1` and a `services` map. Each entry names
-an absolute `agentConfig`, `startAtLogin`, `restartPolicy`, and owner-controlled
-log directory; an optional protected environment file must be mode `0600`.
+exactly one strict target,
+`{"kind":"agent","config":"/absolute/mono-agent.config.json"}` or
+`{"kind":"web","config":"/absolute/web.config.json"}`, plus `startAtLogin`,
+`restartPolicy`, and an owner-controlled log directory. An optional protected
+environment file must be mode `0600`.
 That file is the complete config-resolution environment and ambient launcher
 values cannot override it; without a file, config resolution receives an empty
 environment.
@@ -93,9 +108,11 @@ remain; remove those explicit archive files before applying the decrease.
 2. Inspect resolves exact `ai.mono-agent.<service-id>` labels and plist paths,
    safely fingerprints owner-private plist files, and reports launchd
    running/exited state, PID, and installed-activation readiness honestly.
-3. Plan validates each agent config through core and binds config, package,
-   lockfile, protected environment, Node, runner, LaunchAgents directory, log,
-   plist, and launchd observations into one fingerprint.
+3. Plan validates each agent config through core or each web config through
+   web, requires the corresponding exact direct dependency, and binds target
+   kind/config, package, lockfile, protected environment, Node and runner
+   content, LaunchAgents directory, logs, plist, and launchd observations into
+   one fingerprint.
 4. Apply first requires `allowMutation: true`, verifies the fingerprint, and
    rechecks every binding and observation around mutation and `launchctl`
    boundaries before proceeding.
@@ -104,11 +121,13 @@ remain; remove those explicit archive files before applying the decrease.
 6. Update and removal move the canonical plist to quarantine, validate its
    device, inode, uid, mode, link count, size, digest, and planned identity,
    then publish or restore only through a no-clobber hard link.
-7. The plist carries a non-secret digest binding. The child reads the config,
-   package manifest, and lockfile before and after Core validation, starts Core
-   from that exact validated snapshot, checks health, and writes a mode-`0600`
-   readiness proof only after health, signal handling, and log bindings are
-   ready. The proof is replaced for each PID and withdrawn before drain.
+7. The plist carries a non-secret digest binding. The child rereads every
+   fingerprinted input around validation, starts the selected agent or web
+   product from that exact validated snapshot, and writes a mode-`0600`
+   readiness proof only after exact health, signal handling, and log bindings
+   are ready. Web readiness requires `GET /healthz` to return HTTP 200 with
+   exactly `{"status":"healthy"}`. The proof is withdrawn before either target
+   is stopped.
 8. `launchctl` is invoked only as an argument vector through the injected
    runner. Apply waits a bounded interval for matching PID, running state, and
    readiness proof. An exact exited or unready job plans a restart. Apply
@@ -129,8 +148,9 @@ remain; remove those explicit archive files before applying the decrease.
 | `input.ts` | Stable, no-follow, permission-checked service input snapshots. |
 | `logs.ts` | Owner-private readiness proof plus bounded log rotation and retention. |
 | `command.ts` | Shell-free bounded subprocess runner. |
+| `runner.ts` | Fingerprinted foreground agent/web startup, health, readiness, and shutdown. |
 | `reconciler.ts` | Safe inspect, fingerprinted apply/removal plans, drift checks, atomic mutation, and rollback. |
-| `cli.ts` | Thin JSON frontend plus the pinned foreground core runner. |
+| `cli.ts` | Thin selected-service JSON lifecycle frontend. |
 
 ## Public API
 
@@ -142,6 +162,10 @@ remain; remove those explicit archive files before applying the decrease.
 | `inspectServiceMacos` | Read exact plist and launchd state without mutation. |
 | `planServiceMacos` | Produce a deterministic, validated, fingerprinted reconciliation plan. |
 | `applyServiceMacosPlan` | Recheck and apply a plan only with explicit mutation authorization. |
+| `planStartServiceMacos` / `startServiceMacos` | Fingerprint and start exactly one configured service. |
+| `planStopServiceMacos` / `stopServiceMacos` | Fingerprint, unload, and prove prior-PID death for one service without deleting its plist. |
+| `planRestartServiceMacos` / `restartServiceMacos` | Validate replacement inputs before restarting exactly one loaded service. |
+| `statusServiceMacos` / `readServiceMacosLogs` | Inspect one service and bounded owner-private log tails without mutation. |
 | `planServiceMacosRemoval` | Produce a deterministic removal plan for selected configured services. |
 | `removeServiceMacosPlan` | Recheck, unload, remove, verify, and roll back only with explicit mutation authorization. |
 | `recoverServiceMacosTransactions` | Recover known journaled interruptions only with explicit mutation authorization; unknown artifacts fail closed. |
@@ -155,7 +179,6 @@ Every symbol exported by each public code entrypoint is listed below.
 **`@mono-agent/service-macos`**
 
 ```text
-AgentPlanBinding
 ApplyServiceMacosOptions
 CommandResult
 CommandRunOptions
@@ -166,13 +189,17 @@ InspectServiceMacosOptions
 LAUNCHCTL_PATH
 LoadedServiceMacosConfig
 MAX_SERVICE_CONFIG_BYTES
+MutateSelectedServiceMacosOptions
+PlanSelectedServiceMacosOptions
 PlanServiceMacosOptions
 PlanServiceMacosRemovalOptions
 ProtectedEnvironment
+ReadServiceMacosLogsOptions
 RecoverServiceMacosOptions
 RemoveServiceMacosOptions
 SERVICE_MACOS_CONFIG_VERSION
 SERVICE_PLAN_SCHEMA_VERSION
+SelectedServiceMacosOptions
 ServiceFileIdentity
 ServiceFileObservation
 ServiceMacosCliOptions
@@ -180,6 +207,7 @@ ServiceMacosConfig
 ServiceMacosConfigError
 ServiceMacosDriftError
 ServiceMacosLogsConfig
+ServiceMacosLogsSnapshot
 ServiceMacosMutationDisabledError
 ServiceMacosObservation
 ServiceMacosPlan
@@ -188,48 +216,63 @@ ServiceMacosRemovalPlan
 ServiceMacosRemovalPlanEntry
 ServiceMacosRuntimePaths
 ServiceMacosServiceConfig
+ServiceMacosServiceTarget
+ServiceMacosStatus
+ServiceMacosStopPlan
+ServiceMacosStopPlanEntry
 ServiceMacosTarget
 ServicePlanAction
+ServicePlanBinding
 ServiceRemovalAction
 ServiceRestartPolicy
 ServiceRunnerBinding
 ServiceSignal
 ServiceSignalSource
+StopServiceMacosOptions
 applyServiceMacosPlan
 assertRuntimePaths
 defaultRuntime
 fingerprintPlan
 fingerprintRemovalPlan
+fingerprintStopPlan
 inspectServiceMacos
 loadProtectedEnvironment
 loadServiceMacosConfig
 parseEnvironment
 parseServiceMacosConfig
+planRestartServiceMacos
 planServiceMacos
 planServiceMacosRemoval
+planStartServiceMacos
+planStopServiceMacos
 processCommandRunner
+readServiceMacosLogs
 recoverServiceMacosTransactions
 removeServiceMacosPlan
 renderServicePlist
+restartServiceMacos
 runServiceMacosCli
 serviceMacosConfigSchema
 serviceTarget
+startServiceMacos
+statusServiceMacos
+stopServiceMacos
 ```
 
 <!-- public-api-inventory:end -->
 
 ## Dependency Boundary
 
-This package depends only on `@mono-agent/core` and Node built-ins. It invokes
-the exact Node and packaged runner paths in generated plists and never shells
-through the human-facing mono-agent CLI.
+This package depends directly on `@mono-agent/core` and `@mono-agent/web`. It
+invokes exact fingerprinted Node and packaged runner paths in generated plists
+and never shells through the human-facing mono-agent CLI.
 
 ## What This Package Does Not Own
 
-It does not install dependencies, rewrite agent config, expand secrets into
-service definitions, infer web or other products, execute turns, manage channel
-semantics, publish packages, or retire predecessor services. Foreground core
-operation remains valid when this product is absent.
+It does not install dependencies, rewrite target config, expand secrets into
+service definitions, infer web from an agent, execute turns, manage channel
+semantics, publish packages, or retire predecessor services. Agent and web
+foreground operation remains valid when this product is absent.
 
 ## Related Documentation
 

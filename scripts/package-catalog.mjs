@@ -206,7 +206,7 @@ export const packageCatalog = [
     name: "@mono-agent/service-macos",
     category: "app",
     responsibility: "Inspects, plans, and explicitly reconciles fingerprinted macOS launchd service state.",
-    allowedDependencyCategories: ["core"],
+    allowedDependencyCategories: ["core", "operator-surface"],
     publishable: true,
   },
 ];

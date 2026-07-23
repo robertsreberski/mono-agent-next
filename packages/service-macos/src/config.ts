@@ -8,8 +8,12 @@ export type ServiceRestartPolicy = "never" | "on-failure" | "always";
 export interface ServiceMacosLogsConfig {
   readonly directory: string; readonly maxBytes: number; readonly retainFiles: number;
 }
+export type ServiceMacosServiceTarget =
+  | { readonly kind: "agent"; readonly config: string }
+  | { readonly kind: "web"; readonly config: string };
 export interface ServiceMacosServiceConfig {
-  readonly agentConfig: string; readonly startAtLogin: boolean; readonly restartPolicy: ServiceRestartPolicy;
+  readonly target: ServiceMacosServiceTarget;
+  readonly startAtLogin: boolean; readonly restartPolicy: ServiceRestartPolicy;
   readonly environmentFile?: string;
   readonly logs: ServiceMacosLogsConfig;
 }
@@ -29,7 +33,8 @@ export class ServiceMacosConfigError extends Error {
   }
 }
 const ROOT_KEYS = new Set(["$schema", "configVersion", "services"]);
-const SERVICE_KEYS = new Set(["agentConfig", "startAtLogin", "restartPolicy", "environmentFile", "logs"]);
+const SERVICE_KEYS = new Set(["target", "startAtLogin", "restartPolicy", "environmentFile", "logs"]);
+const TARGET_KEYS = new Set(["kind", "config"]);
 const LOG_KEYS = new Set(["directory", "maxBytes", "retainFiles"]);
 export async function loadServiceMacosConfig(path: string): Promise<LoadedServiceMacosConfig> {
   const absolutePath = resolve(path);
@@ -88,7 +93,28 @@ export const serviceMacosConfigSchema = Object.freeze({
           type: "object",
           additionalProperties: false,
           properties: {
-            agentConfig: { type: "string", minLength: 1 },
+            target: {
+              oneOf: [
+                {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    kind: { const: "agent" },
+                    config: { type: "string", minLength: 1 },
+                  },
+                  required: ["kind", "config"],
+                },
+                {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    kind: { const: "web" },
+                    config: { type: "string", minLength: 1 },
+                  },
+                  required: ["kind", "config"],
+                },
+              ],
+            },
             startAtLogin: { type: "boolean" },
             restartPolicy: { enum: ["never", "on-failure", "always"] },
             environmentFile: { type: "string", minLength: 1 },
@@ -103,7 +129,7 @@ export const serviceMacosConfigSchema = Object.freeze({
               required: ["directory"],
             },
           },
-          required: ["agentConfig", "startAtLogin", "restartPolicy", "logs"],
+          required: ["target", "startAtLogin", "restartPolicy", "logs"],
         },
       },
       additionalProperties: false,
@@ -114,7 +140,7 @@ export const serviceMacosConfigSchema = Object.freeze({
 function parseService(value: unknown, id: string): ServiceMacosServiceConfig {
   const input = readRecord(value, `services.${id}`);
   rejectUnknown(input, SERVICE_KEYS, `services.${id}`);
-  const agentConfig = absolutePath(input.agentConfig, `services.${id}.agentConfig`);
+  const target = parseTarget(input.target, id);
   const startAtLogin = boolean(input.startAtLogin, `services.${id}.startAtLogin`);
   const restartPolicy = enumValue(
     input.restartPolicy,
@@ -126,11 +152,20 @@ function parseService(value: unknown, id: string): ServiceMacosServiceConfig {
     : absolutePath(input.environmentFile, `services.${id}.environmentFile`);
   const logs = parseLogs(input.logs, id);
   return Object.freeze({
-    agentConfig,
+    target,
     startAtLogin,
     restartPolicy,
     ...(environmentFile === undefined ? {} : { environmentFile }),
     logs,
+  });
+}
+function parseTarget(value: unknown, id: string): ServiceMacosServiceTarget {
+  const input = readRecord(value, `services.${id}.target`);
+  rejectUnknown(input, TARGET_KEYS, `services.${id}.target`);
+  const kind = enumValue(input.kind, ["agent", "web"] as const, `services.${id}.target.kind`);
+  return Object.freeze({
+    kind,
+    config: absolutePath(input.config, `services.${id}.target.config`),
   });
 }
 function parseLogs(value: unknown, id: string): ServiceMacosLogsConfig {

@@ -253,6 +253,9 @@ importers:
       '@mono-agent/core':
         specifier: workspace:0.15.0
         version: link:../core
+      '@mono-agent/web':
+        specifier: workspace:0.15.0
+        version: link:../web
 
   packages/state-local:
     dependencies:

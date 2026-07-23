@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { dirname } from "node:path";
@@ -7,6 +8,14 @@ type ReadinessRecord = { readonly event: "reset" } | {
   readonly event: "started" | "stopped"; readonly serviceMacosProof: string; readonly pid: number;
 };
 export interface ServiceLogBinding { readonly stdout: string; readonly stderr: string }
+export interface ManagedServiceLogSnapshot {
+  readonly exists: boolean;
+  readonly totalBytes: number;
+  readonly returnedBytes: number;
+  readonly truncated: boolean;
+  readonly digest?: string;
+  readonly content: string;
+}
 const READINESS_MAX_BYTES = 4_096;
 export async function bindServiceLogs(logs: ActivationLogs, uid: number): Promise<ServiceLogBinding> {
   await assertDirectory(logs, uid);
@@ -30,9 +39,90 @@ export async function assertServiceLogRetention(logs: ActivationLogs, uid: numbe
     }
   }
 }
+
+export async function preflightServiceLogs(
+  logs: ActivationLogs,
+  uid: number,
+): Promise<void> {
+  await assertDirectory(logs, uid);
+  await assertServiceLogRetention(logs, uid);
+  for (const path of [logs.stdoutPath, logs.stderrPath]) {
+    await inspectOptionalManagedFile(path, logs, uid);
+    for (let index = 0; index < logs.retainFiles; index += 1) {
+      await inspectOptionalManagedFile(
+        `${path}.${String(index)}.mono-agent-log`,
+        logs,
+        uid,
+      );
+    }
+  }
+  const readiness = await readOptionalManagedFile(
+    logs.readinessPath,
+    logs,
+    uid,
+    READINESS_MAX_BYTES,
+  );
+  if (readiness !== undefined && parseReadiness(readiness) === undefined) {
+    throw new Error(`${logs.readinessPath} is not a valid managed readiness proof.`);
+  }
+  await assertDirectory(logs, uid);
+}
+
 export async function resetServiceLogs(logs: ActivationLogs, uid: number): Promise<void> {
   await Promise.all([rotate(logs.stdoutPath, logs, uid, true), rotate(logs.stderrPath, logs, uid, true)]);
   await rewriteReadiness(logs, { event: "reset" }, uid, false);
+}
+
+async function inspectOptionalManagedFile(
+  path: string,
+  logs: ActivationLogs,
+  uid: number,
+): Promise<void> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+  if (handle === undefined) return;
+  try {
+    const opened = await handle.stat({ bigint: true });
+    assertSafe(path, opened, uid);
+    await assertBound(logs, path, opened, uid);
+    const after = await handle.stat({ bigint: true });
+    assertSame(path, opened, after);
+    await assertBound(logs, path, after, uid);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readOptionalManagedFile(
+  path: string,
+  logs: ActivationLogs,
+  uid: number,
+  maximum: number,
+): Promise<Buffer | undefined> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+  if (handle === undefined) return undefined;
+  try {
+    const opened = await handle.stat({ bigint: true });
+    assertSafe(path, opened, uid, maximum);
+    await assertBound(logs, path, opened, uid);
+    const source = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    assertSame(path, opened, after);
+    await assertBound(logs, path, after, uid);
+    if (source.byteLength !== Number(after.size)) {
+      throw new Error(`${path} changed size during preflight.`);
+    }
+    return source;
+  } finally {
+    await handle.close();
+  }
 }
 export async function maintainServiceLogs(
   logs: ActivationLogs, uid: number, binding?: ServiceLogBinding,
@@ -41,6 +131,54 @@ export async function maintainServiceLogs(
     rotate(logs.stdoutPath, logs, uid, false, binding?.stdout),
     rotate(logs.stderrPath, logs, uid, false, binding?.stderr),
   ]);
+}
+export async function readManagedServiceLog(
+  path: string,
+  uid: number,
+  maxBytes: number,
+): Promise<ManagedServiceLogSnapshot> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) {
+      return Object.freeze({
+        exists: false,
+        totalBytes: 0,
+        returnedBytes: 0,
+        truncated: false,
+        content: "",
+      });
+    }
+    throw error;
+  }
+  try {
+    const before = await handle.stat({ bigint: true });
+    assertSafe(path, before, uid);
+    if (before.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(`${path} is too large for bounded log inspection.`);
+    }
+    const returnedBytes = Math.min(Number(before.size), maxBytes);
+    const source = Buffer.alloc(returnedBytes);
+    if (returnedBytes > 0) {
+      await handle.read(source, 0, returnedBytes, Number(before.size) - returnedBytes);
+    }
+    const after = await handle.stat({ bigint: true });
+    assertSame(path, before, after);
+    if (!sameFile(after, await lstat(path, { bigint: true }))) {
+      throw new Error(`${path} changed pathname identity during log inspection.`);
+    }
+    return Object.freeze({
+      exists: true,
+      totalBytes: Number(before.size),
+      returnedBytes,
+      truncated: before.size > BigInt(returnedBytes),
+      digest: createHash("sha256").update(source).digest("hex"),
+      content: source.toString("utf8"),
+    });
+  } finally {
+    await handle.close();
+  }
 }
 export async function readServiceReadiness(
   logs: ActivationLogs, token: string, pid: number, uid: number,
