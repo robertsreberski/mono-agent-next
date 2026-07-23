@@ -96,12 +96,14 @@ describe("slack channel", () => {
     }));
     const channel = createSlackChannel({
       context: context(
-        parseSlackConfig(CONFIG),
+        parseSlackConfig({ ...CONFIG, defaultDestination: "C1:1712345678.000100" }),
         async () => ({ status: "completed" }),
       ),
       socketFactory: () => ({ async start() {}, async stop() {} }),
       clientFactory: () => client({ postMessage }),
     });
+    expect(channel.resolveDefaultDeliveryConversationId?.())
+      .toBe("slack:C1:1712345678.000100");
     expect(channel.sendTools.map((tool) => tool.name)).toEqual([
       "SlackSendMessage",
     ]);
@@ -422,6 +424,7 @@ describe("slack channel", () => {
     const channel = createSlackChannel({ context: context(parseSlackConfig(CONFIG), dispatch), socketFactory: () => socket, clientFactory: () => client });
     expect(() => assertChannelModuleCompliance(monoAgentModule, { expectedPackageName: "@mono-agent/channel-slack" })).not.toThrow();
     expect(() => assertChannelInstanceCompliance(channel)).not.toThrow();
+    expect(channel.resolveDefaultDeliveryConversationId?.()).toBe("slack:C1");
     await channel.start?.({ signal: new AbortController().signal });
     await handler?.({ kind: "message", envelopeId: "e0", teamId: "OTHER", channelId: "C1", messageId: "1", threadId: "1", userId: "U", text: "ignore", files: [], receivedAt: new Date().toISOString() });
     await handler?.({ kind: "message", envelopeId: "e1", teamId: "T1", channelId: "C1", messageId: "1", threadId: "1", userId: "U", text: "hello", files: [{ id: "F", name: "note.txt", mediaType: "text/plain", privateUrl: "https://files.slack.com/note" }], receivedAt: new Date().toISOString() });

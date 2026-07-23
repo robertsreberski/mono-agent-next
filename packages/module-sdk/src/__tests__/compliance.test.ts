@@ -229,6 +229,13 @@ describe("public compliance assertions", () => {
         status: "delivered" as const, idempotencyKey: message.idempotencyKey,
       }),
     })).toThrow("channel proactive capability and deliver function must match");
+    expect(() => assertChannelInstanceCompliance({
+      capabilities: {
+        attachments: false, liveInput: false, askUser: false, proactive: false,
+        runtimeControl: false, verbatim: false, cancellation: true,
+      },
+      resolveDefaultDeliveryConversationId: "telegram:42",
+    })).toThrow("resolveDefaultDeliveryConversationId must be a function");
   });
 
   it("runs reusable lifecycle, delivery, health, and redaction checks", async () => {

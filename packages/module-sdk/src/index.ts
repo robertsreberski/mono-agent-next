@@ -1014,7 +1014,8 @@ export interface ChannelHost extends ModuleHost {
   openConversation?(request: ChannelOpenConversationRequest): Promise<ChannelOpenConversationResult>;
 }
 export interface ChannelOutboundMessage {
-  /** A normalized destination of at most 4,096 UTF-8 bytes. */ readonly conversationId: string;
+  /** A normalized destination of at most 4,096 UTF-8 bytes. Core passes adapters a non-empty value. */
+  readonly conversationId: string;
   readonly text: string;
   readonly attachments?: readonly ChannelAttachment[];
   readonly replyToMessageId?: string;
@@ -1050,6 +1051,8 @@ export interface Channel extends ModuleInstance {
   readonly capabilities: ChannelCapabilities;
   /** Model-visible delivery contributions, bound by Core to this exact selected instance. */
   readonly sendTools?: readonly ChannelSendTool[];
+  /** Canonicalize an explicitly requested adapter-owned default before durable delivery admission. */
+  resolveDefaultDeliveryConversationId?(): string | undefined;
   /**
    * Returns a bounded JSON discovery fragment after start. Core combines
    * fragments by top-level key and publishes them through an optional state

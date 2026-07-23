@@ -80,6 +80,7 @@ describe("telegram channel", () => {
       ),
       clientFactory: () => client,
     });
+    expect(channel.resolveDefaultDeliveryConversationId?.()).toBeUndefined();
     expect(channel.sendTools.map((tool) => tool.name)).toEqual([
       "TelegramSendMessage",
       "TelegramSendFile",
@@ -469,6 +470,7 @@ describe("telegram channel", () => {
     const channel = createTelegramChannel({ context: context(parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"], defaultDestination: "42" }), dispatch), clientFactory: () => client });
     expect(() => assertChannelModuleCompliance(monoAgentModule, { expectedPackageName: "@mono-agent/channel-telegram" })).not.toThrow();
     expect(() => assertChannelInstanceCompliance(channel)).not.toThrow();
+    expect(channel.resolveDefaultDeliveryConversationId?.()).toBe("telegram:42");
     await channel.start?.({ signal: new AbortController().signal });
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
     expect(dispatch.mock.calls[0]?.[0]).toMatchObject({ conversationId: "telegram:42", sender: { id: "u", displayName: "Ada" }, attachments: [{ name: "note.txt" }] });

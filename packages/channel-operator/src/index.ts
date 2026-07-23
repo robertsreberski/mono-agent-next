@@ -35,6 +35,7 @@ const MAX_PROACTIVE_TEXT_CHARACTERS = 262_144;
 const MAX_METADATA_BYTES = 65_536;
 const MAX_METADATA_ITEMS = 2_048;
 const MAX_METADATA_DEPTH = 16;
+const PROACTIVE_NEW_CONVERSATION_ID = "operator:new-conversation";
 
 interface OperatorDeliveryReceipt {
   readonly fingerprint: string;
@@ -166,6 +167,9 @@ function createOperatorModuleChannel(
     stop,
     health,
     ...(context.host.openConversation === undefined ? {} : {
+      resolveDefaultDeliveryConversationId() {
+        return PROACTIVE_NEW_CONVERSATION_ID;
+      },
       deliver(value, signal): Promise<ChannelDeliveryResult> {
         const prepared = prepareOperatorDelivery(value);
         if ("failure" in prepared) return Promise.resolve(prepared.failure);

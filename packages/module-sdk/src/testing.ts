@@ -122,6 +122,8 @@ export function assertChannelInstanceCompliance(value: unknown): asserts value i
   const instance = assertModuleInstance(value, "channel");
   const capabilities = assertInstanceCapabilities(instance, "channel", CHANNEL_CAPABILITIES, ["approvals"]);
   assertOptionalFunction(instance.deliver, "channel instance deliver");
+  assertOptionalFunction(instance.resolveDefaultDeliveryConversationId,
+    "channel instance resolveDefaultDeliveryConversationId");
   const sendTools = assertChannelSendTools(readOwnDataProperty(instance, "sendTools", "channel instance"));
   if (capabilities.proactive !== (typeof instance.deliver === "function"))
     fail("channel proactive capability and deliver function must match");

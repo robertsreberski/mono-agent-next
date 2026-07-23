@@ -10,6 +10,7 @@ import {
   slackConfigSchema,
 } from "./config.js";
 import { SlackDelivery } from "./delivery.js";
+import { parseSlackDestination, slackConversationId } from "./destination.js";
 import { SlackInbox } from "./inbox.js";
 import {
   createSlackSendTools,
@@ -455,6 +456,14 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
   return {
     capabilities: Object.freeze({ attachments: true, liveInput: context.host.offerLiveInput !== undefined, askUser: context.host.answerAsk !== undefined, approvals: false, proactive: true, runtimeControl: true, verbatim: false, cancellation: context.host.cancel !== undefined }),
     sendTools,
+    resolveDefaultDeliveryConversationId() {
+      return context.config.defaultDestination === undefined
+        ? undefined
+        : slackConversationId(parseSlackDestination(
+          context.config.defaultDestination,
+          "Slack default destination",
+        ));
+    },
     get running() { return running; },
     async start(startContext) {
       if (running) return;

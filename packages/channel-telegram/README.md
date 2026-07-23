@@ -77,6 +77,9 @@ answers. `/model` and `/effort` maintain bounded, process-local per-chat
 overrides. Activity updates edit one status message when Telegram supports it.
 Core proactive delivery -> durable Core/state receipt -> exact Telegram
 destination -> fingerprint-guarded Bot API send.
+For a channel-only notification, the selected adapter resolves
+`defaultDestination` to its canonical `telegram:<chat-id>` before Core's
+durable admission and the adapter never receives an empty destination.
 `metadata.telegram.replyOptions` renders non-blocking buttons whose
 answers return as normal user input, separate from blocking AskUser callbacks.
 Instance-bound send-tool contributions prepare the same outbound contract; Core

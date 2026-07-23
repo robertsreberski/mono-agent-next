@@ -320,7 +320,7 @@ describe("complete agent plane", () => {
     expect(exports).toHaveLength(2);
   });
 
-  it("executes trigger commands once and delivers through the explicitly selected proactive channel", async () => {
+  it("executes a cron-style default notification once through the selected proactive channel", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtimeName = `@fixture/runtime-${suffix}`;
     const stateName = `@fixture/state-trigger-${suffix}`;
@@ -358,6 +358,7 @@ describe("complete agent plane", () => {
               verbatim: false,
               cancellation: false,
             },
+            resolveDefaultDeliveryConversationId: () => "telegram:42",
             async deliver(message: unknown) {
               deliveries.push(message);
               const idempotencyKey = (message as { idempotencyKey: string }).idempotencyKey;
@@ -384,7 +385,7 @@ describe("complete agent plane", () => {
                     prompt: "prepare update",
                     createdAt: new Date().toISOString(),
                     deliveryChannel: "notify",
-                    metadata: { destination: "operator-admin" },
+                    metadata: { destination: "" },
                   }, new AbortController().signal);
                 },
               }],
@@ -410,7 +411,7 @@ describe("complete agent plane", () => {
     expect(turns).toBe(1);
     expect(deliveries).toEqual([
       expect.objectContaining({
-        conversationId: "operator-admin",
+        conversationId: "telegram:42",
         text: "scheduled answer",
         idempotencyKey: "daily:2026-07-22",
       }),

@@ -18,6 +18,7 @@ import {
 import { createTelegramBotApiClient, type TelegramBotClient, type TelegramBotClientFactory, type TelegramMessageUpdate, type TelegramUpdate } from "./bot.js";
 import { type TelegramConfig, telegramConfigSchema } from "./config.js";
 import { TelegramDelivery } from "./delivery.js";
+import { telegramConversationId } from "./destination.js";
 import {
   createTelegramSendTools,
 } from "./send-tools.js";
@@ -295,6 +296,11 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
   return {
     capabilities: Object.freeze({ attachments: true, liveInput: context.host.offerLiveInput !== undefined, askUser: context.host.answerAsk !== undefined, approvals: false, proactive: true, runtimeControl: true, verbatim: true, cancellation: context.host.cancel !== undefined }),
     sendTools,
+    resolveDefaultDeliveryConversationId() {
+      return context.config.defaultDestination === undefined
+        ? undefined
+        : telegramConversationId(context.config.defaultDestination);
+    },
     get running() { return running; },
     async start(startContext) {
       if (running) return;

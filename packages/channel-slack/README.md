@@ -93,6 +93,9 @@ channel/thread -> fingerprint-guarded Web API send. The instance-bound
 `SlackSendMessage` contribution prepares that same outbound contract; a thread
 keeps its exact history identity, while a new top-level post resolves
 destination history from Slack's confirmed message timestamp.
+For a channel-only notification, the selected adapter resolves
+`defaultDestination` to canonical `slack:<channel>[:thread]` form before
+Core's durable admission and the adapter never receives an empty destination.
 
 ### Durable inbox
 

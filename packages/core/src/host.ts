@@ -476,8 +476,11 @@ class AgentHostImplementation implements AgentHost {
     };
   }
   async deliver(channelInstanceId: string, message: ChannelOutboundMessage): Promise<ChannelDeliveryResult> {
-    const normalized = normalizeOutboundMessage(message);
     const channel = this.#channelInstances.get(channelInstanceId);
+    const normalized = normalizeOutboundMessage(
+      message,
+      channel?.resolveDefaultDeliveryConversationId?.bind(channel),
+    );
     if (channel?.deliver === undefined) {
       return {
         status: "failed",
@@ -4244,7 +4247,10 @@ function submissionFingerprint(input: AgentSubmitInput): DurableFingerprint {
     toolPolicy: input.toolPolicy ?? null,
   });
 }
-function normalizeOutboundMessage(message: ChannelOutboundMessage): ChannelOutboundMessage {
+function normalizeOutboundMessage(
+  message: ChannelOutboundMessage,
+  resolveDefault?: () => string | undefined,
+): ChannelOutboundMessage {
   const input = ownDataRecord(
     message,
     "outbound message",
@@ -4264,9 +4270,12 @@ function normalizeOutboundMessage(message: ChannelOutboundMessage): ChannelOutbo
   if (input.idempotencyKey.includes("\0")) {
     throw new TypeError("idempotencyKey must not contain NUL");
   }
+  const conversationId = input.conversationId === "" ? resolveDefault?.() : input.conversationId;
+  if (input.conversationId === "" && conversationId === undefined)
+    throw new TypeError("conversationId requires an adapter-owned default");
   const normalized = normalizeSubmitInput({
     requestId: input.idempotencyKey,
-    conversationId: input.conversationId as string,
+    conversationId: conversationId as string,
     text: input.text as string,
     ...(input.attachments === undefined
       ? {}

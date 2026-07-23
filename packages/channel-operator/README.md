@@ -71,7 +71,7 @@ fails if that grant is absent or malformed.
 3. `POST /v1/turns` is parsed by `@mono-agent/operator`, inline attachments are decoded within the shared request bound, and quotes are verified against the active conversation's Core replay before dispatch through the injected `ChannelHost`.
 4. Channel reply events become only shared operator NDJSON frames, including AskUser and usage frames; standalone compaction and session-eviction events merge into sticky usage flags without erasing the latest token counts, and the terminal frame carries the authoritative result.
 5. Capability-gated routes project Core conversation listing, replay, redacted config, health, live input, and AskUser answers without package-local state substitutes.
-6. Client disconnect, explicit cancellation, drain, and stop abort the exact dispatch signal; proactive requests open a Core conversation behind Core/state restart-safe delivery authority plus a bounded fingerprint-aware live-instance guard. Conflicting keys fail, ambiguous opens remain unknown, and exhausted guard capacity fails closed.
+6. Client disconnect, explicit cancellation, drain, and stop abort the exact dispatch signal; an empty proactive destination is canonicalized to the stable adapter-owned `operator:new-conversation` operation before Core's durable admission, then opens a Core conversation behind Core/state restart-safe delivery authority plus a bounded fingerprint-aware live-instance guard. Conflicting keys fail, ambiguous opens remain unknown, and exhausted guard capacity fails closed.
 
 ### Package structure
 

@@ -709,7 +709,13 @@ describe("mono-agent operator channel module", () => {
     };
     const channel = await monoAgentModule.create({ instanceId: "operator", config, provenance: {}, configDirectory: "/config", workspaceDirectory: "/workspace", dataDirectory: "/data", logger: noopLogger(), host, signal: new AbortController().signal });
     moduleChannels.add(channel);
-    const message = { conversationId: "", text: "proactive", idempotencyKey: "open-once" };
+    const defaultConversationId = channel.resolveDefaultDeliveryConversationId?.();
+    expect(defaultConversationId).toBe("operator:new-conversation");
+    const message = {
+      conversationId: defaultConversationId!,
+      text: "proactive",
+      idempotencyKey: "open-once",
+    };
     await expect(Promise.all([channel.deliver!(message, new AbortController().signal), channel.deliver!(message, new AbortController().signal)])).resolves.toEqual([
       { status: "delivered", idempotencyKey: "open-once", messageId: "opened-1" },
       { status: "delivered", idempotencyKey: "open-once", messageId: "opened-1" },
