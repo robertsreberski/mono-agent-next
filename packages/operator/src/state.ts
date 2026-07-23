@@ -1,4 +1,5 @@
 import type {
+  OperatorActivity,
   OperatorAsk,
   OperatorCapabilities,
   OperatorFrame,
@@ -21,7 +22,7 @@ export interface OperatorConversationState {
   readonly activeTurnId?: string;
   readonly assistantText: string;
   readonly thoughtText: string;
-  readonly activities: readonly string[];
+  readonly activities: readonly OperatorActivity[];
   readonly pendingAsk?: OperatorAsk;
   readonly usage?: OperatorUsage;
   readonly capabilities?: OperatorCapabilities;
@@ -99,7 +100,25 @@ export function reduceOperatorFrame(state: OperatorConversationState, frame: Ope
     }
     case "activity":
       requireTurn(state, frame);
-      return { ...state, activities: [...state.activities, frame.text] };
+      return { ...state, activities: [...state.activities, { type: frame.type, text: frame.text }] };
+    case "tool_call":
+      requireTurn(state, frame);
+      return { ...state, activities: [...state.activities, { type: frame.type, call: frame.call }] };
+    case "tool_result":
+      requireTurn(state, frame);
+      return { ...state, activities: [...state.activities, { type: frame.type, result: frame.result }] };
+    case "compaction":
+      requireTurn(state, frame);
+      return {
+        ...state,
+        activities: [...state.activities, { type: frame.type, compaction: frame.compaction }],
+        usage: mergeUsage(state.usage, {
+          inputTokens: state.usage?.inputTokens ?? 0,
+          outputTokens: state.usage?.outputTokens ?? 0,
+          compacted: frame.compaction.compacted,
+          sessionEvicted: false,
+        }),
+      };
     case "ask_user":
       requireTurn(state, frame);
       return { ...state, status: "awaiting_user", pendingAsk: frame.ask };
@@ -117,6 +136,7 @@ export function reduceOperatorFrame(state: OperatorConversationState, frame: Ope
         ...settled,
         status: "completed",
         assistantText: frame.finalMessage.text,
+        thoughtText: "",
         finalMessage: frame.finalMessage,
       };
       }
@@ -129,6 +149,7 @@ export function reduceOperatorFrame(state: OperatorConversationState, frame: Ope
       return {
         ...settled,
         status: frame.cancelled ? "cancelled" : "error",
+        thoughtText: "",
         lastError: frame.error,
       };
       }

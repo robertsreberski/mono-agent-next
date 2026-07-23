@@ -17,6 +17,8 @@ import {
   type ModuleStopContext,
 } from "@mono-agent/module-sdk";
 
+import { OPERATOR_REGISTRY_DETAILS_SCHEMA } from "@mono-agent/operator";
+
 import {
   operatorChannelConfigSchema,
   type OperatorChannelConfig,
@@ -146,7 +148,7 @@ function createOperatorModuleChannel(
       }
       return {
         operatorRegistry: {
-          schema: "mono-agent.operator-registry-details.v1",
+          schema: OPERATOR_REGISTRY_DETAILS_SCHEMA,
           agent: identity.agent,
           operator: { endpoint: info.endpoint, tokenEnvironment },
           process: { pid: identity.process.pid, startedAt: info.startedAt },

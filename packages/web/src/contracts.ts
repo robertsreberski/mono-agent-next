@@ -5,6 +5,8 @@ import type {
   OperatorConfigView,
   OperatorHealth,
   OperatorLiveInputResponse,
+  OperatorModel,
+  OperatorActivity,
   OperatorQuote,
   OperatorReplayResponse,
 } from "@mono-agent/operator";
@@ -32,8 +34,17 @@ export interface WebAgent {
   readonly label: string;
   readonly endpoint: string;
   readonly online: boolean;
+  readonly pinned: boolean;
   readonly capabilities: Readonly<Record<string, boolean>>;
+  readonly defaults?: {
+    readonly runtime?: string;
+    readonly model?: string;
+    readonly effort?: string;
+  };
+  readonly models?: readonly OperatorModel[];
 }
+
+export type WebNotificationTriggerKind = "cron" | "webhook";
 
 export interface WebThread {
   readonly id: string;
@@ -42,13 +53,20 @@ export interface WebThread {
   readonly operatorConversationId?: string;
   /** Present only for conversations opened by proactive operator delivery. */
   readonly proactive?: true;
+  /** Whitelisted trigger provenance; arbitrary conversation metadata is never exposed. */
+  readonly trigger?: { readonly kind: WebNotificationTriggerKind };
   readonly title: string;
+  /** Internal ownership marker preventing an automatic title from replacing an operator title. */
+  readonly titleManual: boolean;
+  readonly archivedAt?: string;
   readonly createdAt: string;
   readonly updatedAt: string;
   /** Internal durable tombstone for a dismissed proactive conversation. */
   readonly deletedAt?: string;
   readonly status: WebTurnStatus;
   readonly activeTurnId?: string;
+  /** Stable completion identity used for response-notification deduplication. */
+  readonly lastTurnId?: string;
   readonly pendingAsk?: OperatorAsk;
 }
 
@@ -66,7 +84,9 @@ export interface WebMessage {
   readonly updatedAt: string;
   readonly status: Exclude<WebTurnStatus, "idle">;
   readonly error?: { readonly code: string; readonly message: string };
-  /** Bounded numeric/event metadata only; never thoughts, activity, or provider payloads. */
+  /** Bounded, redacted operator activity. Transient thought deltas are never stored. */
+  readonly activities?: readonly OperatorActivity[];
+  /** Bounded numeric/event metadata only; never thoughts or provider payloads. */
   readonly telemetry?: WebTurnTelemetry;
 }
 
@@ -77,6 +97,8 @@ export interface WebThreadDetail {
 
 export interface WebBootstrap {
   readonly version: typeof WEB_API_VERSION;
+  /** Durable monotonic state revision used to resume invalidation streams. */
+  readonly revision: number;
   readonly agents: readonly WebAgent[];
   readonly threads: readonly WebThread[];
   /** Newly persisted during this bootstrap, so renderers can notify once. */
@@ -86,6 +108,15 @@ export interface WebBootstrap {
 export interface CreateWebThreadInput {
   readonly agentId: string;
   readonly title?: string;
+}
+
+export interface PatchWebAgentInput {
+  readonly pinned: boolean;
+}
+
+export interface PatchWebThreadInput {
+  readonly title?: string;
+  readonly archived?: boolean;
 }
 
 export interface StartWebTurnInput {
@@ -112,8 +143,26 @@ export type WebReplayView = OperatorReplayResponse;
 export type WebConfigView = OperatorConfigView;
 export type WebHealthView = OperatorHealth;
 
+export type WebEventType =
+  | "ready"
+  | "reset"
+  | "agents.changed"
+  | "threads.changed"
+  | "thread.changed";
+
+export interface WebEvent {
+  readonly id: string;
+  readonly version: typeof WEB_API_VERSION;
+  readonly revision: number;
+  readonly type: WebEventType;
+  readonly at: string;
+  readonly threadId?: string;
+}
+
 export interface StoredWebState {
-  readonly schemaVersion: 2;
+  readonly schemaVersion: 3;
+  readonly revision: number;
+  readonly pinnedAgentIds: readonly string[];
   readonly threads: readonly WebThread[];
   readonly messages: readonly WebMessage[];
 }

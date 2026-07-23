@@ -31,6 +31,7 @@ import {
   type OperatorFrame,
   type OperatorInfo,
   type OperatorQuote,
+  type OperatorToolResult,
 } from "@mono-agent/operator";
 
 import { editorTheme, markdownTheme, style } from "./theme.js";
@@ -352,12 +353,40 @@ export class MonoAgentTuiApp {
           this.assistant?.setText(sanitizeTerminalText(this.state.assistantText, { multiline: true }));
         }
         this.setStatus(this.statusText(
-          frame.target === "thought" ? "reasoning…" : this.latestActivity("streaming…"),
+          frame.target === "thought"
+            ? `reasoning… ${boundedStatus(frame.text)}`
+            : this.latestActivity("streaming…"),
         ));
         break;
       case "activity":
         this.setStatus(this.statusText(frame.text));
         break;
+      case "tool_call":
+        this.addNotice(boundedView(
+          `tool ${frame.call.name} started\n${frame.call.inputOmitted
+            ? "[input omitted by operator boundary]"
+            : JSON.stringify(frame.call.input, null, 2)}`,
+        ));
+        this.setStatus(this.statusText(`calling ${frame.call.name}…`));
+        break;
+      case "tool_result":
+        this.addNotice(
+          boundedView(`tool ${frame.result.callId} ${frame.result.isError === true ? "failed" : "completed"}\n${toolResultText(frame.result)}`),
+          frame.result.isError === true ? "warning" : "info",
+        );
+        this.setStatus(this.statusText(
+          `tool ${frame.result.callId} ${frame.result.isError === true ? "failed" : "completed"}`,
+        ));
+        break;
+      case "compaction": {
+        const counts = frame.compaction.tokensBefore === undefined
+          ? ""
+          : ` · ${String(frame.compaction.tokensBefore)} → ${String(frame.compaction.tokensAfter ?? "?")} tokens`;
+        const label = frame.compaction.compacted ? "context compacted" : "context compaction skipped";
+        this.addNotice(`${label}${counts}`);
+        this.setStatus(this.statusText(`${label}${counts}`));
+        break;
+      }
       case "ask_user":
         this.addAsk(frame);
         this.setStatus(this.statusText('awaiting answer · /answer {"q":"v","q2":["v1","v2"]}'));
@@ -709,7 +738,14 @@ export class MonoAgentTuiApp {
   }
 
   private latestActivity(fallback: string): string {
-    return this.state.activities.at(-1) ?? fallback;
+    const latest = this.state.activities.at(-1);
+    if (latest === undefined) return fallback;
+    switch (latest.type) {
+      case "activity": return latest.text;
+      case "tool_call": return `calling ${latest.call.name}…`;
+      case "tool_result": return `tool ${latest.result.callId} ${latest.result.isError === true ? "failed" : "completed"}`;
+      case "compaction": return latest.compaction.compacted ? "context compacted" : "context compaction skipped";
+    }
   }
 
   private statusText(prefix: string): string {
@@ -833,6 +869,18 @@ function errorMessage(error: unknown): string {
 
 function boundedView(value: string): string {
   return value.length <= 32_768 ? value : `${value.slice(0, 32_760)}\n[truncated]`;
+}
+
+function boundedStatus(value: string): string {
+  const compact = value.replace(/\s+/gu, " ").trim();
+  return compact.length <= 160 ? compact : `${compact.slice(0, 159)}…`;
+}
+
+function toolResultText(result: OperatorToolResult): string {
+  if (result.contentOmitted) return "[content omitted by operator boundary]";
+  return result.content?.map((part) =>
+    part.type === "text" ? part.text : JSON.stringify(part.value, null, 2)
+  ).join("\n") ?? "";
 }
 
 function attachmentMediaType(name: string): string {

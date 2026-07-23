@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   OPERATOR_PROTOCOL,
+  OPERATOR_REGISTRY_DETAILS_SCHEMA,
   OPERATOR_REGISTRY_SCHEMA,
   OperatorDirectory,
   OperatorDirectoryError,
@@ -17,8 +18,6 @@ import {
 import { FIXTURE_CAPABILITIES } from "../testing.js";
 
 const roots: string[] = [];
-const OPERATOR_REGISTRY_DETAILS_SCHEMA = "mono-agent.operator-registry-details.v1";
-
 async function temporaryRegistry(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "mono-agent-operator-"));
   roots.push(root);

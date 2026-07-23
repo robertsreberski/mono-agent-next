@@ -69,6 +69,10 @@ describe("source-beta production budgets", () => {
 
   it("counts generated-looking package source as production and rejects unclassified code", () => {
     expect(classifySourcePath("packages/core/src/generated/hidden.ts")).toBe("production");
+    expect(classifySourcePath("packages/web/webapp/src/App.tsx")).toBe("production");
+    expect(classifySourcePath("packages/web/webapp/public/notification-sw.js")).toBe("production");
+    expect(classifySourcePath("packages/web/webapp/src/browser.test.tsx")).toBe("test");
+    expect(classifySourcePath("packages/web/webapp/vite.config.ts")).toBe("tooling");
     expect(classifySourcePath("website/astro.config.mjs")).toBe("production");
     expect(classifySourcePath("packages/tui/vitest.config.ts")).toBe("test");
     expect(classifySourcePath("vitest.config.mjs")).toBe("test");

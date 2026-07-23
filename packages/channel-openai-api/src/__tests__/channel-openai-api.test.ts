@@ -425,6 +425,28 @@ describe("OpenAI-compatible channel", () => {
     expect(stream.endsWith("data: [DONE]\n\n")).toBe(true);
   });
 
+  it("drops transient thinking from JSON and streaming assistant responses", async () => {
+    const hidden = `private-reasoning-${"x".repeat(8_000)}`;
+    const dispatch = vi.fn(async (_request: ChannelInboundRequest, reply: ChannelReplySink) => {
+      await reply.emit({ type: "thinking-delta", delta: hidden });
+      await reply.emit({ type: "text-delta", delta: "visible answer" });
+      return { status: "completed" as const, text: "visible answer" };
+    });
+    const { info } = await start(dispatch, { maxResponseBytes: 4_096 });
+
+    const json = await post(info, chatBody(false));
+    expect(json.status).toBe(200);
+    const jsonBody = await json.text();
+    expect(jsonBody).toContain("visible answer");
+    expect(jsonBody).not.toContain("private-reasoning");
+
+    const streaming = await post(info, chatBody(true));
+    expect(streaming.status).toBe(200);
+    const streamBody = await streaming.text();
+    expect(deltaContent(streamBody)).toBe("visible answer");
+    expect(streamBody).not.toContain("private-reasoning");
+  });
+
   it("terminates SSE with an error instead of appending divergent replacement or final text", async () => {
     let call = 0;
     const dispatch = vi.fn(async (_request: ChannelInboundRequest, reply: ChannelReplySink) => {

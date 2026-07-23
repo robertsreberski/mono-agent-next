@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   OPERATOR_LIMITS,
+  OPERATOR_PROTOCOL,
+  OPERATOR_REGISTRY_DETAILS_SCHEMA,
+  OPERATOR_REGISTRY_SCHEMA,
+  OPERATOR_ROUTES,
   OperatorProtocolError,
   parseAskAnswerRequest,
   parseOperatorFrame,
@@ -12,6 +16,27 @@ import {
 import { MALFORMED_OPERATOR_FRAMES, VALID_OPERATOR_INFO, VALID_TURN_FRAMES, VALID_TURN_REQUEST } from "../testing.js";
 
 describe("operator protocol", () => {
+  it("uses an explicit v2 identity, discovery boundary, and route namespace", () => {
+    expect(OPERATOR_PROTOCOL).toBe("mono-agent.operator.v2");
+    expect(OPERATOR_REGISTRY_SCHEMA).toBe("mono-agent.operator-registry.v2");
+    expect(OPERATOR_REGISTRY_DETAILS_SCHEMA).toBe("mono-agent.operator-registry-details.v2");
+    expect([
+      OPERATOR_ROUTES.info,
+      OPERATOR_ROUTES.turns,
+      OPERATOR_ROUTES.config,
+      OPERATOR_ROUTES.health,
+      OPERATOR_ROUTES.conversations,
+    ].every((route) => route.startsWith("/v2/"))).toBe(true);
+    expect(OPERATOR_ROUTES.ask("conversation")).toBe("/v2/conversations/conversation/ask");
+    expect(OPERATOR_ROUTES.cancel("conversation")).toBe("/v2/conversations/conversation/cancel");
+    expect(OPERATOR_ROUTES.liveInput("conversation")).toBe("/v2/conversations/conversation/live-input");
+    expect(OPERATOR_ROUTES.replay("conversation")).toBe("/v2/conversations/conversation/replay");
+    expect(() => parseOperatorInfo({
+      ...VALID_OPERATOR_INFO,
+      protocol: "mono-agent.operator.v1",
+    })).toThrow("must equal mono-agent.operator.v2");
+  });
+
   it("round-trips the golden info, request, and frames", () => {
     expect(parseOperatorInfo(VALID_OPERATOR_INFO)).toEqual(VALID_OPERATOR_INFO);
     expect(parseTurnRequest(VALID_TURN_REQUEST)).toEqual(VALID_TURN_REQUEST);
@@ -35,6 +60,10 @@ describe("operator protocol", () => {
       ...VALID_TURN_REQUEST,
       metadata: JSON.parse('{"__proto__":{"polluted":true}}'),
     })).toThrow("unsafe key");
+    expect(() => parseTurnRequest({
+      ...VALID_TURN_REQUEST,
+      metadata: { values: Array.from({ length: OPERATOR_LIMITS.jsonItems }, () => null) },
+    })).toThrow("item JSON boundary");
   });
 
   it("requires text or an attachment and rejects unknown request fields", () => {
@@ -77,6 +106,31 @@ describe("operator protocol", () => {
       target: "assistant",
       text: "x".repeat(OPERATOR_LIMITS.frameBytes),
     })).toThrow("limit");
+  });
+
+  it("bounds structured tool payloads and requires explicit omission markers", () => {
+    expect(parseOperatorFrame({
+      type: "tool_call",
+      turnId: "fixture-turn",
+      call: { id: "call", name: "Read", inputOmitted: true },
+    })).toMatchObject({
+      type: "tool_call",
+      call: { id: "call", name: "Read", inputOmitted: true },
+    });
+    expect(() => parseOperatorFrame({
+      type: "tool_call",
+      turnId: "fixture-turn",
+      call: { id: "call", name: "Read", inputOmitted: false },
+    })).toThrow("must include input");
+    expect(() => parseOperatorFrame({
+      type: "tool_result",
+      turnId: "fixture-turn",
+      result: {
+        callId: "call",
+        content: [{ type: "text", text: "🧪".repeat(OPERATOR_LIMITS.toolPayloadBytes / 4) }],
+        contentOmitted: false,
+      },
+    })).toThrow(`${String(OPERATOR_LIMITS.toolPayloadBytes)} UTF-8 bytes`);
   });
 
   it("enforces the canonical AskUser shape and UTF-8 bounds", () => {

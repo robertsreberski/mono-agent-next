@@ -30,22 +30,32 @@ describe("web operator gateway", () => {
     await writeDescriptor(join(registry, "agent.json"), "http://127.0.0.1:43210", process.pid, now);
     const fetchImpl: typeof fetch = async (input) => {
       const url = String(input);
-      if (url.endsWith("/v1/info")) {
+      if (url.endsWith("/v2/info")) {
         return new Response(JSON.stringify({
           ...operatorInfo(true, now),
           capabilities: { ...capabilities(true), proactive: true, replay: true },
         }), { headers: { "content-type": "application/json" } });
       }
-      if (url.endsWith("/v1/conversations")) {
+      if (url.endsWith("/v2/conversations")) {
         return new Response(JSON.stringify({ conversations: [
           { id: "proactive:one", title: "Update", updatedAt: now },
+          { id: "trigger:cron:morning", title: "Morning", updatedAt: now },
           { id: "web:ordinary", updatedAt: now },
         ] }), { headers: { "content-type": "application/json" } });
       }
-      if (url.endsWith("/v1/conversations/proactive%3Aone/replay")) {
+      if (
+        url.endsWith("/v2/conversations/proactive%3Aone/replay")
+        || url.endsWith("/v2/conversations/trigger%3Acron%3Amorning/replay")
+      ) {
+        const cron = url.includes("trigger%3Acron");
         return new Response(JSON.stringify({
-          conversationId: "proactive:one",
-          messages: [{ id: "m-1", role: "assistant", text: "Done", createdAt: now }],
+          conversationId: cron ? "trigger:cron:morning" : "proactive:one",
+          messages: [{
+            id: cron ? "m-2" : "m-1",
+            role: "assistant",
+            text: cron ? "Good morning" : "Done",
+            createdAt: now,
+          }],
         }), { headers: { "content-type": "application/json" } });
       }
       throw new Error(`Unexpected operator request ${url}`);
@@ -58,6 +68,13 @@ describe("web operator gateway", () => {
       title: "Update",
       updatedAt: now,
       messages: [{ id: "m-1", role: "assistant", text: "Done", createdAt: now }],
+    }, {
+      agentId: "personal",
+      conversationId: "trigger:cron:morning",
+      title: "Morning",
+      triggerKind: "cron",
+      updatedAt: now,
+      messages: [{ id: "m-2", role: "assistant", text: "Good morning", createdAt: now }],
     }]);
   });
 
@@ -81,10 +98,10 @@ describe("web operator gateway", () => {
     const forwarded: unknown[] = [];
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v1/info")) {
+      if (url.endsWith("/v2/info")) {
         return new Response(JSON.stringify(info), { status: 200, headers: { "content-type": "application/json" } });
       }
-      if (url.endsWith("/v1/turns")) {
+      if (url.endsWith("/v2/turns")) {
         const request = JSON.parse(String(init?.body)) as { conversationId: string };
         forwarded.push(request);
         const finishedAt = new Date().toISOString();
@@ -135,13 +152,13 @@ describe("web operator gateway", () => {
     const fetchImpl: typeof fetch = async (input) => {
       const url = String(input);
       requestedUrls.push(url);
-      if (url === "http://127.0.0.1:43210/v1/info") {
+      if (url === "http://127.0.0.1:43210/v2/info") {
         return new Response(JSON.stringify(operatorInfo(true, startedAt)), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      if (url === "http://127.0.0.1:43210/v1/turns") {
+      if (url === "http://127.0.0.1:43210/v2/turns") {
         return new Response(new ReadableStream<Uint8Array>({
           start(controller) {
             stream = controller;
@@ -153,7 +170,7 @@ describe("web operator gateway", () => {
           },
         }), { status: 200, headers: { "content-type": "application/x-ndjson" } });
       }
-      if (url === "http://127.0.0.1:43210/v1/conversations/web%3Aswap/cancel") {
+      if (url === "http://127.0.0.1:43210/v2/conversations/web%3Aswap/cancel") {
         stream.enqueue(encoder.encode(`${JSON.stringify({
           type: "error",
           turnId: "turn-swap",
@@ -179,7 +196,7 @@ describe("web operator gateway", () => {
     await writeDescriptor(descriptorPath, "http://127.0.0.1:43211", process.pid + 1, new Date(Date.now() + 1_000).toISOString());
     await gateway.cancel("personal", "web:swap");
     await expect(running).rejects.toMatchObject({ code: "operator_cancelled" });
-    expect(requestedUrls).toContain("http://127.0.0.1:43210/v1/conversations/web%3Aswap/cancel");
+    expect(requestedUrls).toContain("http://127.0.0.1:43210/v2/conversations/web%3Aswap/cancel");
     expect(requestedUrls.some((url) => url.includes(":43211"))).toBe(false);
   });
 
@@ -197,13 +214,13 @@ describe("web operator gateway", () => {
     let pendingState: OperatorConversationState | undefined;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v1/info")) {
+      if (url.endsWith("/v2/info")) {
         return new Response(JSON.stringify({
           ...operatorInfo(true, startedAt),
           capabilities: { ...capabilities(true), liveInput: true, askUser: true },
         }), { headers: { "content-type": "application/json" } });
       }
-      if (url.endsWith("/v1/turns")) {
+      if (url.endsWith("/v2/turns")) {
         return new Response(new ReadableStream({
           start(controller) {
             stream = controller;

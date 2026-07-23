@@ -1385,7 +1385,8 @@ class AgentHostImplementation implements AgentHost {
           if (event.type === "text-delta") {
             emittedText = true;
             await reply.emit({ type: "text-delta", delta: event.delta });
-          } else if (event.type === "usage") {
+          } else if (event.type === "thinking-delta") await reply.emit({ type: "thinking-delta", delta: event.delta });
+          else if (event.type === "usage") {
             await reply.emit({ type: "usage", usage: event.usage });
             if (!emittedCompaction && event.usage.compaction !== undefined) {
               emittedCompaction = true;

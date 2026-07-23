@@ -57,6 +57,10 @@ the shared `@mono-agent/operator` client and pass the bearer token. Every route
 is authenticated, mutation bodies require `application/json`, and cross-origin
 browser requests fail closed.
 
+The channel serves only the `mono-agent.operator.v2` contract under `/v2`.
+Legacy `/v1` routes return a bounded not-found response before dispatch, which
+prevents strict v1 clients from receiving v2 structured-activity frames.
+
 Agent identity and defaults are not authored in channel config. Core must grant
 the declared `operator.identity.v1` capability with the agent id/label, process
 pid, runtime/model defaults, config path, and project root. Module creation
@@ -68,8 +72,13 @@ fails if that grant is absent or malformed.
 
 1. Core resolves the schema-marked secret reference and runs the package-owned strict parser.
 2. `start()` binds an authenticated loopback HTTP listener and exposes its actual ephemeral URL.
-3. `POST /v1/turns` is parsed by `@mono-agent/operator`, inline attachments are decoded within the shared request bound, and quotes are verified against the active conversation's Core replay before dispatch through the injected `ChannelHost`.
-4. Channel reply events become only shared operator NDJSON frames, including AskUser and usage frames; standalone compaction and session-eviction events merge into sticky usage flags without erasing the latest token counts, and the terminal frame carries the authoritative result.
+3. `POST /v2/turns` is parsed by `@mono-agent/operator`, inline attachments are decoded within the shared request bound, and quotes are verified against the active conversation's Core replay before dispatch through the injected `ChannelHost`.
+4. Channel reply events become only shared operator NDJSON frames. Assistant
+   text, transient thought deltas, generic activity, redacted tool calls and
+   results, compaction, AskUser, and usage retain distinct bounded shapes.
+   Compaction and session-eviction also merge into sticky usage flags without
+   erasing the latest token counts; the terminal frame carries the
+   authoritative result.
 5. Capability-gated routes project Core conversation listing, replay, redacted config, health, live input, and AskUser answers without package-local state substitutes.
 6. Client disconnect, explicit cancellation, drain, and stop abort the exact dispatch signal; an empty proactive destination is canonicalized to the stable adapter-owned `operator:new-conversation` operation before Core's durable admission, then opens a Core conversation behind Core/state restart-safe delivery authority plus a bounded fingerprint-aware live-instance guard. Conflicting keys fail, ambiguous opens remain unknown, and exhausted guard capacity fails closed.
 
@@ -91,7 +100,7 @@ fails if that grant is absent or malformed.
 | `parseOperatorChannelConfig` | Validate resolved module config without lifecycle effects. |
 | `createOperatorChannel` | Compose or test the HTTP transport against a typed dispatch function. |
 | `OperatorModuleChannel.endpoint` | Read the actual URL after a successful start. |
-| `OperatorChannelStartInfo` | Publish the exact endpoint and `startedAt` identity also served by `/v1/info`. |
+| `OperatorChannelStartInfo` | Publish the exact endpoint and `startedAt` identity also served by `/v2/info`. |
 | `OperatorIdentityGrant` | Type the exact Core-owned identity capability consumed at creation. |
 
 <!-- public-api-inventory:start -->

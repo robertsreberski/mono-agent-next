@@ -10,12 +10,14 @@ import {
   type OperatorCancelRequest,
   type OperatorCancelResponse,
   type OperatorCapabilities,
+  type OperatorCompaction,
   type OperatorConfigView,
   type OperatorConversationList,
   type OperatorConversationSummary,
   type OperatorFrame,
   type OperatorHealth,
   type OperatorInfo,
+  type OperatorJsonValue,
   type OperatorLiveInputRequest,
   type OperatorLiveInputResponse,
   type OperatorMessage,
@@ -26,6 +28,9 @@ import {
   type OperatorRegistryDescriptor,
   type OperatorReplayResponse,
   type OperatorTurnRequest,
+  type OperatorToolCall,
+  type OperatorToolResult,
+  type OperatorToolResultPart,
   type OperatorUsage,
 } from "./types.js";
 
@@ -128,20 +133,125 @@ function array<T>(value: unknown, path: string, parser: (item: unknown, path: st
   return value.map((item, index) => parser(item, `${path}[${index}]`));
 }
 
-function jsonValue(value: unknown, path: string, depth = 0): unknown {
+function jsonValue(
+  value: unknown,
+  path: string,
+  depth = 0,
+  budget: { items: number } = { items: 0 },
+): OperatorJsonValue {
   if (depth > 20) fail(path, "exceeds the maximum nesting depth");
+  budget.items += 1;
+  if (budget.items > OPERATOR_LIMITS.jsonItems) {
+    fail(path, `exceeds the ${String(OPERATOR_LIMITS.jsonItems)}-item JSON boundary`);
+  }
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (Array.isArray(value)) return value.map((item, index) => jsonValue(item, `${path}[${index}]`, depth + 1));
+  if (Array.isArray(value)) {
+    return value.map((item, index) => jsonValue(item, `${path}[${index}]`, depth + 1, budget));
+  }
   if (typeof value === "object") {
-    const output: Record<string, unknown> = {};
+    const output: Record<string, OperatorJsonValue> = {};
     for (const [key, item] of Object.entries(value)) {
       if (key === "__proto__" || key === "constructor" || key === "prototype") fail(path, `contains unsafe key ${key}`);
-      output[key] = jsonValue(item, `${path}.${key}`, depth + 1);
+      output[key] = jsonValue(item, `${path}.${key}`, depth + 1, budget);
     }
     return output;
   }
   return fail(path, "must contain only JSON values");
+}
+
+function boundedJsonValue(value: unknown, path: string): OperatorJsonValue {
+  const parsed = jsonValue(value, path);
+  if (new TextEncoder().encode(JSON.stringify(parsed)).byteLength > OPERATOR_LIMITS.toolPayloadBytes) {
+    fail(path, `must encode to at most ${String(OPERATOR_LIMITS.toolPayloadBytes)} UTF-8 bytes`);
+  }
+  return parsed;
+}
+
+function boundedUtf8Text(value: unknown, path: string, maximumBytes: number): string {
+  const parsed = text(value, path, { allowEmpty: true, max: maximumBytes });
+  if (new TextEncoder().encode(parsed).byteLength > maximumBytes) {
+    fail(path, `must be at most ${String(maximumBytes)} UTF-8 bytes`);
+  }
+  return parsed;
+}
+
+function toolCall(value: unknown, path: string): OperatorToolCall {
+  const input = record(value, path);
+  keys(input, ["id", "name", "input", "inputOmitted"], path);
+  const inputOmitted = bool(input.inputOmitted, `${path}.inputOmitted`);
+  const hasInput = Object.hasOwn(input, "input");
+  if (hasInput === inputOmitted) {
+    fail(path, inputOmitted ? "must omit input when inputOmitted is true" : "must include input when inputOmitted is false");
+  }
+  return {
+    id: contractText(input.id, `${path}.id`, OPERATOR_LIMITS.toolIdentifierBytes),
+    name: contractText(input.name, `${path}.name`, OPERATOR_LIMITS.toolIdentifierBytes),
+    ...(hasInput ? { input: boundedJsonValue(input.input, `${path}.input`) } : {}),
+    inputOmitted,
+  };
+}
+
+function toolResultPart(value: unknown, path: string): OperatorToolResultPart {
+  const input = record(value, path);
+  if (input.type === "text") {
+    keys(input, ["type", "text"], path);
+    return {
+      type: "text",
+      text: boundedUtf8Text(input.text, `${path}.text`, OPERATOR_LIMITS.toolPayloadBytes),
+    };
+  }
+  if (input.type === "json") {
+    keys(input, ["type", "value"], path);
+    if (!Object.hasOwn(input, "value")) fail(`${path}.value`, "is required");
+    return { type: "json", value: boundedJsonValue(input.value, `${path}.value`) };
+  }
+  return fail(`${path}.type`, "must be text or json");
+}
+
+function toolResult(value: unknown, path: string): OperatorToolResult {
+  const input = record(value, path);
+  keys(input, ["callId", "content", "contentOmitted", "isError"], path);
+  const contentOmitted = bool(input.contentOmitted, `${path}.contentOmitted`);
+  const hasContent = Object.hasOwn(input, "content");
+  if (hasContent === contentOmitted) {
+    fail(path, contentOmitted ? "must omit content when contentOmitted is true" : "must include content when contentOmitted is false");
+  }
+  const output = {
+    callId: contractText(input.callId, `${path}.callId`, OPERATOR_LIMITS.toolIdentifierBytes),
+    ...(hasContent ? {
+      content: array(
+        input.content,
+        `${path}.content`,
+        toolResultPart,
+        OPERATOR_LIMITS.toolResultParts,
+      ),
+    } : {}),
+    contentOmitted,
+    ...(input.isError === undefined ? {} : { isError: bool(input.isError, `${path}.isError`) }),
+  };
+  if (new TextEncoder().encode(JSON.stringify(output)).byteLength > OPERATOR_LIMITS.toolPayloadBytes) {
+    fail(path, `must encode to at most ${String(OPERATOR_LIMITS.toolPayloadBytes)} UTF-8 bytes`);
+  }
+  return output;
+}
+
+function compaction(value: unknown, path: string): OperatorCompaction {
+  const input = record(value, path);
+  keys(input, ["compacted", "tokensBefore", "tokensAfter", "summaryTokens", "firstRetainedMessageId"], path);
+  return {
+    compacted: bool(input.compacted, `${path}.compacted`),
+    ...(input.tokensBefore === undefined ? {} : { tokensBefore: integer(input.tokensBefore, `${path}.tokensBefore`) }),
+    ...(input.tokensAfter === undefined ? {} : { tokensAfter: integer(input.tokensAfter, `${path}.tokensAfter`) }),
+    ...(input.summaryTokens === undefined ? {} : { summaryTokens: integer(input.summaryTokens, `${path}.summaryTokens`) }),
+    ...(input.firstRetainedMessageId === undefined ? {} : {
+      firstRetainedMessageId: contractText(
+        input.firstRetainedMessageId,
+        `${path}.firstRetainedMessageId`,
+        OPERATOR_LIMITS.toolIdentifierBytes,
+      ),
+    }),
+  };
 }
 
 function attachment(value: unknown, path: string): OperatorAttachment {
@@ -365,7 +475,32 @@ export function parseOperatorFrame(value: unknown): OperatorFrame {
       };
     case "activity":
       keys(input, ["type", "turnId", "text"], "frame");
-      return { type, turnId: identifier(input.turnId, "frame.turnId"), text: text(input.text, "frame.text", { max: 16_384 }) };
+      return {
+        type,
+        turnId: identifier(input.turnId, "frame.turnId"),
+        text: text(input.text, "frame.text", { max: OPERATOR_LIMITS.activityCharacters }),
+      };
+    case "tool_call":
+      keys(input, ["type", "turnId", "call"], "frame");
+      return {
+        type,
+        turnId: identifier(input.turnId, "frame.turnId"),
+        call: toolCall(input.call, "frame.call"),
+      };
+    case "tool_result":
+      keys(input, ["type", "turnId", "result"], "frame");
+      return {
+        type,
+        turnId: identifier(input.turnId, "frame.turnId"),
+        result: toolResult(input.result, "frame.result"),
+      };
+    case "compaction":
+      keys(input, ["type", "turnId", "compaction"], "frame");
+      return {
+        type,
+        turnId: identifier(input.turnId, "frame.turnId"),
+        compaction: compaction(input.compaction, "frame.compaction"),
+      };
     case "ask_user":
       keys(input, ["type", "turnId", "ask"], "frame");
       return { type, turnId: identifier(input.turnId, "frame.turnId"), ask: ask(input.ask, "frame.ask") };

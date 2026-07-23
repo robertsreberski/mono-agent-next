@@ -18,7 +18,7 @@ pnpm run generate:source-beta-docs
 
 | Package | Public entrypoints | Named exports | Package API |
 | --- | ---: | ---: | --- |
-| `@mono-agent/module-sdk` | 5 | 332 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
+| `@mono-agent/module-sdk` | 5 | 333 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
 | `@mono-agent/core` | 1 | 59 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/core/README.md) |
 | `@mono-agent/cli` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/cli/README.md) |
 | `@mono-agent/runtime-pi` | 1 | 6 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-pi/README.md) |
@@ -35,9 +35,9 @@ pnpm run generate:source-beta-docs
 | `@mono-agent/state-local` | 1 | 26 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/state-local/README.md) |
 | `@mono-agent/exporter-otlp` | 1 | 13 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/exporter-otlp/README.md) |
 | `@mono-agent/sandbox-srt` | 1 | 14 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/sandbox-srt/README.md) |
-| `@mono-agent/operator` | 2 | 98 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/operator/README.md) |
+| `@mono-agent/operator` | 2 | 108 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/operator/README.md) |
 | `@mono-agent/tui` | 1 | 8 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/tui/README.md) |
-| `@mono-agent/web` | 1 | 31 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/web/README.md) |
+| `@mono-agent/web` | 1 | 36 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/web/README.md) |
 | `create-mono-agent` | 1 | 24 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/create-mono-agent/README.md) |
 | `@mono-agent/docs-mcp` | 1 | 14 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/extras/docs-mcp/README.md) |
 | `@mono-agent/service-macos` | 1 | 78 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/service-macos/README.md) |
@@ -100,6 +100,7 @@ ChannelReplySessionEvictedEvent
 ChannelReplySink
 ChannelReplyTextDeltaEvent
 ChannelReplyTextReplaceEvent
+ChannelReplyThinkingDeltaEvent
 ChannelReplyToolCallEvent
 ChannelReplyToolResultEvent
 ChannelReplyUsageEvent
@@ -903,10 +904,12 @@ DiscoveredOperator
 NormalizeDiscoveredOperatorOptions
 OPERATOR_LIMITS
 OPERATOR_PROTOCOL
+OPERATOR_REGISTRY_DETAILS_SCHEMA
 OPERATOR_REGISTRY_SCHEMA
 OPERATOR_ROUTES
 OperatorAcceptedFrame
 OperatorAction
+OperatorActivity
 OperatorActivityFrame
 OperatorAsk
 OperatorAskAnswerRequest
@@ -922,6 +925,8 @@ OperatorClient
 OperatorClientError
 OperatorClientLimits
 OperatorClientOptions
+OperatorCompaction
+OperatorCompactionFrame
 OperatorCompletedFrame
 OperatorConfigView
 OperatorConversationList
@@ -938,6 +943,7 @@ OperatorHealth
 OperatorIdentityBindingError
 OperatorIdentityBindingField
 OperatorInfo
+OperatorJsonValue
 OperatorLiveInputRequest
 OperatorLiveInputResponse
 OperatorMessage
@@ -954,6 +960,11 @@ OperatorRuntimeOverrideRejectionReason
 OperatorStateError
 OperatorStreamOptions
 OperatorTerminalFrame
+OperatorToolCall
+OperatorToolCallFrame
+OperatorToolResult
+OperatorToolResultFrame
+OperatorToolResultPart
 OperatorTurnRequest
 OperatorUsage
 OperatorUsageFrame
@@ -1028,6 +1039,8 @@ CreateWebThreadInput
 LoadWebConfigOptions
 OfferWebLiveInput
 ParseWebConfigOptions
+PatchWebAgentInput
+PatchWebThreadInput
 StartWebServerOptions
 StartWebTurnInput
 WEB_API_VERSION
@@ -1036,10 +1049,13 @@ WebAskAnswerResult
 WebBootstrap
 WebConfig
 WebConfigView
+WebEvent
+WebEventType
 WebHealthView
 WebListenConfig
 WebLiveInputResult
 WebMessage
+WebNotificationTriggerKind
 WebOperatorGateway
 WebOperatorTurnInput
 WebProactiveConversation

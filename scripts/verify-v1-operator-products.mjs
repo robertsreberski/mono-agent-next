@@ -168,7 +168,10 @@ async function main() {
     ]);
     assert.equal(state.status, "completed");
     assert.equal(state.assistantText, EXPECTED_REPLY);
-    assert.deepEqual(state.activities, ["Proving the operator product path"]);
+    assert.deepEqual(state.activities, [{
+      type: "activity",
+      text: "Proving the operator product path",
+    }]);
     assert.equal(state.finalMessage?.text, EXPECTED_REPLY);
 
     for await (const frame of operator.streamTurn({
@@ -218,6 +221,7 @@ async function main() {
       auth: { token: WEB_TOKEN },
       dataDirectory: webDataDirectory,
       agentRegistries: [registryDirectory],
+      externalOrigins: [],
       sourcePath: join(temporaryRoot, "web.config.json"),
     };
     webServer = await startWebServer({ config: webConfig, environment });
@@ -307,7 +311,7 @@ async function main() {
     const terminal = new SmokeTerminal();
     let tuiInfoRequests = 0;
     const tuiFetch = async (input, init) => {
-      if (String(input).endsWith("/v1/info")) {
+      if (String(input).endsWith("/v2/info")) {
         tuiInfoRequests += 1;
         assert.equal(new Headers(init?.headers).get("authorization"), `Bearer ${OPERATOR_TOKEN}`);
       }

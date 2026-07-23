@@ -232,7 +232,7 @@ describe("operator HTTP channel", () => {
     const first = parseOperatorInfo(await authorizedJson(channel.startInfo.infoUrl));
     const second = parseOperatorInfo(await authorizedJson(channel.startInfo.infoUrl));
     expect(first).toMatchObject({
-      protocol: "mono-agent.operator.v1",
+      protocol: "mono-agent.operator.v2",
       agent: { id: "operator", label: "Fixture Agent" },
       capabilities: {
         attachments: true,
@@ -249,13 +249,53 @@ describe("operator HTTP channel", () => {
     });
   });
 
-  it("streams only shared frames while preserving append, replace, activity, routing, and final text", async () => {
+  it("fails legacy v1 routes closed before dispatching or streaming v2 frames", async () => {
+    const dispatch = vi.fn(async (_request: ChannelInboundRequest, reply: ChannelReplySink) => {
+      await reply.emit({
+        type: "tool-call",
+        call: { id: "legacy-must-not-see", name: "Read", input: { path: "secret" } },
+      });
+      return { status: "completed", text: "must not run" } as const;
+    });
+    const channel = await startChannel(dispatch);
+    const legacyInfo = await fetch(`${channel.startInfo.baseUrl}/v1/info`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(legacyInfo.status).toBe(404);
+
+    const legacyTurn = await postJson(`${channel.startInfo.baseUrl}/v1/turns`, {
+      conversationId: "legacy-client",
+      input: { text: "do not negotiate v2" },
+    });
+    expect(legacyTurn.status).toBe(404);
+    expect(legacyTurn.headers.get("content-type")).toContain("application/json");
+    expect(await legacyTurn.text()).not.toContain("tool_call");
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it("streams only shared frames while preserving text, thought, structured activity, routing, and final text", async () => {
     let inbound: ChannelInboundRequest | undefined;
     const dispatch = vi.fn(async (request: ChannelInboundRequest, reply: ChannelReplySink) => {
       inbound = request;
       await reply.emit({ type: "text-delta", delta: "draft" });
+      await reply.emit({ type: "thinking-delta", delta: "checking" });
       await reply.emit({ type: "text-replace", text: "answer" });
       await reply.emit({ type: "activity", text: "Checked the workspace" });
+      await reply.emit({
+        type: "tool-call",
+        call: { id: "call-1", name: "Read", input: { path: "README.md" } },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: {
+          callId: "call-1",
+          content: [{ type: "text", text: "read complete" }],
+        },
+      });
+      await reply.emit({
+        type: "compaction",
+        compaction: { compacted: true, tokensBefore: 30, tokensAfter: 20 },
+      });
       return { status: "completed", text: "final answer" } as const;
     });
     const channel = await startChannel(dispatch);
@@ -281,8 +321,43 @@ describe("operator HTTP channel", () => {
         startedAt: expect.any(String),
       },
       { type: "delta", turnId, target: "assistant", text: "draft", mode: "append" },
+      { type: "delta", turnId, target: "thought", text: "checking", mode: "append" },
       { type: "delta", turnId, target: "assistant", text: "answer", mode: "replace" },
       { type: "activity", turnId, text: "Checked the workspace" },
+      {
+        type: "tool_call",
+        turnId,
+        call: {
+          id: "call-1",
+          name: "Read",
+          input: { path: "README.md" },
+          inputOmitted: false,
+        },
+      },
+      {
+        type: "tool_result",
+        turnId,
+        result: {
+          callId: "call-1",
+          content: [{ type: "text", text: "read complete" }],
+          contentOmitted: false,
+        },
+      },
+      {
+        type: "compaction",
+        turnId,
+        compaction: { compacted: true, tokensBefore: 30, tokensAfter: 20 },
+      },
+      {
+        type: "usage",
+        turnId,
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          compacted: true,
+          sessionEvicted: false,
+        },
+      },
       {
         type: "completed",
         turnId,
@@ -303,6 +378,40 @@ describe("operator HTTP channel", () => {
       attachments: [],
     });
     expect(inbound?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("omits oversized structured tool payloads without losing correlation or the terminal result", async () => {
+    const oversized = "x".repeat(OPERATOR_LIMITS.toolPayloadBytes);
+    const channel = await startChannel(async (_request, reply) => {
+      await reply.emit({
+        type: "tool-call",
+        call: { id: "large-call", name: "LargeTool", input: { oversized } },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: {
+          callId: "large-call",
+          content: [{ type: "text", text: oversized }],
+        },
+      });
+      return { status: "completed", text: "still completed" };
+    });
+    const frames = await readFrames(await postJson(channel.startInfo.turnsUrl, {
+      conversationId: "large-activity",
+      input: { text: "run" },
+    }));
+    expect(frames).toContainEqual(expect.objectContaining({
+      type: "tool_call",
+      call: { id: "large-call", name: "LargeTool", inputOmitted: true },
+    }));
+    expect(frames).toContainEqual(expect.objectContaining({
+      type: "tool_result",
+      result: { callId: "large-call", contentOmitted: true },
+    }));
+    expect(frames.at(-1)).toMatchObject({
+      type: "completed",
+      finalMessage: { text: "still completed" },
+    });
   });
 
   it("fails closed for malformed, unsupported, unauthorized, and cross-origin requests", async () => {
@@ -522,7 +631,7 @@ describe("operator HTTP channel", () => {
       input: { text: "wait" },
     });
     const cancel = await postJson(
-      `${channel.startInfo.baseUrl}/v1/conversations/cancel-me/cancel`,
+      `${channel.startInfo.baseUrl}/v2/conversations/cancel-me/cancel`,
       { reason: "operator requested" },
     );
     expect(cancel.status).toBe(202);
@@ -535,7 +644,7 @@ describe("operator HTTP channel", () => {
     });
 
     const idle = await postJson(
-      `${channel.startInfo.baseUrl}/v1/conversations/missing/cancel`,
+      `${channel.startInfo.baseUrl}/v2/conversations/missing/cancel`,
       {},
     );
     expect(idle.status).toBe(200);
@@ -620,6 +729,10 @@ describe("operator HTTP channel", () => {
 
     const frames = await readFrames(await postJson(channel.startInfo.turnsUrl, { conversationId: "conversation-controls", input: { text: "run" } }));
     expect(frames).toContainEqual(expect.objectContaining({ type: "ask_user", ask: expect.objectContaining({ interactionId: "ask-1" }) }));
+    expect(frames).toContainEqual(expect.objectContaining({
+      type: "compaction",
+      compaction: { compacted: true, tokensBefore: 8, tokensAfter: 4 },
+    }));
     const usageFrames = frames.filter((frame) => frame.type === "usage");
     expect(usageFrames).toHaveLength(4);
     expect(usageFrames.at(-1)).toEqual({
@@ -714,14 +827,14 @@ describe("mono-agent operator channel module", () => {
     expect(channel.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/u);
     expect(channel.readHostPresence?.()).toMatchObject({
       operatorRegistry: {
-        schema: "mono-agent.operator-registry-details.v1",
+        schema: "mono-agent.operator-registry-details.v2",
         agent: operatorIdentity.agent,
         operator: { endpoint: channel.endpoint, tokenEnvironment: "OPERATOR_TOKEN" },
         process: { pid: process.pid, startedAt: channel.startInfo?.startedAt },
         capabilities: { attachments: true, cancellation: true, health: true, quotes: true },
       },
     });
-    const response = await postJson(`${channel.endpoint}/v1/turns`, {
+    const response = await postJson(`${channel.endpoint}/v2/turns`, {
       conversationId: "module-conversation",
       input: { text: "hello module" },
     });
@@ -1147,7 +1260,7 @@ async function oversizedBodyStatus(
     });
     socket.once("connect", () => {
       socket.write([
-        "POST /v1/turns HTTP/1.1",
+        "POST /v2/turns HTTP/1.1",
         `Host: ${endpoint.host}`,
         `Authorization: Bearer ${TOKEN}`,
         "Content-Type: application/json",

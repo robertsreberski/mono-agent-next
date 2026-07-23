@@ -937,6 +937,7 @@ export interface ChannelInboundRequest {
   readonly metadata?: JsonObject;
 }
 export interface ChannelReplyTextDeltaEvent { readonly type: "text-delta"; readonly delta: string; }
+export interface ChannelReplyThinkingDeltaEvent { readonly type: "thinking-delta"; readonly delta: string; }
 export interface ChannelReplyTextReplaceEvent { readonly type: "text-replace"; readonly text: string; }
 export interface ChannelReplyActivityEvent { readonly type: "activity"; readonly text: string; }
 export interface ChannelReplyAttachmentEvent { readonly type: "attachment"; readonly attachment: ChannelAttachment; }
@@ -948,7 +949,7 @@ export interface ChannelReplyToolResultEvent { readonly type: "tool-result"; rea
 export interface ChannelReplyCompactionEvent { readonly type: "compaction"; readonly compaction: RuntimeCompaction; }
 export interface ChannelReplySessionEvictedEvent { readonly type: "session-evicted"; }
 export type ChannelReplyEvent =
-  | ChannelReplyTextDeltaEvent
+  | ChannelReplyTextDeltaEvent | ChannelReplyThinkingDeltaEvent
   | ChannelReplyTextReplaceEvent
   | ChannelReplyActivityEvent
   | ChannelReplyAttachmentEvent

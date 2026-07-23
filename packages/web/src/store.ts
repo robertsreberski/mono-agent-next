@@ -6,15 +6,19 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   parseAskSnapshot,
+  parseOperatorFrame,
   parseTurnRequest,
+  type OperatorActivity,
   type OperatorMessage,
   type OperatorUsage,
 } from "@mono-agent/operator";
 
 import type {
+  PatchWebThreadInput,
   StartWebTurnInput,
   StoredWebState,
   WebMessage,
+  WebNotificationTriggerKind,
   WebThread,
   WebTurnTelemetry,
 } from "./contracts.js";
@@ -24,7 +28,13 @@ const STATE_FILE = "state.json";
 const MARKER_FILE = ".mono-agent-web-state";
 const LEASE_FILE = "lease.sqlite";
 const MARKER_CONTENT = '{"kind":"mono-agent-web-state","schemaVersion":1}\n';
-const EMPTY_STATE: StoredWebState = Object.freeze({ schemaVersion: 2, threads: [], messages: [] });
+const EMPTY_STATE: StoredWebState = Object.freeze({
+  schemaVersion: 3,
+  revision: 0,
+  pinnedAgentIds: [],
+  threads: [],
+  messages: [],
+});
 
 export interface DurableWebStoreOptions {
   readonly clock?: () => Date;
@@ -86,6 +96,26 @@ export class DurableWebStore {
     return clone(this.state.threads.filter((thread) => thread.deletedAt === undefined));
   }
 
+  revision(): number {
+    this.assertReadable();
+    return this.state.revision;
+  }
+
+  isAgentPinned(agentId: string): boolean {
+    this.assertReadable();
+    return this.state.pinnedAgentIds.includes(agentId);
+  }
+
+  setAgentPinned(agentId: string, pinned: boolean): Promise<boolean> {
+    return this.mutate((draft) => {
+      const index = draft.pinnedAgentIds.indexOf(agentId);
+      if (pinned && index < 0) draft.pinnedAgentIds.push(agentId);
+      if (!pinned && index >= 0) draft.pinnedAgentIds.splice(index, 1);
+      draft.pinnedAgentIds.sort((left, right) => left.localeCompare(right));
+      return pinned;
+    });
+  }
+
   getThread(id: string): WebThread | undefined {
     this.assertReadable();
     const thread = this.state.threads.find((candidate) => candidate.id === id && candidate.deletedAt === undefined);
@@ -109,7 +139,7 @@ export class DurableWebStore {
     };
   }
 
-  createThread(agentId: string, title = "New conversation"): Promise<WebThread> {
+  createThread(agentId: string, title?: string): Promise<WebThread> {
     return this.mutate((draft) => {
       const now = this.clock().toISOString();
       const id = randomUUID();
@@ -117,7 +147,8 @@ export class DurableWebStore {
         id,
         agentId,
         operatorConversationId: `web:${id}`,
-        title: cleanTitle(title),
+        title: cleanTitle(title ?? "New conversation"),
+        titleManual: title !== undefined,
         createdAt: now,
         updatedAt: now,
         status: "idle",
@@ -131,6 +162,7 @@ export class DurableWebStore {
     readonly agentId: string;
     readonly conversationId: string;
     readonly title?: string;
+    readonly triggerKind?: WebNotificationTriggerKind;
     readonly updatedAt: string;
     readonly messages: readonly OperatorMessage[];
   }): Promise<{ readonly thread: WebThread; readonly created: boolean }> {
@@ -145,10 +177,13 @@ export class DurableWebStore {
         agentId: input.agentId,
         operatorConversationId: input.conversationId,
         proactive: true,
+        ...(input.triggerKind === undefined ? {} : { trigger: { kind: input.triggerKind } }),
         title: cleanTitle(input.title ?? input.messages.find((message) => message.text.trim().length > 0)?.text ?? "Proactive update"),
+        titleManual: false,
         createdAt: input.updatedAt,
         updatedAt: input.updatedAt,
         status: "complete",
+        lastTurnId: `proactive:${id}`,
       };
       draft.threads.push(thread);
       input.messages.forEach((message, index) => {
@@ -156,6 +191,7 @@ export class DurableWebStore {
           id: `proactive:${id}:${message.id ?? String(index)}`,
           ...(message.id === undefined ? {} : { operatorMessageId: message.id }),
           threadId: id,
+          turnId: `proactive:${id}`,
           role: message.role,
           text: message.text,
           ...(message.attachments === undefined ? {} : { attachments: stripAttachmentData(message.attachments) }),
@@ -175,6 +211,9 @@ export class DurableWebStore {
       if (thread.status === "running") throw new WebProductError("turn_active", "This conversation already has an active turn.", 409);
       const now = this.clock().toISOString();
       const turnId = randomUUID();
+      const hasEarlierUserMessage = draft.messages.some((message) =>
+        message.threadId === threadId && message.role === "user"
+      );
       const user: WebMessage = {
         id: randomUUID(),
         threadId,
@@ -190,7 +229,15 @@ export class DurableWebStore {
       const assistant: WebMessage = {
         id: randomUUID(), threadId, turnId, role: "assistant", text: "", createdAt: now, updatedAt: now, status: "running",
       };
-      Object.assign(thread, { status: "running", activeTurnId: turnId, updatedAt: now });
+      Object.assign(thread, {
+        status: "running",
+        activeTurnId: turnId,
+        lastTurnId: turnId,
+        updatedAt: now,
+      });
+      if (!thread.titleManual && !hasEarlierUserMessage && turnInput.text.trim().length > 0) {
+        Object.assign(thread, { title: cleanTitle(turnInput.text) });
+      }
       delete (thread as { pendingAsk?: unknown }).pendingAsk;
       draft.messages.push(user, assistant);
       return { thread, user, assistant };
@@ -204,6 +251,7 @@ export class DurableWebStore {
     pendingAsk?: WebThread["pendingAsk"],
     operatorMessageId?: string,
     usage?: OperatorUsage,
+    activities?: readonly OperatorActivity[],
   ): Promise<WebMessage> {
     return this.mutate((draft) => {
       const thread = requiredThread(draft, threadId);
@@ -214,6 +262,9 @@ export class DurableWebStore {
       if (operatorMessageId !== undefined) Object.assign(message, { operatorMessageId });
       if (usage !== undefined) {
         Object.assign(message, { telemetry: mergeTelemetry(message.telemetry, usage) });
+      }
+      if (activities !== undefined) {
+        Object.assign(message, { activities: clone([...activities]) });
       }
       Object.assign(thread, { updatedAt });
       delete (thread as { pendingAsk?: unknown }).pendingAsk;
@@ -227,6 +278,26 @@ export class DurableWebStore {
       const thread = requiredThread(draft, threadId);
       delete (thread as { pendingAsk?: unknown }).pendingAsk;
       Object.assign(thread, { updatedAt: this.clock().toISOString() });
+      return thread;
+    });
+  }
+
+  patchThread(threadId: string, patch: PatchWebThreadInput): Promise<WebThread> {
+    return this.mutate((draft) => {
+      const thread = requiredThread(draft, threadId);
+      if (patch.archived === true && thread.status === "running") {
+        throw new WebProductError("turn_active", "Cancel the active turn before archiving this conversation.", 409);
+      }
+      if (patch.title === undefined && patch.archived === undefined) {
+        throw new WebProductError("invalid_request", "Provide title or archived.", 400);
+      }
+      const now = this.clock().toISOString();
+      if (patch.title !== undefined) {
+        Object.assign(thread, { title: cleanTitle(patch.title), titleManual: true });
+      }
+      if (patch.archived === true) Object.assign(thread, { archivedAt: now });
+      if (patch.archived === false) delete (thread as { archivedAt?: string }).archivedAt;
+      Object.assign(thread, { updatedAt: now });
       return thread;
     });
   }
@@ -257,6 +328,9 @@ export class DurableWebStore {
         throw new WebProductError("turn_active", "Cancel the active turn before deleting this conversation.", 409);
       }
       const thread = draft.threads[index]!;
+      if (thread.archivedAt === undefined) {
+        throw new WebProductError("thread_not_archived", "Archive the conversation before deleting it.", 409);
+      }
       if (thread.proactive === true && thread.operatorConversationId !== undefined) {
         Object.assign(thread, { deletedAt: this.clock().toISOString() });
       } else {
@@ -297,6 +371,7 @@ export class DurableWebStore {
       if (this.poisoned !== undefined) throw this.poisoned;
       const draft = clone(this.state) as MutableState;
       const value = operation(draft);
+      draft.revision += 1;
       validateState(draft);
       try {
         await writeStateAtomic(this.directory, draft, this.afterStateRename);
@@ -324,13 +399,21 @@ export class DurableWebStore {
 }
 
 type MutableState = {
-  schemaVersion: 2;
+  schemaVersion: 3;
+  revision: number;
+  pinnedAgentIds: string[];
   threads: WebThread[];
   messages: WebMessage[];
 };
 
-interface LegacyStoredWebState {
+interface LegacyStoredWebStateV1 {
   readonly schemaVersion: 1;
+  readonly threads: readonly WebThread[];
+  readonly messages: readonly WebMessage[];
+}
+
+interface LegacyStoredWebStateV2 {
+  readonly schemaVersion: 2;
   readonly threads: readonly WebThread[];
   readonly messages: readonly WebMessage[];
 }
@@ -421,12 +504,19 @@ async function loadState(directory: string): Promise<StoredWebState> {
   } catch {
     throw new WebProductError("state_corrupt", "Web state is corrupt; refusing to overwrite it.", 409);
   }
-  if (recordValue(raw)?.schemaVersion === 1) {
-    validateState(raw, 1);
+  const version = recordValue(raw)?.schemaVersion;
+  if (version === 1 || version === 2) {
+    validateLegacyState(raw, version);
+    const legacy = raw as LegacyStoredWebStateV1 | LegacyStoredWebStateV2;
     const migrated: MutableState = {
-      schemaVersion: 2,
-      threads: clone([...(raw as LegacyStoredWebState).threads]),
-      messages: clone([...(raw as LegacyStoredWebState).messages]),
+      schemaVersion: 3,
+      revision: 1,
+      pinnedAgentIds: [],
+      threads: legacy.threads.map((thread) => ({
+        ...clone(thread),
+        titleManual: true,
+      })),
+      messages: clone([...legacy.messages]),
     };
     validateState(migrated);
     await writeStateAtomic(directory, migrated);
@@ -502,7 +592,9 @@ function verifyOwnerAndMode(uid: number | bigint, mode: number | bigint, expecte
 }
 
 function requiredThread(state: MutableState, id: string): WebThread {
-  const thread = state.threads.find((candidate) => candidate.id === id);
+  const thread = state.threads.find((candidate) =>
+    candidate.id === id && candidate.deletedAt === undefined
+  );
   if (thread === undefined) throw new WebProductError("thread_not_found", "Conversation not found.", 404);
   return thread;
 }
@@ -513,29 +605,63 @@ function requiredAssistant(state: MutableState, threadId: string, turnId: string
   return message;
 }
 
-function validateState(raw: unknown, legacyVersion?: 1): asserts raw is StoredWebState | LegacyStoredWebState {
+function validateState(raw: unknown): asserts raw is StoredWebState {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) invalidState();
   const value = raw as Record<string, unknown>;
-  if (value.schemaVersion !== (legacyVersion ?? 2) || !Array.isArray(value.threads) || !Array.isArray(value.messages)) invalidState();
+  if (
+    value.schemaVersion !== 3
+    || !Number.isSafeInteger(value.revision)
+    || Number(value.revision) < 0
+    || !Array.isArray(value.pinnedAgentIds)
+    || !Array.isArray(value.threads)
+    || !Array.isArray(value.messages)
+  ) invalidState();
   const fields = Object.keys(value);
-  if (fields.some((field) => !["schemaVersion", "threads", "messages"].includes(field))) invalidState();
+  if (fields.some((field) => ![
+    "schemaVersion", "revision", "pinnedAgentIds", "threads", "messages",
+  ].includes(field))) invalidState();
+  const pinnedAgentIds = new Set<string>();
+  for (const agentId of value.pinnedAgentIds as unknown[]) {
+    if (!isBoundedIdentifier(agentId) || pinnedAgentIds.has(agentId)) invalidState();
+    pinnedAgentIds.add(agentId);
+  }
   const threadIds = new Set<string>();
   for (const thread of value.threads as unknown[]) {
     const record = recordValue(thread);
-    if (!record || !isString(record.id) || !isString(record.agentId) || !isString(record.title) || !isTimestamp(record.createdAt) || !isTimestamp(record.updatedAt) || !isStatus(record.status)) invalidState();
+    if (
+      !record
+      || !isString(record.id)
+      || !isString(record.agentId)
+      || !isString(record.title)
+      || typeof record.titleManual !== "boolean"
+      || !isTimestamp(record.createdAt)
+      || !isTimestamp(record.updatedAt)
+      || !isStatus(record.status)
+    ) invalidState();
     if (Object.keys(record).some((field) => ![
-      "id", "agentId", "operatorConversationId", "proactive", "title", "createdAt",
-      "updatedAt", "deletedAt", "status", "activeTurnId", "pendingAsk",
+      "id", "agentId", "operatorConversationId", "proactive", "trigger", "title",
+      "titleManual", "archivedAt", "createdAt", "updatedAt", "deletedAt", "status",
+      "activeTurnId", "lastTurnId", "pendingAsk",
     ].includes(field))) invalidState();
     if (threadIds.has(record.id)) invalidState();
     threadIds.add(record.id);
     if (record.operatorConversationId !== undefined && !isString(record.operatorConversationId)) invalidState();
     if (record.proactive !== undefined && record.proactive !== true) invalidState();
+    if (record.trigger !== undefined) {
+      const trigger = recordValue(record.trigger);
+      if (
+        !trigger
+        || Object.keys(trigger).some((field) => field !== "kind")
+        || (trigger.kind !== "cron" && trigger.kind !== "webhook")
+      ) invalidState();
+    }
+    if (record.archivedAt !== undefined && !isTimestamp(record.archivedAt)) invalidState();
     if (record.deletedAt !== undefined && !isTimestamp(record.deletedAt)) invalidState();
     if (record.pendingAsk !== undefined) {
       try { parseAskSnapshot({ ask: record.pendingAsk }); } catch { invalidState(); }
     }
     if (record.activeTurnId !== undefined && !isString(record.activeTurnId)) invalidState();
+    if (record.lastTurnId !== undefined && !isString(record.lastTurnId)) invalidState();
     if (record.status === "running" && !isString(record.activeTurnId)) invalidState();
     if (record.status !== "running" && record.activeTurnId !== undefined) invalidState();
   }
@@ -545,7 +671,7 @@ function validateState(raw: unknown, legacyVersion?: 1): asserts raw is StoredWe
     if (!record || !isString(record.id) || !isString(record.threadId) || !threadIds.has(record.threadId) || (record.role !== "user" && record.role !== "assistant") || !isString(record.text) || !isTimestamp(record.createdAt) || !isTimestamp(record.updatedAt) || !isStatus(record.status) || record.status === "idle") invalidState();
     if (Object.keys(record).some((field) => ![
       "id", "operatorMessageId", "threadId", "turnId", "role", "text", "attachments", "quote",
-      "createdAt", "updatedAt", "status", "error", ...(legacyVersion === 1 ? [] : ["telemetry"]),
+      "createdAt", "updatedAt", "status", "error", "activities", "telemetry",
     ].includes(field))) invalidState();
     if (messageIds.has(record.id)) invalidState();
     messageIds.add(record.id);
@@ -567,8 +693,49 @@ function validateState(raw: unknown, legacyVersion?: 1): asserts raw is StoredWe
       const error = recordValue(record.error);
       if (!error || Object.keys(error).some((field) => !["code", "message"].includes(field)) || !isString(error.code) || !isString(error.message)) invalidState();
     }
+    if (record.activities !== undefined) {
+      if (!Array.isArray(record.activities)) invalidState();
+      for (const activity of record.activities) {
+        const activityRecord = recordValue(activity);
+        if (!activityRecord) invalidState();
+        try {
+          const parsed = parseOperatorFrame({ ...activityRecord, turnId: "stored-web-activity" });
+          if (!["activity", "tool_call", "tool_result", "compaction"].includes(parsed.type)) invalidState();
+        } catch {
+          invalidState();
+        }
+      }
+    }
     if (record.telemetry !== undefined && !isTelemetry(record.telemetry)) invalidState();
   }
+}
+
+function validateLegacyState(
+  raw: unknown,
+  version: 1 | 2,
+): asserts raw is LegacyStoredWebStateV1 | LegacyStoredWebStateV2 {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) invalidState();
+  const value = raw as Record<string, unknown>;
+  if (
+    value.schemaVersion !== version
+    || !Array.isArray(value.threads)
+    || !Array.isArray(value.messages)
+    || Object.keys(value).some((field) => !["schemaVersion", "threads", "messages"].includes(field))
+  ) invalidState();
+  const migrated = {
+    schemaVersion: 3,
+    revision: 0,
+    pinnedAgentIds: [],
+    threads: (value.threads as unknown[]).map((thread) => {
+      const record = recordValue(thread);
+      if (!record) invalidState();
+      return { ...record, titleManual: true };
+    }),
+    messages: value.messages,
+  };
+  validateState(migrated);
+  if (version === 1 && (value.messages as unknown[]).some((message) =>
+    recordValue(message)?.telemetry !== undefined)) invalidState();
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
@@ -576,6 +743,9 @@ function recordValue(value: unknown): Record<string, unknown> | undefined {
 }
 
 function isString(value: unknown): value is string { return typeof value === "string"; }
+function isBoundedIdentifier(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256;
+}
 function isTimestamp(value: unknown): value is string { return typeof value === "string" && !Number.isNaN(Date.parse(value)); }
 function isStatus(value: unknown): boolean { return ["idle", "running", "complete", "failed", "cancelled", "interrupted"].includes(String(value)); }
 function invalidState(): never { throw new WebProductError("state_corrupt", "Web state is corrupt; refusing to overwrite it.", 409); }
@@ -635,7 +805,13 @@ function stripAttachmentData(
 }
 
 function freezeState(state: MutableState): StoredWebState {
-  return Object.freeze({ schemaVersion: 2, threads: Object.freeze(clone(state.threads)), messages: Object.freeze(clone(state.messages)) });
+  return Object.freeze({
+    schemaVersion: 3,
+    revision: state.revision,
+    pinnedAgentIds: Object.freeze(clone(state.pinnedAgentIds)),
+    threads: Object.freeze(clone(state.threads)),
+    messages: Object.freeze(clone(state.messages)),
+  });
 }
 
 function clone<T>(value: T): T { return structuredClone(value); }

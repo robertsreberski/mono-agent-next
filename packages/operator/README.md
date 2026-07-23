@@ -24,6 +24,12 @@ web renderers. It provides the only first-party wire decoder, trusted-loopback
 client, owner-private discovery reader, deterministic conversation reducer,
 available-action rules, and golden fixtures.
 
+The current wire identity is `mono-agent.operator.v2`, its discovery schema is
+`mono-agent.operator-registry.v2`, and its routes live exclusively under
+`/v2`. Version 2 adds bounded tool-call, tool-result, and compaction frames.
+Servers do not serve legacy `/v1` routes, so a strict v1 client fails before
+dispatch and can never receive frame types it does not understand.
+
 ## Install / Usage
 
 Install the library in an operator product:
@@ -68,12 +74,15 @@ constructed and is never returned as directory state.
 1. The owning state/discovery lifecycle publishes an owner-private descriptor
    containing the literal loopback endpoint; `channel-operator` serves that
    endpoint and does not own registry persistence.
-2. A product discovers and selects an entry, then `OperatorClient` validates the
-   endpoint, rejects redirects, submits bounded JSON, and decodes bounded NDJSON.
+2. A product discovers and selects a v2 entry, then `OperatorClient` validates
+   the endpoint, rejects redirects, submits bounded JSON to `/v2`, and decodes
+   bounded v2 NDJSON.
 3. Every turn starts with `accepted`, carries only validated frames, and ends
    with exactly one `completed` or `error`; stopping iteration aborts the request.
-4. Usage snapshots retain the latest numeric counters while compaction and
-   provider-session-eviction flags stay sticky for the active turn.
+4. The reducer retains bounded structured status, tool-call, tool-result, and
+   compaction activity for product-owned replay while thought deltas exist only
+   during the active turn. Usage snapshots retain the latest numeric counters
+   while compaction and provider-session-eviction flags stay sticky.
 5. Inline attachment URLs and quote text use shared hard bounds; the serving
    channel remains responsible for decoding attachments and verifying quote
    identities against authoritative conversation replay.
@@ -103,7 +112,7 @@ constructed and is never returned as directory state.
 | `availableOperatorActions` | Gate cancel, live input, AskUser, overrides, attachments, quoting, and views from one policy. |
 | `evaluateOperatorRuntimeOverride` | Apply one deterministic capability/model/effort eligibility decision in every renderer before Core validation. |
 | `assertOperatorIdentity` | Bind endpoint info to the selected registry agent id, process id, and process start time before use. |
-| `parseOperatorFrame` / `serializeOperatorFrame` | Implement a compliant server without duplicating wire validation. |
+| `parseOperatorFrame` / `serializeOperatorFrame` | Implement a compliant server without duplicating bounded thought, activity, tool, compaction, or terminal-frame validation. |
 | `OPERATOR_ROUTES` / `OPERATOR_LIMITS` | Share route names and hard protocol bounds with servers and tests. |
 | `@mono-agent/operator/testing` | Reuse golden streams to prove product parity. |
 
@@ -120,10 +129,12 @@ DiscoveredOperator
 NormalizeDiscoveredOperatorOptions
 OPERATOR_LIMITS
 OPERATOR_PROTOCOL
+OPERATOR_REGISTRY_DETAILS_SCHEMA
 OPERATOR_REGISTRY_SCHEMA
 OPERATOR_ROUTES
 OperatorAcceptedFrame
 OperatorAction
+OperatorActivity
 OperatorActivityFrame
 OperatorAsk
 OperatorAskAnswerRequest
@@ -139,6 +150,8 @@ OperatorClient
 OperatorClientError
 OperatorClientLimits
 OperatorClientOptions
+OperatorCompaction
+OperatorCompactionFrame
 OperatorCompletedFrame
 OperatorConfigView
 OperatorConversationList
@@ -155,6 +168,7 @@ OperatorHealth
 OperatorIdentityBindingError
 OperatorIdentityBindingField
 OperatorInfo
+OperatorJsonValue
 OperatorLiveInputRequest
 OperatorLiveInputResponse
 OperatorMessage
@@ -171,6 +185,11 @@ OperatorRuntimeOverrideRejectionReason
 OperatorStateError
 OperatorStreamOptions
 OperatorTerminalFrame
+OperatorToolCall
+OperatorToolCallFrame
+OperatorToolResult
+OperatorToolResultFrame
+OperatorToolResultPart
 OperatorTurnRequest
 OperatorUsage
 OperatorUsageFrame

@@ -12,6 +12,8 @@ import type {
   ChannelTurnResult,
   JsonObject,
   JsonValue,
+  RuntimeToolCall,
+  RuntimeToolResult,
   RuntimeUsage,
   TurnMessage,
 } from "@mono-agent/module-sdk";
@@ -24,6 +26,7 @@ import {
   parseLiveInputRequest,
   parseOperatorHealth,
   parseOperatorInfo,
+  parseOperatorFrame,
   parseTurnRequest,
   serializeOperatorFrame,
   type OperatorCancelResponse,
@@ -40,6 +43,8 @@ import {
   type OperatorConfigView,
   type OperatorLiveInputResponse,
   type OperatorMessage,
+  type OperatorToolCall,
+  type OperatorToolResult,
   type OperatorUsage,
   type OperatorTurnRequest,
 } from "@mono-agent/operator";
@@ -380,12 +385,21 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
             text += event.delta;
             await writer.write({ type: "delta", turnId, target: "assistant", text: event.delta, mode: "append" });
             break;
+          case "thinking-delta":
+            await writer.write({ type: "delta", turnId, target: "thought", text: event.delta, mode: "append" });
+            break;
           case "text-replace":
             text = event.text;
             await writer.write({ type: "delta", turnId, target: "assistant", text: event.text, mode: "replace" });
             break;
           case "activity":
             await writer.write({ type: "activity", turnId, text: event.text });
+            break;
+          case "tool-call":
+            await writer.write({ type: "tool_call", turnId, call: operatorToolCall(event.call) });
+            break;
+          case "tool-result":
+            await writer.write({ type: "tool_result", turnId, result: operatorToolResult(event.result) });
             break;
           case "attachment":
             unsupportedAttachment = true;
@@ -411,6 +425,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
                 sessionEvicted: false,
               },
             );
+            await writer.write({ type: "compaction", turnId, compaction: event.compaction });
             await writer.write({ type: "usage", turnId, usage: projectedUsage });
             break;
           case "session-evicted":
@@ -879,6 +894,65 @@ function operatorUsage(usage: RuntimeUsage): OperatorUsage {
     compacted: usage.compaction?.compacted ?? false,
     sessionEvicted: usage.sessionEvicted ?? false,
   };
+}
+
+function operatorToolCall(call: RuntimeToolCall): OperatorToolCall {
+  const id = boundedToolIdentifier(call.id, "call");
+  const name = boundedToolIdentifier(call.name, "tool");
+  const candidate = {
+    type: "tool_call",
+    turnId: "projection",
+    call: { id, name, input: call.input, inputOmitted: false },
+  } as const;
+  try {
+    const frame = parseOperatorFrame(candidate);
+    if (frame.type === "tool_call") return frame.call;
+  } catch {
+    // The payload can be valid at the runtime boundary but too large or carry
+    // JSON keys that the product protocol deliberately refuses to replay.
+  }
+  return { id, name, inputOmitted: true };
+}
+
+function operatorToolResult(result: RuntimeToolResult): OperatorToolResult {
+  const callId = boundedToolIdentifier(result.callId, "call");
+  const content = result.content.map((part) => part.type === "text"
+    ? { type: "text" as const, text: part.text }
+    : part.type === "json"
+      ? { type: "json" as const, value: part.value }
+      : { type: "text" as const, text: part.type === "file"
+          ? "[file result omitted]"
+          : "[artifact result omitted]" });
+  const candidate = {
+    type: "tool_result",
+    turnId: "projection",
+    result: {
+      callId,
+      content,
+      contentOmitted: false,
+      ...(result.isError === undefined ? {} : { isError: result.isError }),
+    },
+  } as const;
+  try {
+    const frame = parseOperatorFrame(candidate);
+    if (frame.type === "tool_result") return frame.result;
+  } catch {
+    // Keep correlation and outcome visible while omitting an unsafe payload.
+  }
+  return {
+    callId,
+    contentOmitted: true,
+    ...(result.isError === undefined ? {} : { isError: result.isError }),
+  };
+}
+
+function boundedToolIdentifier(value: string, prefix: "call" | "tool"): string {
+  return value.length > 0
+    && value.trim().length > 0
+    && !value.includes("\0")
+    && Buffer.byteLength(value, "utf8") <= OPERATOR_LIMITS.toolIdentifierBytes
+    ? value
+    : `${prefix}:${createHash("sha256").update(value).digest("hex")}`;
 }
 
 function mergeOperatorUsage(

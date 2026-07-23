@@ -69,7 +69,7 @@ describe("durable web state", () => {
     const migrated = await DurableWebStore.open(dataDirectory);
     expect(migrated.getThreadDetail("legacy-thread")?.messages[0]?.text).toBe(exactLegacyText);
     expect(JSON.parse(await readFile(join(dataDirectory, "state.json"), "utf8"))).toMatchObject({
-      schemaVersion: 2,
+      schemaVersion: 3,
       messages: [{ text: exactLegacyText }],
     });
 
@@ -135,6 +135,36 @@ describe("durable web state", () => {
       messages: [{ role: "user" }, { role: "assistant", status: "interrupted" }],
     });
     await reopened.close();
+  });
+
+  it("persists pins, first-turn automatic titles, manual titles, and archive-before-delete guards", async () => {
+    const root = await temporaryDirectory();
+    const store = await DurableWebStore.open(join(root, "state"));
+    expect(store.revision()).toBe(0);
+    await store.setAgentPinned("personal", true);
+    expect(store.isAgentPinned("personal")).toBe(true);
+
+    const thread = await store.createThread("personal");
+    expect(thread).toMatchObject({ title: "New conversation", titleManual: false });
+    await expect(store.deleteThread(thread.id)).rejects.toMatchObject({ code: "thread_not_archived" });
+    const first = await store.startTurn(thread.id, "First durable title");
+    await store.finishTurn(thread.id, first.assistant.turnId!, "complete");
+    expect(store.getThread(thread.id)).toMatchObject({ title: "First durable title", titleManual: false });
+    const second = await store.startTurn(thread.id, "Must not replace the first title");
+    await store.finishTurn(thread.id, second.assistant.turnId!, "complete");
+    expect(store.getThread(thread.id)?.title).toBe("First durable title");
+
+    await store.patchThread(thread.id, { title: "Operator title" });
+    await store.patchThread(thread.id, { archived: true });
+    expect(store.getThread(thread.id)).toMatchObject({
+      title: "Operator title",
+      titleManual: true,
+      archivedAt: expect.any(String),
+    });
+    await store.deleteThread(thread.id);
+    expect(store.getThread(thread.id)).toBeUndefined();
+    expect(store.revision()).toBeGreaterThan(0);
+    await store.close();
   });
 
   it("refuses concurrent ownership and preserves corrupt state bytes", async () => {

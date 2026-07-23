@@ -76,6 +76,11 @@ API requests must also use a listener-approved local authority and actual port,
 which closes the DNS-rebinding/forged-Host boundary. The health probe is
 `GET /healthz`.
 
+Public browser assets are capped at 16 MiB and read descriptor-first with
+`O_NOFOLLOW`; every path component below the configured static root must remain
+a real directory or regular file with stable identity. Static-file and
+static-directory symlinks are never served.
+
 Programmatic startup is equivalent:
 
 ```ts
@@ -111,8 +116,8 @@ browser stream contains web-owned thread snapshots, not raw operator frames.
 | `operator-gateway.ts` | Thin binding to the shared directory, client, reducer, and action policy. |
 | `store.ts` | Versioned state, exclusive process lease, atomic commits, and restart recovery. |
 | `service.ts` | Conversation/turn process lifecycle and exact cancellation. |
-| `server.ts` | Authenticated HTTP API, origin/media-type enforcement, streaming, and shutdown. |
-| `ui.ts` | Bundled dependency-free browser shell. |
+| `server.ts` | Authenticated HTTP API, origin/media-type enforcement, link-free descriptor-first static asset reads, streaming, and shutdown. |
+| `webapp/` | React/assistant-ui browser console, PWA assets, and Vite build. |
 | `bin.ts` | Foreground standalone process entrypoint. |
 
 ### Durable-state contract
@@ -176,6 +181,8 @@ CreateWebThreadInput
 LoadWebConfigOptions
 OfferWebLiveInput
 ParseWebConfigOptions
+PatchWebAgentInput
+PatchWebThreadInput
 StartWebServerOptions
 StartWebTurnInput
 WEB_API_VERSION
@@ -184,10 +191,13 @@ WebAskAnswerResult
 WebBootstrap
 WebConfig
 WebConfigView
+WebEvent
+WebEventType
 WebHealthView
 WebListenConfig
 WebLiveInputResult
 WebMessage
+WebNotificationTriggerKind
 WebOperatorGateway
 WebOperatorTurnInput
 WebProactiveConversation

@@ -31,6 +31,7 @@ describe("web product config", () => {
       allowInsecureHttp: false,
       dataDirectory: join(root, "private", "web"),
       agentRegistries: [join(root, "agent-a", "registry"), join(root, "..", "shared", "registry")],
+      externalOrigins: [],
       sourcePath: configPath,
     });
   });
@@ -57,10 +58,38 @@ describe("web product config", () => {
     await expect(loadWebConfig(configPath)).rejects.toMatchObject({ code: "config_too_large" });
   });
 
+  it("accepts only unique canonical HTTPS external proxy origins", () => {
+    const options = {
+      sourcePath: join(tmpdir(), "web.config.json"),
+      environment: { WEB_TEST_TOKEN: "testtesttesttest" },
+    };
+    const base = {
+      configVersion: 1,
+      auth: { token: { $env: "WEB_TEST_TOKEN" } },
+    };
+    expect(parseWebConfig({
+      ...base,
+      externalOrigins: ["https://console.example.test"],
+    }, options).externalOrigins).toEqual(["https://console.example.test"]);
+    expect(() => parseWebConfig({
+      ...base,
+      externalOrigins: ["http://console.example.test"],
+    }, options)).toThrow(/HTTPS origin/u);
+    expect(() => parseWebConfig({
+      ...base,
+      externalOrigins: ["https://console.example.test/path"],
+    }, options)).toThrow(/without credentials, path/u);
+    expect(() => parseWebConfig({
+      ...base,
+      externalOrigins: ["https://console.example.test", "https://console.example.test"],
+    }, options)).toThrow(/duplicates/u);
+  });
+
   it("exports the strict authoring schema from the executable config contract", () => {
     expect(webConfigJsonSchema.required).toEqual(["configVersion", "auth"]);
     expect(webConfigJsonSchema.additionalProperties).toBe(false);
     expect(webConfigJsonSchema.properties.allowInsecureHttp.default).toBe(false);
+    expect(webConfigJsonSchema.properties.externalOrigins.items.pattern).toBe("^https://");
     expect(webConfigJsonSchema.properties.auth.properties.token.properties.$env.pattern).toContain("A-Za-z_");
   });
 });

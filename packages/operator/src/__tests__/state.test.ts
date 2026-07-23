@@ -17,11 +17,21 @@ describe("operator domain state", () => {
     expect(first).toMatchObject({
       status: "completed",
       assistantText: "Hello fixture",
-      thoughtText: "Checking the fixture.",
-      activities: ["Calling a fixture tool"],
-      usage: { inputTokens: 12, outputTokens: 3 },
+      thoughtText: "",
+      activities: [
+        { type: "activity", text: "Calling a fixture tool" },
+        { type: "tool_call", call: { id: "fixture-tool-call", name: "fixture_tool" } },
+        { type: "tool_result", result: { callId: "fixture-tool-call" } },
+        { type: "compaction", compaction: { compacted: true } },
+      ],
+      usage: { inputTokens: 12, outputTokens: 3, compacted: true },
     });
-    expect(VALID_TURN_FRAMES).toHaveLength(9);
+    expect(VALID_TURN_FRAMES).toHaveLength(12);
+    const streaming = reduceOperatorFrames(
+      initialOperatorState("fixture-conversation"),
+      VALID_TURN_FRAMES.slice(0, 5),
+    );
+    expect(streaming.thoughtText).toBe("Checking the fixture.");
   });
 
   it("derives renderer actions from shared state and capabilities", () => {
@@ -49,6 +59,11 @@ describe("operator domain state", () => {
       startedAt: "2026-01-02T03:04:05.000Z",
     });
     expect(() => reduceOperatorFrame(active, { type: "activity", turnId: "turn-b", text: "wrong" })).toThrow("expected turn-a");
+    expect(() => reduceOperatorFrame(active, {
+      type: "tool_call",
+      turnId: "turn-b",
+      call: { id: "call", name: "tool", input: {}, inputOmitted: false },
+    })).toThrow("expected turn-a");
   });
 
   it("keeps compaction and session eviction sticky across later usage snapshots", () => {

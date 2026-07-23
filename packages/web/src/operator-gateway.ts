@@ -67,12 +67,33 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
 
   return {
     async listAgents(): Promise<readonly WebAgent[]> {
-      return (await entries()).map((entry) => ({
-        id: entry.id,
-        label: entry.label,
-        endpoint: entry.endpoint,
-        online: !entry.stale,
-        capabilities: capabilityRecord(entry.capabilities),
+      return Promise.all((await entries()).map(async (entry): Promise<WebAgent> => {
+        const base: WebAgent = {
+          id: entry.id,
+          label: entry.label,
+          endpoint: entry.endpoint,
+          online: !entry.stale,
+          pinned: false,
+          capabilities: capabilityRecord(entry.capabilities),
+        };
+        if (entry.stale) return base;
+        try {
+          const client = createOperatorClientForEntry(entry, {
+            env: options.environment,
+            ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+          });
+          const info = await client.getInfo();
+          assertIdentity(entry, info);
+          return {
+            ...base,
+            label: info.agent.label,
+            capabilities: capabilityRecord(info.capabilities),
+            ...(info.defaults === undefined ? {} : { defaults: info.defaults }),
+            ...(info.models === undefined ? {} : { models: info.models }),
+          };
+        } catch {
+          return { ...base, online: false };
+        }
       }));
     },
 
@@ -149,13 +170,18 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
         if (!info.capabilities.proactive || !info.capabilities.replay) return [];
         const listed = await client.getConversations();
         return await Promise.all(listed.conversations
-          .filter((conversation) => conversation.id.startsWith("proactive:"))
+          .filter((conversation) =>
+            conversation.id.startsWith("proactive:")
+            || conversation.id.startsWith("trigger:")
+          )
           .map(async (conversation) => {
             const replay = await client.getReplay(conversation.id);
+            const triggerKind = triggerKindFromConversationId(conversation.id);
             return {
               agentId: entry.id,
               conversationId: conversation.id,
               ...(conversation.title === undefined ? {} : { title: conversation.title }),
+              ...(triggerKind === undefined ? {} : { triggerKind }),
               updatedAt: conversation.updatedAt,
               messages: replay.messages,
             };
@@ -258,4 +284,9 @@ function conversationKey(agentId: string, conversationId: string): string {
 function capabilityRecord(capabilities: DiscoveredOperator["capabilities"]): Readonly<Record<string, boolean>> {
   if (capabilities === undefined) return {};
   return Object.freeze(Object.fromEntries(Object.entries(capabilities).map(([name, enabled]) => [name, enabled])));
+}
+
+function triggerKindFromConversationId(conversationId: string): "cron" | "webhook" | undefined {
+  const match = /^(?:trigger|proactive):(cron|webhook):/u.exec(conversationId);
+  return match?.[1] as "cron" | "webhook" | undefined;
 }

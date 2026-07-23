@@ -152,7 +152,7 @@ describe("complete agent plane", () => {
               readHostPresence() {
                 return {
                   operatorRegistry: {
-                    schema: "mono-agent.operator-registry-details.v1",
+                    schema: "mono-agent.operator-registry-details.v2",
                     agent: { id: "fixture-agent", label: "Fixture Agent" },
                     operator: {
                       endpoint: "http://127.0.0.1:43210",
@@ -198,7 +198,7 @@ describe("complete agent plane", () => {
       status: "ready",
       details: {
         operatorRegistry: {
-          schema: "mono-agent.operator-registry-details.v1",
+          schema: "mono-agent.operator-registry-details.v2",
           agent: { id: "fixture-agent", label: "Fixture Agent" },
           operator: {
             endpoint: "http://127.0.0.1:43210",

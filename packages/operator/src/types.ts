@@ -1,16 +1,17 @@
-export const OPERATOR_PROTOCOL = "mono-agent.operator.v1" as const;
-export const OPERATOR_REGISTRY_SCHEMA = "mono-agent.operator-registry.v1" as const;
+export const OPERATOR_PROTOCOL = "mono-agent.operator.v2" as const;
+export const OPERATOR_REGISTRY_SCHEMA = "mono-agent.operator-registry.v2" as const;
+export const OPERATOR_REGISTRY_DETAILS_SCHEMA = "mono-agent.operator-registry-details.v2" as const;
 
 export const OPERATOR_ROUTES = Object.freeze({
-  info: "/v1/info",
-  turns: "/v1/turns",
-  config: "/v1/config",
-  health: "/v1/health",
-  conversations: "/v1/conversations",
-  ask: (conversationId: string) => `/v1/conversations/${encodeURIComponent(conversationId)}/ask`,
-  cancel: (conversationId: string) => `/v1/conversations/${encodeURIComponent(conversationId)}/cancel`,
-  liveInput: (conversationId: string) => `/v1/conversations/${encodeURIComponent(conversationId)}/live-input`,
-  replay: (conversationId: string) => `/v1/conversations/${encodeURIComponent(conversationId)}/replay`,
+  info: "/v2/info",
+  turns: "/v2/turns",
+  config: "/v2/config",
+  health: "/v2/health",
+  conversations: "/v2/conversations",
+  ask: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/ask`,
+  cancel: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/cancel`,
+  liveInput: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/live-input`,
+  replay: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/replay`,
 });
 
 export const OPERATOR_LIMITS = Object.freeze({
@@ -38,7 +39,20 @@ export const OPERATOR_LIMITS = Object.freeze({
   askChoiceDescriptionBytes: 4_096,
   askAnswerValuesPerQuestion: 20,
   askAnswerBytes: 16_384,
+  activityCharacters: 16_384,
+  toolIdentifierBytes: 4_096,
+  toolPayloadBytes: 262_144,
+  toolResultParts: 128,
+  jsonItems: 10_000,
 });
+
+export type OperatorJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly OperatorJsonValue[]
+  | { readonly [key: string]: OperatorJsonValue };
 
 export interface OperatorAttachment {
   id: string;
@@ -156,6 +170,56 @@ export interface OperatorActivityFrame {
   text: string;
 }
 
+export interface OperatorToolCall {
+  id: string;
+  name: string;
+  input?: OperatorJsonValue;
+  inputOmitted: boolean;
+}
+
+export interface OperatorToolCallFrame {
+  type: "tool_call";
+  turnId: string;
+  call: OperatorToolCall;
+}
+
+export type OperatorToolResultPart =
+  | { readonly type: "text"; readonly text: string }
+  | { readonly type: "json"; readonly value: OperatorJsonValue };
+
+export interface OperatorToolResult {
+  callId: string;
+  content?: readonly OperatorToolResultPart[];
+  contentOmitted: boolean;
+  isError?: boolean;
+}
+
+export interface OperatorToolResultFrame {
+  type: "tool_result";
+  turnId: string;
+  result: OperatorToolResult;
+}
+
+export interface OperatorCompaction {
+  compacted: boolean;
+  tokensBefore?: number;
+  tokensAfter?: number;
+  summaryTokens?: number;
+  firstRetainedMessageId?: string;
+}
+
+export interface OperatorCompactionFrame {
+  type: "compaction";
+  turnId: string;
+  compaction: OperatorCompaction;
+}
+
+export type OperatorActivity =
+  | Omit<OperatorActivityFrame, "turnId">
+  | Omit<OperatorToolCallFrame, "turnId">
+  | Omit<OperatorToolResultFrame, "turnId">
+  | Omit<OperatorCompactionFrame, "turnId">;
+
 export interface OperatorAskUserFrame {
   type: "ask_user";
   turnId: string;
@@ -208,6 +272,9 @@ export type OperatorFrame =
   | OperatorAcceptedFrame
   | OperatorDeltaFrame
   | OperatorActivityFrame
+  | OperatorToolCallFrame
+  | OperatorToolResultFrame
+  | OperatorCompactionFrame
   | OperatorAskUserFrame
   | OperatorCapabilitiesFrame
   | OperatorUsageFrame

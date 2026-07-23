@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -36,6 +37,7 @@ describe("web service lifecycle", () => {
     });
     expect((await first.bootstrap()).newProactiveThreadIds).toEqual([]);
 
+    await first.patchThread(initial.newProactiveThreadIds[0]!, { archived: true });
     await first.deleteThread(initial.newProactiveThreadIds[0]!);
     expect((await first.bootstrap()).threads).toEqual([]);
     await first.stop();
@@ -179,6 +181,66 @@ describe("web service lifecycle", () => {
     await reopened.close();
   });
 
+  it("persists bounded structured activity without ever persisting transient thought text", async () => {
+    const root = await temporaryDirectory();
+    const stateDirectory = join(root, "state");
+    const store = await DurableWebStore.open(stateDirectory);
+    const service = new WebService(store, gateway({
+      async runTurn(input) {
+        await input.onState?.({
+          conversationId: input.conversationId,
+          status: "streaming",
+          activeTurnId: "operator-turn",
+          assistantText: "Visible answer",
+          thoughtText: "PRIVATE TRANSIENT REASONING",
+          activities: [
+            {
+              type: "tool_call",
+              call: {
+                id: "call-1",
+                name: "CalendarLookup",
+                input: { range: "today" },
+                inputOmitted: false,
+              },
+            },
+            {
+              type: "tool_result",
+              result: {
+                callId: "call-1",
+                content: [{ type: "text", text: "No events" }],
+                contentOmitted: false,
+              },
+            },
+            {
+              type: "compaction",
+              compaction: { compacted: true, tokensBefore: 9_000, tokensAfter: 3_000 },
+            },
+          ],
+        });
+      },
+    }));
+    const thread = await service.createThread("personal");
+    await expect(service.runTurn(thread.id, { text: "What is next?" }, async () => undefined)).resolves.toMatchObject({
+      messages: [
+        { role: "user" },
+        {
+          role: "assistant",
+          text: "Visible answer",
+          activities: [
+            { type: "tool_call", call: { name: "CalendarLookup" } },
+            { type: "tool_result", result: { content: [{ text: "No events" }] } },
+            { type: "compaction", compaction: { compacted: true } },
+          ],
+        },
+      ],
+    });
+    await service.stop();
+    const stored = await readFile(join(stateDirectory, "state.json"), "utf8");
+    expect(stored).toContain("CalendarLookup");
+    expect(stored).not.toContain("PRIVATE TRANSIENT REASONING");
+    expect(stored).not.toContain("thoughtText");
+  });
+
   it("registers a durable turn before a blocked first renderer update so cancel cannot miss it", async () => {
     const root = await temporaryDirectory();
     const store = await DurableWebStore.open(join(root, "state"));
@@ -214,6 +276,39 @@ describe("web service lifecycle", () => {
     await expect(cancelling).resolves.toMatchObject({ thread: { status: "cancelled" } });
     await expect(running).resolves.toMatchObject({ thread: { status: "cancelled" } });
     expect(runTurn).not.toHaveBeenCalled();
+    await service.stop();
+  });
+
+  it("emits revision-ordered invalidations and resets cursors outside its replay window", async () => {
+    const root = await temporaryDirectory();
+    const store = await DurableWebStore.open(join(root, "state"));
+    const service = new WebService(store, gateway(), { eventReplayLimit: 1 });
+    const live: Array<{ readonly type: string; readonly revision: number }> = [];
+    const close = service.openEventStream(undefined, (event) => {
+      live.push(event);
+    });
+    expect(live.map(({ type, revision }) => ({ type, revision }))).toEqual([
+      { type: "ready", revision: 0 },
+    ]);
+
+    const thread = await service.createThread("personal");
+    await service.patchThread(thread.id, { title: "Manual title" });
+    close();
+    expect(live.slice(1).map(({ type, revision }) => ({ type, revision }))).toEqual([
+      { type: "threads.changed", revision: 1 },
+      { type: "thread.changed", revision: 2 },
+    ]);
+
+    const reset: Array<{ readonly type: string; readonly revision: number }> = [];
+    service.openEventStream(0, (event) => { reset.push(event); })();
+    expect(reset.map(({ type, revision }) => ({ type, revision }))).toEqual([
+      { type: "reset", revision: 2 },
+    ]);
+    const future: Array<{ readonly type: string; readonly revision: number }> = [];
+    service.openEventStream(99, (event) => { future.push(event); })();
+    expect(future.map(({ type, revision }) => ({ type, revision }))).toEqual([
+      { type: "reset", revision: 2 },
+    ]);
     await service.stop();
   });
 
@@ -261,6 +356,7 @@ function agent(): WebAgent {
     label: "Personal Agent",
     endpoint: "http://127.0.0.1:1",
     online: true,
+    pinned: false,
     capabilities: {},
   };
 }

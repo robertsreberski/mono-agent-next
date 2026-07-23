@@ -245,6 +245,10 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
             case "usage":
               usage = toOpenAiUsage(event.usage);
               return;
+            case "thinking-delta":
+              // Chat Completions has no transient-thought surface. Do not fold
+              // private reasoning into canonical assistant response text.
+              return;
             case "tool-call":
               if (
                 seenToolCallIds.has(event.call.id)
