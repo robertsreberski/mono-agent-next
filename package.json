@@ -25,6 +25,7 @@
     "check:consumer-docs-consistency": "node scripts/check-consumer-docs-consistency.mjs",
     "check:getting-started-version-pins": "node scripts/check-getting-started-version-pins.mjs",
     "check:docs": "node scripts/check-docs.mjs",
+    "check:source-beta-budgets": "node --experimental-strip-types scripts/check-source-beta-budgets.mjs",
     "check:source-beta-docs": "node --experimental-strip-types scripts/generate-source-beta-docs.mjs --check",
     "check:doc-snippets": "node scripts/check-doc-snippets.mjs",
     "check:architecture": "node scripts/check-package-architecture.mjs",
@@ -46,7 +47,7 @@
     "release:consumer": "node scripts/release/verify-packed-consumer.mjs",
     "release:publish": "node scripts/release/publish-release.mjs",
     "release:verify": "node scripts/release/verify-release.mjs",
-    "scripts:test": "vitest run scripts/__tests__/check-package-architecture.test.mjs scripts/__tests__/check-license-consistency.test.mjs scripts/__tests__/check-dependency-vulnerabilities.test.mjs scripts/__tests__/check-oss-hygiene.test.mjs",
+    "scripts:test": "vitest run scripts/__tests__/check-package-architecture.test.mjs scripts/__tests__/check-license-consistency.test.mjs scripts/__tests__/check-dependency-vulnerabilities.test.mjs scripts/__tests__/check-oss-hygiene.test.mjs scripts/__tests__/source-beta-report.test.mjs scripts/__tests__/verify-all.test.mjs scripts/__tests__/website-ci.test.mjs",
     "release:test": "vitest run scripts/release/__tests__/release.test.mjs scripts/release/__tests__/package-count-drift.test.mjs scripts/release/__tests__/packed-consumer.test.mjs"
   },
   "devDependencies": {

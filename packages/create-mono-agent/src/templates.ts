@@ -112,11 +112,20 @@ export function renderProject(options: ProjectTemplateOptions): readonly Rendere
     files.push(
       {
         path: ".mcp.json",
-        contents: `${JSON.stringify({ mcpServers: {} }, null, 2)}\n`,
+        contents: `${JSON.stringify({
+          mcpServers: {
+            "project-status": {
+              type: "stdio",
+              command: "node",
+              args: ["./tools/project-status-mcp.mjs"],
+            },
+          },
+        }, null, 2)}\n`,
         mode: 0o644,
       },
-      { path: "cron/.gitkeep", contents: "", mode: 0o644 },
+      { path: "cron/morning-briefing.md", contents: personalCronJob(), mode: 0o644 },
       { path: "skills/.gitkeep", contents: "", mode: 0o644 },
+      { path: "tools/project-status-mcp.mjs", contents: projectStatusMcpServer(), mode: 0o644 },
     );
   }
 
@@ -473,7 +482,9 @@ function projectReadme(displayName: string, template: ProjectTemplate): string {
   const templateNotes = template === "personal"
     ? [
         "This template selects Telegram, webhook, OpenAI-compatible API, and operator channels,",
-        "owner-private local memory/state, an empty cron directory, and a local OTLP exporter.",
+        "owner-private local memory/state, a harmless Markdown cron example, a project-owned",
+        "status MCP fixture, and a local OTLP exporter. Replace the example job and tool with",
+        "your own project behavior after reviewing their explicit channel and tool policies.",
         "TUI, web, service management, and docs MCP remain separately installed products.",
       ]
     : template === "multi-runtime"
@@ -531,6 +542,74 @@ function gitignore(): string {
     ".mono-agent/state/",
     ".mono-agent/trace-sources/",
     "node_modules/",
+    "",
+  ].join("\n");
+}
+
+function personalCronJob(): string {
+  return [
+    "---",
+    "id: morning-briefing",
+    "expression: 30 7 * * *",
+    "timezone: Europe/Rome",
+    "runtime: pi",
+    "effort: high",
+    "notify: telegram",
+    "overlap: skip",
+    "maxRunMs: 600000",
+    "---",
+    "",
+    "Prepare a concise morning briefing from information already available in this workspace.",
+    "Do not change files, contact external services, or perform any other side effect.",
+    "",
+  ].join("\n");
+}
+
+function projectStatusMcpServer(): string {
+  return [
+    "let buffer = \"\";",
+    "",
+    "process.stdin.setEncoding(\"utf8\");",
+    "process.stdin.on(\"data\", (chunk) => {",
+    "  buffer += chunk;",
+    "  while (buffer.includes(\"\\n\")) {",
+    "    const index = buffer.indexOf(\"\\n\");",
+    "    const line = buffer.slice(0, index);",
+    "    buffer = buffer.slice(index + 1);",
+    "    if (line.trim().length === 0) continue;",
+    "    const message = JSON.parse(line);",
+    "    if (message.id === undefined) continue;",
+    "    let result;",
+    "    if (message.method === \"initialize\") {",
+    "      result = {",
+    "        protocolVersion: message.params?.protocolVersion,",
+    "        capabilities: { tools: {} },",
+    "        serverInfo: { name: \"project-status\", version: \"1.0.0\" },",
+    "      };",
+    "    } else if (message.method === \"tools/list\") {",
+    "      result = {",
+    "        tools: [{",
+    "          name: \"project_status\",",
+    "          description: \"Return the static status of this scaffolded project fixture.\",",
+    "          inputSchema: { type: \"object\", properties: {}, additionalProperties: false },",
+    "        }],",
+    "      };",
+    "    } else if (message.method === \"tools/call\" && message.params?.name === \"project_status\") {",
+    "      result = {",
+    "        content: [{ type: \"text\", text: \"The scaffolded project MCP fixture is available.\" }],",
+    "      };",
+    "    } else {",
+    "      process.stdout.write(JSON.stringify({",
+    "        jsonrpc: \"2.0\",",
+    "        id: message.id,",
+    "        error: { code: -32601, message: \"Unknown MCP method or tool.\" },",
+    "      }) + \"\\n\");",
+    "      continue;",
+    "    }",
+    "    process.stdout.write(JSON.stringify({ jsonrpc: \"2.0\", id: message.id, result }) + \"\\n\");",
+    "  }",
+    "});",
+    "process.stdin.on(\"end\", () => process.exit(0));",
     "",
   ].join("\n");
 }

@@ -4,7 +4,7 @@ import { describe, expect, test } from "vitest";
 import { parseDocument } from "yaml";
 
 describe("website CI contract", () => {
-  test("keeps the isolated build and rendered accessibility lane exact", () => {
+  test("keeps the isolated Node 22 frozen-install and build lane exact", () => {
     const source = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
     const document = parseDocument(source, { merge: false, strict: true, uniqueKeys: true, version: "1.2" });
     expect([...document.errors, ...document.warnings]).toEqual([]);
@@ -12,7 +12,7 @@ describe("website CI contract", () => {
     const website = workflow.jobs.website;
 
     expect(website).toEqual({
-      name: "Website",
+      name: "Website (Node 22)",
       "runs-on": "ubuntu-latest",
       "timeout-minutes": 20,
       defaults: { run: { "working-directory": "website" } },
@@ -21,7 +21,7 @@ describe("website CI contract", () => {
         {
           name: "Setup Node",
           uses: "actions/setup-node@v4",
-          with: { "node-version": "24" },
+          with: { "node-version": "22.19.0" },
         },
         { name: "Enable Corepack", run: "corepack enable" },
         { name: "Install website dependencies", run: "pnpm install --frozen-lockfile" },
@@ -34,5 +34,21 @@ describe("website CI contract", () => {
         { name: "Audit every built page for accessibility", run: "pnpm run test:a11y" },
       ],
     });
+
+    const verifyRuns = workflow.jobs.verify.steps
+      .map((step) => step.run)
+      .filter((run) => typeof run === "string");
+    expect(verifyRuns.some((run) => run.includes("pnpm run check:source-beta-budgets"))).toBe(true);
+    expect(verifyRuns.some((run) => run.includes("pnpm run scripts:test"))).toBe(true);
+
+    const verdict = workflow.jobs.verdict;
+    expect(verdict.needs).toEqual(["verify", "website"]);
+    expect(verdict.steps[0].env).toEqual({
+      VERIFY_RESULT: "${{ needs.verify.result }}",
+      WEBSITE_RESULT: "${{ needs.website.result }}",
+    });
+    expect(verdict.steps[0].run).toContain(
+      '[[ "$VERIFY_RESULT" != "success" || "$WEBSITE_RESULT" != "success" ]]',
+    );
   });
 });

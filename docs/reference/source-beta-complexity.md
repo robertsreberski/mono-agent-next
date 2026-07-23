@@ -17,30 +17,30 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `97c6bdfed01a8edb054fa419f3a28f49bb4e728f7b239c03c8cc916a1c8cf5f3`
+Source manifest digest: `bf4325978f228d53e39fdef7b62ccb223a0ef1675ddcee717db58131ca150192`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 158 | 53652 |
-| Tests | 105 | 39650 |
-| Repository and product tooling | 60 | 19062 |
+| Production | 159 | 53789 |
+| Tests | 108 | 39822 |
+| Repository and product tooling | 60 | 19636 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **323** | **112364** |
+| **Total executable source** | **327** | **113247** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 339.6 lines.
+Average production file size is 338.3 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 53652 | 130000 | within limit |
+| repository-production | 53789 | 130000 | within limit |
 | kernel-production | 19610 | 15000 | over limit |
 
 ## Largest package ownership surfaces
@@ -57,7 +57,7 @@ Average production file size is 339.6 lines.
 | `@mono-agent/channel-webhook` | 4 | 1628 | 506 |
 
 The complete package table is retained in the generated report model exposed by
-`pnpm run report:source-beta -- --json`.
+`pnpm --silent run report:source-beta -- --json`.
 
 ## Structural complexity
 

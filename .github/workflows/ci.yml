@@ -65,6 +65,7 @@ jobs:
         run: |
           pnpm run generate:package-docs
           pnpm run generate:public-api-docs
+          pnpm run check:source-beta-budgets
           pnpm run check:source-beta-docs
           pnpm run check:docs
 
@@ -77,7 +78,9 @@ jobs:
         run: pnpm run check:deep-imports
 
       - name: Test the complete v1 workspace
-        run: pnpm run test
+        run: |
+          pnpm run scripts:test
+          pnpm run test
 
       - name: Prove packed complete v1 system
         if: ${{ matrix.node-version == '22.19.0' }}
@@ -86,19 +89,56 @@ jobs:
       - name: Check generated contracts and whitespace
         run: git diff --exit-code && git diff --check
 
+  website:
+    name: Website (Node 22)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: website
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Install website dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test website transforms
+        run: pnpm run test:unit
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Build docs site (check-asides -> sync-content -> astro build -> check-links)
+        run: pnpm run build
+
+      - name: Audit every built page for accessibility
+        run: pnpm run test:a11y
+
   verdict:
     name: Required verdict
     if: always()
     needs:
       - verify
+      - website
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - name: Publish required verdict
         env:
           VERIFY_RESULT: ${{ needs.verify.result }}
+          WEBSITE_RESULT: ${{ needs.website.result }}
         run: |
-          if [[ "$VERIFY_RESULT" != "success" ]]; then
+          if [[ "$VERIFY_RESULT" != "success" || "$WEBSITE_RESULT" != "success" ]]; then
             echo "CI VERDICT: FAILED"
             exit 1
           fi

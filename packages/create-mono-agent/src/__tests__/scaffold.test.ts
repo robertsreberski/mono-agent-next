@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   mkdtemp,
   mkdir,
@@ -143,11 +144,32 @@ describe("project templates", () => {
     const memory = record(config.memory);
     const state = record(config.state);
     const channels = record(config.channels);
+    const mcp = parseJson(files, ".mcp.json");
+    const cron = files.get("cron/morning-briefing.md") ?? "";
+    const projectMcp = files.get("tools/project-status-mcp.mjs") ?? "";
 
     expect([...files.keys()]).toContain(".mcp.json");
-    expect([...files.keys()]).toContain("cron/.gitkeep");
+    expect([...files.keys()]).toContain("cron/morning-briefing.md");
     expect([...files.keys()]).toContain("skills/.gitkeep");
+    expect([...files.keys()]).toContain("tools/project-status-mcp.mjs");
+    expect([...files.keys()]).not.toContain("cron/.gitkeep");
     expect([...files.keys()]).not.toContain(".mono-agent/memory/.first-run-memory-initializing");
+    expect(mcp).toEqual({
+      mcpServers: {
+        "project-status": {
+          type: "stdio",
+          command: "node",
+          args: ["./tools/project-status-mcp.mjs"],
+        },
+      },
+    });
+    expect(projectMcp).toContain('name: "project_status"');
+    expect(projectMcp).toContain("The scaffolded project MCP fixture is available.");
+    expect(cron).toContain("id: morning-briefing");
+    expect(cron).toContain("expression: 30 7 * * *");
+    expect(cron).toContain("runtime: pi");
+    expect(cron).toContain("notify: telegram");
+    expect(cron).toContain("Do not change files, contact external services");
     expect(memory).toEqual({
       $use: "@mono-agent/memory-local",
       root: "./.mono-agent/memory",
@@ -185,6 +207,39 @@ describe("project templates", () => {
     expect(record(channels.webhook)).toMatchObject({ path: "/webhook/invoke", mode: "async" });
     expect(record(channels.webhook)).not.toHaveProperty("routesDirectory");
     expect(record(channels["openai-api"]).listen).toEqual({ host: "127.0.0.1", port: 4312 });
+  });
+
+  it("ships a runnable project-owned MCP fixture without a mono-agent module dependency", async () => {
+    const root = await makeTemporaryDirectory();
+    const target = join(root, "personal-agent");
+    await scaffoldAgent({ targetDirectory: target, template: "personal" });
+    const input = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } },
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "project_status", arguments: {} } },
+    ].map((message) => JSON.stringify(message)).join("\n") + "\n";
+    const result = spawnSync(process.execPath, ["./tools/project-status-mcp.mjs"], {
+      cwd: target,
+      input,
+      encoding: "utf8",
+      timeout: 5_000,
+      shell: false,
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe("");
+    const frames = result.stdout.trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(frames).toHaveLength(3);
+    expect(frames[1]).toMatchObject({
+      id: 2,
+      result: { tools: [{ name: "project_status" }] },
+    });
+    expect(frames[2]).toMatchObject({
+      id: 3,
+      result: {
+        content: [{ type: "text", text: "The scaffolded project MCP fixture is available." }],
+      },
+    });
   });
 
   it("renders explicit Pi and native Claude routes for multi-runtime", () => {

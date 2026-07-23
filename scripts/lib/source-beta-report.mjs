@@ -8,6 +8,16 @@ import { collectPackagePublicApiInventories } from "./public-api-docs.mjs";
 
 export const SOURCE_BETA_REPORT_SCHEMA = "mono-agent.source-beta-report.v1";
 export const SOURCE_BETA_REPORT_OUTPUT = "docs/reference/source-beta-complexity.md";
+export const SOURCE_BETA_LINE_BUDGETS = Object.freeze([
+  Object.freeze({
+    id: "repository-production",
+    maximumLines: 130_000,
+  }),
+  Object.freeze({
+    id: "kernel-production",
+    maximumLines: 15_000,
+  }),
+]);
 
 const SOURCE_EXTENSIONS = new Set([
   ".astro",
@@ -39,27 +49,30 @@ export function collectSourceBetaReport({ root, renderProject }) {
   const dependencyGraph = collectDependencyGraph(root);
   const publicApi = collectPublicApi(root);
   const templates = collectTemplateClosures(renderProject);
-  const budgets = [
-    {
-      id: "repository-production",
-      actualLines: source.byClassification.production.lines,
-      maximumLines: 130_000,
-    },
-    {
-      id: "kernel-production",
-      actualLines: packages
+  const actualLinesByBudget = new Map([
+    ["repository-production", source.byClassification.production.lines],
+    [
+      "kernel-production",
+      packages
         .filter((row) => [
           "@mono-agent/cli",
           "@mono-agent/core",
           "@mono-agent/module-sdk",
         ].includes(row.name))
         .reduce((sum, row) => sum + row.productionLines, 0),
-      maximumLines: 15_000,
-    },
-  ].map((budget) => Object.freeze({
-    ...budget,
-    withinLimit: budget.actualLines <= budget.maximumLines,
-  }));
+    ],
+  ]);
+  const budgets = SOURCE_BETA_LINE_BUDGETS.map((budget) => {
+    const actualLines = actualLinesByBudget.get(budget.id);
+    if (actualLines === undefined) {
+      throw new Error(`No source measurement exists for binding budget ${budget.id}.`);
+    }
+    return Object.freeze({
+      ...budget,
+      actualLines,
+      withinLimit: actualLines <= budget.maximumLines,
+    });
+  });
   const manifestDigest = digest(JSON.stringify(files.map((file) => ({
     path: file.path,
     classification: file.classification,
@@ -79,6 +92,68 @@ export function collectSourceBetaReport({ root, renderProject }) {
     publicApi,
     templates,
   });
+}
+
+export function assertSourceBetaBudgets(report) {
+  if (report === null || typeof report !== "object" || !Array.isArray(report.budgets)) {
+    throw new Error("Source-beta budget assertion requires a report with a budgets array.");
+  }
+
+  const issues = [];
+  const rowsById = new Map();
+  for (const row of report.budgets) {
+    if (row === null || typeof row !== "object" || typeof row.id !== "string") {
+      issues.push("Budget rows must be objects with string ids.");
+      continue;
+    }
+    const rows = rowsById.get(row.id) ?? [];
+    rows.push(row);
+    rowsById.set(row.id, rows);
+  }
+
+  const expectedIds = new Set(SOURCE_BETA_LINE_BUDGETS.map((budget) => budget.id));
+  for (const id of rowsById.keys()) {
+    if (!expectedIds.has(id)) issues.push(`Unexpected source-beta budget ${id}.`);
+  }
+
+  for (const expected of SOURCE_BETA_LINE_BUDGETS) {
+    const rows = rowsById.get(expected.id) ?? [];
+    if (rows.length !== 1) {
+      issues.push(
+        `Expected exactly one ${expected.id} budget row; found ${String(rows.length)}.`,
+      );
+      continue;
+    }
+    const [row] = rows;
+    if (row.maximumLines !== expected.maximumLines) {
+      issues.push(
+        `${expected.id} maximum must remain ${String(expected.maximumLines)} lines; `
+        + `found ${String(row.maximumLines)}.`,
+      );
+    }
+    if (!Number.isSafeInteger(row.actualLines) || row.actualLines < 0) {
+      issues.push(`${expected.id} actual lines must be a non-negative safe integer.`);
+      continue;
+    }
+    const withinLimit = row.actualLines <= expected.maximumLines;
+    if (row.withinLimit !== withinLimit) {
+      issues.push(
+        `${expected.id} withinLimit must be ${String(withinLimit)} for `
+        + `${String(row.actualLines)} lines.`,
+      );
+    }
+    if (!withinLimit) {
+      issues.push(
+        `${expected.id} exceeds ${String(expected.maximumLines)} lines by `
+        + `${String(row.actualLines - expected.maximumLines)}.`,
+      );
+    }
+  }
+
+  if (issues.length > 0) {
+    throw new Error(`Source-beta production budget assertion failed:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
+  }
+  return report;
 }
 
 export function summarizeSourceFiles(files) {
@@ -161,7 +236,7 @@ ${report.budgets.map((budget) => `| ${budget.id} | ${budget.actualLines} | ${bud
 ${largest.map((row) => `| \`${row.name}\` | ${row.productionFiles} | ${row.productionLines} | ${row.testLines} |`).join("\n")}
 
 The complete package table is retained in the generated report model exposed by
-\`pnpm run report:source-beta -- --json\`.
+\`pnpm --silent run report:source-beta -- --json\`.
 
 ## Structural complexity
 
@@ -417,11 +492,7 @@ function listReportablePaths(root) {
 }
 
 function isSourcePath(path) {
-  if (!SOURCE_EXTENSIONS.has(extname(path))) return false;
-  return path.startsWith("packages/")
-    || path.startsWith("extras/")
-    || path.startsWith("scripts/")
-    || path.startsWith("website/");
+  return SOURCE_EXTENSIONS.has(extname(path));
 }
 
 function sourceFileRecord(root, path) {
@@ -430,28 +501,41 @@ function sourceFileRecord(root, path) {
   const source = bytes.toString("utf8");
   return Object.freeze({
     path,
-    classification: classifySource(path),
+    classification: classifySourcePath(path),
     owner: sourceOwner(path),
     lines: physicalLines(source),
     sha256: digest(bytes),
   });
 }
 
-function classifySource(path) {
-  if (path.includes("/dist/") || path.includes("/generated/")) return "generated";
+export function classifySourcePath(path) {
+  const packageSource = /^(?:packages|extras)\/[^/]+\/src\//u.test(path);
+  if (packageSource) {
+    if (
+      /^(?:packages|extras)\/[^/]+\/src\/__tests__\//u.test(path)
+      || /\.test\.ts$/u.test(path)
+      || /^packages\/tui\/src\/.*\.test\.tsx$/u.test(path)
+    ) return "test";
+    return "production";
+  }
+
+  if (path.startsWith("website/src/") || path === "website/astro.config.mjs") {
+    return "production";
+  }
+  if (/(?:^|\/)(?:playwright|vitest)\.config\.(?:mjs|ts)$/u.test(path)) return "test";
   if (
-    path.includes("/__tests__/")
-    || path.includes("/tests/")
-    || path.includes("/test/")
-    || /\.(?:test|spec)\.[cm]?[jt]sx?$/u.test(path)
-    || path.endsWith("/playwright.config.ts")
+    /^scripts\/(?:.*\/)?__tests__\//u.test(path)
+    || /^website\/(?:scripts\/__tests__|tests)\//u.test(path)
   ) return "test";
   if (
-    /^packages\/[^/]+\/src\//u.test(path)
-    || /^extras\/[^/]+\/src\//u.test(path)
-    || path.startsWith("website/src/")
-  ) return "production";
-  return "tooling";
+    path.startsWith("scripts/")
+    || path.startsWith("website/scripts/")
+    || /^extras\/docs-mcp\/scripts\/(?:generate-corpus|smoke-packed)\.mjs$/u.test(path)
+  ) return "tooling";
+  throw new Error(
+    `Unclassified executable source file ${path}; add an explicit production, test, `
+    + "tooling, or reproducible generated-source rule.",
+  );
 }
 
 function sourceOwner(path) {

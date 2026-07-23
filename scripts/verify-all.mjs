@@ -40,6 +40,11 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
       args: ["run", "check:getting-started-version-pins"],
     },
     {
+      label: "check:source-beta-budgets",
+      command: "pnpm",
+      args: ["run", "check:source-beta-budgets"],
+    },
+    {
       label: "check:source-beta-docs",
       command: "pnpm",
       args: ["run", "check:source-beta-docs"],
@@ -59,6 +64,7 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
     { label: "release:pack", command: "pnpm", args: ["run", "release:pack", "--", "--tag", releaseTag] },
     { label: "release:consumer", command: "pnpm", args: packedConsumerArgs },
     { label: "typecheck", command: "pnpm", args: ["run", "typecheck"] },
+    { label: "scripts:test", command: "pnpm", args: ["run", "scripts:test"] },
     { label: "test", command: "pnpm", args: ["run", "test"] },
     { label: "git diff --check", command: "git", args: ["diff", "--check"] },
   ];

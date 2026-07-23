@@ -59,7 +59,7 @@ referenced through `$env`, with every value blank.
 | Template | Selected agent-process modules | Purpose |
 | --- | --- | --- |
 | `minimal` | Pi runtime and loopback webhook | Smallest runnable five-package closure; default. |
-| `personal` | Pi; Telegram, webhook, OpenAI API, operator; local memory/state; cron; OTLP | Sanitized Personal Agent process using current module schemas. Products remain separate. |
+| `personal` | Pi; Telegram, webhook, OpenAI API, operator; local memory/state; cron; OTLP | Sanitized Personal Agent process with a harmless project-owned MCP and Markdown job fixture. Products remain separate. |
 | `multi-runtime` | Pi, native Claude SDK, and loopback webhook | Focused same-family/cross-runtime fallback example. |
 
 The checked-in bootstrap schema validates the generated seed. After installing,
@@ -210,5 +210,6 @@ npm pack --dry-run ./packages/create-mono-agent
 
 Focused tests prove the full template/dependency matrix, names-only secret
 references, current module field shapes, deterministic bootstrap files,
+the Personal template's ordinary stdio MCP and Markdown cron surfaces,
 no-overwrite behavior, concurrent ownership, rollback after installer failure,
 CLI template selection, and delegation of non-scaffold commands.

@@ -6,7 +6,7 @@ This repository contains the config-first v1 framework built from npm packages u
 
 ## Successor bootstrap safety
 
-This private repository is the development-only successor. The original private
+This public repository is the development-only successor. The original private
 `mono-agent` repository remains the live source for the local CLI and Personal
 Agent. Do not publish packages, deploy or restart consumers, repoint services,
 or retire the predecessor from this checkout. Release, soak, observation,

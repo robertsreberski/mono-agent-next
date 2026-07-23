@@ -49,6 +49,7 @@ describe("verify-all", () => {
       "check:codex-discoverability",
       "check:consumer-docs-consistency",
       "check:getting-started-version-pins",
+      "check:source-beta-budgets",
       "check:source-beta-docs",
       "check:docs",
       "release:validate",
@@ -60,6 +61,7 @@ describe("verify-all", () => {
       "release:pack",
       "release:consumer",
       "typecheck",
+      "scripts:test",
       "test",
       "git diff --check",
     ]);
