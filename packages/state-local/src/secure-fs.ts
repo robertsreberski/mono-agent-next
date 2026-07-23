@@ -12,14 +12,10 @@ import {
   chmod,
   link,
   lstat,
-  mkdtemp,
   mkdir,
   open,
-  readFile,
   realpath,
-  rm,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -789,28 +785,25 @@ interface IndexEntry {
   readonly valueBytes: number;
 }
 
-async function createLeaseDatabase(): Promise<Buffer> {
-  const temporaryDirectory = await mkdtemp(join(tmpdir(), "mono-agent-state-lease-"));
-  const temporaryDatabase = join(temporaryDirectory, "lease.sqlite");
-  let database: DatabaseSync | undefined;
-  try {
-    database = new DatabaseSync(temporaryDatabase);
-    database.exec("PRAGMA journal_mode = OFF;");
-    database.exec(`PRAGMA application_id = ${String(STATE_INDEX_APPLICATION_ID)};`);
-    database.close();
-    database = undefined;
-    const bytes = await readFile(temporaryDatabase);
-    if (bytes.byteLength === 0 || bytes.byteLength > 1024 * 1024) {
-      throw new StateLocalError(
-        "STATE_CORRUPT",
-        "The local state process lease template has an invalid size.",
-      );
-    }
-    return bytes;
-  } finally {
-    database?.close();
-    await rm(temporaryDirectory, { recursive: true, force: true });
-  }
+function createLeaseDatabase(): Buffer {
+  // `DatabaseSync.serialize()` is not available on the minimum supported
+  // Node 22 runtime. An empty SQLite database is a single, stable format-3
+  // leaf page, so construct that canonical page directly instead of creating
+  // a less-safe pathname-backed staging database.
+  const pageBytes = 4_096;
+  const database = Buffer.alloc(pageBytes);
+  database.write("SQLite format 3\0", 0, "binary");
+  database.writeUInt16BE(pageBytes, 16);
+  database[18] = 1; // legacy rollback-journal write format
+  database[19] = 1; // legacy rollback-journal read format
+  database[21] = 64;
+  database[22] = 32;
+  database[23] = 32;
+  database.writeUInt32BE(1, 28); // one database page
+  database.writeUInt32BE(STATE_INDEX_APPLICATION_ID, 68);
+  database[100] = 0x0d; // empty sqlite_schema leaf-table page
+  database.writeUInt16BE(pageBytes, 105);
+  return database;
 }
 
 async function rejectSqliteSidecars(path: string): Promise<void> {

@@ -26,10 +26,64 @@ export class AgentModuleError extends Error {
   }
 }
 
+export type AgentAdmissionErrorCode =
+  | "not_accepting"
+  | "capacity_exceeded"
+  | "request_conflict"
+  | "request_in_progress"
+  | "stale_admission"
+  | "uncertain_admission";
+
 export class AgentAdmissionError extends Error {
-  constructor(message: string) {
+  readonly code: AgentAdmissionErrorCode;
+  readonly requestId?: string;
+  readonly runId?: string;
+
+  constructor(
+    code: AgentAdmissionErrorCode,
+    message: string,
+    context: { readonly requestId?: string; readonly runId?: string } = {},
+  ) {
     super(message);
     this.name = "AgentAdmissionError";
+    this.code = code;
+    if (context.requestId !== undefined) this.requestId = context.requestId;
+    if (context.runId !== undefined) this.runId = context.runId;
+  }
+}
+
+export type RunExecutionStatus = "failed" | "uncertain";
+
+export interface RunExecutionErrorOptions {
+  readonly cause?: unknown;
+  readonly requestId?: string;
+  readonly runId?: string;
+}
+
+/**
+ * Provider-neutral terminal failure from `AgentHost.submit`.
+ *
+ * `uncertain` means an externally visible effect or durable settlement could
+ * not be proved and the caller must inspect the run before retrying.
+ */
+export class RunExecutionError extends Error {
+  readonly status: RunExecutionStatus;
+  readonly failureCode: string;
+  readonly requestId?: string;
+  readonly runId?: string;
+
+  constructor(
+    status: RunExecutionStatus,
+    failureCode: string,
+    message: string,
+    options: RunExecutionErrorOptions = {},
+  ) {
+    super(message, options.cause === undefined ? undefined : { cause: options.cause });
+    this.name = "RunExecutionError";
+    this.status = status;
+    this.failureCode = failureCode;
+    if (options.requestId !== undefined) this.requestId = options.requestId;
+    if (options.runId !== undefined) this.runId = options.runId;
   }
 }
 

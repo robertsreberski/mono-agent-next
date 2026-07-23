@@ -6,7 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 
-import type { RuntimeTurnEvent, RuntimeTurnRequest } from "@mono-agent/module-sdk";
+import type {
+  RuntimeSession,
+  RuntimeTurnEvent,
+  RuntimeTurnRequest,
+} from "@mono-agent/module-sdk";
+import { RUNTIME_SESSION_UNAVAILABLE_CODE } from "@mono-agent/module-sdk";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -19,7 +24,7 @@ import {
   openCodeProcessEnvironment,
 } from "../environment.js";
 import type { ProcessLike, SpawnProcess } from "../process.js";
-import { createRuntimeOpenCode } from "../runtime.js";
+import { createRuntimeOpenCode, RuntimeOpenCodeError } from "../runtime.js";
 
 class FakeProcess extends EventEmitter implements ProcessLike {
   readonly pid = 4321;
@@ -464,6 +469,77 @@ describe("runtime-opencode", () => {
     })).toMatchObject({ details: { state: "created" } });
   });
 
+  it("publishes only bounded accessor-free redacted process causes", async () => {
+    const secret = "sk-secret";
+    let accessorReads = 0;
+    const processCause = new Error(
+      `spawn rejected ${secret} ${"x".repeat(8_192)}`,
+    ) as Error & { code?: string };
+    processCause.name = `SpawnFailure-${secret}`;
+    Object.defineProperty(processCause, "code", {
+      configurable: true,
+      enumerable: true,
+      value: `SPAWN_${secret}`,
+      writable: true,
+    });
+    Object.defineProperty(processCause, "cause", {
+      configurable: true,
+      get() {
+        accessorReads += 1;
+        return new Error(`nested ${secret}`);
+      },
+    });
+    Object.defineProperty(processCause, "danger", {
+      configurable: true,
+      get() {
+        accessorReads += 1;
+        return secret;
+      },
+    });
+    const runtime = createRuntimeOpenCode({
+      config: parseRuntimeOpenCodeConfig({
+        timeoutMs: 2_000,
+        environment: { OPENAI_API_KEY: secret },
+      }),
+      instanceId: "opencode-runtime",
+      workspaceDirectory: process.cwd(),
+      spawnProcess() {
+        const child = new FakeProcess();
+        queueMicrotask(() => child.emit("error", processCause));
+        return child;
+      },
+    });
+
+    let failure: unknown;
+    try {
+      await runtime.start?.({ signal: new AbortController().signal });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(RuntimeOpenCodeError);
+    const typed = failure as RuntimeOpenCodeError;
+    expect(typed.message).not.toContain(secret);
+    expect(typed.message.length).toBeLessThanOrEqual(4_096);
+    expect(typed.cause).toBeInstanceOf(Error);
+    expect(typed.cause === processCause).toBe(false);
+    const cause = typed.cause as Error & { readonly code?: string };
+    expect(cause.message).not.toContain(secret);
+    expect(cause.message.length).toBeLessThanOrEqual(4_096);
+    expect(cause.name).toBe("SpawnFailure-[REDACTED]");
+    expect(cause.code).toBe("SPAWN_[REDACTED]");
+    expect(Object.getOwnPropertyDescriptor(cause, "cause")).toBeUndefined();
+    const descriptors = Object.values(Object.getOwnPropertyDescriptors(cause));
+    expect(descriptors.every((descriptor) => !("get" in descriptor))).toBe(true);
+    expect(
+      descriptors
+        .filter((descriptor) => "value" in descriptor)
+        .map((descriptor) => String(descriptor.value))
+        .join("\n"),
+    ).not.toContain(secret);
+    expect(accessorReads).toBe(0);
+  });
+
   it("uses the authenticated 1.15.13 server API and waits for completed assistant plus final idle", async () => {
     const api = new FakeOpenCodeApi();
     const { runtime, invocations, serverChild } = harness(api);
@@ -493,6 +569,7 @@ describe("runtime-opencode", () => {
       },
       session: {
         id: "session-1",
+        conversationId: "conversation",
         route: {
           runtimeInstanceId: "opencode-runtime",
           model: "anthropic/claude-sonnet-4-5",
@@ -562,6 +639,72 @@ describe("runtime-opencode", () => {
     expect(serverChild()?.signals).toEqual(["SIGTERM"]);
   });
 
+  it("rejects wrong session linkage before any per-turn server request", async () => {
+    const api = new FakeOpenCodeApi();
+    const { runtime } = harness(api);
+    await runtime.start?.({ signal: new AbortController().signal });
+    const requestsAfterStart = api.requests.length;
+    const exactSession: RuntimeSession = {
+      id: "shared",
+      conversationId: "conversation",
+      route: {
+        runtimeInstanceId: "opencode-runtime",
+        model: "anthropic/claude-sonnet-4-5",
+      },
+    };
+    const invalidSessions: RuntimeSession[] = [
+      {
+        ...exactSession,
+        route: { ...exactSession.route, runtimeInstanceId: "other-runtime" },
+      },
+      {
+        ...exactSession,
+        route: { ...exactSession.route, model: "anthropic/claude-opus-4-1" },
+      },
+      {
+        ...exactSession,
+        conversationId: "other-conversation",
+      },
+    ];
+
+    for (const session of invalidSessions) {
+      await expect(runtime.runTurn(
+        request("wrong-linkage", session),
+        context(),
+      )).rejects.toMatchObject({ code: "SESSION_INVALID" });
+    }
+    expect(api.requests).toHaveLength(requestsAfterStart);
+    await runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+  });
+
+  it("maps a provider-native 404 continuation to the shared unavailable code", async () => {
+    const api = new FakeOpenCodeApi();
+    const { runtime } = harness(api);
+    await runtime.start?.({ signal: new AbortController().signal });
+    await expect(runtime.runTurn(
+      request("missing-session", {
+        id: "missing",
+        conversationId: "conversation",
+        route: {
+          runtimeInstanceId: "opencode-runtime",
+          model: "anthropic/claude-sonnet-4-5",
+        },
+      }),
+      context(),
+    )).rejects.toMatchObject({
+      code: RUNTIME_SESSION_UNAVAILABLE_CODE,
+      retryability: "not-retryable",
+      sideEffects: "none",
+    });
+    await runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+  });
+
   it("repairs resumed permissions and serializes prompts for the same session", async () => {
     const api = new FakeOpenCodeApi();
     api.addSession("shared", [
@@ -571,6 +714,7 @@ describe("runtime-opencode", () => {
     await runtime.start?.({ signal: new AbortController().signal });
     const session = {
       id: "shared",
+      conversationId: "conversation",
       route: {
         runtimeInstanceId: "opencode-runtime",
         model: "anthropic/claude-sonnet-4-5",
@@ -617,6 +761,7 @@ describe("runtime-opencode", () => {
     await runtime.start?.({ signal: new AbortController().signal });
     const session = {
       id: "shared",
+      conversationId: "conversation",
       route: {
         runtimeInstanceId: "opencode-runtime",
         model: "anthropic/claude-sonnet-4-5",
@@ -653,6 +798,7 @@ describe("runtime-opencode", () => {
     await runtime.start?.({ signal: new AbortController().signal });
     const session = {
       id: "shared",
+      conversationId: "conversation",
       route: {
         runtimeInstanceId: "opencode-runtime",
         model: "anthropic/claude-sonnet-4-5",
@@ -752,6 +898,39 @@ describe("runtime-opencode", () => {
     expect(runtime.health?.({
       signal: new AbortController().signal,
     })).toMatchObject({ details: { state: "draining" } });
+    serverChild()?.closeNow("SIGTERM");
+    await runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+  });
+
+  it("quarantines on native activity that omits its session binding", async () => {
+    const api = new FakeOpenCodeApi();
+    const { runtime, serverChild } = harness(api, false);
+    await runtime.start?.({ signal: new AbortController().signal });
+    const turn = runtime.runTurn(request("turn"), context());
+    await vi.waitFor(() => expect(api.prompts).toHaveLength(1));
+    api.emit("permission.asked", {
+      id: "permission-unbound",
+      permission: "bash",
+      patterns: ["*"],
+    });
+    await expect(turn).rejects.toMatchObject({
+      code: "NATIVE_TOOL_PROTOCOL_VIOLATION",
+      retryability: "not-retryable",
+      sideEffects: "unknown",
+    });
+    expect(runtime.health?.({
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      status: "degraded",
+      details: {
+        state: "draining",
+        quarantineCode: "NATIVE_TOOL_PROTOCOL_VIOLATION",
+      },
+    });
+    expect(serverChild()?.signals[0]).toBe("SIGTERM");
     serverChild()?.closeNow("SIGTERM");
     await runtime.stop?.({
       signal: new AbortController().signal,

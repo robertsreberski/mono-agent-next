@@ -7,8 +7,10 @@ import {
   createFixtureProject,
   minimalConfig,
   runtimeController,
+  runtimeSession,
   type FixtureProject,
 } from "./fixture.js";
+import { MemoryStateStore } from "./durable-state-fixture.js";
 
 const projects: FixtureProject[] = [];
 
@@ -24,6 +26,11 @@ describe("complete agent plane", () => {
     const operatorName = `@fixture/operator-${suffix}`;
     const published: unknown[] = [];
     const startedAt = "2026-07-22T12:00:00.000Z";
+    const state = Object.assign(new MemoryStateStore(), {
+      async publishHostPresence(request: unknown) {
+        published.push(request);
+      },
+    });
     const project = await createFixtureProject([
       {
         name: runtimeName,
@@ -34,19 +41,7 @@ describe("complete agent plane", () => {
         name: stateName,
         kind: "state",
         controller: {
-          create: () => ({
-            async read() { return undefined; },
-            async write() { return { version: "1", updatedAt: startedAt }; },
-            async delete() { return false; },
-            async list() { return { records: [] }; },
-            async compareAndSwap() { return { status: "conflict" }; },
-            async upsertPresence(request: { presence: unknown }) { return request.presence; },
-            async removePresence() { return false; },
-            async listPresence() { return []; },
-            async publishHostPresence(request: unknown) {
-              published.push(request);
-            },
-          }),
+          create: () => state,
         },
       },
       {
@@ -181,11 +176,11 @@ describe("complete agent plane", () => {
     const stateName = `@fixture/state-${suffix}`;
     const memoryName = `@fixture/memory-${suffix}`;
     const exporterName = `@fixture/exporter-${suffix}`;
-    const records = new Map<string, { value: Uint8Array; version: string; updatedAt: string }>();
+    const state = new MemoryStateStore();
+    const records = state.records;
     const captures: unknown[] = [];
     const exports: unknown[] = [];
     const requests: Array<Record<string, unknown>> = [];
-    let version = 0;
 
     const project = await createFixtureProject([
       {
@@ -195,7 +190,7 @@ describe("complete agent plane", () => {
           requests.push(request as Record<string, unknown>);
           return {
             ...(completed(`answer-${String(requests.length)}`) as Record<string, unknown>),
-            session: { id: "native-session" },
+            session: runtimeSession("native-session", request),
           };
         }),
       },
@@ -203,45 +198,7 @@ describe("complete agent plane", () => {
         name: stateName,
         kind: "state",
         controller: {
-          create: () => ({
-            async read(request: { key: string }) {
-              const record = records.get(request.key);
-              return record === undefined ? undefined : { key: request.key, ...record };
-            },
-            async write(request: { key: string; value: Uint8Array; expectedVersion?: string }) {
-              const current = records.get(request.key);
-              if (request.expectedVersion !== undefined && request.expectedVersion !== current?.version) {
-                throw new Error("CAS mismatch");
-              }
-              const result = { version: String(++version), updatedAt: new Date().toISOString() };
-              records.set(request.key, { value: request.value, ...result });
-              return result;
-            },
-            async compareAndSwap(request: { key: string; value: Uint8Array; expectedVersion: string | null }) {
-              const current = records.get(request.key);
-              const matches = request.expectedVersion === null
-                ? current === undefined
-                : current?.version === request.expectedVersion;
-              if (!matches) return { status: "conflict", ...(current === undefined ? {} : { currentVersion: current.version }) };
-              const result = { version: String(++version), updatedAt: new Date().toISOString() };
-              const record = { key: request.key, value: request.value, ...result };
-              records.set(request.key, { value: request.value, ...result });
-              return { status: "applied", record };
-            },
-            async delete(request: { key: string }) {
-              return records.delete(request.key);
-            },
-            async list(request: { prefix?: string }) {
-              return {
-                records: [...records.entries()]
-                  .filter(([key]) => request.prefix === undefined || key.startsWith(request.prefix))
-                  .map(([key, record]) => ({ key, ...record })),
-              };
-            },
-            async upsertPresence(request: { presence: unknown }) { return request.presence; },
-            async removePresence() { return false; },
-            async listPresence() { return []; },
-          }),
+          create: () => state,
         },
       },
       {
@@ -303,7 +260,11 @@ describe("complete agent plane", () => {
     await second.stop();
 
     const secondRequest = requests[1]!;
-    expect(secondRequest.session).toEqual({ id: "native-session" });
+    expect(secondRequest.session).toEqual({
+      id: "native-session",
+      conversationId: "durable",
+      route: { runtimeInstanceId: "main", model: "fixture:model" },
+    });
     expect(JSON.stringify(secondRequest.messages)).toContain("durable preference");
     expect(captures).toHaveLength(2);
     expect(exports).toHaveLength(2);
@@ -406,8 +367,8 @@ describe("complete agent plane", () => {
     const stateName = `@fixture/state-trigger-recovery-${suffix}`;
     const triggerName = `@fixture/trigger-recovery-${suffix}`;
     const channelName = `@fixture/channel-trigger-recovery-${suffix}`;
-    const records = new Map<string, { value: Uint8Array; version: string; updatedAt: string }>();
-    let version = 0;
+    const state = new MemoryStateStore();
+    const records = state.records;
     let turns = 0;
     let deliveries = 0;
     let deliveryStatus: "delivered" | "failed" | "unknown" = "failed";
@@ -424,43 +385,7 @@ describe("complete agent plane", () => {
         name: stateName,
         kind: "state",
         controller: {
-          create: () => ({
-            async read(request: { key: string }) {
-              const record = records.get(request.key);
-              return record === undefined ? undefined : { key: request.key, ...record };
-            },
-            async write(request: { key: string; value: Uint8Array; expectedVersion?: string }) {
-              const current = records.get(request.key);
-              if (request.expectedVersion !== undefined && current?.version !== request.expectedVersion) {
-                throw new Error("fixture state version conflict");
-              }
-              const result = { version: String(++version), updatedAt: new Date().toISOString() };
-              records.set(request.key, { value: new Uint8Array(request.value), ...result });
-              return result;
-            },
-            async delete(request: { key: string }) { return records.delete(request.key); },
-            async list(request: { prefix?: string }) {
-              return {
-                records: [...records.entries()]
-                  .filter(([key]) => request.prefix === undefined || key.startsWith(request.prefix))
-                  .map(([key, record]) => ({ key, ...record })),
-              };
-            },
-            async compareAndSwap(request: { key: string; value: Uint8Array; expectedVersion: string | null }) {
-              const current = records.get(request.key);
-              const matches = request.expectedVersion === null
-                ? current === undefined
-                : current?.version === request.expectedVersion;
-              if (!matches) return { status: "conflict", ...(current === undefined ? {} : { currentVersion: current.version }) };
-              const result = { version: String(++version), updatedAt: new Date().toISOString() };
-              const record = { key: request.key, value: new Uint8Array(request.value), ...result };
-              records.set(request.key, { value: record.value, ...result });
-              return { status: "applied", record };
-            },
-            async upsertPresence(request: { presence: unknown }) { return request.presence; },
-            async removePresence() { return false; },
-            async listPresence() { return []; },
-          }),
+          create: () => state,
         },
       },
       {
@@ -529,7 +454,9 @@ describe("complete agent plane", () => {
     await expect(host.runModuleCommand("cron", "cron:invoke", "failed-delivery")).resolves.toMatchObject({
       value: { status: "accepted" },
     });
-    expect(turns).toBe(2);
+    // The failed delivery is retried from the settled model response; the
+    // provider turn itself remains exactly-once.
+    expect(turns).toBe(1);
     expect(deliveries).toBe(2);
     deliveryStatus = "unknown";
     await expect(host.runModuleCommand("cron", "cron:invoke", "unknown-delivery")).resolves.toMatchObject({
@@ -543,28 +470,28 @@ describe("complete agent plane", () => {
     await expect(host.runModuleCommand("cron", "cron:invoke", "unknown-delivery")).resolves.toMatchObject({
       value: { status: "rejected", reason: "duplicate trigger event" },
     });
-    expect(turns).toBe(3);
+    expect(turns).toBe(2);
     expect(deliveries).toBe(3);
     deliveryStatus = "delivered";
     await host.stop();
 
     const staleId = "stale-started";
     const staleKey = `core/triggers/${createHash("sha256").update(staleId).digest("hex")}`;
-    records.set(staleKey, {
+    await state.write({
+      key: staleKey,
       value: new TextEncoder().encode(JSON.stringify({
         status: "started",
         event: { id: staleId },
         startedAt: "2020-01-01T00:00:00.000Z",
         leaseExpiresAt: "2020-01-01T00:30:00.000Z",
       })),
-      version: String(++version),
-      updatedAt: new Date().toISOString(),
+      signal: new AbortController().signal,
     });
     const restarted = await createAgentHost(project.configPath);
     await expect(restarted.runModuleCommand("cron", "cron:invoke", staleId)).resolves.toMatchObject({
       value: { status: "accepted" },
     });
-    expect(turns).toBe(4);
+    expect(turns).toBe(3);
     await restarted.stop();
   });
 });

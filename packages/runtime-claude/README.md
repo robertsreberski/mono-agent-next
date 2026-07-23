@@ -63,6 +63,15 @@ to the other.
 5. Cancellation interrupts only the active query/process, and every failure
    carries typed retryability and side-effect settlement.
 
+Native session ids are private to the exact runtime instance, model, and
+canonical conversation that created them. A mismatched continuation fails
+before either transport is invoked.
+
+A provider-confirmed missing continuation uses the shared
+`runtime_session_unavailable` error code so Core can retire it without
+conflating provider loss with an invalid session envelope. Provider failures
+expose only bounded, redacted, accessor-free `Error` cause snapshots.
+
 ### Package structure
 
 | Source | Responsibility |

@@ -19,6 +19,7 @@ import {
   validateLoadedModuleReferences,
 } from "./module-loader.js";
 import { parseProjectMcpConfig, type ProjectMcpConfig } from "./mcp.js";
+import { runtimeNativeToolPolicyIssue } from "./native-tool-policy.js";
 import { normalizeRuntimeModelValidation } from "./runtime-result-normalizer.js";
 import type {
   AgentConfig,
@@ -180,11 +181,18 @@ function validateRuntimeRoutes(
       });
       continue;
     }
-    if ((validation.nativeTools?.length ?? 0) > 0) {
+    const nativeToolIssue = runtimeNativeToolPolicyIssue({
+      nativeTools: validation.nativeTools ?? [],
+      ...(validation.capabilities === undefined
+        ? {}
+        : { capabilities: validation.capabilities }),
+      config,
+    });
+    if (nativeToolIssue !== undefined) {
       issues.push({
         path: `${routePath}.model`,
-        message: `${loaded.packageName} advertises native tools that Core cannot yet govern`,
-        code: "unsupported_native_tools",
+        message: `${loaded.packageName} ${nativeToolIssue}`,
+        code: "native_tool_policy",
       });
     }
   }

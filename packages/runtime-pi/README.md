@@ -18,8 +18,9 @@ Runtime module.
 ## Responsibility
 
 Own Pi model resolution, atomically persisted API-key/OAuth credentials,
-isolated native provider attempts, resumable session forks, live steering, and
-translation between Pi events and the mono-agent runtime slot.
+isolated native provider attempts, durably reserved resumable session forks,
+live steering, governed literal edits and web search, and translation between
+Pi events and the mono-agent runtime slot.
 
 ## Install / Usage
 
@@ -74,10 +75,40 @@ Relative `auth.path` and `sessions.root` values resolve from the directory that
 contains the loaded agent config. The agent workspace remains the execution
 working directory for native Pi attempts.
 
-This runtime reports `approvals: false` and `sandbox: false`, both globally and
-for exact model routes. It delegates tools to Core but does not implement an
-approval prompt or a sandbox boundary; callers must select automatic approval
-policy and `sandbox.mode: "off"` for this slice.
+This runtime reports `approvals: true` and `sandbox: false`, both globally and
+for exact model routes. Core-owned tools still execute through Core. Three
+runtime-owned tools are advertised before provider dispatch:
+
+- `NodeRepl`: `read`, `write`, `execute`, and `network`;
+- `Edit`: `read` and `write`;
+- `WebSearch`: `network`.
+
+Every descriptor uses `approval: "core-callback"` and
+`sandbox: "unsupported"`. Core must accept each exact descriptor under the
+configured and request-level tool policies and supply
+`RuntimeTurnContext.requestApproval` for every turn. Automatic allow/deny
+policies return their decision through that same callback; interactive policy
+uses the configured interaction handler. A missing or mismatched approval
+bridge fails before provider access, and denial happens before filesystem,
+process, or network effects.
+
+Approval summaries bind decisions to exact paths, queries, limits, and
+`replace_all`, plus complete UTF-8 byte lengths, SHA-256 digests, and bounded
+escaped previews of code and replacement strings. `Edit` accepts only an
+existing, owner-controlled, single-link regular UTF-8 file below the workspace,
+rejects every symlink component, and performs identity-and-digest checked
+literal replacement through a same-directory atomic rename. `WebSearch` uses a
+fixed HTTPS endpoint, bounded response and output sizes, checked same-origin
+redirects, a whole-request timeout, strict content type and UTF-8 decoding, and
+distinguishes a recognized empty result page from transport, HTTP, or parser
+failure.
+
+The REPL child inherits the host's `process.env`; approved code can inspect
+environment values in addition to the declared filesystem, subprocess, and
+network authority. Because this package does not implement a sandbox boundary,
+routes using these native tools require `sandbox.mode: "off"`. Operators should
+treat an approved REPL call as granting the code full authority within the
+runtime process's operating-system permissions.
 
 ## Architecture
 
@@ -87,23 +118,39 @@ policy and `sandbox.mode: "off"` for this slice.
    instance.
 2. The runtime resolves the `provider:model` route through Pi's built-in model
    registry or an explicitly configured local provider.
-3. A fresh native Pi `AgentHarness` attempt is seeded from Core's canonical
+3. Core's pre-provider negotiation accepts the exact Node REPL, Edit, and
+   WebSearch authority descriptors and supplies the fail-closed approval
+   callback.
+4. A fresh native Pi `AgentHarness` attempt is seeded from Core's canonical
    messages, or an explicitly linked native session is forked for continuation.
-4. Failed, cancelled, and incomplete forks are deleted while the caller's prior
-   session remains immutable. Only a completed fork becomes the next opaque
-   continuation point.
-5. Pi text, thinking, tools, usage, compaction, live steering, and session
+5. The harness exposes the three governed native tools. The Node.js REPL child
+   is lazy and run-scoped; Edit and WebSearch independently validate and bound
+   each approved call.
+6. Persistent attempts create an owner-private reservation before the Pi JSONL
+   session, bind the reservation token into the session header, and atomically
+   commit the marker only after successful settlement. Startup removes only
+   token-matched, dead-owner uncommitted attempts. Failed, cancelled, and
+   incomplete forks are deleted while the caller's prior committed session
+   remains immutable.
+7. Pi text, thinking, tools, usage, compaction, live steering, and session
    linkage are normalized into module-sdk contracts.
+
+Native session ids are accepted only with the exact runtime-instance, model,
+and canonical-conversation binding that created them. A mismatch is rejected
+before model resolution or any provider request.
 
 ### Package structure
 
 | Source | Responsibility |
 | --- | --- |
 | `config.ts` | Strict runtime configuration schema and validation. |
-| `credentials.ts` | Owner-private API-key/OAuth loading and atomic refresh rotation. |
+| `credentials.ts` | Descriptor-validated owner-private API-key/OAuth loading and identity-checked atomic refresh rotation. |
+| `edit.ts` | Bounded literal workspace editing with no-follow identity checks and atomic replacement. |
 | `models.ts` | Built-in models plus bounded, redirect-safe local-provider discovery. |
-| `sessions.ts` | Atomic fresh/forked native attempt reservations. |
+| `node-repl.ts`, `node-repl-worker.ts` | Bounded run-scoped Node REPL child lifecycle and evaluation. |
+| `sessions.ts` | Durable owner-private reservation/commit markers and atomic fresh/forked native attempts. |
 | `runtime.ts` | Native harness lifecycle, sessions, live input, events, tools, and settlement. |
+| `web-search.ts` | Bounded checked HTTP lifecycle and strict search-result parsing. |
 | `index.ts` | The typed `monoAgentModule` definition. |
 
 ## Public API
@@ -143,8 +190,9 @@ adapter, core host, channels, state implementations, or products.
 
 It does not choose cross-runtime fallbacks, persist the canonical transcript,
 load agent configuration, run channels, install packages, own MCP processes,
-implement approvals or sandboxing, or widen tool policy. Core retains those
-responsibilities.
+render approval interactions, implement sandboxing, or widen tool policy. Core
+retains those responsibilities. The runtime requests a correlated Core decision
+for every native-tool call and never interprets provider output as approval.
 
 ## Related Documentation
 

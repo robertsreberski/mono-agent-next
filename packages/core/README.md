@@ -21,8 +21,9 @@ Core infrastructure.
 ## Responsibility
 
 Own strict configuration, direct-dependency module loading, runtime routing,
-turn admission, bounded skill disclosure, project MCP clients, health, drain,
-and shutdown.
+idempotent turn admission, canonical transcript and run settlement, exact
+provider-session linkage, bounded skill disclosure, project MCP clients,
+proactive-delivery receipts, health, drain, and shutdown.
 
 ## Install / Usage
 
@@ -35,11 +36,19 @@ import { createAgentHost } from "@mono-agent/core";
 
 const host = await createAgentHost("./mono-agent.config.json");
 const response = await host.submit({
+  requestId: "example-request-1",
   conversationId: "example",
   text: "Hello",
 });
+const run = await host.readRun(response.runId);
 await host.stop();
 ```
+
+`requestId` is the idempotency identity. Reusing it with the exact same input
+joins an in-process turn or returns its durably cached public response after a
+restart. Reusing it with another conversation or payload fails with
+`AgentAdmissionError` code `request_conflict`; an expired running admission is
+classified `uncertain` and is never replayed.
 
 Configuration is strict JSON. Selecting a package with `$use` never installs
 or scans for code: the package must already be a literal direct dependency and
@@ -90,6 +99,48 @@ manifests are then preflighted before module imports, and module-owned schemas
 validate inline leaves. `createAgentHost` starts that exact validated snapshot
 and routes normalized requests.
 
+With an artifact-capable state module, Core admits each request and settles its
+run, canonical transcript revision, public response cache, and exact
+conversation/runtime/model session pointer through bounded multi-key
+transactions. Transcript revisions are append-only. Attachment bytes live in
+the content-addressed artifact plane and the transcript stores immutable refs;
+provider sessions, tool arguments/results, and raw provider failures never
+enter the public replay or response cache. Failed publication retains a
+run-scoped intent so recovery is inspectable instead of silently losing or
+orphaning ownership evidence.
+
+Fallback is attempt-scoped. Only a typed retryable runtime failure declaring
+`sideEffects: "none"` may advance to the next eligible route, and only before
+Core observes text, tool execution, an interaction, live input, or a returned
+result. Diagnostic, usage, compaction, and exact-session events alone are not
+treated as committed effects. Core captures one bounded accessor-free error
+snapshot at the catch boundary and uses it for evidence, uncertainty, and
+fallback; raw runtime exception graphs never become public error causes.
+
+Eligibility is derived from the submitted request as well as explicit
+requirements: attachments, structured-output schemas, `maxTurns`, and
+`maxOutputTokens` automatically require an honestly advertised route
+capability. Runtime-owned tools are intersected with global and request-local
+tool policy before provider dispatch. Callback-governed invocations are bound
+to their advertised identity/effects and receive a durable automatic
+allow/deny or a bounded approval interaction; runtime-enforced tools make a
+route ineligible whenever Core would need to narrow authority the runtime
+cannot prove.
+
+Provider continuation is reused only for the exact conversation/runtime/model
+route. Canonical expiry, idle rollover, daily rollover, provider eviction,
+capability downgrades, and per-message migration remove the exact stale durable
+pointer with compare-and-swap, so a raced replacement is never deleted and an
+expired session is not resurrected after restart. Isolated proactive runs
+neither consume nor replace the ordinary conversation lineage. A typed
+session-unavailable failure evicts the supplied pointer and retries that same
+route exactly once from canonical history without a session, before ordinary
+fallback is considered.
+
+Proactive channel delivery uses the same fail-closed discipline: a known
+failure may be retried only by another explicit `deliver()` call, while an
+ambiguous or stale outcome remains `unknown` and is never resent.
+
 ### Package structure
 
 | Module | Purpose |
@@ -99,7 +150,11 @@ and routes normalized requests.
 | `module-loader.ts` | Dependency, lockfile, manifest, kind, and API checks. |
 | `schema.ts` | Exact schema composition and redacted explanation. |
 | `mcp.ts` | Ordinary project stdio and HTTP MCP clients plus Core tool identity. |
-| `host.ts` | Admission, serialized turns, bounded skill disclosure, routing, lifecycle, and health. |
+| `native-tool-policy.ts` | Runtime-owned tool, approval, request-narrowing, and sandbox-policy intersection. |
+| `transcript.ts` | Strict provider-neutral append-only replay records and interaction evidence. |
+| `execution-store.ts` | Bounded state transaction/scan and artifact adapter. |
+| `run-journal.ts` | Admission, run events, settlement, session, artifact-intent, and delivery idempotency. |
+| `host.ts` | Admission, serialized turns, exact sessions, safe fallback, settlement, lifecycle, and health. |
 
 ## Public API
 
@@ -113,6 +168,11 @@ and routes normalized requests.
 | Explain config ownership without leaking env values | `explainAgentConfig` |
 | Inspect the selected graph without starting it | `inspectAgent` |
 | Start a bounded foreground agent | `createAgentHost` |
+| Submit or safely retry one request | `AgentHost.submit` with a stable `requestId` |
+| Page durable run summaries | `AgentHost.listRuns` |
+| Inspect one safe run/event/transcript projection | `AgentHost.readRun` |
+| Branch on admission outcomes | `AgentAdmissionError.code` |
+| Classify a failed or uncertain submitted run | `RunExecutionError.status`, `.failureCode`, and `.runId` |
 
 <!-- public-api-inventory:start -->
 <!-- Generated by scripts/generate-public-api-docs.mjs. Do not edit by hand. -->
@@ -123,6 +183,7 @@ Every symbol exported by each public code entrypoint is listed below.
 
 ```text
 AgentAdmissionError
+AgentAdmissionErrorCode
 AgentApprovalAnswer
 AgentApprovalAnswerStatus
 AgentAskAnswer
@@ -139,6 +200,7 @@ AgentHost
 AgentHostOptions
 AgentHostStartInfo
 AgentInspection
+AgentInteractionEvidence
 AgentLiveInput
 AgentLiveInputStatus
 AgentLoadOptions
@@ -146,7 +208,16 @@ AgentModuleCommandResult
 AgentModuleError
 AgentPolicyConfig
 AgentResponse
+AgentResponseMessage
+AgentRunAttemptEvidence
+AgentRunEvent
+AgentRunHistoryPage
+AgentRunRecord
+AgentRunStatus
+AgentRunSummary
 AgentSubmitInput
+AgentTranscriptContentPart
+AgentTranscriptEntry
 AgentValidationResult
 ConfigExplanationEntry
 EnvReference
@@ -156,6 +227,9 @@ LoadedAgentModule
 LoadedAuthoritySource
 ModuleKind
 ResolvedAgentPaths
+RunExecutionError
+RunExecutionErrorOptions
+RunExecutionStatus
 RuntimeRoute
 SelectedModuleConfig
 composeAgentConfigSchema
@@ -180,7 +254,7 @@ state, trigger, exporter, sandbox, UI, or host product.
 
 ## What This Package Does Not Own
 
-Provider authentication and sessions, transport mechanics, durable storage,
+Provider authentication and session internals, transport mechanics, durable storage formats,
 memory algorithms, exporters, renderers, package installation, service
 management, and product configuration remain outside core.
 
@@ -193,4 +267,7 @@ management, and product configuration remain outside core.
 
 Run `pnpm --filter @mono-agent/core test`, `build`, and `typecheck`. Focused
 tests cover strict config rejection, dependency and package preflight, lifecycle
-ordering and unwind, serialized admission, fallback policy, redaction, and MCP.
+ordering and unwind, atomic request deduplication and restart replay, stale-run
+classification, exact session continuation, append-only transcripts,
+interaction evidence, delivery idempotency, fallback policy, redaction, and
+MCP.

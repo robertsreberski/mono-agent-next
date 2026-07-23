@@ -18,6 +18,8 @@ export const runtimeOpenCodeCapabilities: RuntimeCapabilities = Object.freeze({
   structuredOutput: false,
   sandbox: false,
   sessions: true,
+  maxTurns: false,
+  maxOutputTokens: false,
   liveInput: false,
 });
 

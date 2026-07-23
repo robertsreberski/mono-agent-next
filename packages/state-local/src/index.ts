@@ -38,7 +38,14 @@ export const monoAgentModule = defineStateModule({
     apiVersion: 1,
     kind: "state",
     responsibility: "Provides owner-private CAS state, durable transcript/run records, idempotency, and presence publication.",
-    capabilities: ["state.local", "state.cas", "state.presence", "state.artifacts"],
+    capabilities: [
+      "state.local",
+      "state.cas",
+      "state.transactions",
+      "state.scan",
+      "state.presence",
+      "state.artifacts",
+    ],
   },
   schema: stateLocalConfigSchema,
   create: async (context) => StateLocalStore.open(

@@ -292,6 +292,8 @@ describe("public compliance assertions", () => {
         ...runtimeCapabilities,
         artifactResults: true,
         liveInput: false,
+        maxTurns: true,
+        maxOutputTokens: true,
       },
       runTurn() {},
     })).not.toThrow();

@@ -81,6 +81,15 @@ compatibility field and only accepts `true`.
 7. Same-session prompts are serialized. Cancellation finishes a bounded native
    session abort before releasing that session to another prompt.
 
+Native session ids are accepted only with the exact runtime-instance, model,
+and canonical-conversation binding that created them. A mismatch is rejected
+before any per-turn server request.
+
+A provider `404` for an otherwise valid continuation uses the shared
+`runtime_session_unavailable` error code so Core can retire it without
+conflating provider loss with an invalid session envelope. Process and provider
+failures expose only bounded, redacted, accessor-free `Error` cause snapshots.
+
 ### Package structure
 
 | Source | Responsibility |

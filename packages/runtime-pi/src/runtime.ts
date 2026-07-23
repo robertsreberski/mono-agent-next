@@ -1,4 +1,6 @@
 import { Buffer } from "node:buffer";
+import { createHash, randomUUID } from "node:crypto";
+import { TextDecoder } from "node:util";
 
 import {
   AgentHarness,
@@ -16,7 +18,12 @@ import {
   type TSchema,
   type Usage,
 } from "@earendil-works/pi-ai";
-import { RuntimeTurnError } from "@mono-agent/module-sdk";
+import {
+  parseApprovalDecision,
+  parseApprovalRequest,
+  RUNTIME_SESSION_UNAVAILABLE_CODE,
+  RuntimeTurnError,
+} from "@mono-agent/module-sdk";
 import type {
   JsonValue,
   ModuleDiagnostic,
@@ -28,6 +35,8 @@ import type {
   ModuleStopContext,
   Runtime,
   RuntimeCapabilities,
+  RuntimeNativeToolDescriptor,
+  RuntimeSession,
   RuntimeToolCall,
   RuntimeToolDefinition,
   RuntimeToolResult,
@@ -43,12 +52,42 @@ import type {
 import type { RuntimePiConfig } from "./config.js";
 import { parsePiModelReference } from "./config.js";
 import { ReadOnlyPiCredentialStore, redactRuntimePiText, resolveRuntimePiPath } from "./credentials.js";
-import { runtimePiNativeTools } from "./model.js";
-import { createRuntimePiModelRegistry, type RuntimePiModelRegistry } from "./models.js";
+import {
+  runtimePiEditTool,
+  runtimePiNativeTools,
+  runtimePiNodeReplTool,
+  runtimePiWebSearchTool,
+} from "./model.js";
+import {
+  createRuntimePiModelRegistry,
+  RuntimePiModelDiscoveryError,
+  type RuntimePiModelRegistry,
+} from "./models.js";
+import {
+  editLiteralFile,
+  EDIT_MAX_PATH_BYTES,
+  EDIT_MAX_STRING_BYTES,
+  type LiteralEditInput,
+  validateLiteralEditInput,
+} from "./edit.js";
+import {
+  createNodeReplController,
+  NODE_REPL_MAX_CODE_BYTES,
+  type NodeReplController,
+} from "./node-repl.js";
 import {
   RuntimePiSessionManager,
+  RuntimePiSessionUnavailableError,
   type RuntimePiSessionAttemptResult,
 } from "./sessions.js";
+import {
+  formatWebSearchResults,
+  searchWeb,
+  validateWebSearchInput,
+  WEB_SEARCH_MAX_QUERY_BYTES,
+  WEB_SEARCH_MAX_RESULTS,
+  type WebSearchInput,
+} from "./web-search.js";
 
 const EMPTY_USAGE: Usage = {
   input: 0,
@@ -58,6 +97,10 @@ const EMPTY_USAGE: Usage = {
   totalTokens: 0,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
+
+const NODE_REPL_APPROVAL_PREVIEW_MAX_BYTES = 1_024;
+const NATIVE_APPROVAL_PREVIEW_MAX_BYTES = 1_024;
+const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
 type RuntimeState = "created" | "running" | "draining" | "stopped";
 
@@ -70,22 +113,40 @@ export interface CreateRuntimePiOptions {
 }
 
 export class RuntimePiError extends RuntimeTurnError {
-  declare readonly code: "RUNTIME_NOT_RUNNING" | "MODEL_INVALID" | "PROVIDER_FAILED" | "SESSION_INVALID" | "UNSUPPORTED";
+  declare readonly code:
+    | "RUNTIME_NOT_RUNNING"
+    | "MODEL_INVALID"
+    | "PROVIDER_FAILED"
+    | "SESSION_INVALID"
+    | typeof RUNTIME_SESSION_UNAVAILABLE_CODE
+    | "UNSUPPORTED";
   readonly committedSideEffects: boolean;
   readonly retryable: boolean;
 
   constructor(
     code: RuntimePiError["code"],
     message: string,
-    options: { readonly committedSideEffects?: boolean; readonly retryable?: boolean } = {},
+    options: {
+      readonly committedSideEffects?: boolean;
+      readonly retryable?: boolean;
+      readonly cause?: unknown;
+      readonly secrets?: readonly string[];
+    } = {},
   ) {
-    const retryable = options.retryable ?? code === "PROVIDER_FAILED";
+    const retryable = options.retryable ?? false;
     const committedSideEffects = options.committedSideEffects ?? false;
+    const safeCause = options.cause === undefined
+      ? undefined
+      : Object.freeze(Object.assign(
+        new Error(redactRuntimePiText(options.cause, options.secrets ?? [])),
+        { name: "RuntimePiCause" },
+      ));
     super({
       code,
       message,
       retryability: retryable ? "retryable" : "not-retryable",
       sideEffects: committedSideEffects ? "committed" : "none",
+      ...(safeCause === undefined ? {} : { cause: safeCause }),
     });
     this.name = "RuntimePiError";
     this.committedSideEffects = committedSideEffects;
@@ -297,6 +358,357 @@ function piTools(
   }));
 }
 
+function boundedUtf8Prefix(
+  value: string,
+  maxBytes: number,
+): { readonly text: string; readonly bytes: number; readonly totalBytes: number } {
+  const encoded = Buffer.from(value, "utf8");
+  if (encoded.byteLength <= maxBytes) {
+    return {
+      text: value,
+      bytes: encoded.byteLength,
+      totalBytes: encoded.byteLength,
+    };
+  }
+  let end = maxBytes;
+  while (end > 0) {
+    try {
+      return {
+        text: UTF8_DECODER.decode(encoded.subarray(0, end)),
+        bytes: end,
+        totalBytes: encoded.byteLength,
+      };
+    } catch {
+      end -= 1;
+    }
+  }
+  return { text: "", bytes: 0, totalBytes: encoded.byteLength };
+}
+
+function nodeReplApprovalSummary(code: string): string {
+  const preview = boundedUtf8Prefix(code, NODE_REPL_APPROVAL_PREVIEW_MAX_BYTES);
+  const digest = createHash("sha256").update(code, "utf8").digest("hex");
+  const state = preview.bytes < preview.totalBytes ? "truncated" : "complete";
+  return [
+    "Allow Node REPL to evaluate this JavaScript with unsandboxed access to the inherited process environment, filesystem, subprocess execution, and network?",
+    `Code evidence: ${String(preview.totalBytes)} UTF-8 bytes; sha256:${digest}.`,
+    `Escaped preview (${String(preview.bytes)}/${String(preview.totalBytes)} bytes, ${state}): ${JSON.stringify(preview.text)}`,
+  ].join("\n");
+}
+
+function stringEvidence(label: string, value: string): string {
+  const preview = boundedUtf8Prefix(value, NATIVE_APPROVAL_PREVIEW_MAX_BYTES);
+  const digest = createHash("sha256").update(value, "utf8").digest("hex");
+  const state = preview.bytes < preview.totalBytes ? "truncated" : "complete";
+  return [
+    `${label} evidence: ${String(preview.totalBytes)} UTF-8 bytes; sha256:${digest}.`,
+    `${label} escaped preview (${String(preview.bytes)}/${String(preview.totalBytes)} bytes, ${state}): ${JSON.stringify(preview.text)}`,
+  ].join("\n");
+}
+
+function editApprovalSummary(input: LiteralEditInput): string {
+  return [
+    "Allow runtime-pi to atomically replace literal text in this unsandboxed workspace file?",
+    `file_path: ${JSON.stringify(input.filePath)}`,
+    `replace_all: ${String(input.replaceAll)}`,
+    stringEvidence("file_path", input.filePath),
+    stringEvidence("old_string", input.oldString),
+    stringEvidence("new_string", input.newString),
+  ].join("\n");
+}
+
+function webSearchApprovalSummary(input: WebSearchInput): string {
+  return [
+    "Allow runtime-pi to send this search query to the configured HTTPS search endpoint?",
+    `query: ${JSON.stringify(input.query)}`,
+    `limit: ${String(input.limit)}`,
+    stringEvidence("query", input.query),
+  ].join("\n");
+}
+
+function combinedToolSignal(
+  turnSignal: AbortSignal,
+  signal: AbortSignal | undefined,
+): AbortSignal {
+  return signal === undefined
+    ? turnSignal
+    : AbortSignal.any([turnSignal, signal]);
+}
+
+async function requireNativeApproval(
+  context: RuntimeTurnContext,
+  descriptor: RuntimeNativeToolDescriptor,
+  toolCallId: string,
+  summary: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const requestApproval = context.requestApproval;
+  if (requestApproval === undefined) {
+    throw new RuntimePiError(
+      "UNSUPPORTED",
+      `runtime-pi requires Core's approval callback for its native ${descriptor.id} tool`,
+      { retryable: false },
+    );
+  }
+  const approval = parseApprovalRequest({
+    interactionId: randomUUID(),
+    callId: toolCallId,
+    toolId: descriptor.id,
+    displayName: descriptor.displayName,
+    effects: descriptor.effects,
+    summary,
+    requestedAt: new Date().toISOString(),
+  });
+  const decision = parseApprovalDecision(
+    await requestApproval(approval, signal),
+    approval,
+  );
+  if (decision.decision !== "allow_once") {
+    throw new Error(`${descriptor.displayName} execution was denied.`);
+  }
+}
+
+function nativeTextResult(
+  toolCallId: string,
+  text: string,
+  results: Map<string, RuntimeToolResult>,
+): {
+  readonly content: (TextContent | ImageContent)[];
+  readonly details: { readonly runtimeResult: RuntimeToolResult };
+} {
+  const result: RuntimeToolResult = {
+    callId: toolCallId,
+    content: [{ type: "text", text }],
+  };
+  results.set(toolCallId, result);
+  return {
+    content: runtimeToolResultToPiContent(result.content),
+    details: { runtimeResult: result },
+  };
+}
+
+function nodeReplTool(
+  context: RuntimeTurnContext,
+  controller: NodeReplController,
+  results: Map<string, RuntimeToolResult>,
+  turnSignal: AbortSignal,
+  onToolAttempt: () => void,
+): AgentTool {
+  const requestApproval = context.requestApproval;
+  if (requestApproval === undefined) {
+    throw new RuntimePiError(
+      "UNSUPPORTED",
+      "runtime-pi requires Core's approval callback for its native NodeRepl tool",
+      { retryable: false },
+    );
+  }
+  return {
+    name: runtimePiNodeReplTool.id,
+    label: runtimePiNodeReplTool.displayName,
+    description:
+      "Evaluate JavaScript in a run-scoped Node.js REPL. Variables persist across NodeRepl calls in this run.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["code"],
+      properties: {
+        code: {
+          type: "string",
+          minLength: 1,
+          maxLength: 262_144,
+          description: "JavaScript to evaluate in the run-scoped Node.js REPL.",
+        },
+      },
+    } as TSchema,
+    executionMode: "sequential",
+    async execute(toolCallId, params, signal) {
+      if (params === null || typeof params !== "object") {
+        throw new Error("Node REPL parameters must be an object.");
+      }
+      const code = Reflect.get(params, "code");
+      if (typeof code !== "string") throw new Error("Node REPL code must be a string.");
+      if (Buffer.byteLength(code, "utf8") > NODE_REPL_MAX_CODE_BYTES) {
+        throw new Error(
+          `Node REPL code exceeds ${String(NODE_REPL_MAX_CODE_BYTES)} bytes.`,
+        );
+      }
+      const approvalSignal = combinedToolSignal(turnSignal, signal);
+      await requireNativeApproval(
+        context,
+        runtimePiNodeReplTool,
+        toolCallId,
+        nodeReplApprovalSummary(code),
+        approvalSignal,
+      );
+      onToolAttempt();
+      const output = await controller.execute({ code }, { signal: approvalSignal });
+      return nativeTextResult(toolCallId, output, results);
+    },
+  };
+}
+
+function editTool(
+  context: RuntimeTurnContext,
+  workspaceDirectory: string,
+  results: Map<string, RuntimeToolResult>,
+  turnSignal: AbortSignal,
+  onToolAttempt: () => void,
+): AgentTool {
+  return {
+    name: runtimePiEditTool.id,
+    label: runtimePiEditTool.displayName,
+    description:
+      "Replace one exact literal string in an existing UTF-8 workspace file, or every exact match when replace_all is true.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["file_path", "old_string", "new_string"],
+      properties: {
+        file_path: {
+          type: "string",
+          minLength: 1,
+          maxLength: EDIT_MAX_PATH_BYTES,
+          description: "Workspace-relative or in-workspace absolute file path.",
+        },
+        old_string: {
+          type: "string",
+          minLength: 1,
+          maxLength: EDIT_MAX_STRING_BYTES,
+          description: "Exact literal text to replace.",
+        },
+        new_string: {
+          type: "string",
+          maxLength: EDIT_MAX_STRING_BYTES,
+          description: "Literal replacement text.",
+        },
+        replace_all: {
+          type: "boolean",
+          description: "Replace every exact match. Defaults to false.",
+        },
+      },
+    } as TSchema,
+    executionMode: "sequential",
+    async execute(toolCallId, params, signal) {
+      if (params === null || typeof params !== "object") {
+        throw new Error("Edit parameters must be an object.");
+      }
+      const input: LiteralEditInput = {
+        filePath: Reflect.get(params, "file_path"),
+        oldString: Reflect.get(params, "old_string"),
+        newString: Reflect.get(params, "new_string"),
+        replaceAll: Reflect.get(params, "replace_all") ?? false,
+      } as LiteralEditInput;
+      validateLiteralEditInput(input);
+      const approvalSignal = combinedToolSignal(turnSignal, signal);
+      await requireNativeApproval(
+        context,
+        runtimePiEditTool,
+        toolCallId,
+        editApprovalSummary(input),
+        approvalSignal,
+      );
+      onToolAttempt();
+      const edited = await editLiteralFile(
+        workspaceDirectory,
+        input,
+        { signal: approvalSignal },
+      );
+      return nativeTextResult(
+        toolCallId,
+        [
+          `Edited ${JSON.stringify(edited.path)} with ${String(edited.replacements)} literal replacement${edited.replacements === 1 ? "" : "s"}.`,
+          `Bytes: ${String(edited.bytesBefore)} -> ${String(edited.bytesAfter)}.`,
+          `SHA-256: ${edited.sha256Before} -> ${edited.sha256After}.`,
+        ].join("\n"),
+        results,
+      );
+    },
+  };
+}
+
+function webSearchTool(
+  context: RuntimeTurnContext,
+  results: Map<string, RuntimeToolResult>,
+  turnSignal: AbortSignal,
+  onToolAttempt: () => void,
+): AgentTool {
+  return {
+    name: runtimePiWebSearchTool.id,
+    label: runtimePiWebSearchTool.displayName,
+    description:
+      "Search the web through a bounded, redirect-checked HTTPS endpoint and return result summaries.",
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      required: ["query"],
+      properties: {
+        query: {
+          type: "string",
+          minLength: 1,
+          maxLength: WEB_SEARCH_MAX_QUERY_BYTES,
+          description: "Search query.",
+        },
+        limit: {
+          type: "integer",
+          minimum: 1,
+          maximum: WEB_SEARCH_MAX_RESULTS,
+          description: "Maximum result count. Defaults to 5.",
+        },
+      },
+    } as TSchema,
+    async execute(toolCallId, params, signal) {
+      if (params === null || typeof params !== "object") {
+        throw new Error("WebSearch parameters must be an object.");
+      }
+      const input: WebSearchInput = {
+        query: Reflect.get(params, "query"),
+        limit: Reflect.get(params, "limit") ?? 5,
+      } as WebSearchInput;
+      validateWebSearchInput(input);
+      const approvalSignal = combinedToolSignal(turnSignal, signal);
+      await requireNativeApproval(
+        context,
+        runtimePiWebSearchTool,
+        toolCallId,
+        webSearchApprovalSummary(input),
+        approvalSignal,
+      );
+      onToolAttempt();
+      const searchResults = await searchWeb(input, { signal: approvalSignal });
+      return nativeTextResult(
+        toolCallId,
+        formatWebSearchResults(searchResults),
+        results,
+      );
+    },
+  };
+}
+
+function nativeToolExecutionResult(
+  toolCallId: string,
+  toolName: string,
+  result: unknown,
+  isError: boolean,
+): RuntimeToolResult {
+  const content = result !== null
+    && typeof result === "object"
+    && Array.isArray(Reflect.get(result, "content"))
+    ? Reflect.get(result, "content") as unknown[]
+    : [];
+  const text = content.flatMap((part) =>
+    part !== null
+    && typeof part === "object"
+    && Reflect.get(part, "type") === "text"
+    && typeof Reflect.get(part, "text") === "string"
+      ? [Reflect.get(part, "text") as string]
+      : []);
+  return {
+    callId: toolCallId,
+    content: [{ type: "text", text: text.join("\n") || `${toolName} execution failed.` }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
 function systemPrompt(messages: readonly TurnMessage[]): string | undefined {
   const values = messages
     .filter((message) => message.role === "system")
@@ -311,6 +723,34 @@ function finalUser(messages: readonly TurnMessage[]): { index: number; text: str
     if (message?.role === "user") return { index, ...textAndImages(message.content) };
   }
   throw new TypeError("runtime-pi turn requires a user message");
+}
+
+function assertSessionLinkage(
+  request: RuntimeTurnRequest,
+  instanceId: string,
+): void {
+  if (request.session === undefined) return;
+  if (request.session.route?.runtimeInstanceId !== instanceId) {
+    throw new RuntimePiError(
+      "SESSION_INVALID",
+      "runtime-pi session belongs to another runtime instance",
+      { retryable: false },
+    );
+  }
+  if (request.session.route.model !== request.model) {
+    throw new RuntimePiError(
+      "SESSION_INVALID",
+      "runtime-pi session belongs to another model route",
+      { retryable: false },
+    );
+  }
+  if (request.session.conversationId !== request.conversationId) {
+    throw new RuntimePiError(
+      "SESSION_INVALID",
+      "runtime-pi session belongs to another conversation",
+      { retryable: false },
+    );
+  }
 }
 
 function assistantTurnMessage(message: AssistantMessage): TurnMessage {
@@ -342,10 +782,12 @@ function exactCapabilities(attachments: boolean): RuntimeCapabilities {
     tools: true,
     mcp: true,
     attachments,
-    approvals: false,
+    approvals: true,
     structuredOutput: false,
     sandbox: false,
     sessions: true,
+    maxTurns: true,
+    maxOutputTokens: false,
     artifactResults: true,
     liveInput: true,
   };
@@ -356,7 +798,49 @@ function withCommittedEffects(error: RuntimePiError, committedSideEffects: boole
   return new RuntimePiError(error.code, error.message, {
     committedSideEffects: true,
     retryable: error.retryable,
+    ...(error.cause === undefined ? {} : { cause: error.cause }),
   });
+}
+
+const TRANSIENT_PROVIDER_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
+const TRANSIENT_PROVIDER_CODE = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+function ownDataValue(value: unknown, key: string): unknown {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+    return undefined;
+  }
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined && "value" in descriptor
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Retry only failures carrying an explicit own transient status/code. */
+export function isCheckedTransientProviderFailure(error: unknown): boolean {
+  const status = ownDataValue(error, "status")
+    ?? ownDataValue(error, "statusCode");
+  if (typeof status === "number"
+    && Number.isSafeInteger(status)
+    && TRANSIENT_PROVIDER_STATUS.has(status)) {
+    return true;
+  }
+  const code = ownDataValue(error, "code");
+  return typeof code === "string" && TRANSIENT_PROVIDER_CODE.has(code);
 }
 
 async function waitForSettled(
@@ -412,16 +896,19 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
       tools: true,
       mcp: true,
       attachments: false,
-      approvals: false,
+      approvals: true,
       structuredOutput: false,
       sandbox: false,
       sessions: true,
+      maxTurns: true,
+      maxOutputTokens: false,
       artifactResults: true,
       liveInput: true,
     },
 
     async start(_context: ModuleStartContext) {
       if (state === "stopped") throw new RuntimePiError("RUNTIME_NOT_RUNNING", "runtime-pi cannot restart after stop");
+      await sessions.initialize();
       state = "running";
     },
 
@@ -509,14 +996,22 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
           { retryable: false },
         );
       }
-      if (request.session?.runtimeInstanceId !== undefined && request.session.runtimeInstanceId !== options.instanceId) {
-        throw new RuntimePiError("SESSION_INVALID", "runtime-pi session belongs to another runtime instance", { retryable: false });
+      assertSessionLinkage(request, options.instanceId);
+      if (context.requestApproval === undefined) {
+        throw new RuntimePiError(
+          "UNSUPPORTED",
+          "runtime-pi requires Core's approval callback for its native tools",
+          { retryable: false },
+        );
       }
-      if (request.session?.provider !== undefined && request.session.provider !== "pi") {
-        throw new RuntimePiError("SESSION_INVALID", "runtime-pi session has an incompatible provider", { retryable: false });
-      }
-      if (request.session?.model !== undefined && request.session.model !== request.model) {
-        throw new RuntimePiError("SESSION_INVALID", "runtime-pi session model does not match the requested model", { retryable: false });
+      const nativeToolNames = new Set(runtimePiNativeTools.map((tool) => tool.id));
+      const conflict = request.tools.find((tool) => nativeToolNames.has(tool.name));
+      if (conflict !== undefined) {
+        throw new RuntimePiError(
+          "UNSUPPORTED",
+          `runtime-pi request tools conflict with the native ${conflict.name} tool`,
+          { retryable: false },
+        );
       }
 
       let model: Model<string>;
@@ -524,7 +1019,17 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
         model = await registry.resolve(request.model, request.signal);
       } catch (error) {
         if (request.signal.aborted) return { status: "cancelled" };
-        throw new RuntimePiError("MODEL_INVALID", redactRuntimePiText(error, registry.configuredSecrets));
+        const discoveryFailure = error instanceof RuntimePiModelDiscoveryError;
+        const retryable = discoveryFailure && isCheckedTransientProviderFailure(error);
+        throw new RuntimePiError(
+          discoveryFailure ? "PROVIDER_FAILED" : "MODEL_INVALID",
+          redactRuntimePiText(error, registry.configuredSecrets),
+          {
+            cause: error,
+            retryable,
+            secrets: registry.configuredSecrets,
+          },
+        );
       }
       const reference = parsePiModelReference(request.model);
       const prompt = finalUser(request.messages);
@@ -532,9 +1037,18 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
       if (!options.config.localProviders.some((provider) => provider.id === reference.provider)) {
         try { secretValues.push(...await credentialStore.redactionValues()); } catch { /* request auth reports the safe failure */ }
       }
+      const currentFailureSecrets = async (): Promise<readonly string[]> => {
+        const values = [...secretValues];
+        try {
+          values.push(...await credentialStore.redactionValues());
+        } catch {
+          // Preserve the already validated snapshot if the rotated store is unavailable.
+        }
+        return [...new Set(values)];
+      };
       let committedSideEffects = false;
       try {
-        return await sessions.withAttempt(
+        const turnResult = await sessions.withAttempt(
           {
             conversationId: request.conversationId,
             modelKey: request.model,
@@ -555,6 +1069,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
             const toolErrors = new Set<string>();
             const effort = thinkingLevel(request.options?.effort, model);
             const authoredSystemPrompt = systemPrompt(request.messages);
+            const nodeRepl = createNodeReplController(cwd);
             const harness = new AgentHarness({
               env: sessions.env,
               session: attempt.session,
@@ -562,14 +1077,36 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
               model,
               thinkingLevel: effort.level,
               ...(authoredSystemPrompt === undefined ? {} : { systemPrompt: authoredSystemPrompt }),
-              tools: piTools(
-                request.tools,
-                context,
-                toolResults,
-                toolErrors,
-                request.signal,
-                () => { committedSideEffects = true; },
-              ),
+              tools: [
+                ...piTools(
+                  request.tools,
+                  context,
+                  toolResults,
+                  toolErrors,
+                  request.signal,
+                  () => { committedSideEffects = true; },
+                ),
+                nodeReplTool(
+                  context,
+                  nodeRepl,
+                  toolResults,
+                  request.signal,
+                  () => { committedSideEffects = true; },
+                ),
+                editTool(
+                  context,
+                  cwd,
+                  toolResults,
+                  request.signal,
+                  () => { committedSideEffects = true; },
+                ),
+                webSearchTool(
+                  context,
+                  toolResults,
+                  request.signal,
+                  () => { committedSideEffects = true; },
+                ),
+              ],
               streamOptions: {
                 timeoutMs: options.config.retry.timeoutMs,
                 maxRetries: options.config.retry.maxRetries,
@@ -583,14 +1120,20 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
               (event) => toolErrors.has(event.toolCallId) ? { isError: true } : undefined,
             );
             active.add(harness);
-            const linkedSession = {
+            const linkedSession: RuntimeSession = {
               id: attempt.id,
-              runtimeInstanceId: options.instanceId,
-              provider: "pi",
-              model: request.model,
+              conversationId: request.conversationId,
+              route: {
+                runtimeInstanceId: options.instanceId,
+                model: request.model,
+              },
               createdAt: new Date().toISOString(),
-              metadata: { provider: reference.provider, nativeModel: reference.model },
-            } as const;
+              metadata: {
+                provider: "pi",
+                nativeProvider: reference.provider,
+                nativeModel: reference.model,
+              },
+            };
             let maxTurnsHit = false;
             let turnCount = 0;
             let abortPromise: Promise<unknown> | undefined;
@@ -621,8 +1164,19 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                   call: { id: event.toolCallId, name: event.toolName, input: jsonValue(event.args) },
                 });
               } else if (event.type === "tool_execution_end") {
-                const result = toolResults.get(event.toolCallId);
-                if (result !== undefined) await context.emit({ type: "tool-result", result });
+                const result = toolResults.get(event.toolCallId)
+                  ?? (nativeToolNames.has(event.toolName)
+                    ? nativeToolExecutionResult(
+                      event.toolCallId,
+                      event.toolName,
+                      event.result,
+                      event.isError,
+                    )
+                    : undefined);
+                if (result !== undefined) {
+                  toolResults.set(event.toolCallId, result);
+                  await context.emit({ type: "tool-result", result });
+                }
               } else if (event.type === "turn_end") {
                 turnCount += 1;
                 if (maxTurns !== undefined && turnCount >= maxTurns && event.message.role === "assistant"
@@ -681,13 +1235,17 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                 return { completed: false, value: { status: "cancelled", message, usage } };
               }
               if (result.stopReason === "error") {
+                const failureSecrets = await currentFailureSecrets();
                 throw new RuntimePiError(
                   "PROVIDER_FAILED",
-                  redactRuntimePiText(result.errorMessage ?? "Pi provider request failed", secretValues),
-                  { committedSideEffects },
+                  redactRuntimePiText(result.errorMessage ?? "Pi provider request failed", failureSecrets),
+                  {
+                    committedSideEffects,
+                    cause: result.errorMessage ?? "Pi provider request failed",
+                    secrets: failureSecrets,
+                  },
                 );
               }
-              await context.emit({ type: "session", session: linkedSession });
               return {
                 completed: true,
                 value: {
@@ -704,10 +1262,16 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                 return { completed: false, value: { status: maxTurnsHit ? "max-turns" : "cancelled" } };
               }
               if (error instanceof RuntimePiError) throw withCommittedEffects(error, committedSideEffects);
+              const failureSecrets = await currentFailureSecrets();
               throw new RuntimePiError(
                 "PROVIDER_FAILED",
-                redactRuntimePiText(error, secretValues),
-                { committedSideEffects },
+                redactRuntimePiText(error, failureSecrets),
+                {
+                  committedSideEffects,
+                  retryable: isCheckedTransientProviderFailure(error),
+                  cause: error,
+                  secrets: failureSecrets,
+                },
               );
             } finally {
               request.signal.removeEventListener("abort", abortHarness);
@@ -715,16 +1279,34 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
               unsubscribe();
               removeToolResultHandler();
               active.delete(harness);
+              await nodeRepl.close();
             }
           },
         );
+        if (turnResult.status === "completed" && turnResult.session !== undefined) {
+          await context.emit({ type: "session", session: turnResult.session });
+        }
+        return turnResult;
       } catch (error) {
         if (request.signal.aborted) return { status: "cancelled" };
         if (error instanceof RuntimePiError) throw withCommittedEffects(error, committedSideEffects);
+        if (error instanceof RuntimePiSessionUnavailableError) {
+          throw new RuntimePiError(
+            RUNTIME_SESSION_UNAVAILABLE_CODE,
+            error.message,
+            { cause: error },
+          );
+        }
+        const failureSecrets = await currentFailureSecrets();
         throw new RuntimePiError(
           "SESSION_INVALID",
-          redactRuntimePiText(error, secretValues),
-          { committedSideEffects, retryable: false },
+          redactRuntimePiText(error, failureSecrets),
+          {
+            committedSideEffects,
+            retryable: false,
+            cause: error,
+            secrets: failureSecrets,
+          },
         );
       }
     },

@@ -24,12 +24,71 @@ const MODEL_DISCOVERY_TIMEOUT_MS = 10_000;
 const MAX_MODEL_DISCOVERY_BYTES = 1_048_576;
 const MAX_DISCOVERED_MODELS = 10_000;
 const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
+const TRUSTED_MODEL_DISCOVERY_TRANSPORT_CODES = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETUNREACH",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_SOCKET",
+]);
+
+/** Locally classified model-discovery failure for exact retry decisions. */
+export class RuntimePiModelDiscoveryError extends TypeError {
+  readonly status: number | undefined;
+  readonly code: string | undefined;
+
+  constructor(
+    message: string,
+    options: {
+      readonly status?: number;
+      readonly code?: string;
+      readonly cause?: unknown;
+    } = {},
+  ) {
+    if (options.cause === undefined) super(message);
+    else super(message, { cause: options.cause });
+    this.name = "RuntimePiModelDiscoveryError";
+    this.status = options.status;
+    this.code = options.code;
+  }
+}
+
+function ownDataValue(value: unknown, key: string): unknown {
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+    return undefined;
+  }
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined && "value" in descriptor
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function trustedTransportCode(error: unknown): string | undefined {
+  const direct = ownDataValue(error, "code");
+  if (typeof direct === "string" && TRUSTED_MODEL_DISCOVERY_TRANSPORT_CODES.has(direct)) {
+    return direct;
+  }
+  const cause = ownDataValue(error, "cause");
+  const nested = ownDataValue(cause, "code");
+  return typeof nested === "string" && TRUSTED_MODEL_DISCOVERY_TRANSPORT_CODES.has(nested)
+    ? nested
+    : undefined;
+}
 
 export interface RuntimePiModelCapabilities {
   readonly tools: true;
   readonly attachments: boolean;
   readonly structuredOutput: false;
-  readonly approvals: false;
+  readonly approvals: true;
   readonly sandbox: false;
   readonly thinkingLevels: readonly string[];
 }
@@ -167,12 +226,25 @@ async function discoverLocalModels(
   } catch (error) {
     if (context.signal?.aborted === true) throw context.signal.reason;
     if (timeoutSignal.aborted) {
-      throw new TypeError(`runtime-pi local model discovery timed out after ${MODEL_DISCOVERY_TIMEOUT_MS}ms`);
+      throw new RuntimePiModelDiscoveryError(
+        `runtime-pi local model discovery timed out after ${MODEL_DISCOVERY_TIMEOUT_MS}ms`,
+        { code: "ETIMEDOUT" },
+      );
     }
-    throw new TypeError(`runtime-pi local model discovery failed for ${providerId}`, { cause: error });
+    const code = trustedTransportCode(error);
+    throw new RuntimePiModelDiscoveryError(
+      `runtime-pi local model discovery failed for ${providerId}`,
+      {
+        ...(code === undefined ? {} : { code }),
+        cause: error,
+      },
+    );
   }
   if (!response.ok) {
-    throw new TypeError(`runtime-pi local model discovery failed for ${providerId} with HTTP ${response.status}`);
+    throw new RuntimePiModelDiscoveryError(
+      `runtime-pi local model discovery failed for ${providerId} with HTTP ${response.status}`,
+      { status: response.status },
+    );
   }
 
   const payload = await readBoundedJson(response);
@@ -313,7 +385,7 @@ export function createRuntimePiModelRegistry(
         tools: true,
         attachments: model.input.includes("image"),
         structuredOutput: false,
-        approvals: false,
+        approvals: true,
         sandbox: false,
         thinkingLevels: getSupportedThinkingLevels(model),
       };

@@ -10,12 +10,19 @@ import type {
   StateListResult,
   StateReadRequest,
   StateRecord,
+  StateScanRequest,
+  StateScanResult,
   StatePresenceListRequest,
   StatePresenceRecord,
   StatePresenceRemoveRequest,
   StatePresenceUpsertRequest,
   StateHostPresenceRequest,
   StateStore,
+  StateTransactionCheck,
+  StateTransactionDelete,
+  StateTransactionPut,
+  StateTransactionRequest,
+  StateTransactionResult,
   StateWriteRequest,
   StateWriteResult,
 } from "@mono-agent/module-sdk/internal";
@@ -61,6 +68,7 @@ import {
   normalizePresenceRecord,
   parseSnapshot,
   serializeSnapshot,
+  stateSnapshotByteLimit,
   toStateRecord,
   type StateSnapshot,
   type StoredRecord,
@@ -70,12 +78,24 @@ import {
   validateStatePrefix,
 } from "./snapshot.js";
 
+const STATE_CURSOR_MAX_CODE_UNITS = 16_512;
+
 const MARKER_FILE = ".mono-agent-state";
 const LEASE_FILE = "lease.sqlite";
 const MARKER_CONTENT = '{"kind":"mono-agent-state-local","schemaVersion":1}\n';
 const SNAPSHOT_INDEX_KEY = "snapshot";
 const PRESENCE_INDEX_PREFIX = "presence:";
 const STATE_INDEX_MAX_ENTRIES = 1_024;
+const STATE_TRANSACTION_MAX_ENTRIES = 1_000;
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const TYPED_ARRAY_BUFFER_GETTER =
+  Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "buffer")?.get;
+const TYPED_ARRAY_BYTE_LENGTH_GETTER =
+  Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteLength")?.get;
+const TYPED_ARRAY_BYTE_OFFSET_GETTER =
+  Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, "byteOffset")?.get;
+const TYPED_ARRAY_TAG_GETTER =
+  Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTOTYPE, Symbol.toStringTag)?.get;
 
 export interface StateLocalStoreHooks {
   readonly artifacts?: StateLocalArtifactHooks;
@@ -100,6 +120,7 @@ export class StateLocalStore implements StateStore {
   private readonly artifacts: StateLocalArtifacts;
   private readonly clock: () => Date;
   private readonly snapshotHooks: AtomicReplaceHooks | undefined;
+  private readonly snapshotByteLimit: number;
   private readonly presence: PresencePublisher | undefined;
   private snapshot: StateSnapshot;
   private operation: Promise<void> = Promise.resolve();
@@ -116,6 +137,7 @@ export class StateLocalStore implements StateStore {
     lease: ProcessLease,
     artifacts: StateLocalArtifacts,
     snapshot: StateSnapshot,
+    snapshotByteLimit: number,
     options: StateLocalStoreOpenOptions,
   ) {
     this.root = config.root;
@@ -125,6 +147,7 @@ export class StateLocalStore implements StateStore {
     this.lease = lease;
     this.artifacts = artifacts;
     this.snapshot = snapshot;
+    this.snapshotByteLimit = snapshotByteLimit;
     this.clock = options.clock ?? (() => new Date());
     this.snapshotHooks = options.hooks?.snapshot;
     const discovery = config.discovery;
@@ -157,10 +180,7 @@ export class StateLocalStore implements StateStore {
     let artifacts: StateLocalArtifacts | undefined;
     try {
       throwIfAborted(options.signal);
-      const maximumSnapshotBytes = Math.min(
-        2_147_483_647,
-        effectiveConfig.maxTotalBytes * 2 + effectiveConfig.maxRecords * 256 + 4_096,
-      );
+      const snapshotByteLimit = stateSnapshotByteLimit(effectiveConfig);
       const indexedKeys = lease.listIndexKeys("", STATE_INDEX_MAX_ENTRIES);
       if (indexedKeys.some((key) =>
         key !== SNAPSHOT_INDEX_KEY && !key.startsWith(PRESENCE_INDEX_PREFIX))) {
@@ -169,11 +189,14 @@ export class StateLocalStore implements StateStore {
           "The local state transactional index contains an unexpected entry.",
         );
       }
-      const encodedSnapshot = lease.readIndex(SNAPSHOT_INDEX_KEY, maximumSnapshotBytes);
+      const encodedSnapshot = lease.readIndex(SNAPSHOT_INDEX_KEY, snapshotByteLimit);
       let snapshot: StateSnapshot;
       if (encodedSnapshot === undefined) {
         snapshot = emptySnapshot();
-        lease.writeIndex(SNAPSHOT_INDEX_KEY, serializeSnapshot(snapshot));
+        lease.writeIndex(
+          SNAPSHOT_INDEX_KEY,
+          serializeSnapshot(snapshot, snapshotByteLimit),
+        );
         await lease.verify();
       } else {
         snapshot = parseSnapshot(encodedSnapshot, effectiveConfig);
@@ -191,6 +214,7 @@ export class StateLocalStore implements StateStore {
         lease,
         artifacts,
         snapshot,
+        snapshotByteLimit,
         options,
       );
     } catch (error) {
@@ -349,6 +373,122 @@ export class StateLocalStore implements StateStore {
         totalBytes,
       });
       return { status: "applied", record: toStateRecord(stored) };
+    });
+  }
+
+  transaction(request: StateTransactionRequest): Promise<StateTransactionResult> {
+    const normalized = normalizeTransactionRequest(
+      request,
+      this.config.maxRecordBytes,
+      this.config.maxTotalBytes,
+    );
+    return this.runExclusive(normalized.signal, async () => {
+      await this.guardPaths();
+
+      const conflicts = [
+        ...normalized.checks,
+        ...normalized.puts,
+        ...normalized.deletes,
+      ].flatMap((operation) => {
+        const existing = this.snapshot.records.get(operation.key);
+        const matches = operation.expectedVersion === null
+          ? existing === undefined
+          : existing?.version === operation.expectedVersion;
+        return matches
+          ? []
+          : [{
+              key: operation.key,
+              ...(existing === undefined ? {} : { currentVersion: existing.version }),
+            }];
+      });
+      if (conflicts.length > 0) {
+        return { status: "conflict" as const, conflicts };
+      }
+
+      const deleted = normalized.deletes
+        .map((operation) => this.snapshot.records.get(operation.key))
+        .filter((record): record is StoredRecord => record !== undefined);
+      const mutationCount = normalized.puts.length + deleted.length;
+      if (mutationCount === 0) {
+        return { status: "applied", records: [], deletedKeys: [] };
+      }
+      if (this.snapshot.generation > Number.MAX_SAFE_INTEGER - mutationCount) {
+        throw new StateLocalError(
+          "STATE_LIMIT_EXCEEDED",
+          "The local state version counter cannot accommodate this transaction.",
+        );
+      }
+
+      const finalRecordCount = this.snapshot.records.size + normalized.puts
+        .filter((operation) => !this.snapshot.records.has(operation.key)).length - deleted.length;
+      if (finalRecordCount > this.config.maxRecords) {
+        throw new StateLocalError("STATE_LIMIT_EXCEEDED", "Local state has reached maxRecords.");
+      }
+      const putBytes = normalized.puts.reduce((total, operation) =>
+        total + operation.value.byteLength, 0);
+      const replacedBytes = normalized.puts.reduce((total, operation) =>
+        total + (this.snapshot.records.get(operation.key)?.value.byteLength ?? 0), 0);
+      const deletedBytes = deleted.reduce((total, record) => total + record.value.byteLength, 0);
+      const totalBytes = this.snapshot.totalBytes - replacedBytes - deletedBytes + putBytes;
+      if (!Number.isSafeInteger(totalBytes) || totalBytes > this.config.maxTotalBytes) {
+        throw new StateLocalError("STATE_LIMIT_EXCEEDED", "Local state has reached maxTotalBytes.");
+      }
+
+      const records = new Map(this.snapshot.records);
+      const updatedAt = canonicalNow(this.clock);
+      let generation = this.snapshot.generation;
+      const appliedRecords: StateRecord[] = [];
+      for (const operation of normalized.puts) {
+        generation += 1;
+        const stored: StoredRecord = {
+          key: operation.key,
+          value: operation.value,
+          version: `v${generation}`,
+          updatedAt,
+        };
+        records.set(operation.key, stored);
+        appliedRecords.push(toStateRecord(stored));
+      }
+      const deletedKeys: string[] = [];
+      for (const operation of normalized.deletes) {
+        if (!records.delete(operation.key)) continue;
+        generation += 1;
+        deletedKeys.push(operation.key);
+      }
+
+      await this.commit({
+        generation,
+        listGeneration: nextListGeneration(this.snapshot),
+        records,
+        totalBytes,
+      });
+      return {
+        status: "applied",
+        records: appliedRecords,
+        deletedKeys,
+      };
+    });
+  }
+
+  scan(request: StateScanRequest): Promise<StateScanResult> {
+    const normalized = normalizeScanRequest(request);
+    return this.runExclusive(normalized.signal, async () => {
+      await this.guardPaths();
+      const afterKey = decodeScanCursor(normalized.cursor, normalized.prefix);
+      const matching = [...this.snapshot.records.values()]
+        .filter((record) =>
+          !isInternalStateKey(record.key) &&
+          record.key.startsWith(normalized.prefix) &&
+          (afterKey === undefined || record.key > afterKey))
+        .sort(compareStoredRecords);
+      const selected = matching.slice(0, normalized.limit);
+      const cursor = matching.length > selected.length
+        ? encodeScanCursor(normalized.prefix, selected[selected.length - 1]?.key)
+        : undefined;
+      return {
+        records: selected.map(toStateRecord),
+        ...(cursor === undefined ? {} : { cursor }),
+      };
     });
   }
 
@@ -610,8 +750,11 @@ export class StateLocalStore implements StateStore {
   }
 
   private async commit(draft: StateSnapshot): Promise<void> {
+    // Serialization and its exact startup/read bound are checked before the
+    // uncertain durable-append region. A predictable capacity failure must not
+    // poison an otherwise healthy store.
+    const bytes = serializeSnapshot(draft, this.snapshotByteLimit);
     try {
-      const bytes = serializeSnapshot(draft);
       await this.snapshotHooks?.beforeRename?.(this.snapshotPath);
       await this.lease.verify();
       await this.snapshotHooks?.afterCheck?.(this.snapshotPath);
@@ -670,6 +813,361 @@ async function prepareMarker(root: string): Promise<void> {
   }
 }
 
+interface NormalizedTransactionCheck {
+  readonly key: string;
+  readonly expectedVersion: string | null;
+}
+
+interface NormalizedTransactionPut extends NormalizedTransactionCheck {
+  readonly value: Buffer;
+}
+
+interface NormalizedTransactionRequest {
+  readonly checks: readonly NormalizedTransactionCheck[];
+  readonly puts: readonly NormalizedTransactionPut[];
+  readonly deletes: readonly NormalizedTransactionCheck[];
+  readonly signal: AbortSignal;
+}
+
+interface NormalizedScanRequest {
+  readonly prefix: string;
+  readonly cursor?: string;
+  readonly limit: number;
+  readonly signal: AbortSignal;
+}
+
+function normalizeTransactionRequest(
+  request: StateTransactionRequest,
+  maxRecordBytes: number,
+  maxTotalBytes: number,
+): NormalizedTransactionRequest {
+  const value = readOwnDataRecord(
+    request,
+    ["checks", "deletes", "puts", "signal"],
+    ["checks", "deletes", "puts", "signal"],
+    "State transaction",
+  );
+  const checkInputs = readDenseArray<StateTransactionCheck>(
+    value.checks,
+    STATE_TRANSACTION_MAX_ENTRIES,
+    "State transaction checks",
+  );
+  const putInputs = readDenseArray<StateTransactionPut>(
+    value.puts,
+    STATE_TRANSACTION_MAX_ENTRIES,
+    "State transaction puts",
+  );
+  const deleteInputs = readDenseArray<StateTransactionDelete>(
+    value.deletes,
+    STATE_TRANSACTION_MAX_ENTRIES,
+    "State transaction deletes",
+  );
+  const total = checkInputs.length + putInputs.length + deleteInputs.length;
+  if (total < 1 || total > STATE_TRANSACTION_MAX_ENTRIES) {
+    throw new StateLocalError(
+      "STATE_LIMIT_EXCEEDED",
+      `State transactions must contain from 1 through ${STATE_TRANSACTION_MAX_ENTRIES} entries.`,
+    );
+  }
+
+  const checks = checkInputs.map((operation, index) =>
+    normalizeTransactionOperation(operation, "check", index));
+  let putBytes = 0;
+  const puts = putInputs.map((operation, index) => {
+    const normalized = normalizeTransactionOperation(operation, "put", index);
+    const data = readOwnDataRecord(
+      operation,
+      ["expectedVersion", "key", "value"],
+      ["expectedVersion", "key", "value"],
+      `State transaction put ${index}`,
+    );
+    const bytes = cloneTransactionBytes(data.value, normalized.key, maxRecordBytes);
+    putBytes += bytes.byteLength;
+    if (!Number.isSafeInteger(putBytes) || putBytes > maxTotalBytes) {
+      throw new StateLocalError(
+        "STATE_LIMIT_EXCEEDED",
+        "State transaction put data exceeds maxTotalBytes.",
+      );
+    }
+    return { ...normalized, value: bytes };
+  });
+  const deletes = deleteInputs.map((operation, index) =>
+    normalizeTransactionOperation(operation, "delete", index));
+  const keys = new Set<string>();
+  for (const operation of [...checks, ...puts, ...deletes]) {
+    if (keys.has(operation.key)) {
+      throw new StateLocalError(
+        "STATE_INVALID_CONFIG",
+        `State transaction key ${operation.key} occurs more than once.`,
+      );
+    }
+    keys.add(operation.key);
+  }
+  return {
+    checks,
+    puts,
+    deletes,
+    signal: readAbortSignal(value.signal, "State transaction signal"),
+  };
+}
+
+function normalizeTransactionOperation(
+  operation: StateTransactionCheck | StateTransactionPut | StateTransactionDelete,
+  kind: "check" | "put" | "delete",
+  index: number,
+): NormalizedTransactionCheck {
+  const keys = kind === "put"
+    ? ["expectedVersion", "key", "value"]
+    : ["expectedVersion", "key"];
+  const value = readOwnDataRecord(
+    operation,
+    keys,
+    keys,
+    `State transaction ${kind} ${index}`,
+  );
+  const key = validateStateKey(value.key);
+  const expectedVersion = value.expectedVersion === null
+    ? null
+    : validateExpectedVersion(value.expectedVersion);
+  if (expectedVersion === undefined) {
+    throw new StateLocalError(
+      "STATE_VERSION_MISMATCH",
+      `State transaction ${kind} ${index} must provide expectedVersion.`,
+    );
+  }
+  return { key, expectedVersion };
+}
+
+function cloneTransactionBytes(
+  value: unknown,
+  key: string,
+  maxRecordBytes: number,
+): Buffer {
+  try {
+    if (
+      TYPED_ARRAY_BUFFER_GETTER === undefined ||
+      TYPED_ARRAY_BYTE_LENGTH_GETTER === undefined ||
+      TYPED_ARRAY_BYTE_OFFSET_GETTER === undefined ||
+      TYPED_ARRAY_TAG_GETTER === undefined ||
+      TYPED_ARRAY_TAG_GETTER.call(value) !== "Uint8Array"
+    ) {
+      throw new TypeError("Expected Uint8Array");
+    }
+    // Invoke the intrinsic accessors directly. Own/subclass accessors are
+    // ignored, while a Proxy has no typed-array internal slot and is rejected.
+    const beforeLength = TYPED_ARRAY_BYTE_LENGTH_GETTER.call(value) as unknown;
+    const beforeOffset = TYPED_ARRAY_BYTE_OFFSET_GETTER.call(value) as unknown;
+    const buffer = TYPED_ARRAY_BUFFER_GETTER.call(value) as unknown;
+    if (
+      !Number.isSafeInteger(beforeLength) ||
+      (beforeLength as number) < 0 ||
+      !Number.isSafeInteger(beforeOffset) ||
+      (beforeOffset as number) < 0 ||
+      (
+        !(buffer instanceof ArrayBuffer) &&
+        !(typeof SharedArrayBuffer === "function" && buffer instanceof SharedArrayBuffer)
+      )
+    ) {
+      throw new TypeError("Invalid Uint8Array internals");
+    }
+    if ((beforeLength as number) > maxRecordBytes) {
+      throw new StateLocalError(
+        "STATE_LIMIT_EXCEEDED",
+        `State record ${key} exceeds maxRecordBytes.`,
+      );
+    }
+    const source = new Uint8Array(
+      buffer as ArrayBufferLike,
+      beforeOffset as number,
+      beforeLength as number,
+    );
+    const bytes = Buffer.from(source);
+    const afterLength = TYPED_ARRAY_BYTE_LENGTH_GETTER.call(value) as unknown;
+    const afterOffset = TYPED_ARRAY_BYTE_OFFSET_GETTER.call(value) as unknown;
+    const afterBuffer = TYPED_ARRAY_BUFFER_GETTER.call(value) as unknown;
+    if (
+      afterLength !== beforeLength ||
+      afterOffset !== beforeOffset ||
+      afterBuffer !== buffer ||
+      bytes.byteLength !== beforeLength ||
+      bytes.byteLength > maxRecordBytes
+    ) {
+      throw new StateLocalError(
+        "STATE_INVALID_CONFIG",
+        `State transaction byte data for ${key} changed while being copied.`,
+      );
+    }
+    return bytes;
+  } catch (error) {
+    if (error instanceof StateLocalError) throw error;
+    throw new StateLocalError(
+      "STATE_INVALID_CONFIG",
+      `State transaction value for ${key} must be byte data.`,
+      error,
+    );
+  }
+}
+
+function normalizeScanRequest(request: StateScanRequest): NormalizedScanRequest {
+  const value = readOwnDataRecord(
+    request,
+    ["limit", "prefix", "signal"],
+    ["cursor", "limit", "prefix", "signal"],
+    "State scan",
+  );
+  const prefix = validateStatePrefix(value.prefix);
+  if (!Number.isSafeInteger(value.limit) || (value.limit as number) < 1 || (value.limit as number) > 1_000) {
+    throw new StateLocalError(
+      "STATE_LIMIT_EXCEEDED",
+      "State scan limit must be from 1 through 1000.",
+    );
+  }
+  if (
+    value.cursor !== undefined &&
+    (
+      typeof value.cursor !== "string"
+      || value.cursor.length === 0
+      || value.cursor.length > STATE_CURSOR_MAX_CODE_UNITS
+    )
+  ) {
+    throw new StateLocalError("STATE_INVALID_CURSOR", "State scan cursor is invalid.");
+  }
+  return {
+    prefix,
+    ...(value.cursor === undefined ? {} : { cursor: value.cursor as string }),
+    limit: value.limit as number,
+    signal: readAbortSignal(value.signal, "State scan signal"),
+  };
+}
+
+function readOwnDataRecord(
+  value: unknown,
+  required: readonly string[],
+  allowed: readonly string[],
+  label: string,
+): Readonly<Record<string, unknown>> {
+  let prototype: object | null;
+  let keys: readonly PropertyKey[];
+  let descriptors: Readonly<Record<string, PropertyDescriptor>>;
+  try {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new TypeError("Expected object");
+    }
+    prototype = Object.getPrototypeOf(value) as object | null;
+    keys = Reflect.ownKeys(value);
+    descriptors = Object.getOwnPropertyDescriptors(value) as Readonly<
+      Record<string, PropertyDescriptor>
+    >;
+  } catch (error) {
+    throw new StateLocalError(
+      "STATE_INVALID_CONFIG",
+      `${label} must be a plain own-data object.`,
+      error,
+    );
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new StateLocalError(
+      "STATE_INVALID_CONFIG",
+      `${label} must be a plain own-data object.`,
+    );
+  }
+  if (keys.some((key) => typeof key !== "string")) {
+    throw new StateLocalError("STATE_INVALID_CONFIG", `${label} must not contain symbol fields.`);
+  }
+  const names = keys as readonly string[];
+  if (
+    required.some((key) => !names.includes(key)) ||
+    names.some((key) => !allowed.includes(key))
+  ) {
+    throw new StateLocalError(
+      "STATE_INVALID_CONFIG",
+      `${label} contains unknown or missing fields.`,
+    );
+  }
+  const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const name of names) {
+    const descriptor = descriptors[name];
+    if (
+      descriptor === undefined ||
+      !("value" in descriptor) ||
+      descriptor.enumerable !== true
+    ) {
+      throw new StateLocalError(
+        "STATE_INVALID_CONFIG",
+        `${label} fields must be enumerable own data properties.`,
+      );
+    }
+    result[name] = descriptor.value;
+  }
+  return result;
+}
+
+function readDenseArray<T>(
+  value: unknown,
+  maximum: number,
+  label: string,
+): readonly T[] {
+  let prototype: object | null;
+  let keys: readonly PropertyKey[];
+  let descriptors: Readonly<Record<string, PropertyDescriptor>>;
+  try {
+    if (!Array.isArray(value)) throw new TypeError("Expected array");
+    prototype = Object.getPrototypeOf(value) as object | null;
+    keys = Reflect.ownKeys(value);
+    descriptors = Object.getOwnPropertyDescriptors(value) as Readonly<
+      Record<string, PropertyDescriptor>
+    >;
+  } catch (error) {
+    throw new StateLocalError("STATE_INVALID_CONFIG", `${label} must be a dense array.`, error);
+  }
+  const lengthDescriptor = descriptors.length;
+  const length = lengthDescriptor !== undefined && "value" in lengthDescriptor
+    ? lengthDescriptor.value as unknown
+    : undefined;
+  if (
+    prototype !== Array.prototype ||
+    !Number.isSafeInteger(length) ||
+    (length as number) < 0 ||
+    (length as number) > maximum
+  ) {
+    throw new StateLocalError(
+      Number.isSafeInteger(length) && (length as number) > maximum
+        ? "STATE_LIMIT_EXCEEDED"
+        : "STATE_INVALID_CONFIG",
+      `${label} must be a bounded dense array.`,
+    );
+  }
+  const expectedKeys = new Set<PropertyKey>([
+    ...Array.from({ length: length as number }, (_, index) => String(index)),
+    "length",
+  ]);
+  if (keys.length !== expectedKeys.size || keys.some((key) => !expectedKeys.has(key))) {
+    throw new StateLocalError("STATE_INVALID_CONFIG", `${label} must be a dense own-data array.`);
+  }
+  const result: T[] = [];
+  for (let index = 0; index < (length as number); index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (
+      descriptor === undefined ||
+      !("value" in descriptor) ||
+      descriptor.enumerable !== true
+    ) {
+      throw new StateLocalError("STATE_INVALID_CONFIG", `${label} must be a dense own-data array.`);
+    }
+    result.push(descriptor.value as T);
+  }
+  return result;
+}
+
+function readAbortSignal(value: unknown, label: string): AbortSignal {
+  try {
+    if (!(value instanceof AbortSignal)) throw new TypeError("Expected AbortSignal");
+  } catch (error) {
+    throw new StateLocalError("STATE_INVALID_CONFIG", `${label} must be an AbortSignal.`, error);
+  }
+  return value;
+}
+
 function assertExpectedVersion(
   key: string,
   existing: StoredRecord | undefined,
@@ -691,6 +1189,10 @@ function canonicalNow(clock: () => Date): string {
   return value.toISOString();
 }
 
+function compareStoredRecords(left: StoredRecord, right: StoredRecord): number {
+  return left.key < right.key ? -1 : left.key > right.key ? 1 : 0;
+}
+
 function clonePresence(presence: StatePresenceRecord): StatePresenceRecord {
   return normalizePresenceRecord(presence);
 }
@@ -710,7 +1212,11 @@ function decodeCursor(
   generation: number,
 ): string | undefined {
   if (cursor === undefined) return undefined;
-  if (typeof cursor !== "string" || cursor.length === 0 || cursor.length > 4_096) {
+  if (
+    typeof cursor !== "string"
+    || cursor.length === 0
+    || cursor.length > STATE_CURSOR_MAX_CODE_UNITS
+  ) {
     throw new StateLocalError("STATE_INVALID_CURSOR", "State list cursor is invalid.");
   }
   let raw: unknown;
@@ -741,5 +1247,53 @@ function decodeCursor(
     return key;
   } catch (error) {
     throw new StateLocalError("STATE_INVALID_CURSOR", "State list cursor contains an invalid key.", error);
+  }
+}
+
+function encodeScanCursor(prefix: string, key: string | undefined): string | undefined {
+  if (key === undefined) return undefined;
+  const cursor = Buffer.from(
+    JSON.stringify({ v: 1, p: prefix, k: key }),
+    "utf8",
+  ).toString("base64url");
+  if (cursor.length > STATE_CURSOR_MAX_CODE_UNITS) {
+    throw new StateLocalError("STATE_LIMIT_EXCEEDED", "State scan cursor exceeds its byte bound.");
+  }
+  return cursor;
+}
+
+function decodeScanCursor(cursor: string | undefined, prefix: string): string | undefined {
+  if (cursor === undefined) return undefined;
+  let raw: unknown;
+  try {
+    const decoded = Buffer.from(cursor, "base64url");
+    if (decoded.toString("base64url") !== cursor) throw new Error("Non-canonical cursor");
+    raw = JSON.parse(decoded.toString("utf8")) as unknown;
+  } catch (error) {
+    throw new StateLocalError("STATE_INVALID_CURSOR", "State scan cursor is invalid.", error);
+  }
+  if (
+    typeof raw !== "object" ||
+    raw === null ||
+    Array.isArray(raw) ||
+    Object.getPrototypeOf(raw) !== Object.prototype ||
+    Object.keys(raw).sort().join(",") !== "k,p,v" ||
+    (raw as { v?: unknown }).v !== 1 ||
+    (raw as { p?: unknown }).p !== prefix
+  ) {
+    throw new StateLocalError("STATE_INVALID_CURSOR", "State scan cursor does not match this query.");
+  }
+  try {
+    const key = validateStateKey((raw as { k?: unknown }).k);
+    if (!key.startsWith(prefix)) {
+      throw new StateLocalError("STATE_INVALID_CURSOR", "State scan cursor does not match this prefix.");
+    }
+    return key;
+  } catch (error) {
+    throw new StateLocalError(
+      "STATE_INVALID_CURSOR",
+      "State scan cursor contains an invalid key.",
+      error,
+    );
   }
 }

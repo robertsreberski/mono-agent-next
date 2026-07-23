@@ -403,6 +403,291 @@ describe("StateLocalStore", () => {
     await store.close();
   });
 
+  it("commits explicit multi-key transactions all at once and preserves them across restart", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    const alpha = await store.write({ key: "runs/alpha", value: bytes("old"), signal });
+    const guard = await store.write({ key: "runs/guard", value: bytes("guard"), signal });
+    const retired = await store.write({ key: "runs/retired", value: bytes("retired"), signal });
+
+    const result = await store.transaction({
+      checks: [{ key: "runs/guard", expectedVersion: guard.version }],
+      puts: [
+        { key: "runs/alpha", expectedVersion: alpha.version, value: bytes("updated") },
+        { key: "runs/current", expectedVersion: null, value: bytes("current") },
+      ],
+      deletes: [
+        { key: "runs/retired", expectedVersion: retired.version },
+        { key: "runs/already-absent", expectedVersion: null },
+      ],
+      signal,
+    });
+
+    expect(result.status).toBe("applied");
+    if (result.status !== "applied") throw new Error("Expected transaction to apply.");
+    expect(result.records.map((record) => record.key)).toEqual(["runs/alpha", "runs/current"]);
+    expect(new Set(result.records.map((record) => record.version)).size).toBe(2);
+    expect(result.deletedKeys).toEqual(["runs/retired"]);
+    result.records[0]?.value.fill(0);
+    expect(text((await store.read({ key: "runs/alpha", signal }))?.value)).toBe("updated");
+    await store.close();
+
+    const reopened = await open(config);
+    expect(text((await reopened.read({ key: "runs/alpha", signal }))?.value)).toBe("updated");
+    expect(text((await reopened.read({ key: "runs/current", signal }))?.value)).toBe("current");
+    expect(await reopened.read({ key: "runs/retired", signal })).toBeUndefined();
+    await reopened.close();
+  });
+
+  it("reopens a transaction snapshot containing long Unicode and JSON-escaped keys", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    const longSegment = `${"界".repeat(500)}${'"'.repeat(500)}`;
+    const keys = Array.from(
+      { length: 30 },
+      (_, index) => `runs/${String(index).padStart(2, "0")}-${longSegment}`,
+    );
+    const result = await store.transaction({
+      checks: [],
+      puts: keys.map((key) => ({ key, expectedVersion: null, value: bytes("x") })),
+      deletes: [],
+      signal,
+    });
+    expect(result.status).toBe("applied");
+    await store.close();
+
+    const encoded = await readIndexedSnapshot(join(config.root, "lease.sqlite"));
+    const legacyUnderestimate =
+      config.maxTotalBytes * 2 + config.maxRecords * 256 + 4_096;
+    expect(encoded.byteLength).toBeGreaterThan(legacyUnderestimate);
+
+    const reopened = await open(config);
+    const records = await reopened.scan({ prefix: "runs/", limit: 100, signal });
+    expect(records.records.map((record) => record.key)).toEqual(keys);
+    await reopened.close();
+  });
+
+  it("reports every transaction conflict and leaves all candidate mutations unapplied", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    const alpha = await store.write({ key: "runs/alpha", value: bytes("alpha"), signal });
+    const retired = await store.write({ key: "runs/retired", value: bytes("retired"), signal });
+
+    const result = await store.transaction({
+      checks: [{ key: "runs/missing", expectedVersion: alpha.version }],
+      puts: [
+        { key: "runs/alpha", expectedVersion: retired.version, value: bytes("changed") },
+        { key: "runs/new", expectedVersion: null, value: bytes("new") },
+      ],
+      deletes: [{ key: "runs/retired", expectedVersion: alpha.version }],
+      signal,
+    });
+
+    expect(result).toEqual({
+      status: "conflict",
+      conflicts: [
+        { key: "runs/missing" },
+        { key: "runs/alpha", currentVersion: alpha.version },
+        { key: "runs/retired", currentVersion: retired.version },
+      ],
+    });
+    expect(text((await store.read({ key: "runs/alpha", signal }))?.value)).toBe("alpha");
+    expect(text((await store.read({ key: "runs/retired", signal }))?.value)).toBe("retired");
+    expect(await store.read({ key: "runs/new", signal })).toBeUndefined();
+    await store.close();
+  });
+
+  it("rejects ambiguous, sparse, accessor-backed, and oversized transaction inputs", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    const sparse = new Array(1);
+    const accessor = Object.defineProperty({}, "key", {
+      enumerable: true,
+      get: () => "runs/accessor",
+    });
+    Object.defineProperties(accessor, {
+      expectedVersion: { enumerable: true, value: null },
+      value: { enumerable: true, value: bytes("value") },
+    });
+
+    expect(() => store.transaction({
+      checks: sparse,
+      puts: [],
+      deletes: [],
+      signal,
+    } as never)).toThrowError(expect.objectContaining({ code: "STATE_INVALID_CONFIG" }));
+    expect(() => store.transaction({
+      checks: [],
+      puts: [accessor],
+      deletes: [],
+      signal,
+    } as never)).toThrowError(expect.objectContaining({ code: "STATE_INVALID_CONFIG" }));
+    expect(() => store.transaction({
+      checks: [{ key: "runs/repeated-entry", expectedVersion: null }],
+      puts: [{ key: "runs/repeated-entry", expectedVersion: null, value: bytes("value") }],
+      deletes: [],
+      signal,
+    })).toThrowError(expect.objectContaining({ code: "STATE_INVALID_CONFIG" }));
+    expect(() => store.transaction({
+      checks: [],
+      puts: [{
+        key: "runs/oversized",
+        expectedVersion: null,
+        value: new Uint8Array(config.maxRecordBytes + 1),
+      }],
+      deletes: [],
+      signal,
+    })).toThrowError(expect.objectContaining({ code: "STATE_LIMIT_EXCEEDED" }));
+    const ownAccessor = new Uint8Array(config.maxRecordBytes + 1);
+    Object.defineProperty(ownAccessor, "byteLength", {
+      configurable: true,
+      get: () => 0,
+    });
+    expect(() => store.transaction({
+      checks: [],
+      puts: [{
+        key: "runs/own-byte-length",
+        expectedVersion: null,
+        value: ownAccessor,
+      }],
+      deletes: [],
+      signal,
+    })).toThrowError(expect.objectContaining({ code: "STATE_LIMIT_EXCEEDED" }));
+    class MisreportedUint8Array extends Uint8Array {
+      override get byteLength(): number {
+        return 0;
+      }
+    }
+    expect(() => store.transaction({
+      checks: [],
+      puts: [{
+        key: "runs/subclass-byte-length",
+        expectedVersion: null,
+        value: new MisreportedUint8Array(config.maxRecordBytes + 1),
+      }],
+      deletes: [],
+      signal,
+    })).toThrowError(expect.objectContaining({ code: "STATE_LIMIT_EXCEEDED" }));
+    const proxied = new Proxy(new Uint8Array(config.maxRecordBytes + 1), {
+      get(target, property) {
+        if (property === "byteLength" || property === "length") return 0;
+        return Reflect.get(target, property, target);
+      },
+    });
+    expect(() => store.transaction({
+      checks: [],
+      puts: [{
+        key: "runs/proxied-byte-length",
+        expectedVersion: null,
+        value: proxied,
+      }],
+      deletes: [],
+      signal,
+    })).toThrowError(expect.objectContaining({ code: "STATE_INVALID_CONFIG" }));
+    expect(() => store.transaction({
+      checks: Array.from({ length: 1_001 }, (_, index) => ({
+        key: `runs/bounded-${index}`,
+        expectedVersion: null,
+      })),
+      puts: [],
+      deletes: [],
+      signal,
+    })).toThrowError(expect.objectContaining({ code: "STATE_LIMIT_EXCEEDED" }));
+    expect(() => store.transaction(Object.assign({
+      checks: [{ key: "runs/symbol", expectedVersion: null }],
+      puts: [],
+      deletes: [],
+      signal,
+    }, { [Symbol("hidden")]: true }))).toThrowError(expect.objectContaining({
+      code: "STATE_INVALID_CONFIG",
+    }));
+    expect(await store.scan({ prefix: "runs/", limit: 10, signal })).toEqual({ records: [] });
+    await store.close();
+  });
+
+  it("uses prefix-bound last-key scan cursors that continue across intervening commits", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    await store.write({ key: "runs/a", value: bytes("a"), signal });
+    await store.write({ key: "runs/c", value: bytes("c"), signal });
+    await store.write({ key: "other/a", value: bytes("other"), signal });
+
+    const first = await store.scan({ prefix: "runs/", limit: 1, signal });
+    expect(first.records.map((record) => record.key)).toEqual(["runs/a"]);
+    if (first.cursor === undefined) throw new Error("Expected a forward scan cursor.");
+    await store.write({ key: "runs/b", value: bytes("b"), signal });
+    const second = await store.scan({
+      prefix: "runs/",
+      cursor: first.cursor,
+      limit: 10,
+      signal,
+    });
+    expect(second.records.map((record) => record.key)).toEqual(["runs/b", "runs/c"]);
+    expect(second.cursor).toBeUndefined();
+    await expect(store.scan({
+      prefix: "other/",
+      cursor: first.cursor,
+      limit: 10,
+      signal,
+    })).rejects.toMatchObject({ code: "STATE_INVALID_CURSOR" });
+    await store.close();
+  });
+
+  it("paginates after maximally escaped valid keys without emitting an unusable cursor", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    const escapedKey = `runs/${"\ud800".repeat(1_000)}`;
+    const laterKey = "runs/\ue000";
+    await store.write({ key: escapedKey, value: bytes("escaped"), signal });
+    await store.write({ key: laterKey, value: bytes("later"), signal });
+
+    const first = await store.scan({ prefix: "runs/", limit: 1, signal });
+    expect(first.records.map((record) => record.key)).toEqual([escapedKey]);
+    expect(first.cursor?.length).toBeGreaterThan(4_096);
+    if (first.cursor === undefined) throw new Error("Expected a long escaped-key cursor.");
+    const second = await store.scan({
+      prefix: "runs/",
+      cursor: first.cursor,
+      limit: 1,
+      signal,
+    });
+    expect(second.records.map((record) => record.key)).toEqual([laterKey]);
+    expect(second.cursor).toBeUndefined();
+    await store.close();
+  });
+
+  it("recovers one complete transaction snapshot after an uncertain committed write", async () => {
+    const config = await createConfig();
+    let crash = true;
+    const store = await open(config, {
+      snapshot: {
+        afterRename: () => {
+          if (!crash) return;
+          crash = false;
+          throw new Error("simulated transaction crash after commit");
+        },
+      },
+    });
+
+    await expect(store.transaction({
+      checks: [],
+      puts: [
+        { key: "runs/one", expectedVersion: null, value: bytes("one") },
+        { key: "runs/two", expectedVersion: null, value: bytes("two") },
+      ],
+      deletes: [],
+      signal,
+    })).rejects.toMatchObject({ code: "STATE_POISONED" });
+    await expect(store.read({ key: "runs/one", signal }))
+      .rejects.toMatchObject({ code: "STATE_POISONED" });
+    await store.close();
+
+    const reopened = await open(config);
+    expect(text((await reopened.read({ key: "runs/one", signal }))?.value)).toBe("one");
+    expect(text((await reopened.read({ key: "runs/two", signal }))?.value)).toBe("two");
+    await reopened.close();
+  });
+
   it("persists, filters, and safely removes hidden presence records", async () => {
     const config = await createConfig();
     const store = await open(config);
@@ -457,6 +742,33 @@ describe("StateLocalStore", () => {
     const reopened = await open(config);
     expect((await reopened.listPresence({ includeExpired: true, signal })).map((item) => item.presenceId))
       .toEqual(["presence-expired"]);
+    await reopened.close();
+  });
+
+  it("keeps accepted Unicode presence identities reopenable and rejects oversized durable keys", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    const acceptedPresenceId = "界".repeat(128);
+    const presence = {
+      presenceId: acceptedPresenceId,
+      agentId: "agent-unicode",
+      instanceId: "instance-unicode",
+      updatedAt: "2026-07-23T11:59:00.000Z",
+      expiresAt: "2026-07-23T12:01:00.000Z",
+    } as const;
+
+    await store.upsertPresence({ presence, signal });
+    await expect(store.upsertPresence({
+      presence: {
+        ...presence,
+        presenceId: "界".repeat(129),
+      },
+      signal,
+    })).rejects.toMatchObject({ code: "STATE_LIMIT_EXCEEDED" });
+    await store.close();
+
+    const reopened = await open(config);
+    expect(await reopened.listPresence({ includeExpired: true, signal })).toEqual([presence]);
     await reopened.close();
   });
 });

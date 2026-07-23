@@ -16,7 +16,28 @@ describe("runtime-pi module import", () => {
       kind: "runtime",
       capabilities: [],
     });
-    expect(validation).toEqual({ supported: true, nativeTools: [] });
+    expect(validation).toEqual({
+      supported: true,
+      nativeTools: [{
+        id: "NodeRepl",
+        displayName: "Node REPL",
+        effects: ["read", "write", "execute", "network"],
+        approval: "core-callback",
+        sandbox: "unsupported",
+      }, {
+        id: "Edit",
+        displayName: "Edit",
+        effects: ["read", "write"],
+        approval: "core-callback",
+        sandbox: "unsupported",
+      }, {
+        id: "WebSearch",
+        displayName: "Web Search",
+        effects: ["network"],
+        approval: "core-callback",
+        sandbox: "unsupported",
+      }],
+    });
     expect(validation).not.toBeInstanceOf(Promise);
     expect(module.monoAgentModule.validateModel?.({
       model: "openai/gpt-5",

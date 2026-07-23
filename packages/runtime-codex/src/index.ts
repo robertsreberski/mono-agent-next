@@ -23,6 +23,7 @@ export const monoAgentModule = defineRuntimeModule({
       config: context.config,
       instanceId: context.instanceId,
       workspaceDirectory: context.workspaceDirectory,
+      dataDirectory: context.dataDirectory,
     });
   },
 });
