@@ -10,6 +10,8 @@ import {
   applyServiceMacosPlan,
   inspectServiceMacos,
   planServiceMacos,
+  planServiceMacosRemoval,
+  removeServiceMacosPlan,
 } from "./reconciler.js";
 
 export type ServiceSignal = "SIGINT" | "SIGTERM";
@@ -30,7 +32,7 @@ export interface ServiceMacosCliOptions {
 }
 
 interface ParsedCommand {
-  readonly command: "inspect" | "plan" | "apply" | "run-service";
+  readonly command: "inspect" | "plan" | "apply" | "remove" | "run-service";
   readonly configPath: string;
   readonly environmentFile?: string;
   readonly allowMutation: boolean;
@@ -59,7 +61,29 @@ export async function runServiceMacosCli(
       stdout(`${JSON.stringify({ ok: true, observations }, null, 2)}\n`);
       return 0;
     }
-    const plan = await planServiceMacos(parsed.configPath, { runtime, ...(options.runner === undefined ? {} : { runner: options.runner }) });
+    if (parsed.command === "remove") {
+      if (!parsed.allowMutation) throw new UsageError("remove requires the explicit --allow-mutation flag");
+      const removalPlan = await planServiceMacosRemoval(parsed.configPath, {
+        runtime,
+        ...(options.runner === undefined ? {} : { runner: options.runner }),
+      });
+      const observations = await removeServiceMacosPlan(removalPlan, {
+        runtime,
+        allowMutation: true,
+        ...(options.runner === undefined ? {} : { runner: options.runner }),
+      });
+      stdout(`${JSON.stringify({
+        ok: true,
+        operation: "remove",
+        fingerprint: removalPlan.fingerprint,
+        observations,
+      }, null, 2)}\n`);
+      return 0;
+    }
+    const plan = await planServiceMacos(parsed.configPath, {
+      runtime,
+      ...(options.runner === undefined ? {} : { runner: options.runner }),
+    });
     if (parsed.command === "plan") {
       stdout(`${JSON.stringify({ ok: true, plan }, null, 2)}\n`);
       return 0;
@@ -98,7 +122,13 @@ export function defaultRuntime(runnerScriptPath?: string): ServiceMacosRuntimePa
 
 function parseCommand(argv: readonly string[], cwd: string): ParsedCommand {
   const command = argv[0];
-  if (command !== "inspect" && command !== "plan" && command !== "apply" && command !== "run-service") {
+  if (
+    command !== "inspect"
+    && command !== "plan"
+    && command !== "apply"
+    && command !== "remove"
+    && command !== "run-service"
+  ) {
     throw new UsageError(`Unknown command: ${argv.join(" ")}`);
   }
   let configPath: string | undefined;
@@ -120,7 +150,7 @@ function parseCommand(argv: readonly string[], cwd: string): ParsedCommand {
       environmentFile = resolve(cwd, value);
       continue;
     }
-    if (argument === "--allow-mutation" && command === "apply" && !allowMutation) {
+    if (argument === "--allow-mutation" && (command === "apply" || command === "remove") && !allowMutation) {
       allowMutation = true;
       continue;
     }
@@ -177,6 +207,7 @@ function usage(): string {
   mono-agent-service-macos inspect --config <service-macos.json>
   mono-agent-service-macos plan --config <service-macos.json>
   mono-agent-service-macos apply --config <service-macos.json> --allow-mutation
+  mono-agent-service-macos remove --config <service-macos.json> --allow-mutation
 `;
 }
 

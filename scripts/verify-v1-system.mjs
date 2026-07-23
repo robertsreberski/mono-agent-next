@@ -138,6 +138,7 @@ async function main() {
       startOtlpReceiver(),
       startDeliveryReceiver(),
     ]);
+    await proveScaffoldFirstTurns(scaffoldDirectory, provider.baseUrl);
 
     await writeSystemFixture(consumerDirectory, {
       providerBaseUrl: provider.baseUrl,
@@ -383,6 +384,180 @@ async function assertTemplateContract(directory, template) {
       `${template} module selection must be ${expectedUses.join(", ")}; found ${actualUses.join(", ")}`,
     );
   }
+}
+
+async function proveScaffoldFirstTurns(scaffoldDirectory, providerBaseUrl) {
+  for (const template of ["minimal", "personal", "multi-runtime"]) {
+    const directory = join(scaffoldDirectory, template);
+    await writeJson(
+      join(directory, "mono-agent.config.json"),
+      hermeticScaffoldConfig(template, providerBaseUrl),
+    );
+    const scenarioPath = join(directory, "packed-first-turn.mjs");
+    await writeFile(scenarioPath, scaffoldFirstTurnScenarioSource(), "utf8");
+    const result = await runAsync(
+      process.execPath,
+      [basename(scenarioPath), "mono-agent.config.json", template],
+      directory,
+      {
+        ...process.env,
+        SCAFFOLD_WEBHOOK_TOKEN: `packed-${template}-webhook-token`,
+        CLAUDE_CODE_OAUTH_TOKEN: "packed-template-claude-oauth-token",
+      },
+    );
+    const parsed = JSON.parse(result.stdout.trim().split("\n").at(-1) ?? "null");
+    if (
+      parsed?.ok !== true
+      || parsed.template !== template
+      || parsed.reply !== EXPECTED_REPLY
+      || (template === "personal" && parsed.firstRunMarker !== "initialized")
+    ) {
+      throw new Error(`Packed ${template} first-turn fixture failed: ${result.stdout}`);
+    }
+  }
+}
+
+function hermeticScaffoldConfig(template, providerBaseUrl) {
+  const runtimes = {
+    pi: {
+      $use: "@mono-agent/runtime-pi",
+      auth: { path: "./.secrets/pi/auth.json" },
+      retry: { maxRetries: 0, maxDelayMs: 0, timeoutMs: 10_000 },
+      localProviders: [{
+        id: "local",
+        baseUrl: providerBaseUrl,
+        models: [{ id: "echo", contextWindow: 16_384, maxTokens: 1_024 }],
+      }],
+    },
+    ...(template === "multi-runtime"
+      ? {
+          "claude-sdk": {
+            $use: "@mono-agent/runtime-claude",
+            mode: "sdk",
+            auth: {
+              method: "oauth-token",
+              token: { $env: "CLAUDE_CODE_OAUTH_TOKEN" },
+            },
+          },
+        }
+      : {}),
+  };
+  return {
+    configVersion: 1,
+    agent: {
+      id: `packed-${template}`,
+      name: `Packed ${template}`,
+      instructions: "./AGENTS.md",
+      workspace: ".",
+    },
+    runtimes,
+    routing: {
+      primary: { runtime: "pi", model: "local:echo" },
+      fallbacks: template === "multi-runtime"
+        ? [{ runtime: "claude-sdk", model: "claude-opus-4-8" }]
+        : [],
+      effort: "high",
+    },
+    session: { mode: "continuous" },
+    ...(template === "personal"
+      ? {
+          memory: {
+            $use: "@mono-agent/memory-local",
+            directory: "./.mono-agent/memory",
+            capture: { mode: "direct" },
+          },
+          state: {
+            $use: "@mono-agent/state-local",
+            root: "./.mono-agent/state",
+          },
+        }
+      : {}),
+    channels: {
+      inbound: {
+        $use: "@mono-agent/channel-webhook",
+        listen: { host: "127.0.0.1", port: 0 },
+        apiKey: { $env: "SCAFFOLD_WEBHOOK_TOKEN" },
+        mode: "sync",
+        maxRunMs: 10_000,
+      },
+    },
+    policy: {
+      tools: { default: "deny", allow: [] },
+      approvals: { default: "allow" },
+      sandbox: { mode: "off" },
+    },
+  };
+}
+
+function scaffoldFirstTurnScenarioSource() {
+  return String.raw`import assert from "node:assert/strict";
+import { access, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+
+import { createAgentHost } from "@mono-agent/core";
+
+const configPath = resolve(process.argv[2] ?? "mono-agent.config.json");
+const template = process.argv[3];
+const expectedReply = "mono-agent-next durable provider fact 7d3f9c";
+const secret = process.env.SCAFFOLD_WEBHOOK_TOKEN;
+assert.ok(secret, "SCAFFOLD_WEBHOOK_TOKEN is required");
+let markerPath;
+if (template === "personal") {
+  const { MEMORY_LOCAL_MARKER_FILENAME } = await import("@mono-agent/memory-local");
+  markerPath = join(dirname(configPath), ".mono-agent", "memory", MEMORY_LOCAL_MARKER_FILENAME);
+  await assert.rejects(() => access(markerPath), (error) => error?.code === "ENOENT");
+}
+
+let host;
+try {
+  host = await createAgentHost(configPath, { drainTimeoutMs: 5_000, lifecycleTimeoutMs: 5_000 });
+  const endpoint = host.startInfo.channels.find((channel) => channel.instanceId === "inbound")?.endpoint;
+  assert.equal(typeof endpoint, "string", "scaffold webhook did not expose an endpoint");
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer " + secret,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      text: "packed scaffold " + template + " first turn",
+      conversationId: "scaffold-first-turn",
+    }),
+  });
+  const body = await response.text();
+  assert.equal(response.status, 200, body);
+  const completed = JSON.parse(body);
+  assert.equal(completed.status, "succeeded");
+  assert.equal(completed.text, expectedReply);
+  await host.drain();
+  await host.stop();
+  host = undefined;
+
+  let firstRunMarker;
+  if (markerPath !== undefined) {
+    const initialized = await readFile(markerPath, "utf8");
+    assert.match(initialized, /^initialized:[0-9a-f-]+\n$/u);
+    firstRunMarker = "initialized";
+
+    const interrupted = initialized.replace(/^initialized:/u, "initializing:");
+    await writeFile(markerPath, interrupted, { encoding: "utf8", mode: 0o600 });
+    await assert.rejects(
+      () => createAgentHost(configPath, { drainTimeoutMs: 5_000, lifecycleTimeoutMs: 5_000 }),
+      /incomplete|initializ/iu,
+    );
+    assert.equal(await readFile(markerPath, "utf8"), interrupted);
+  }
+
+  process.stdout.write(JSON.stringify({
+    ok: true,
+    template,
+    reply: expectedReply,
+    ...(firstRunMarker === undefined ? {} : { firstRunMarker }),
+  }) + "\n");
+} finally {
+  if (host !== undefined) await host.stop().catch(() => undefined);
+}
+`;
 }
 
 function collectSelectedPackages(value, output = []) {
@@ -781,17 +956,24 @@ function assertProviderRequests(requests) {
   }
   const captureRequests = requests.filter((request) => isStructuredCaptureRequest(request.parsed));
   const userRequests = requests.filter((request) => !isStructuredCaptureRequest(request.parsed));
-  if (captureRequests.length !== 3 || userRequests.length !== 3) {
+  if (captureRequests.length !== 3 || userRequests.length !== 6) {
     throw new Error(
-      `Fake provider expected three agent turns and three memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
+      `Fake provider expected six agent turns and three memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
     );
   }
   const userInputs = userRequests.map((request) => finalProviderUserText(request.parsed));
-  const expectedInputs = [MEMORY_QUERY, "Run the packed system cron proof.", MEMORY_QUERY];
+  const expectedInputs = [
+    "packed scaffold minimal first turn",
+    "packed scaffold personal first turn",
+    "packed scaffold multi-runtime first turn",
+    MEMORY_QUERY,
+    "Run the packed system cron proof.",
+    MEMORY_QUERY,
+  ];
   if (JSON.stringify(userInputs) !== JSON.stringify(expectedInputs)) {
     throw new Error(`Packed provider user inputs must be ${JSON.stringify(expectedInputs)}; found ${JSON.stringify(userInputs)}`);
   }
-  const memoryRecallRequest = userRequests[2];
+  const memoryRecallRequest = userRequests[5];
   if (!JSON.stringify(memoryRecallRequest.parsed.messages).includes(EXPECTED_REPLY)) {
     throw new Error("Fresh operator conversation did not receive Core-recalled memory in its Pi provider request");
   }

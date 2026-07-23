@@ -1,6 +1,6 @@
 ---
 title: "Home"
-description: "Build and understand the private mono-agent v1 source target: strict selected modules, standalone operator products, and explicit delivery phases."
+description: "Build and understand the public mono-agent v1 source target: strict selected modules, standalone operator products, and explicit delivery phases."
 sidebar:
   order: 0
 ---
@@ -10,8 +10,8 @@ mono-agent v1 is a config-first agent framework. One strict
 exporter, and sandbox modules; `@mono-agent/core` validates their installed
 identity and runs them through neutral contracts.
 
-This documentation describes the private `mono-agent-next` source target. The
-repository is not yet a published release and is not the live source for
+This documentation describes the public `mono-agent-next` source target. The
+packages are not yet published, and this repository is not the live source for
 existing agents.
 
 :::caution
@@ -22,7 +22,7 @@ predecessor retirement. Those are a later, separately approved phase.
 
 ## Start here
 
-1. [Install the private source workspace](/getting-started/install/) and run its
+1. [Install the source workspace](/getting-started/install/) and run its
    focused verification.
 2. [Prove and inspect a first agent](/getting-started/quickstart/) through the
    packed minimal path.
@@ -30,6 +30,8 @@ predecessor retirement. Those are a later, separately approved phase.
    adding a module.
 4. Read the [exact v1 architecture](/reference/v1-architecture/) for the closed
    23-package roster and dependency rules.
+5. Use the [source-beta migration guide](/migration/v0-to-v1-source-beta/) to
+   rehearse a consumer without changing its live v0 copy.
 
 ## What v1 contains
 

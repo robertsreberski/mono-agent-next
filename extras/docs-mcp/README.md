@@ -166,7 +166,7 @@ offline MCP companion.
 
 - [Documentation MCP companion guide](https://mono-agent-docs.vercel.app/tools/documentation-mcp/)
 - [MCP server configuration](https://mono-agent-docs.vercel.app/tools/mcp/)
-- [Feature registry](https://mono-agent-docs.vercel.app/reference/feature-registry/)
+- [Generated public API inventory](https://mono-agent-docs.vercel.app/reference/public-api/)
 
 ## Verification
 

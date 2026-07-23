@@ -1,11 +1,11 @@
 ---
 title: "Install & Prerequisites"
-description: "Install and verify the private mono-agent v1 source workspace without publishing packages or touching live consumers."
+description: "Install and verify the public mono-agent v1 source workspace without publishing packages or touching live consumers."
 sidebar:
   order: 1
 ---
 
-This page installs the private source workspace. Consumer installation from npm
+This page installs the public source workspace. Consumer installation from npm
 is intentionally deferred until a separately authorized release phase.
 
 ## Prerequisites
@@ -14,7 +14,7 @@ is intentionally deferred until a separately authorized release phase.
 | --- | --- | --- |
 | Node.js | 22.19.0 | Required by every v1 package. |
 | pnpm | 10.16.0 | The workspace pins pnpm 10.28.2 in `package.json`. |
-| Git and private repository access | Current | Required to clone `mono-agent-next`. |
+| Git | Current | Required to clone `mono-agent-next`. |
 | macOS | Optional | Required only for `@mono-agent/service-macos`; the foreground host and most modules are cross-platform Node.js packages. |
 
 Provider credentials are not required for the hermetic packed minimal proof. A
@@ -25,7 +25,7 @@ and web secrets are required only when those surfaces are selected or started.
 ## Clone and install
 
 ```bash
-git clone git@github.com:robertsreberski/mono-agent-next.git
+git clone https://github.com/robertsreberski/mono-agent-next.git
 cd mono-agent-next
 corepack enable
 pnpm install --frozen-lockfile
@@ -60,7 +60,7 @@ publish packages, use production credentials, or mutate a live consumer.
 
 ## Inspect the built executables
 
-Use the built files directly in this private worktree so an older globally
+Use the built files directly in this source worktree so an older globally
 installed command cannot shadow them:
 
 ```bash
@@ -75,7 +75,7 @@ separate executables and lifecycles.
 
 ## Render a project without installing it
 
-After `pnpm build`, the private source scaffolder can render any closed template:
+After `pnpm build`, the source scaffolder can render any closed template:
 
 ```bash
 node packages/create-mono-agent/dist/bin/create-mono-agent.js \
@@ -89,7 +89,7 @@ node packages/create-mono-agent/dist/bin/create-mono-agent.js \
 
 Accepted templates are `minimal`, `personal`, and `multi-runtime`; `minimal` is
 the default. The target must not already exist. Installation never runs unless
-`--install` is explicit, so omit that flag during the private source phase.
+`--install` is explicit, so omit that flag during the source-beta phase.
 
 Every template writes:
 
@@ -129,7 +129,7 @@ selected runtime.
 ## Consumer installation is a later phase
 
 The intended post-release consumer commands are exposed by
-`create-mono-agent` and `@mono-agent/cli`, but this private rebuild does not
+`create-mono-agent` and `@mono-agent/cli`, but this source rebuild does not
 publish them. A future release procedure must first pack the exact candidate,
 verify package contents and identities, publish under reviewed authority, and
 prove a clean registry install. Only then should users run registry-backed

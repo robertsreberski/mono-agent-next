@@ -49,6 +49,7 @@ describe("verify-all", () => {
       "check:codex-discoverability",
       "check:consumer-docs-consistency",
       "check:getting-started-version-pins",
+      "check:source-beta-docs",
       "check:docs",
       "release:validate",
       "check:architecture",

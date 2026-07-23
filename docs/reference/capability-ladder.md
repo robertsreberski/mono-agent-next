@@ -1,32 +1,29 @@
 ---
 title: "Capability ladder"
-description: "Choose the lowest-cost extension boundary for new mono-agent capabilities before adding packages or contracts."
+description: "Choose the lowest v1 ownership boundary that completely satisfies a new capability."
 sidebar:
   order: 5
 ---
 
-Choose the lowest rung that satisfies the capability. Lower rungs keep ownership, runtime surface area, and release blast radius smaller; higher rungs need stronger gates because they create new boundaries for users, hosts, packages, or adapters.
+Ask what the capability is before adding a package or contract. Use the lowest
+rung that completely owns it:
 
-Use this page before changing package boundaries, adding new runtime-visible tools, or moving adapter-specific ideas into shared contracts.
-
-## Rungs
-
-| Order | Rung | Cost | Gate |
+| Order | Desired capability | Correct boundary | Gate |
 | --- | --- | --- | --- |
-| 1 | Existing package / existing public surface | Lowest; no new ownership surface. | Use the current package responsibility and API without adding a new config key, runtime concept, package, or shared contract. |
-| 2 | Config field or selected skill | New user-facing option or loaded instruction surface. | For config, add typed config, validation, docs, and feature-registry coverage when it ships a capability. For skills, keep the behavior under `context.selectedSkills`; selected skills should not require host glue. |
-| 3 | New adapter/package in the correct package category | New package ownership, README, tests, release discovery, and catalog metadata. | Add the package to `scripts/package-catalog.mjs` with the correct `category`, `responsibility`, and `allowedDependencyCategories`; `scripts/check-package-architecture.mjs` must pass. Channel adapters that should be loaded from config expose a package-root `createChannelDriver()` and are declared under `channels.plugins[]`; the seam is loading only, still returning a normal `ChannelDriver`. |
-| 4 | MCP server / auto-provisioned MCP tool | Runtime-visible tool lifecycle, policy/security/docs, and tool-result behavior. | Use this when the model needs an explicit callable tool boundary. The canonical app-owned example is `MemoryRecall`; arbitrary user MCP servers still belong under `tools.mcpConfigPath`. |
-| 5 | Shared core contract change in `@mono-agent/agent-contracts` | Highest blast radius; likely semver, release coordination, and migration work. | Last resort only for adapter-neutral shared structure. `scripts/check-package-architecture.mjs` enforces that `agent-contracts` stays adapter-neutral. |
+| 1 | Existing behavior or API already fits | Existing package and public surface | No new ownership surface. Use the package's current schema or API. |
+| 2 | Model needs instructions for an existing tool or workflow | Selected skill | Keep instructions under `skills/`; do not add host glue. |
+| 3 | Model calls a project/domain tool | MCP server in `.mcp.json` | Standard MCP lifecycle, policy, security, and tool-result behavior. No Core or package-catalog edit. |
+| 4 | Work runs on a schedule | `@mono-agent/trigger-cron` plus a Markdown job | Typed trigger config, valid runtime/channel references, and bounded job behavior. |
+| 5 | External system pushes work | Existing webhook or channel module | Authentication, allowlist, delivery idempotency, bounds, health, and redaction. |
+| 6 | Work outlives the turn or independently collects data | External project/host service | Own its durable lifecycle and re-enter through an explicit configured channel or webhook. |
+| 7 | New human interface | Product consuming `@mono-agent/operator` | Shared protocol/client/domain fixtures; no second wire decoder or Core import. |
+| 8 | Replace a framework runtime, channel, memory, state, trigger, exporter, or sandbox semantic | Narrow typed module | Direct dependency, exact `$use`, package-owned schema, public compliance suite, catalog metadata for first-party modules. |
+| 9 | Change an adapter-neutral contract shared by module implementations | `@mono-agent/module-sdk` contract | Last resort and highest blast radius; prove lower rungs cannot own the behavior. |
 
-## Enforcement points
+Package presence never activates a typed module. Project MCP servers do not
+become typed modules merely because they are important. Core is not a generic
+process supervisor, plugin registry, documentation host, UI toolkit, or service
+manager.
 
-- `scripts/package-catalog.mjs` is the source of truth for package categories, responsibilities, and allowed workspace dependency categories.
-- `scripts/check-package-architecture.mjs` enforces catalog coverage, package dependency boundaries, and adapter-neutrality for core contracts.
-- `docs/reference/feature-registry.md` is the source of truth for shipped framework capabilities and their coverage.
-
-The [feature registry](/reference/feature-registry/) coverage legend explains whether a capability is reached through config, CLI, auto behavior, code, or development tooling. Its maintenance rules apply when a package ships a new capability or option; do not add a registry row for a docs-only decision rule like this ladder.
-
-## How to choose
-
-Start by asking whether an existing public surface can express the behavior. If it can, stay on rung 1 and document usage where needed. If users need to declare or select behavior, rung 2 is usually enough. If the behavior needs independent package ownership or adapter responsibility, use rung 3. If the model must decide to call a bounded tool at runtime, use rung 4. Only change `@mono-agent/agent-contracts` when multiple packages need the same adapter-neutral structure and the lower rungs would create hidden coupling.
+The [v1 architecture](/reference/v1-architecture/) defines dependency direction
+and the [package directory](/reference/packages/) names each current owner.

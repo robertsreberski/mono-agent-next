@@ -151,4 +151,3 @@ completion of later runtime, state, trigger, or migration verticals.
 - [Operator channel](/channels/tui/) — authenticated agent endpoint and current capability set.
 - [Terminal operator](/observability/tui/) — independent pi-tui renderer.
 - [v1 architecture](/reference/v1-architecture/) — product/config ownership and dependency direction.
-- [Sessions and concurrency](/runtime/sessions-concurrency/) — general conversation isolation; later v1 state work remains separate.

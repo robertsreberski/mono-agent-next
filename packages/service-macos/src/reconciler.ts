@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { link, lstat, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { link, lstat, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { validateAgentConfig, type AgentLoadOptions, type AgentValidationResult } from "@mono-agent/core";
@@ -46,6 +46,7 @@ export interface AgentPlanBinding {
 }
 
 export type ServicePlanAction = "create" | "update" | "load" | "noop";
+export type ServiceRemovalAction = "remove" | "noop";
 
 export interface ServiceMacosPlanEntry {
   readonly serviceId: string;
@@ -67,6 +68,23 @@ export interface ServiceMacosPlan {
   readonly fingerprint: string;
 }
 
+export interface ServiceMacosRemovalPlanEntry {
+  readonly serviceId: string;
+  readonly target: ServiceMacosTarget;
+  readonly observed: ServiceMacosObservation;
+  readonly action: ServiceRemovalAction;
+}
+
+export interface ServiceMacosRemovalPlan {
+  readonly schemaVersion: 1;
+  readonly operation: "remove";
+  readonly configPath: string;
+  readonly configDigest: string;
+  readonly runtime: ServiceMacosRuntimePaths;
+  readonly entries: readonly ServiceMacosRemovalPlanEntry[];
+  readonly fingerprint: string;
+}
+
 export interface InspectServiceMacosOptions {
   readonly runtime: ServiceMacosRuntimePaths;
   readonly runner?: CommandRunner;
@@ -78,6 +96,14 @@ export interface PlanServiceMacosOptions extends InspectServiceMacosOptions {
 }
 
 export interface ApplyServiceMacosOptions extends PlanServiceMacosOptions {
+  readonly allowMutation?: boolean;
+}
+
+export interface PlanServiceMacosRemovalOptions extends InspectServiceMacosOptions {
+  readonly serviceIds?: readonly string[];
+}
+
+export interface RemoveServiceMacosOptions extends InspectServiceMacosOptions {
   readonly allowMutation?: boolean;
 }
 
@@ -179,13 +205,94 @@ export async function applyServiceMacosPlan(
       await launchctl(runner, ["bootstrap", entry.target.launchdDomain, entry.target.plistPath], options.signal);
       continue;
     }
-    await promoteAndActivate(entry, runner, options.signal);
+    await promoteAndActivate(entry, runner, plan.runtime.uid, options.signal);
   }
   return await inspectLoadedConfig(loaded, options);
 }
 
+export async function planServiceMacosRemoval(
+  configPath: string,
+  options: PlanServiceMacosRemovalOptions,
+): Promise<ServiceMacosRemovalPlan> {
+  assertRuntimePaths(options.runtime);
+  await assertOwnedDirectory(options.runtime.launchAgentsDirectory, options.runtime.uid);
+  const loaded = await loadServiceMacosConfig(configPath);
+  const selectedServiceIds = selectRemovalServiceIds(loaded, options.serviceIds);
+  const observations = await inspectLoadedConfig(loaded, options);
+  const byService = new Map(observations.map((observation) => [observation.target.serviceId, observation]));
+  const entries = selectedServiceIds.map((serviceId): ServiceMacosRemovalPlanEntry => {
+    const observed = byService.get(serviceId);
+    if (observed === undefined) throw new Error(`Missing observation for ${serviceId}.`);
+    if (observed.loaded && !observed.file.exists) {
+      throw new ServiceMacosDriftError(
+        `Loaded service ${serviceId} has no managed plist; removal cannot be rolled back safely.`,
+      );
+    }
+    return Object.freeze({
+      serviceId,
+      target: observed.target,
+      observed,
+      action: observed.loaded || observed.file.exists ? "remove" : "noop",
+    });
+  });
+  const partial = Object.freeze({
+    schemaVersion: SERVICE_PLAN_SCHEMA_VERSION as 1,
+    operation: "remove" as const,
+    configPath: loaded.path,
+    configDigest: digest(loaded.source),
+    runtime: Object.freeze({ ...options.runtime }),
+    entries: Object.freeze(entries),
+  });
+  return Object.freeze({ ...partial, fingerprint: fingerprintRemovalPlan(partial) });
+}
+
+export async function removeServiceMacosPlan(
+  plan: ServiceMacosRemovalPlan,
+  options: RemoveServiceMacosOptions,
+): Promise<readonly ServiceMacosObservation[]> {
+  if (options.allowMutation !== true) throw new ServiceMacosMutationDisabledError();
+  assertRuntimePaths(options.runtime);
+  if (!sameRuntime(options.runtime, plan.runtime)) {
+    throw new ServiceMacosDriftError("Runtime paths differ from the fingerprinted removal plan.");
+  }
+  const { fingerprint: _fingerprint, ...partial } = plan;
+  if (fingerprintRemovalPlan(partial) !== plan.fingerprint) {
+    throw new ServiceMacosDriftError("Removal plan fingerprint is invalid.");
+  }
+  const loaded = await loadServiceMacosConfig(plan.configPath);
+  if (digest(loaded.source) !== plan.configDigest) {
+    throw new ServiceMacosDriftError("Service config changed after removal planning.");
+  }
+  await assertOwnedDirectory(plan.runtime.launchAgentsDirectory, plan.runtime.uid);
+  const runner = options.runner ?? processCommandRunner;
+
+  for (const entry of plan.entries) {
+    const current = await inspectTarget(entry.target, plan.runtime.uid, runner, options.signal);
+    assertObservationMatches(entry.observed, current);
+  }
+  for (const entry of plan.entries) {
+    if (entry.action === "noop") continue;
+    const immediate = await inspectTarget(entry.target, plan.runtime.uid, runner, options.signal);
+    assertObservationMatches(entry.observed, immediate);
+    await removeAndDisable(entry, runner, plan.runtime.uid, options.signal);
+  }
+  return Object.freeze(await Promise.all(
+    plan.entries.map(async (entry) => {
+      const observation = await inspectTarget(entry.target, plan.runtime.uid, runner, options.signal);
+      if (observation.loaded || observation.file.exists) {
+        throw new ServiceMacosDriftError(`Removal did not disable ${entry.serviceId}.`);
+      }
+      return observation;
+    }),
+  ));
+}
+
 export function fingerprintPlan(plan: Omit<ServiceMacosPlan, "fingerprint">): string {
   return `service-macos:v1:${digest(JSON.stringify(plan))}`;
+}
+
+export function fingerprintRemovalPlan(plan: Omit<ServiceMacosRemovalPlan, "fingerprint">): string {
+  return `service-macos:remove:v1:${digest(JSON.stringify(plan))}`;
 }
 
 async function inspectLoadedConfig(
@@ -283,9 +390,12 @@ async function assertBindingCurrent(
 async function promoteAndActivate(
   entry: ServiceMacosPlanEntry,
   runner: CommandRunner,
+  expectedUid: number,
   signal?: AbortSignal,
 ): Promise<void> {
-  const previous = entry.observed.file.exists ? await readFile(entry.target.plistPath) : undefined;
+  const previous = entry.observed.file.exists
+    ? await readObservedPlist(entry.target.plistPath, entry.observed.file, entry.target.serviceId, expectedUid)
+    : undefined;
   await atomicWrite(entry.target.plistPath, entry.desiredPlist, entry.observed.file.exists);
   let unloaded = false;
   try {
@@ -322,6 +432,79 @@ async function promoteAndActivate(
     }
     throw error;
   }
+}
+
+async function removeAndDisable(
+  entry: ServiceMacosRemovalPlanEntry,
+  runner: CommandRunner,
+  expectedUid: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  const previous = entry.observed.file.exists
+    ? await readObservedPlist(entry.target.plistPath, entry.observed.file, entry.serviceId, expectedUid)
+    : undefined;
+  let unloaded = false;
+  let removed = false;
+  try {
+    if (entry.observed.loaded) {
+      await launchctl(runner, ["bootout", entry.target.launchdTarget], signal);
+      unloaded = true;
+    }
+    const afterBootout = await inspectTarget(entry.target, expectedUid, runner, signal);
+    if (afterBootout.loaded) {
+      throw new ServiceMacosDriftError(`launchd still reports ${entry.serviceId} loaded after bootout.`);
+    }
+    if (entry.observed.file.exists) {
+      assertObservationMatches(
+        Object.freeze({ ...entry.observed, loaded: false }),
+        afterBootout,
+      );
+      await unlink(entry.target.plistPath);
+      removed = true;
+      await fsyncDirectory(dirname(entry.target.plistPath));
+    }
+    const finalObservation = await inspectTarget(entry.target, expectedUid, runner, signal);
+    if (finalObservation.loaded || finalObservation.file.exists) {
+      throw new ServiceMacosDriftError(`Removal did not disable ${entry.serviceId}.`);
+    }
+  } catch (error) {
+    const rollbackFailures: unknown[] = [];
+    if (removed && previous !== undefined) {
+      try {
+        await atomicWrite(entry.target.plistPath, previous, false);
+      } catch (rollbackError) {
+        rollbackFailures.push(rollbackError);
+      }
+    }
+    if (unloaded && entry.observed.loaded && previous !== undefined) {
+      try {
+        await launchctl(runner, ["bootstrap", entry.target.launchdDomain, entry.target.plistPath], signal);
+      } catch (rollbackError) {
+        rollbackFailures.push(rollbackError);
+      }
+    }
+    if (rollbackFailures.length > 0) {
+      throw new AggregateError([error, ...rollbackFailures], `Removal and rollback both failed for ${entry.serviceId}.`);
+    }
+    throw error;
+  }
+}
+
+async function readObservedPlist(
+  path: string,
+  expected: ServiceFileObservation,
+  serviceId: string,
+  expectedUid: number,
+): Promise<Buffer> {
+  const current = await inspectPlistFile(path, expectedUid);
+  if (current.digest !== expected.digest || current.bytes !== expected.bytes) {
+    throw new ServiceMacosDriftError(`Managed plist changed before mutation for ${serviceId}.`);
+  }
+  const bytes = await readBounded(path, 1_048_576);
+  if (digest(bytes) !== expected.digest || bytes.byteLength !== expected.bytes) {
+    throw new ServiceMacosDriftError(`Managed plist changed while it was read for ${serviceId}.`);
+  }
+  return bytes;
 }
 
 async function atomicWrite(path: string, value: string | Uint8Array, replace: boolean): Promise<void> {
@@ -400,11 +583,46 @@ async function readFirstLockfile(root: string): Promise<{ readonly path: string;
 }
 
 async function readBounded(path: string, maximumBytes: number): Promise<Buffer> {
-  const metadata = await stat(path);
-  if (!metadata.isFile() || metadata.size > maximumBytes) {
-    throw new Error(`${path} must be a regular file no larger than ${String(maximumBytes)} bytes.`);
+  const before = await lstat(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1 || before.size > maximumBytes) {
+    throw new Error(`${path} must be a single-linked regular file no larger than ${String(maximumBytes)} bytes.`);
   }
-  return await readFile(path);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const after = await handle.stat();
+    if (
+      !after.isFile()
+      || after.dev !== before.dev
+      || after.ino !== before.ino
+      || after.nlink !== 1
+      || after.size > maximumBytes
+    ) {
+      throw new Error(`${path} changed identity or exceeded its byte limit while it was opened.`);
+    }
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
+function selectRemovalServiceIds(
+  loaded: LoadedServiceMacosConfig,
+  requested: readonly string[] | undefined,
+): readonly string[] {
+  if (requested === undefined) return Object.freeze(Object.keys(loaded.config.services).sort());
+  if (requested.length === 0) {
+    throw new ServiceMacosDriftError("A removal plan must select at least one service.");
+  }
+  const selected = [...new Set(requested)].sort();
+  if (selected.length !== requested.length) {
+    throw new ServiceMacosDriftError("Removal service ids must be unique.");
+  }
+  for (const serviceId of selected) {
+    if (!Object.hasOwn(loaded.config.services, serviceId)) {
+      throw new ServiceMacosDriftError(`Removal service ${serviceId} is not declared by the service config.`);
+    }
+  }
+  return Object.freeze(selected);
 }
 
 function sameRuntime(left: ServiceMacosRuntimePaths, right: ServiceMacosRuntimePaths): boolean {

@@ -61,6 +61,13 @@ jobs:
           node scripts/check-license-consistency.mjs
           pnpm run check:architecture
 
+      - name: Check generated documentation contracts
+        run: |
+          pnpm run generate:package-docs
+          pnpm run generate:public-api-docs
+          pnpm run check:source-beta-docs
+          pnpm run check:docs
+
       - name: Build and typecheck the complete v1 workspace
         run: |
           pnpm run build

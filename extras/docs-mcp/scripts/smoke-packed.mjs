@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import process from "node:process";
@@ -46,8 +46,31 @@ try {
     ".bin",
     process.platform === "win32" ? "mono-agent-docs-mcp.cmd" : "mono-agent-docs-mcp",
   );
+  const registrationPath = join(smokeRoot, ".mcp.json");
+  await writeFile(registrationPath, `${JSON.stringify({
+    mcpServers: {
+      "mono-agent-docs": {
+        type: "stdio",
+        command: executable,
+        args: [],
+      },
+    },
+  }, null, 2)}\n`, "utf8");
+  const registration = JSON.parse(await readFile(registrationPath, "utf8"));
+  const registeredServer = registration?.mcpServers?.["mono-agent-docs"];
+  assert.deepEqual(
+    Object.keys(registration),
+    ["mcpServers"],
+    "Companion registration must remain outside mono-agent.config.json.",
+  );
+  assert.deepEqual(
+    registeredServer,
+    { type: "stdio", command: executable, args: [] },
+    "Companion registration did not preserve the exact stdio command.",
+  );
   const transport = new StdioClientTransport({
-    command: executable,
+    command: registeredServer.command,
+    args: registeredServer.args,
     cwd: smokeRoot,
     stderr: "pipe",
   });
@@ -100,6 +123,7 @@ try {
     ok: true,
     package: "@mono-agent/docs-mcp",
     transport: "packed-stdio",
+    registration: "mcpServers.mono-agent-docs",
     docsVersion: structured.docsVersion,
     corpusDigest: structured.corpusDigest,
     topResult: first.readTarget,

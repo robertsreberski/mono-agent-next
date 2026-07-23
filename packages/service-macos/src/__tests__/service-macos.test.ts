@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,6 +14,8 @@ import {
   inspectServiceMacos,
   parseServiceMacosConfig,
   planServiceMacos,
+  planServiceMacosRemoval,
+  removeServiceMacosPlan,
   type CommandResult,
   type CommandRunner,
   type ServiceMacosRuntimePaths,
@@ -175,6 +177,91 @@ describe("service-macos reconciliation", () => {
     expect(await readFile(plistPath, "utf8")).toBe("prior plist");
     expect(fixture.runner.loaded).toContain(`gui/${String(fixture.runtime.uid)}/ai.mono-agent.personal-agent`);
   });
+
+  it("fingerprints explicit removal and prevents launchd resurrection", async () => {
+    const fixture = await createFixture();
+    const installPlan = await planServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+    });
+    await applyServiceMacosPlan(installPlan, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+      allowMutation: true,
+    });
+    const plistPath = installPlan.entries[0]!.target.plistPath;
+    const removalPlan = await planServiceMacosRemoval(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+    });
+    expect(removalPlan).toMatchObject({
+      operation: "remove",
+      entries: [{ serviceId: "personal-agent", action: "remove", observed: { loaded: true } }],
+    });
+    expect(removalPlan.fingerprint).toMatch(/^service-macos:remove:v1:[a-f0-9]{64}$/u);
+
+    await expect(removeServiceMacosPlan(removalPlan, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+    })).rejects.toBeInstanceOf(ServiceMacosMutationDisabledError);
+
+    const observations = await removeServiceMacosPlan(removalPlan, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      allowMutation: true,
+    });
+    expect(observations).toEqual([
+      expect.objectContaining({ file: { exists: false }, loaded: false }),
+    ]);
+    await expect(access(plistPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(fixture.runner.loaded).not.toContain(`gui/${String(fixture.runtime.uid)}/ai.mono-agent.personal-agent`);
+
+    const idempotent = await planServiceMacosRemoval(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+    });
+    expect(idempotent.entries[0]?.action).toBe("noop");
+  });
+
+  it("rejects removal drift before mutation and restores a loaded service after a bounded failure", async () => {
+    const drift = await createFixture();
+    const plistPath = join(drift.runtime.launchAgentsDirectory, "ai.mono-agent.personal-agent.plist");
+    await writeFile(plistPath, "managed plist", { mode: 0o600 });
+    drift.runner.loaded.add(`gui/${String(drift.runtime.uid)}/ai.mono-agent.personal-agent`);
+    const driftPlan = await planServiceMacosRemoval(drift.configPath, {
+      runtime: drift.runtime,
+      runner: drift.runner,
+    });
+    await writeFile(plistPath, "operator replacement", { mode: 0o600 });
+    drift.runner.calls.length = 0;
+    await expect(removeServiceMacosPlan(driftPlan, {
+      runtime: drift.runtime,
+      runner: drift.runner,
+      allowMutation: true,
+    })).rejects.toBeInstanceOf(ServiceMacosDriftError);
+    expect(await readFile(plistPath, "utf8")).toBe("operator replacement");
+    expect(drift.runner.calls.every((call) => call.arguments_[0] === "print")).toBe(true);
+
+    const rollback = await createFixture();
+    const rollbackPath = join(rollback.runtime.launchAgentsDirectory, "ai.mono-agent.personal-agent.plist");
+    await writeFile(rollbackPath, "rollback plist", { mode: 0o600 });
+    const launchdTarget = `gui/${String(rollback.runtime.uid)}/ai.mono-agent.personal-agent`;
+    rollback.runner.loaded.add(launchdTarget);
+    const rollbackPlan = await planServiceMacosRemoval(rollback.configPath, {
+      runtime: rollback.runtime,
+      runner: rollback.runner,
+    });
+    rollback.runner.failPrintAfter = 2;
+    await expect(removeServiceMacosPlan(rollbackPlan, {
+      runtime: rollback.runtime,
+      runner: rollback.runner,
+      allowMutation: true,
+    })).rejects.toThrow(/launchctl print/u);
+    expect(await readFile(rollbackPath, "utf8")).toBe("rollback plist");
+    expect(rollback.runner.loaded).toContain(launchdTarget);
+  });
 });
 
 interface Fixture {
@@ -224,10 +311,16 @@ class FakeRunner implements CommandRunner {
   readonly calls: Array<{ command: string; arguments_: readonly string[] }> = [];
   readonly loaded = new Set<string>();
   failNextBootstrap = false;
+  failPrintAfter: number | undefined;
 
   async run(command: string, arguments_: readonly string[]): Promise<CommandResult> {
     this.calls.push({ command, arguments_: [...arguments_] });
     if (arguments_[0] === "print") {
+      if (this.failPrintAfter === 0) {
+        this.failPrintAfter = undefined;
+        return result(5, "inspection failed");
+      }
+      if (this.failPrintAfter !== undefined) this.failPrintAfter -= 1;
       return result(this.loaded.has(arguments_[1] ?? "") ? 0 : 113);
     }
     if (arguments_[0] === "bootout") {

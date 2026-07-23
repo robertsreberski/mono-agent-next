@@ -42,6 +42,19 @@ Apply requires the conspicuous mutation flag:
 mono-agent-service-macos apply --config ./service-macos.json --allow-mutation
 ```
 
+Removal is also fingerprinted and explicitly authorized:
+
+```bash
+mono-agent-service-macos remove --config ./service-macos.json --allow-mutation
+```
+
+Removal unloads only the configured LaunchAgent labels and deletes their
+managed plist files. It never deletes agent config, state, memory, logs, or
+product data. A changed config, file observation, runtime binding, or launchd
+observation fails before mutation. A bounded failure restores the prior plist
+and loaded state when that state was safe to prove; repeating removal after
+success is a no-op.
+
 The service file uses `configVersion: 1` and a `services` map. Each entry names
 an absolute `agentConfig`, `startAtLogin`, `restartPolicy`, and owner-controlled
 log directory; an optional protected environment file must be mode `0600`.
@@ -56,6 +69,9 @@ log directory; an optional protected environment file must be mode `0600`.
 4. Apply first requires `allowMutation: true`, verifies the fingerprint, and rechecks every binding and observation before any write.
 5. A mode-`0600` temporary plist is fsynced and atomically promoted; `launchctl` is invoked only as an argument vector through the injected runner.
 6. Activation failure restores the prior plist and best-effort prior launchd definition.
+7. Removal uses a separately fingerprinted plan, verifies drift before each
+   mutation, unloads before unlinking, proves no resurrection, and restores the
+   previous safe state on bounded failure.
 
 ### Package structure
 
@@ -65,7 +81,7 @@ log directory; an optional protected environment file must be mode `0600`.
 | `plist.ts` | Exact labels, target paths, and deterministic owner-private plist content. |
 | `environment.ts` | No-follow protected environment reads without secret expansion into plists. |
 | `command.ts` | Shell-free bounded subprocess runner. |
-| `reconciler.ts` | Safe inspect, fingerprinted plan, drift checks, atomic apply, and rollback. |
+| `reconciler.ts` | Safe inspect, fingerprinted apply/removal plans, drift checks, atomic mutation, and rollback. |
 | `cli.ts` | Thin JSON frontend plus the pinned foreground core runner. |
 
 ## Public API
@@ -78,6 +94,8 @@ log directory; an optional protected environment file must be mode `0600`.
 | `inspectServiceMacos` | Read exact plist and launchd state without mutation. |
 | `planServiceMacos` | Produce a deterministic, validated, fingerprinted reconciliation plan. |
 | `applyServiceMacosPlan` | Recheck and apply a plan only with explicit mutation authorization. |
+| `planServiceMacosRemoval` | Produce a deterministic removal plan for selected configured services. |
+| `removeServiceMacosPlan` | Recheck, unload, remove, verify, and roll back only with explicit mutation authorization. |
 | `runServiceMacosCli` | Embed the optional CLI frontend with injected paths and command runner. |
 
 <!-- public-api-inventory:start -->
@@ -100,7 +118,9 @@ LAUNCHCTL_PATH
 LoadedServiceMacosConfig
 MAX_SERVICE_CONFIG_BYTES
 PlanServiceMacosOptions
+PlanServiceMacosRemovalOptions
 ProtectedEnvironment
+RemoveServiceMacosOptions
 SERVICE_MACOS_CONFIG_VERSION
 SERVICE_PLAN_SCHEMA_VERSION
 ServiceFileObservation
@@ -113,10 +133,13 @@ ServiceMacosMutationDisabledError
 ServiceMacosObservation
 ServiceMacosPlan
 ServiceMacosPlanEntry
+ServiceMacosRemovalPlan
+ServiceMacosRemovalPlanEntry
 ServiceMacosRuntimePaths
 ServiceMacosServiceConfig
 ServiceMacosTarget
 ServicePlanAction
+ServiceRemovalAction
 ServiceRestartPolicy
 ServiceSignal
 ServiceSignalSource
@@ -124,13 +147,16 @@ applyServiceMacosPlan
 assertRuntimePaths
 defaultRuntime
 fingerprintPlan
+fingerprintRemovalPlan
 inspectServiceMacos
 loadProtectedEnvironment
 loadServiceMacosConfig
 parseEnvironment
 parseServiceMacosConfig
 planServiceMacos
+planServiceMacosRemoval
 processCommandRunner
+removeServiceMacosPlan
 renderServicePlist
 runServiceMacosCli
 serviceMacosConfigSchema
