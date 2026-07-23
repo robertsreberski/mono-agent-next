@@ -102,7 +102,7 @@ describe("service-macos reconciliation", () => {
     });
     expect(plan.entries[0]).toMatchObject({ action: "create" });
     expect(plan.fingerprint).toMatch(/^service-macos:v1:[a-f0-9]{64}$/u);
-    expect(plan.entries[0]?.desiredPlist).toContain(`<string>${process.execPath}</string>`);
+    expect(plan.entries[0]?.desiredPlist).toContain(`<string>${fixture.runtime.nodePath}</string>`);
     expect(fixture.runner.calls.every((call) => call.command === LAUNCHCTL_PATH && call.arguments_[0] === "print")).toBe(true);
   });
 
@@ -324,6 +324,12 @@ describe("service-macos reconciliation", () => {
     await chmod(runtime.runtime.runnerScriptPath, 0o666);
     await expect(planServiceMacos(runtime.configPath, {
       runtime: runtime.runtime, runner: runtime.runner, validateAgent: validAgent,
+    })).rejects.toThrow(/protected/u);
+
+    const nodeRuntime = await createFixture();
+    await chmod(nodeRuntime.runtime.nodePath, 0o666);
+    await expect(planServiceMacos(nodeRuntime.configPath, {
+      runtime: nodeRuntime.runtime, runner: nodeRuntime.runner, validateAgent: validAgent,
     })).rejects.toThrow(/protected/u);
 
     const environment = await createFixture();
@@ -1030,6 +1036,8 @@ async function createFixture(): Promise<Fixture> {
   await writeFile(agentConfig, "{}\n", { mode: 0o600 });
   await writeFile(join(project, "package.json"), "{}\n", { mode: 0o600 });
   await writeFile(join(project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", { mode: 0o600 });
+  const nodePath = join(root, "node");
+  await writeFile(nodePath, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
   const runnerScriptPath = join(root, "service-macos.js");
   await writeFile(runnerScriptPath, "// runner\n", { mode: 0o600 });
   const configPath = join(root, "service-macos.json");
@@ -1049,7 +1057,7 @@ async function createFixture(): Promise<Fixture> {
   return {
     root,
     configPath,
-    runtime: { nodePath: process.execPath, runnerScriptPath, launchAgentsDirectory, uid },
+    runtime: { nodePath, runnerScriptPath, launchAgentsDirectory, uid },
     runner: new FakeRunner(),
   };
 }
