@@ -1,6 +1,8 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Socket } from "node:net";
+import { isIP } from "node:net";
+import { hostname as systemHostname, networkInterfaces } from "node:os";
 
 import type {
   ChannelInboundRequest,
@@ -33,7 +35,7 @@ class HttpError extends Error {
 }
 
 export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): OpenAiApiServer {
-  if (!isLoopbackHost(options.config.listen.host)) throw new Error("OpenAI API channel can bind only to loopback.");
+  assertStartSafety(options.config);
   let server: Server | undefined;
   let info: OpenAiApiStartInfo | undefined;
   let startPromise: Promise<OpenAiApiStartInfo> | undefined;
@@ -76,12 +78,17 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
           return;
         }
         const address = next.address();
-        if (address === null || typeof address === "string" || !isLoopbackHost(address.address)) {
-          reject(new Error("OpenAI API listener resolved outside loopback."));
+        if (
+          address === null
+          || typeof address === "string"
+          || (!isLoopbackHost(address.address) && options.config.allowNonLoopback !== true)
+          || (!isLoopbackHost(address.address) && options.config.apiKey.length < 32)
+        ) {
+          reject(new Error("OpenAI API listener resolved to an unauthorized non-loopback address."));
           void closeServer(next);
           return;
         }
-        const host = bracket(options.config.listen.host);
+        const host = bracket(advertisedHost(options.config.listen.host));
         const baseUrl = `http://${host}:${address.port}${options.config.basePath}`;
         info = Object.freeze({
           host: options.config.listen.host,
@@ -135,7 +142,7 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (stopping) throw new HttpError(503, "shutting_down", "The channel is stopping.");
     if (info === undefined) throw new HttpError(503, "not_started", "The channel is not started.");
-    const authority = validateAuthority(request, info.port);
+    const authority = validateAuthority(request, options.config.listen.host, info.port);
     const target = request.url ?? "/";
     if (!target.startsWith("/") || target.startsWith("//")) throw new HttpError(400, "invalid_target", "Request target must be origin-form.");
     const url = new URL(target, "http://openai.invalid");
@@ -150,7 +157,11 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
     }
     if (request.method === "POST" && url.pathname === `${options.config.basePath}/chat/completions`) {
       mutationSafety(request, authority);
-      const parsed = parseOpenAiChatRequest(await readJson(request, options.config.maxBodyBytes), options.config);
+      const parsed = parseOpenAiChatRequest(
+        await readJson(request, options.config.maxBodyBytes),
+        options.config,
+        conversationHeader(request),
+      );
       if (parsed.warnings.length > 0) response.setHeader("x-mono-agent-warnings", parsed.warnings.join(","));
       await completion(parsed, response);
       return;
@@ -293,6 +304,18 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
   }
 }
 
+function conversationHeader(request: IncomingMessage): string | undefined {
+  for (const name of ["x-openwebui-chat-id", "x-conversation-id"] as const) {
+    const value = request.headers[name];
+    if (value === undefined) continue;
+    if (Array.isArray(value) || value.length === 0 || value.length > 256) {
+      throw new HttpError(400, "invalid_conversation_id", `${name} must contain one bounded identifier.`);
+    }
+    return value;
+  }
+  return undefined;
+}
+
 function authenticate(request: IncomingMessage, secret: string): void {
   const header = request.headers.authorization;
   if (typeof header !== "string" || !header.startsWith("Bearer ") || !sameSecret(header.slice(7), secret)) {
@@ -300,7 +323,7 @@ function authenticate(request: IncomingMessage, secret: string): void {
   }
 }
 
-function validateAuthority(request: IncomingMessage, port: number): URL {
+function validateAuthority(request: IncomingMessage, configuredHost: string, port: number): URL {
   const host = request.headers.host;
   if (host === undefined) throw new HttpError(421, "invalid_authority", "Invalid request authority.");
   let authority: URL;
@@ -310,14 +333,21 @@ function validateAuthority(request: IncomingMessage, port: number): URL {
     throw new HttpError(421, "invalid_authority", "Invalid request authority.");
   }
   if (
-    !isLoopbackHost(authority.hostname)
-    || effectivePort(authority) !== port
+    effectivePort(authority) !== port
     || authority.username !== ""
     || authority.password !== ""
     || authority.pathname !== "/"
     || authority.search !== ""
     || authority.hash !== ""
   ) throw new HttpError(421, "invalid_authority", "Invalid request authority.");
+  const candidate = canonicalHost(authority.hostname);
+  const configured = canonicalHost(configuredHost);
+  const allowed = isLoopbackHost(configuredHost)
+    ? isLoopbackHost(candidate)
+    : isWildcardHost(configured)
+      ? isAllowedWildcardAuthority(candidate)
+      : candidate === configured;
+  if (!allowed) throw new HttpError(421, "invalid_authority", "Invalid request authority.");
   return authority;
 }
 
@@ -383,15 +413,16 @@ function sendError(response: ServerResponse, error: unknown): void {
 }
 
 function publicError(error: unknown): { readonly status: number; readonly payload: Readonly<Record<string, unknown>> } {
-  const status = error instanceof HttpError ? error.status : error instanceof OpenAiRequestError ? error.status : 500;
-  const message = status >= 500 ? "Internal server error." : boundedMessage(error);
+  const known = classifyError(error);
+  const status = known?.status ?? 500;
+  const message = status >= 500 ? "Internal server error." : known?.message ?? "Request failed.";
   return {
     status,
     payload: {
       error: {
         message,
         type: status === 401 ? "authentication_error" : status >= 500 ? "api_error" : "invalid_request_error",
-        code: errorCode(error),
+        code: known?.code ?? "internal_error",
       },
     },
   };
@@ -401,14 +432,19 @@ function errorPayload(error: unknown): Readonly<Record<string, unknown>> {
   return publicError(error).payload;
 }
 
-function errorCode(error: unknown): string {
-  const code = typeof error === "object" && error !== null ? Reflect.get(error, "code") : undefined;
-  return typeof code === "string" && /^[a-z0-9_]{1,64}$/u.test(code) ? code : "internal_error";
-}
-
-function boundedMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : "Request failed.";
-  return message.length <= 512 ? message : `${message.slice(0, 509)}...`;
+function classifyError(
+  error: unknown,
+): { readonly status: number; readonly code: string; readonly message: string } | undefined {
+  try {
+    if (!(error instanceof HttpError) && !(error instanceof OpenAiRequestError)) return undefined;
+    const code = /^[a-z0-9_]{1,64}$/u.test(error.code) ? error.code : "internal_error";
+    const message = error.message.length <= 512
+      ? error.message
+      : `${error.message.slice(0, 509)}...`;
+    return { status: error.status, code, message };
+  } catch {
+    return undefined;
+  }
 }
 
 function beginSse(response: ServerResponse): void {
@@ -537,6 +573,61 @@ function securityHeaders(response: ServerResponse): void {
   response.setHeader("x-content-type-options", "nosniff");
   response.setHeader("x-frame-options", "DENY");
   response.setHeader("referrer-policy", "no-referrer");
+}
+
+function assertStartSafety(config: OpenAiApiConfig): void {
+  if (!isLoopbackHost(config.listen.host) && config.allowNonLoopback !== true) {
+    throw new Error("OpenAI API channel may bind outside loopback only with explicit allowNonLoopback.");
+  }
+  if (
+    typeof config.apiKey !== "string"
+    || config.apiKey.length < 20
+    || config.apiKey.length > 4_096
+    || /\s/u.test(config.apiKey)
+  ) {
+    throw new Error("OpenAI API channel requires a resolved 20-4096 character apiKey.");
+  }
+  if (!isLoopbackHost(config.listen.host) && config.apiKey.length < 32) {
+    throw new Error("A non-loopback OpenAI API listener requires an apiKey of at least 32 characters.");
+  }
+}
+
+function advertisedHost(configuredHost: string): string {
+  const canonical = canonicalHost(configuredHost);
+  if (!isWildcardHost(canonical)) return configuredHost;
+  return canonical === "0.0.0.0" || canonical === "::ffff:0:0" ? "127.0.0.1" : "::1";
+}
+
+function isAllowedWildcardAuthority(host: string): boolean {
+  if (isWildcardHost(host) || isLoopbackHost(host)) return true;
+  const machine = canonicalHost(systemHostname());
+  if (host === machine || host === `${machine}.local`) return true;
+  if (isIP(host) === 0) return false;
+  try {
+    for (const entries of Object.values(networkInterfaces())) {
+      for (const entry of entries ?? []) {
+        if (canonicalHost(entry.address) === host) return true;
+      }
+    }
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function isWildcardHost(host: string): boolean {
+  const canonical = canonicalHost(host);
+  return canonical === "0.0.0.0" || canonical === "::" || canonical === "::ffff:0:0";
+}
+
+function canonicalHost(host: string): string {
+  const normalized = host.toLowerCase().replace(/^\[|\]$/gu, "").replace(/\.$/u, "");
+  if (isIP(normalized) !== 6) return normalized;
+  try {
+    return new URL(`http://[${normalized}]/`).hostname.replace(/^\[|\]$/gu, "").toLowerCase();
+  } catch {
+    return normalized;
+  }
 }
 
 function sameSecret(left: string, right: string): boolean {

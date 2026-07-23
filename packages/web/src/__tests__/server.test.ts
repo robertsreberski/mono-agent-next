@@ -27,6 +27,84 @@ afterEach(async () => {
 });
 
 describe("standalone web product", () => {
+  it("exposes bounded attachments, quotes, operator views, and durable thread deletion", async () => {
+    const root = await temporaryDirectory();
+    let forwarded: unknown;
+    const now = new Date().toISOString();
+    const gateway: WebOperatorGateway = {
+      async listAgents() {
+        return [{ ...agent(), capabilities: { ...capabilities(), attachments: true, quotes: true } }];
+      },
+      async runTurn(input) {
+        forwarded = input;
+        await input.onText("accepted");
+      },
+      async cancel() {},
+      async readReplay(_agentId, conversationId) {
+        return { conversationId, messages: [{ id: "m1", role: "assistant", text: "accepted" }] };
+      },
+      async readConfig() {
+        return { revision: "r1", generatedAt: now, value: { channels: "[redacted]" }, redacted: true };
+      },
+      async readHealth() {
+        return { status: "healthy", checkedAt: now, details: [] };
+      },
+    };
+    const server = await startWebServer({ config: config(join(root, "state")), operatorGateway: gateway });
+    webServers.add(server);
+    const browserScript = await (await fetch(`${server.url}app.js`)).text();
+    expect(browserScript).toContain("maxAttachmentBytes = 524288");
+    expect(browserScript).toContain("Conversation replay");
+    const thread = await json(server, "/api/v1/threads", {
+      method: "POST", body: JSON.stringify({ agentId: "personal" }),
+    }) as { id: string; operatorConversationId: string };
+    const largeData = Buffer.alloc(320 * 1_024, 0x61);
+    const attachment = {
+      id: "file-1",
+      name: "note.txt",
+      mediaType: "text/plain",
+      sizeBytes: largeData.byteLength,
+      url: `data:text/plain;base64,${largeData.toString("base64")}`,
+    };
+    const response = await fetch(`${server.url}api/v1/threads/${thread.id}/turns`, {
+      method: "POST",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({
+        text: "with context",
+        attachments: [attachment],
+        quote: { conversationId: thread.operatorConversationId, messageId: "m1", text: "previous" },
+      }),
+    });
+    expect(response.status).toBe(200);
+    await response.text();
+    expect(forwarded).toMatchObject({
+      attachments: [attachment],
+      quote: { conversationId: thread.operatorConversationId, messageId: "m1", text: "previous" },
+    });
+    const oversizedData = Buffer.alloc((512 * 1_024) + 1, 0x62);
+    const oversized = await fetch(`${server.url}api/v1/threads/${thread.id}/turns`, {
+      method: "POST",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: JSON.stringify({
+        text: "",
+        attachments: [{
+          id: "file-too-large",
+          name: "large.bin",
+          mediaType: "application/octet-stream",
+          sizeBytes: oversizedData.byteLength,
+          url: `data:application/octet-stream;base64,${oversizedData.toString("base64")}`,
+        }],
+      }),
+    });
+    expect(oversized.status).toBe(413);
+    await expect(json(server, `/api/v1/threads/${thread.id}/replay`)).resolves.toMatchObject({ conversationId: thread.operatorConversationId });
+    await expect(json(server, "/api/v1/agents/personal/config")).resolves.toMatchObject({ revision: "r1", redacted: true });
+    await expect(json(server, "/api/v1/agents/personal/health")).resolves.toMatchObject({ status: "healthy" });
+    await expect(json(server, `/api/v1/threads/${thread.id}`, { method: "DELETE", body: "{}" })).resolves.toEqual({ deleted: true });
+    const missing = await fetch(`${server.url}api/v1/threads/${thread.id}`, { headers: authHeaders() });
+    expect(missing.status).toBe(404);
+  });
+
   it("authenticates browser APIs and rejects cross-origin or browser-simple mutations", async () => {
     const root = await temporaryDirectory();
     const gateway = immediateGateway();

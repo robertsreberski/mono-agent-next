@@ -118,6 +118,13 @@ interface ActiveTurn {
   readonly controller: AbortController;
 }
 
+interface ResolvedOperatorQuote {
+  readonly conversationId: string;
+  readonly messageId: string;
+  readonly role: "user" | "assistant";
+  readonly text: string;
+}
+
 class HttpError extends Error {
   constructor(
     readonly statusCode: number,
@@ -322,10 +329,18 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
   const handleTurn = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     let turnRequest: OperatorTurnRequest;
     let attachments: readonly ChannelAttachment[];
+    let quote: ResolvedOperatorQuote | undefined;
     try {
       turnRequest = parseTurnRequest(await readBoundedJsonBody(request, OPERATOR_LIMITS.requestBytes));
       if (turnRequest.input.quote !== undefined) {
-        throw new HttpError(422, "unsupported_capability", "This operator endpoint does not accept quotes.");
+        if (options.host?.readReplay === undefined) {
+          throw new HttpError(422, "unsupported_capability", "This operator endpoint does not accept quotes.");
+        }
+        quote = await resolveOperatorQuote(
+          options.host.readReplay,
+          turnRequest,
+          new AbortController().signal,
+        );
       }
       attachments = (turnRequest.input.attachments ?? []).map(toChannelAttachment);
     } catch (error) {
@@ -393,7 +408,15 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
         startedAt,
       });
       const result = await options.dispatch(
-        toInboundRequest(identity, turnId, startedAt, turnRequest, attachments, active.controller.signal),
+        toInboundRequest(
+          identity,
+          turnId,
+          startedAt,
+          turnRequest,
+          attachments,
+          quote,
+          active.controller.signal,
+        ),
         reply,
       );
       if (active.controller.signal.aborted || result.status === "cancelled") {
@@ -537,7 +560,8 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
     const activeTurnId = [...(activeByConversation.get(conversationId) ?? [])][0]?.turnId;
     const body: OperatorReplayResponse = {
       conversationId,
-      messages: result.entries.map((entry) => toOperatorMessage(entry.message, entry.createdAt)),
+      messages: result.entries.map((entry) =>
+        toOperatorMessage(entry.message, entry.createdAt, entry.turnId)),
       ...(activeTurnId === undefined ? {} : { activeTurnId }),
     };
     sendJson(response, 200, body);
@@ -663,7 +687,7 @@ function operatorCapabilities(host: CreateOperatorChannelOptions["host"]): Opera
     liveInput: host?.offerLiveInput !== undefined,
     askUser: host?.answerAsk !== undefined,
     cancellation: true,
-    quotes: false,
+    quotes: host?.readReplay !== undefined,
     runtimeOverrides: true,
     proactive: host?.openConversation !== undefined,
     configView: host?.readConfig !== undefined,
@@ -678,21 +702,88 @@ function toInboundRequest(
   receivedAt: string,
   request: OperatorTurnRequest,
   attachments: readonly ChannelAttachment[],
+  quote: ResolvedOperatorQuote | undefined,
   signal: AbortSignal,
 ): ChannelInboundRequest {
+  const text = projectOperatorInput(request.input.text ?? "", quote);
+  const metadata = {
+    ...(request.metadata ?? {}),
+    ...(quote === undefined ? {} : {
+      operatorQuote: {
+        conversationId: quote.conversationId,
+        messageId: quote.messageId,
+        role: quote.role,
+      },
+    }),
+  } as JsonObject;
   return {
     requestId: turnId,
     conversationId: request.conversationId,
     sender: { id: "operator", displayName: identity.agent.label },
-    text: request.input.text ?? "",
+    text,
     attachments,
     receivedAt,
     ...(request.runtime === undefined ? {} : { runtime: request.runtime }),
     ...(request.model === undefined ? {} : { model: request.model }),
     ...(request.effort === undefined ? {} : { effort: request.effort }),
     signal,
-    ...(request.metadata === undefined ? {} : { metadata: request.metadata as JsonObject }),
+    ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
   };
+}
+
+async function resolveOperatorQuote(
+  readReplay: NonNullable<ChannelHost["readReplay"]>,
+  request: OperatorTurnRequest,
+  signal: AbortSignal,
+): Promise<ResolvedOperatorQuote> {
+  const quote = request.input.quote!;
+  if (quote.conversationId !== request.conversationId) {
+    throw new HttpError(422, "foreign_quote", "Operator quotes must reference the active conversation.");
+  }
+  let replay: Awaited<ReturnType<typeof readReplay>>;
+  try {
+    replay = await readReplay({
+      conversationId: request.conversationId,
+      limit: CORE_REPLAY_PAGE_LIMIT,
+      signal,
+    });
+  } catch {
+    throw new HttpError(503, "replay_unavailable", "Conversation replay is temporarily unavailable.");
+  }
+  const entry = replay.entries.find((candidate) =>
+    (candidate.message.id ?? candidate.turnId) === quote.messageId);
+  if (entry === undefined
+    || (entry.message.role !== "user" && entry.message.role !== "assistant")) {
+    throw new HttpError(422, "quote_not_found", "The quoted operator message does not exist in this conversation.");
+  }
+  const text = entry.message.content
+    .flatMap((part) => part.type === "text" ? [part.text] : [])
+    .join("");
+  if (text.length > OPERATOR_LIMITS.quoteCharacters) {
+    throw new HttpError(422, "quote_too_large", "The quoted operator message exceeds the quote bound.");
+  }
+  if (quote.text !== undefined && quote.text !== text) {
+    throw new HttpError(422, "quote_mismatch", "The supplied quote text does not match conversation replay.");
+  }
+  return Object.freeze({
+    conversationId: request.conversationId,
+    messageId: quote.messageId,
+    role: entry.message.role,
+    text,
+  });
+}
+
+function projectOperatorInput(text: string, quote: ResolvedOperatorQuote | undefined): string {
+  if (quote === undefined) return text;
+  const quoted = JSON.stringify({
+    conversationId: quote.conversationId,
+    messageId: quote.messageId,
+    role: quote.role,
+    text: quote.text,
+  });
+  return text.length === 0
+    ? `Quoted message (verified from conversation replay):\n${quoted}`
+    : `Quoted message (verified from conversation replay):\n${quoted}\n\nUser message:\n${text}`;
 }
 
 function validateIdentityGrant(value: OperatorIdentityGrant): OperatorIdentityGrant {
@@ -722,19 +813,27 @@ function toChannelAttachment(attachment: NonNullable<OperatorTurnRequest["input"
   if (attachment.url === undefined || !attachment.url.startsWith("data:")) throw new HttpError(422, "unsupported_attachment", "Operator attachments must use bounded inline data URLs.");
   const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/u.exec(attachment.url);
   if (match === null) throw new HttpError(422, "unsupported_attachment", "Operator attachment data URL is invalid.");
-  const data = Buffer.from(match[2]!, "base64");
+  const encoded = match[2]!;
+  const data = Buffer.from(encoded, "base64");
+  if (encoded.length % 4 !== 0 || data.toString("base64") !== encoded) {
+    throw new HttpError(422, "unsupported_attachment", "Operator attachment data URL is not canonical base64.");
+  }
   if (match[1] !== attachment.mediaType) throw new HttpError(422, "invalid_attachment", "Operator attachment media type does not match its data URL.");
   if (data.byteLength > OPERATOR_LIMITS.requestBytes) throw new HttpError(413, "attachment_too_large", "Operator attachment exceeds the request byte bound.");
+  if (attachment.sizeBytes !== undefined && attachment.sizeBytes !== data.byteLength) {
+    throw new HttpError(422, "invalid_attachment", "Operator attachment size does not match its data URL.");
+  }
   return { id: attachment.id, kind: match[1]!.startsWith("image/") ? "image" : match[1]!.startsWith("audio/") ? "audio" : "file", name: attachment.name, mediaType: attachment.mediaType, sizeBytes: data.byteLength, data: new Uint8Array(data) };
 }
 
-function toOperatorMessage(message: TurnMessage, createdAt: string): OperatorMessage {
+function toOperatorMessage(message: TurnMessage, createdAt: string, fallbackId?: string): OperatorMessage {
   const text = message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
+  const id = message.id ?? fallbackId;
   const attachments = message.content.flatMap((part) => part.type === "attachment"
     ? [{ id: part.attachment.id, name: part.attachment.name, mediaType: part.attachment.mediaType, sizeBytes: part.attachment.sizeBytes }]
     : []);
   return {
-    ...(message.id === undefined ? {} : { id: message.id }),
+    ...(id === undefined ? {} : { id }),
     role: message.role === "assistant" ? "assistant" : "user",
     text,
     ...(attachments.length === 0 ? {} : { attachments }),

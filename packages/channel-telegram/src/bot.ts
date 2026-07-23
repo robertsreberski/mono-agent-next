@@ -1,12 +1,15 @@
 import type { ChannelAttachment } from "@mono-agent/module-sdk";
+import { Agent, type Dispatcher } from "undici";
 
 import type { TelegramConfig } from "./config.js";
+import { createTelegramTranscriber } from "./transcription.js";
 
 export interface TelegramRemoteAttachment {
   readonly fileId: string;
   readonly name: string;
   readonly mediaType: string;
   readonly sizeBytes?: number;
+  readonly transcriptionEligible?: boolean;
 }
 
 export interface TelegramMessageUpdate {
@@ -39,7 +42,15 @@ export interface TelegramSendMessageRequest {
   readonly text: string;
   readonly replyToMessageId?: string;
   readonly buttons?: readonly { readonly label: string; readonly data: string }[];
+  readonly disableNotification?: boolean;
   readonly idempotencyKey?: string;
+  readonly signal: AbortSignal;
+}
+
+export interface TelegramEditMessageRequest {
+  readonly chatId: string;
+  readonly messageId: string;
+  readonly text: string;
   readonly signal: AbortSignal;
 }
 
@@ -47,6 +58,7 @@ export interface TelegramSendAttachmentRequest {
   readonly chatId: string;
   readonly attachment: ChannelAttachment;
   readonly caption?: string;
+  readonly disableNotification?: boolean;
   readonly idempotencyKey?: string;
   readonly signal: AbortSignal;
 }
@@ -55,9 +67,12 @@ export interface TelegramBotClient {
   poll(offset: number, timeoutSeconds: number, signal: AbortSignal): Promise<readonly TelegramUpdate[]>;
   download(attachment: TelegramRemoteAttachment, maxBytes: number, signal: AbortSignal): Promise<ChannelAttachment>;
   sendMessage(request: TelegramSendMessageRequest): Promise<{ readonly messageId: string }>;
+  editMessage?(request: TelegramEditMessageRequest): Promise<void>;
   sendAttachment(request: TelegramSendAttachmentRequest): Promise<{ readonly messageId: string }>;
+  transcribe?(attachment: ChannelAttachment, signal: AbortSignal): Promise<string>;
   answerCallback?(callbackId: string, signal: AbortSignal): Promise<void>;
   setReaction?(chatId: string, messageId: string, emoji: string, signal: AbortSignal): Promise<void>;
+  close?(): Promise<void>;
 }
 
 export type TelegramBotClientFactory = (config: TelegramConfig) => TelegramBotClient;
@@ -65,8 +80,18 @@ export type TelegramBotClientFactory = (config: TelegramConfig) => TelegramBotCl
 export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: typeof fetch = fetch): TelegramBotClient {
   const api = `https://api.telegram.org/bot${config.botToken}`;
   const fileApi = `https://api.telegram.org/file/bot${config.botToken}`;
+  const dispatcher = config.transport?.ipFamily === undefined
+    ? undefined
+    : new Agent({ connect: { family: config.transport.ipFamily } });
+  const telegramFetch = (
+    input: string | URL | Request,
+    init: RequestInit,
+  ): Promise<Response> => fetchImpl(input, {
+    ...init,
+    ...(dispatcher === undefined ? {} : { dispatcher }),
+  } as RequestInit & { dispatcher?: Dispatcher });
   const call = async (method: string, body: Readonly<Record<string, unknown>>, signal: AbortSignal): Promise<unknown> => {
-    const response = await fetchImpl(`${api}/${method}`, {
+    const response = await telegramFetch(`${api}/${method}`, {
       method: "POST",
       redirect: "error",
       headers: { "content-type": "application/json" },
@@ -88,7 +113,7 @@ export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: ty
       if (attachment.sizeBytes !== undefined && attachment.sizeBytes > maxBytes) throw new Error("Telegram attachment exceeds the configured byte limit.");
       const file = await call("getFile", { file_id: attachment.fileId }, signal);
       if (!isRecord(file) || typeof file.file_path !== "string" || !safeFilePath(file.file_path)) throw new Error("Telegram getFile returned an invalid path.");
-      const response = await fetchImpl(`${fileApi}/${file.file_path}`, { signal, redirect: "error" });
+      const response = await telegramFetch(`${fileApi}/${file.file_path}`, { signal, redirect: "error" });
       if (!response.ok) throw new Error(`Telegram file download failed with HTTP ${response.status}.`);
       const data = await readBoundedBytes(response, maxBytes, "Telegram attachment");
       return { id: attachment.fileId, kind: attachmentKind(attachment.mediaType), name: safeName(attachment.name), mediaType: attachment.mediaType, sizeBytes: data.byteLength, data };
@@ -99,22 +124,38 @@ export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: ty
         text: request.text,
         ...(request.replyToMessageId === undefined ? {} : { reply_parameters: { message_id: numericMessageId(request.replyToMessageId) } }),
         ...(request.buttons === undefined || request.buttons.length === 0 ? {} : { reply_markup: { inline_keyboard: [request.buttons.map((button) => ({ text: button.label, callback_data: button.data }))] } }),
+        ...(request.disableNotification === undefined ? {} : { disable_notification: request.disableNotification }),
       }, request.signal);
       return { messageId: telegramMessageId(result) };
+    },
+    async editMessage(request) {
+      await call("editMessageText", {
+        chat_id: request.chatId,
+        message_id: numericMessageId(request.messageId),
+        text: request.text,
+      }, request.signal);
     },
     async sendAttachment(request) {
       const bytes = Buffer.from(request.attachment.data);
       const form = new FormData();
+      const photo = request.attachment.kind === "image";
+      const field = photo ? "photo" : "document";
       form.set("chat_id", request.chatId);
-      form.set("document", new Blob([bytes], { type: request.attachment.mediaType }), safeName(request.attachment.name));
+      form.set(field, new Blob([bytes], { type: request.attachment.mediaType }), safeName(request.attachment.name));
       if (request.caption !== undefined) form.set("caption", request.caption);
-      const response = await fetchImpl(`${api}/sendDocument`, { method: "POST", body: form, signal: request.signal, redirect: "error" });
+      if (request.disableNotification !== undefined) form.set("disable_notification", String(request.disableNotification));
+      const method = photo ? "sendPhoto" : "sendDocument";
+      const response = await telegramFetch(`${api}/${method}`, { method: "POST", body: form, signal: request.signal, redirect: "error" });
       const value = await readBoundedJson(response, 2 * 1024 * 1024);
-      if (!response.ok || !isRecord(value) || value.ok !== true) throw new Error(`Telegram sendDocument failed with HTTP ${response.status}.`);
+      if (!response.ok || !isRecord(value) || value.ok !== true) throw new Error(`Telegram ${method} failed with HTTP ${response.status}.`);
       return { messageId: telegramMessageId(value.result) };
     },
     async answerCallback(callbackId, signal) { await call("answerCallbackQuery", { callback_query_id: callbackId }, signal); },
     async setReaction(chatId, messageId, emoji, signal) { await call("setMessageReaction", { chat_id: chatId, message_id: numericMessageId(messageId), reaction: [{ type: "emoji", emoji }] }, signal); },
+    ...(config.transcription === undefined
+      ? {}
+      : { transcribe: createTelegramTranscriber(config.transcription, fetchImpl) }),
+    async close() { await dispatcher?.close(); },
   };
 }
 
@@ -146,8 +187,9 @@ function parseUpdate(value: unknown): TelegramUpdate | undefined {
 function parseAttachments(message: Record<string, unknown>): TelegramRemoteAttachment[] {
   const result: TelegramRemoteAttachment[] = [];
   if (isRecord(message.document) && typeof message.document.file_id === "string") result.push(remote(message.document, typeof message.document.file_name === "string" ? message.document.file_name : "document", typeof message.document.mime_type === "string" ? message.document.mime_type : "application/octet-stream"));
-  if (isRecord(message.voice) && typeof message.voice.file_id === "string") result.push(remote(message.voice, "voice.ogg", typeof message.voice.mime_type === "string" ? message.voice.mime_type : "audio/ogg"));
-  if (isRecord(message.audio) && typeof message.audio.file_id === "string") result.push(remote(message.audio, typeof message.audio.file_name === "string" ? message.audio.file_name : "audio", typeof message.audio.mime_type === "string" ? message.audio.mime_type : "audio/mpeg"));
+  if (isRecord(message.voice) && typeof message.voice.file_id === "string") result.push(remote(message.voice, "voice.ogg", typeof message.voice.mime_type === "string" ? message.voice.mime_type : "audio/ogg", true));
+  if (isRecord(message.audio) && typeof message.audio.file_id === "string") result.push(remote(message.audio, typeof message.audio.file_name === "string" ? message.audio.file_name : "audio", typeof message.audio.mime_type === "string" ? message.audio.mime_type : "audio/mpeg", true));
+  if (isRecord(message.video_note) && typeof message.video_note.file_id === "string") result.push(remote(message.video_note, "video-note.mp4", typeof message.video_note.mime_type === "string" ? message.video_note.mime_type : "video/mp4", true));
   if (Array.isArray(message.photo)) {
     const photo = [...message.photo].reverse().find(isRecord);
     if (photo !== undefined && typeof photo.file_id === "string") result.push(remote(photo, "photo.jpg", "image/jpeg"));
@@ -155,8 +197,8 @@ function parseAttachments(message: Record<string, unknown>): TelegramRemoteAttac
   return result;
 }
 
-function remote(value: Record<string, unknown>, name: string, mediaType: string): TelegramRemoteAttachment {
-  return { fileId: value.file_id as string, name: safeName(name), mediaType, ...(Number.isSafeInteger(value.file_size) ? { sizeBytes: value.file_size as number } : {}) };
+function remote(value: Record<string, unknown>, name: string, mediaType: string, transcriptionEligible = false): TelegramRemoteAttachment {
+  return { fileId: value.file_id as string, name: safeName(name), mediaType, ...(Number.isSafeInteger(value.file_size) ? { sizeBytes: value.file_size as number } : {}), ...(transcriptionEligible ? { transcriptionEligible: true } : {}) };
 }
 
 function telegramName(from: Record<string, unknown>): string | undefined {

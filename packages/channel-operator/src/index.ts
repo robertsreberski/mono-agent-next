@@ -125,7 +125,7 @@ function createOperatorModuleChannel(
             liveInput: capabilities.liveInput,
             askUser: capabilities.askUser,
             cancellation: capabilities.cancellation,
-            quotes: false,
+            quotes: context.host.readReplay !== undefined,
             runtimeOverrides: capabilities.runtimeControl,
             proactive: capabilities.proactive,
             configView: true,

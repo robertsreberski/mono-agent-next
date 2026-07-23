@@ -20,7 +20,9 @@ Catalog responsibility: Runs the standalone pi-tui renderer over the shared oper
 This package owns terminal layout, keyboard input, and rendering. It connects
 to an already-running agent through the shared operator client, shows streamed
 assistant text and activity, and lets the operator cancel or select eligible
-model and effort overrides. Closing the renderer never stops the agent.
+model and effort overrides. Capability-gated commands expose replay, redacted
+config, health, bounded attachments, and quotes without a second decoder or
+action policy. Closing the renderer never stops the agent.
 
 There is no embedded agent/responder mode, agent-config reader, replay parser,
 self-configuration flow, or second protocol reducer in this package.
@@ -56,6 +58,13 @@ Controls:
 - `/model <ref|default>` and `/effort <level|default>` set the next-turn
   override when permitted; advertised catalogs act as allowlists;
 - `/answer <question-id>=<value>` answers a pending AskUser interaction;
+- `/attach <path>` queues up to four regular files (512 KiB per file and the
+  shared 1 MiB total request bound still applies);
+- `/quote <message-id>[=<text>]` queues a quote when advertised; `/quote clear`
+  removes it, and `/replay` shows authoritative message ids;
+- `/send [text]` sends queued attachments, including an attachment-only turn;
+- `/config`, `/replay`, and `/health` render bounded shared-client views only
+  when advertised;
 - `/exit` or `/quit` closes this TUI only.
 
 Model and effort catalogs are optional allowlists. When an endpoint omits one,
@@ -86,8 +95,8 @@ await handle.waitUntilExit();
 3. A submitted prompt calls `OperatorClient.streamTurn`.
 4. Every normalized frame passes through `reduceOperatorFrame`; the renderer
    never parses NDJSON or invents domain state.
-5. Cancel, live-input, AskUser, model, and effort controls are gated by
-   `availableOperatorActions`.
+5. Cancel, live-input, AskUser, attachment, quote, model/effort, and view
+   controls are gated by `availableOperatorActions`.
 6. `MonoAgentTuiApp` makes C0/C1 and bidi controls visible and inert before
    mapping normalized state and activity to pi-tui components.
 
@@ -139,9 +148,10 @@ server implementation.
 ## What This Package Does Not Own
 
 It does not run an agent, serve the operator endpoint, decode the wire format,
-decide action eligibility, persist conversations, read agent config, own web
-state, stop a background service, or mutate a running agent when the renderer
-exits.
+decide action eligibility, persist conversations, read an agent config file,
+own web state, stop a background service, or mutate a running agent when the
+renderer exits. `/config` displays only the endpoint's already-redacted shared
+operator view.
 
 ## Related Documentation
 

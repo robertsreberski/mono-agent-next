@@ -1,3 +1,14 @@
+import type {
+  OperatorAsk,
+  OperatorAskAnswerResponse,
+  OperatorAttachment,
+  OperatorConfigView,
+  OperatorHealth,
+  OperatorLiveInputResponse,
+  OperatorQuote,
+  OperatorReplayResponse,
+} from "@mono-agent/operator";
+
 /** Browser API version. It is independent from the agent operator wire version. */
 export const WEB_API_VERSION = 1 as const;
 
@@ -14,19 +25,30 @@ export interface WebAgent {
 export interface WebThread {
   readonly id: string;
   readonly agentId: string;
+  /** Exact agent-owned conversation id used by the shared operator client. */
+  readonly operatorConversationId?: string;
+  /** Present only for conversations opened by proactive operator delivery. */
+  readonly proactive?: true;
   readonly title: string;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /** Internal durable tombstone for a dismissed proactive conversation. */
+  readonly deletedAt?: string;
   readonly status: WebTurnStatus;
   readonly activeTurnId?: string;
+  readonly pendingAsk?: OperatorAsk;
 }
 
 export interface WebMessage {
   readonly id: string;
+  /** Agent transcript id, when the operator replay/terminal frame supplies one. */
+  readonly operatorMessageId?: string;
   readonly threadId: string;
   readonly turnId?: string;
   readonly role: "user" | "assistant";
   readonly text: string;
+  readonly attachments?: readonly OperatorAttachment[];
+  readonly quote?: OperatorQuote;
   readonly createdAt: string;
   readonly updatedAt: string;
   readonly status: Exclude<WebTurnStatus, "idle">;
@@ -42,6 +64,8 @@ export interface WebBootstrap {
   readonly version: typeof WEB_API_VERSION;
   readonly agents: readonly WebAgent[];
   readonly threads: readonly WebThread[];
+  /** Newly persisted during this bootstrap, so renderers can notify once. */
+  readonly newProactiveThreadIds: readonly string[];
 }
 
 export interface CreateWebThreadInput {
@@ -51,9 +75,26 @@ export interface CreateWebThreadInput {
 
 export interface StartWebTurnInput {
   readonly text: string;
+  readonly attachments?: readonly OperatorAttachment[];
+  readonly quote?: OperatorQuote;
   readonly model?: string;
   readonly effort?: string;
 }
+
+export interface AnswerWebAskInput {
+  readonly interactionId: string;
+  readonly answers: Readonly<Record<string, readonly string[]>>;
+}
+
+export interface OfferWebLiveInput {
+  readonly text: string;
+}
+
+export type WebAskAnswerResult = OperatorAskAnswerResponse;
+export type WebLiveInputResult = OperatorLiveInputResponse;
+export type WebReplayView = OperatorReplayResponse;
+export type WebConfigView = OperatorConfigView;
+export type WebHealthView = OperatorHealth;
 
 export interface StoredWebState {
   readonly schemaVersion: 1;

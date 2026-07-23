@@ -41,6 +41,34 @@ describe("operator protocol", () => {
     expect(() => parseTurnRequest({ ...VALID_TURN_REQUEST, surprise: true })).toThrow("unknown field");
   });
 
+  it("allows inline attachment URLs up to the shared request budget", () => {
+    const materiallyLargerUrl = `data:application/octet-stream;base64,${"A".repeat(128 * 1024)}`;
+    expect(parseTurnRequest({
+      conversationId: "c",
+      input: {
+        attachments: [{
+          id: "large",
+          name: "large.bin",
+          mediaType: "application/octet-stream",
+          url: materiallyLargerUrl,
+        }],
+      },
+    })).toMatchObject({
+      input: { attachments: [{ url: materiallyLargerUrl }] },
+    });
+    expect(() => parseTurnRequest({
+      conversationId: "c",
+      input: {
+        attachments: [{
+          id: "too-large",
+          name: "too-large.bin",
+          mediaType: "application/octet-stream",
+          url: "x".repeat(OPERATOR_LIMITS.attachmentUrlCharacters + 1),
+        }],
+      },
+    })).toThrow(`at most ${String(OPERATOR_LIMITS.attachmentUrlCharacters)} characters`);
+  });
+
   it("bounds serialized frames by UTF-8 bytes", () => {
     expect(() => serializeOperatorFrame({
       type: "delta",

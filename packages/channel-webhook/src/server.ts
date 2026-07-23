@@ -5,9 +5,13 @@ import { hostname as systemHostname } from "node:os";
 
 import {
   isLoopbackHost,
+  MAX_RUN_MS,
+  parseWebhookMode,
+  parseWebhookPath,
   type WebhookConfig,
   type WebhookMode,
 } from "./config.js";
+import type { WebhookRoute } from "./routes.js";
 
 const SHUTDOWN_DRAIN_MS = 1_000;
 const MAX_TEXT_LENGTH = 1_000_000;
@@ -30,6 +34,7 @@ export interface WebhookInboundRequest {
   readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
+  readonly routeName?: string;
   readonly metadata?: WebhookJsonObject;
   readonly abortSignal: AbortSignal;
 }
@@ -93,6 +98,11 @@ export interface WebhookChannelStartInfo {
   readonly baseUrl: string;
   readonly invokeUrl: string;
   readonly statusBaseUrl: string;
+  readonly routes: readonly {
+    readonly name: string;
+    readonly invokeUrl: string;
+    readonly statusBaseUrl: string;
+  }[];
   readonly authRequired: boolean;
 }
 
@@ -106,6 +116,7 @@ export interface WebhookChannel {
 export interface CreateWebhookChannelOptions {
   readonly config: WebhookConfig;
   readonly submit: WebhookSubmit;
+  readonly routes?: readonly WebhookRoute[];
 }
 
 interface ParsedInvocation {
@@ -114,6 +125,7 @@ interface ParsedInvocation {
   readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
+  readonly mode?: WebhookMode;
   readonly metadata?: WebhookJsonObject;
 }
 
@@ -148,6 +160,8 @@ class ExecutionError extends Error {
 
 export function createWebhookChannel(options: CreateWebhookChannelOptions): WebhookChannel {
   assertStartSafety(options.config);
+  const routes = normalizeRoutes(options.config, options.routes);
+  const routesByPath = new Map(routes.map((route) => [route.path, route]));
 
   let server: Server | undefined;
   let startPromise: Promise<WebhookChannelStartInfo> | undefined;
@@ -246,12 +260,19 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
             return;
           }
           const baseUrl = `http://${hostForUrl(host)}:${String(port)}`;
+          const routeUrls = routes.map((route) => Object.freeze({
+            name: route.name,
+            invokeUrl: `${baseUrl}${route.path}`,
+            statusBaseUrl: `${baseUrl}${statusBasePath(route.path)}`,
+          }));
+          const primary = routeUrls[0]!;
           startInfo = Object.freeze({
             host,
             port,
             baseUrl,
-            invokeUrl: `${baseUrl}${options.config.path}`,
-            statusBaseUrl: `${baseUrl}${statusBasePath(options.config.path)}`,
+            invokeUrl: primary.invokeUrl,
+            statusBaseUrl: primary.statusBaseUrl,
+            routes: Object.freeze(routeUrls),
             authRequired: true,
           });
           resolve(startInfo);
@@ -271,14 +292,13 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
     }
     validateAuthority(request, options.config.listen.host, startInfo.port);
     const requestUrl = parseRequestUrl(request.url);
-    const invokePath = options.config.path;
-    const requestStatusBasePath = statusBasePath(invokePath);
     if (requestUrl.search.length > 0) {
       sendJson(response, 404, safeErrorBody("not_found", "Route not found."));
       return;
     }
 
-    if (requestUrl.pathname === invokePath) {
+    const route = routesByPath.get(requestUrl.pathname);
+    if (route !== undefined) {
       if (request.method !== "POST") {
         sendJson(response, 405, safeErrorBody("method_not_allowed", "Method not allowed."), {
           allow: "POST",
@@ -296,14 +316,12 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
         );
         return;
       }
-      await handleInvocation(request, response);
+      await handleInvocation(request, response, route);
       return;
     }
 
-    if (
-      requestUrl.pathname === requestStatusBasePath ||
-      requestUrl.pathname.startsWith(`${requestStatusBasePath}/`)
-    ) {
+    const statusRoute = matchStatusRoute(requestUrl.pathname, routes);
+    if (statusRoute !== undefined) {
       if (request.method !== "GET") {
         sendJson(response, 405, safeErrorBody("method_not_allowed", "Method not allowed."), {
           allow: "GET",
@@ -313,7 +331,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       if (!authenticate(request, response, options.config.apiKey)) {
         return;
       }
-      const requestId = matchStatusRequestId(requestUrl.pathname, requestStatusBasePath);
+      const requestId = matchStatusRequestId(requestUrl.pathname, statusBasePath(statusRoute.path));
       if (requestId === undefined) {
         sendJson(response, 404, safeErrorBody("not_found", "Request status not found."));
         return;
@@ -333,6 +351,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
   const handleInvocation = async (
     request: IncomingMessage,
     response: ServerResponse,
+    route: WebhookRoute,
   ): Promise<void> => {
     if (stopping) {
       sendJson(response, 503, safeErrorBody("shutting_down", "The webhook channel is stopping."));
@@ -345,7 +364,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       if (options.config.signatureSecret !== undefined && !verifySignature(request.headers["x-mono-agent-signature"], body.raw, options.config.signatureSecret)) {
         throw new HttpError(401, "invalid_signature", "Unauthorized.");
       }
-      invocation = parseInvocation(body.value);
+      invocation = applyRoute(parseInvocation(body.value), route);
     } catch (error) {
       const failure = error instanceof HttpError
         ? error
@@ -361,11 +380,12 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
     }
 
     const requestId = randomUUID();
-    const conversationId = invocation.conversationId ?? `webhook:${requestId}`;
+    const conversationId = invocation.conversationId ?? `webhook:${route.name}:${requestId}`;
     const receivedAt = new Date().toISOString();
-    const requestStatusUrl = `${statusBasePath(options.config.path)}/${encodeURIComponent(requestId)}`;
+    const requestStatusUrl = `${statusBasePath(route.path)}/${encodeURIComponent(requestId)}`;
+    const mode = invocation.mode ?? route.mode;
 
-    if (options.config.mode === "async") {
+    if (mode === "async") {
       pruneStatuses(statuses, options.config.retentionMs);
       if (!reserveStatusCapacity(statuses, options.config.maxStoredRequests)) {
         sendJson(
@@ -388,7 +408,8 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
         conversationId,
         receivedAt,
         statusUrl: requestStatusUrl,
-        mode: options.config.mode,
+        mode,
+        route,
         invocation,
       });
       setStatus(statuses, {
@@ -411,7 +432,8 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       conversationId,
       receivedAt,
       statusUrl: requestStatusUrl,
-      mode: options.config.mode,
+      mode,
+      route,
       invocation,
     });
     const onClose = (): void => {
@@ -443,6 +465,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
     readonly receivedAt: string;
     readonly statusUrl: string;
     readonly mode: WebhookMode;
+    readonly route: WebhookRoute;
     readonly invocation: ParsedInvocation;
   }): ActiveRequest => {
     const controller = new AbortController();
@@ -455,6 +478,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       ...(input.invocation.runtime === undefined ? {} : { runtime: input.invocation.runtime }),
       ...(input.invocation.model === undefined ? {} : { model: input.invocation.model }),
       ...(input.invocation.effort === undefined ? {} : { effort: input.invocation.effort }),
+      routeName: input.route.name,
       ...(input.invocation.metadata === undefined ? {} : { metadata: input.invocation.metadata }),
       abortSignal: controller.signal,
     };
@@ -463,7 +487,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       options.submit,
       inbound,
       controller,
-      options.config.maxRunMs,
+      input.route.maxRunMs ?? options.config.maxRunMs,
     )
       .then<WebhookTerminalStatus>((result) => ({
         status: "succeeded",
@@ -536,6 +560,88 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
   return Object.freeze({ start, health, getStatus, stop });
 }
 
+function normalizeRoutes(
+  config: WebhookConfig,
+  supplied: readonly WebhookRoute[] | undefined,
+): readonly WebhookRoute[] {
+  if (config.routesDirectory !== undefined && supplied === undefined) {
+    throw new Error("Webhook directory-backed config requires loaded routes.");
+  }
+  const candidates: readonly WebhookRoute[] = supplied ?? [Object.freeze({
+    name: "default",
+    path: config.path,
+    mode: config.defaultMode,
+    prompt: "",
+    source: "config:path",
+  })];
+  if (candidates.length < 1 || candidates.length > 1_000) {
+    throw new Error("Webhook channel requires between 1 and 1000 routes.");
+  }
+  const routes: WebhookRoute[] = [];
+  const names = new Set<string>();
+  const paths = new Set<string>();
+  for (const candidate of candidates) {
+    if (!/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(candidate.name)
+      || parseWebhookPath(candidate.path) !== candidate.path
+      || parseWebhookMode(candidate.mode) !== candidate.mode
+      || typeof candidate.prompt !== "string"
+      || Buffer.byteLength(candidate.prompt, "utf8") > MAX_TEXT_LENGTH * 4
+      || (candidate.runtime !== undefined && !validRouteString(candidate.runtime))
+      || (candidate.model !== undefined && !validRouteString(candidate.model))
+      || (candidate.effort !== undefined && !validRouteString(candidate.effort))
+      || (candidate.maxRunMs !== undefined
+        && (!Number.isSafeInteger(candidate.maxRunMs)
+          || candidate.maxRunMs < 1
+          || candidate.maxRunMs > MAX_RUN_MS))) {
+      throw new Error("Webhook route configuration is invalid.");
+    }
+    if (names.has(candidate.name) || paths.has(candidate.path)) {
+      throw new Error("Webhook route names and paths must be unique.");
+    }
+    names.add(candidate.name);
+    paths.add(candidate.path);
+    routes.push(Object.freeze({ ...candidate }));
+  }
+  for (const route of routes) {
+    if (routes.some((other) => other !== route
+      && (other.path === `${route.path}/requests`
+        || other.path.startsWith(`${route.path}/requests/`)))) {
+      throw new Error("Webhook route conflicts with a request-status namespace.");
+    }
+  }
+  return Object.freeze(routes);
+}
+
+function validRouteString(value: string): boolean {
+  return value.length > 0
+    && value.length <= MAX_IDENTIFIER_LENGTH
+    && value === value.trim()
+    && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function matchStatusRoute(pathname: string, routes: readonly WebhookRoute[]): WebhookRoute | undefined {
+  return routes.find((route) => {
+    const base = statusBasePath(route.path);
+    return pathname === base || pathname.startsWith(`${base}/`);
+  });
+}
+
+function applyRoute(invocation: ParsedInvocation, route: WebhookRoute): ParsedInvocation {
+  const text = route.prompt.length === 0
+    ? invocation.text
+    : `${route.prompt}\n\n${invocation.text}`;
+  if (text.length > MAX_TEXT_LENGTH || Buffer.byteLength(text, "utf8") > MAX_TEXT_LENGTH * 4) {
+    throw new HttpError(400, "invalid_request", "The route prompt and request text exceed the request bound.");
+  }
+  return Object.freeze({
+    ...invocation,
+    text,
+    ...(invocation.runtime !== undefined || route.runtime === undefined ? {} : { runtime: route.runtime }),
+    ...(invocation.model !== undefined || route.model === undefined ? {} : { model: route.model }),
+    ...(invocation.effort !== undefined || route.effort === undefined ? {} : { effort: route.effort }),
+  });
+}
+
 async function executeSubmission(
   submit: WebhookSubmit,
   request: WebhookInboundRequest,
@@ -585,7 +691,7 @@ function parseInvocation(value: unknown): ParsedInvocation {
     throw new HttpError(400, "invalid_request", "Request body must be a JSON object.");
   }
   const input = value as Record<string, unknown>;
-  const allowed = new Set(["text", "conversationId", "runtime", "model", "effort", "metadata"]);
+  const allowed = new Set(["text", "conversationId", "runtime", "model", "effort", "mode", "metadata"]);
   const unknown = Object.keys(input).filter((key) => !allowed.has(key)).sort();
   if (unknown.length > 0) {
     throw new HttpError(400, "invalid_request", "Request body contains unknown fields.");
@@ -601,6 +707,7 @@ function parseInvocation(value: unknown): ParsedInvocation {
   const runtime = readInvocationString(input.runtime, "runtime", MAX_IDENTIFIER_LENGTH, false);
   const model = readInvocationString(input.model, "model", MAX_IDENTIFIER_LENGTH, false);
   const effort = readInvocationString(input.effort, "effort", MAX_IDENTIFIER_LENGTH, false);
+  const mode = input.mode === undefined ? undefined : requestMode(input.mode);
   const metadata = parseMetadata(input.metadata);
   return {
     text: text as string,
@@ -608,8 +715,16 @@ function parseInvocation(value: unknown): ParsedInvocation {
     ...(runtime === undefined ? {} : { runtime }),
     ...(model === undefined ? {} : { model }),
     ...(effort === undefined ? {} : { effort }),
+    ...(mode === undefined ? {} : { mode }),
     ...(metadata === undefined ? {} : { metadata }),
   };
+}
+
+function requestMode(value: unknown): WebhookMode {
+  if (value !== "sync" && value !== "async") {
+    throw new HttpError(400, "invalid_request", 'mode must be either "sync" or "async".');
+  }
+  return value;
 }
 
 function readInvocationString(

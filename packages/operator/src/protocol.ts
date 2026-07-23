@@ -143,7 +143,9 @@ function attachment(value: unknown, path: string): OperatorAttachment {
     name: text(input.name, `${path}.name`, { max: 1_024 }),
     mediaType: text(input.mediaType, `${path}.mediaType`, { max: 255 }),
     ...(input.sizeBytes === undefined ? {} : { sizeBytes: integer(input.sizeBytes, `${path}.sizeBytes`) }),
-    ...(input.url === undefined ? {} : { url: text(input.url, `${path}.url`, { max: 8_192 }) }),
+    ...(input.url === undefined ? {} : {
+      url: text(input.url, `${path}.url`, { max: OPERATOR_LIMITS.attachmentUrlCharacters }),
+    }),
   };
 }
 
@@ -153,7 +155,12 @@ function quote(value: unknown, path: string): OperatorQuote {
   return {
     conversationId: identifier(input.conversationId, `${path}.conversationId`),
     messageId: identifier(input.messageId, `${path}.messageId`),
-    ...(input.text === undefined ? {} : { text: text(input.text, `${path}.text`, { allowEmpty: true, max: 32_768 }) }),
+    ...(input.text === undefined ? {} : {
+      text: text(input.text, `${path}.text`, {
+        allowEmpty: true,
+        max: OPERATOR_LIMITS.quoteCharacters,
+      }),
+    }),
   };
 }
 

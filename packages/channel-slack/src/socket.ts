@@ -34,7 +34,41 @@ export interface SlackActionEvent {
   readonly receivedAt: string;
 }
 
-export type SlackSocketEvent = SlackMessageEvent | SlackActionEvent;
+export interface SlackShortcutEvent {
+  readonly kind: "shortcut";
+  readonly envelopeId: string;
+  readonly teamId: string;
+  readonly userId: string;
+  readonly callbackId: string;
+  readonly sourceChannelId?: string;
+  readonly sourceMessageId?: string;
+  readonly sourceThreadId?: string;
+  readonly receivedAt: string;
+}
+
+export interface SlackHomeOpenedEvent {
+  readonly kind: "home-opened";
+  readonly envelopeId: string;
+  readonly teamId: string;
+  readonly userId: string;
+  readonly receivedAt: string;
+}
+
+export interface SlackHomeActionEvent {
+  readonly kind: "home-action";
+  readonly envelopeId: string;
+  readonly teamId: string;
+  readonly userId: string;
+  readonly actionId: string;
+  readonly receivedAt: string;
+}
+
+export type SlackSocketEvent =
+  | SlackMessageEvent
+  | SlackActionEvent
+  | SlackShortcutEvent
+  | SlackHomeOpenedEvent
+  | SlackHomeActionEvent;
 export type SlackSocketEventHandler = (event: SlackSocketEvent) => void | Promise<void>;
 
 export interface SlackSocketFailure {
@@ -166,12 +200,65 @@ function parseEnvelope(envelope: Record<string, unknown>): SlackSocketEvent | un
   if (envelope.type === "events_api" && record(envelope.payload)) {
     const payload = envelope.payload;
     const event = record(payload.event) ? payload.event : undefined;
-    if (event?.type !== "message" || event.subtype !== undefined || typeof payload.team_id !== "string" || typeof event.channel !== "string" || typeof event.ts !== "string" || typeof event.user !== "string") return undefined;
+    if (typeof payload.team_id !== "string" || event === undefined) return undefined;
+    if (event.type === "app_home_opened" && typeof event.user === "string") {
+      return {
+        kind: "home-opened",
+        envelopeId,
+        teamId: payload.team_id,
+        userId: event.user,
+        receivedAt: new Date().toISOString(),
+      };
+    }
+    if (event.type !== "message" || event.subtype !== undefined || typeof event.channel !== "string" || typeof event.ts !== "string" || typeof event.user !== "string") return undefined;
     return { kind: "message", envelopeId, teamId: payload.team_id, channelId: event.channel, messageId: event.ts, threadId: typeof event.thread_ts === "string" ? event.thread_ts : event.ts, userId: event.user, text: typeof event.text === "string" ? event.text : "", files: Object.freeze(parseFiles(event.files)), receivedAt: new Date().toISOString() };
   }
   if (envelope.type === "interactive" && record(envelope.payload)) {
     const payload = envelope.payload;
+    if ((payload.type === "shortcut" || payload.type === "message_action")
+      && record(payload.team)
+      && record(payload.user)
+      && typeof payload.team.id === "string"
+      && typeof payload.user.id === "string"
+      && typeof payload.callback_id === "string") {
+      const channelId = record(payload.channel) && typeof payload.channel.id === "string"
+        ? payload.channel.id
+        : undefined;
+      const messageId = record(payload.message) && typeof payload.message.ts === "string"
+        ? payload.message.ts
+        : undefined;
+      const threadId = record(payload.message) && typeof payload.message.thread_ts === "string"
+        ? payload.message.thread_ts
+        : messageId;
+      return {
+        kind: "shortcut",
+        envelopeId,
+        teamId: payload.team.id,
+        userId: payload.user.id,
+        callbackId: payload.callback_id,
+        ...(channelId === undefined ? {} : { sourceChannelId: channelId }),
+        ...(messageId === undefined ? {} : { sourceMessageId: messageId }),
+        ...(threadId === undefined ? {} : { sourceThreadId: threadId }),
+        receivedAt: new Date().toISOString(),
+      };
+    }
     const action = Array.isArray(payload.actions) && record(payload.actions[0]) ? payload.actions[0] : undefined;
+    if (record(payload.team)
+      && record(payload.user)
+      && action !== undefined
+      && typeof payload.team.id === "string"
+      && typeof payload.user.id === "string"
+      && typeof action.action_id === "string"
+      && (!record(payload.channel) || !record(payload.message))) {
+      return {
+        kind: "home-action",
+        envelopeId,
+        teamId: payload.team.id,
+        userId: payload.user.id,
+        actionId: action.action_id,
+        receivedAt: new Date().toISOString(),
+      };
+    }
     if (!record(payload.team) || !record(payload.channel) || !record(payload.user) || !record(payload.message) || action === undefined || typeof payload.team.id !== "string" || typeof payload.channel.id !== "string" || typeof payload.user.id !== "string" || typeof payload.message.ts !== "string" || typeof action.action_id !== "string" || typeof action.value !== "string") return undefined;
     return { kind: "action", envelopeId, teamId: payload.team.id, channelId: payload.channel.id, messageId: payload.message.ts, threadId: typeof payload.message.thread_ts === "string" ? payload.message.thread_ts : payload.message.ts, userId: payload.user.id, actionId: action.action_id, value: action.value, receivedAt: new Date().toISOString() };
   }

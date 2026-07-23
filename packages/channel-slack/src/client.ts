@@ -20,10 +20,22 @@ export interface SlackFilePostRequest {
   readonly signal: AbortSignal;
 }
 
+export interface SlackHomeView {
+  readonly type: "home";
+  readonly blocks: readonly Readonly<Record<string, unknown>>[];
+}
+
 export interface SlackApiClient {
   download(file: SlackRemoteFile, maxBytes: number, signal: AbortSignal): Promise<ChannelAttachment>;
   postMessage(request: SlackPostRequest): Promise<{ readonly messageId: string }>;
   postFile(request: SlackFilePostRequest): Promise<{ readonly messageId: string }>;
+  setAssistantStatus?(
+    channelId: string,
+    threadId: string,
+    status: string,
+    signal: AbortSignal,
+  ): Promise<void>;
+  publishHome?(userId: string, view: SlackHomeView, signal: AbortSignal): Promise<void>;
   addReaction?(channelId: string, messageId: string, name: string, signal: AbortSignal): Promise<void>;
 }
 
@@ -61,6 +73,16 @@ export function createSlackWebApiClient(config: SlackConfig, fetchImpl: typeof f
       if (!sent.ok) throw new Error(`Slack file upload failed with HTTP ${sent.status}.`);
       const completed = await api("files.completeUploadExternal", { files: [{ id: upload.file_id, title: request.attachment.name }], channel_id: request.channelId, ...(request.threadId === undefined ? {} : { thread_ts: request.threadId }) }, request.signal);
       return { messageId: typeof completed.ts === "string" ? completed.ts : upload.file_id };
+    },
+    async setAssistantStatus(channelId, threadId, status, signal) {
+      await api("assistant.threads.setStatus", {
+        channel_id: channelId,
+        thread_ts: threadId,
+        status,
+      }, signal);
+    },
+    async publishHome(userId, view, signal) {
+      await api("views.publish", { user_id: userId, view }, signal);
     },
     async addReaction(channelId, messageId, name, signal) { await api("reactions.add", { channel: channelId, timestamp: messageId, name }, signal); },
   };

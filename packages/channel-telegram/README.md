@@ -18,8 +18,11 @@ Communication channel.
 ## Responsibility
 
 Consume one bot update stream, enforce exact chat authorization, normalize text
-and bounded media, dispatch turns, project supported live-input, cancellation,
-and AskUser controls, and deliver idempotent proactive messages and files.
+and bounded media, optionally transcribe audio, dispatch turns, project
+live-input, cancellation, AskUser, and per-chat runtime controls, and deliver
+idempotent proactive messages and files. The selected instance contributes
+`TelegramSendMessage` and `TelegramSendFile` under Core's ordinary tool policy;
+the same configured chat allowlist remains authoritative.
 
 ## Install / Usage
 
@@ -37,9 +40,31 @@ switch is true:
   "$use": "@mono-agent/channel-telegram",
   "botToken": { "$env": "TELEGRAM_BOT_TOKEN" },
   "allowedChatIds": ["123456789"],
-  "defaultDestination": "123456789"
+  "defaultDestination": "123456789",
+  "transport": { "ipFamily": 4 },
+  "quietHours": {
+    "start": "23:00",
+    "end": "07:00",
+    "timezone": "Europe/Amsterdam"
+  },
+  "transcription": {
+    "endpoint": "http://127.0.0.1:50060/v1/audio/transcriptions",
+    "model": "large-v3"
+  }
 }
 ```
+
+`transport.ipFamily` pins Telegram Bot API traffic to IPv4 or IPv6.
+`transcription` is opt-in and calls the configured OpenAI-compatible endpoint
+without an authorization header; use a trusted endpoint. Quiet hours preserve
+delivery but request silent Telegram notifications.
+
+`TelegramSendFile` accepts one canonical base64 document or photo. Its
+model-visible inline payload is capped at the smaller of the configured
+attachment limit and 180 KiB so the complete runtime tool call remains inside
+the shared boundary. Filenames must be safe basenames; photos require an image
+media type. `TelegramSendMessage.reply_options` contains two to eight
+non-blocking labels and remains distinct from AskUser.
 
 ## Architecture
 
@@ -48,8 +73,13 @@ switch is true:
 Telegram polling -> exact chat allowlist -> bounded attachment download ->
 normalized `ChannelInboundRequest` -> Core -> final reply. Supported Core
 controls route `/cancel`, live steering, and bounded AskUser button/free-text
-answers. Core proactive delivery -> exact Telegram destination -> in-process
-idempotent Bot API send.
+answers. `/model` and `/effort` maintain bounded, process-local per-chat
+overrides. Activity updates edit one status message when Telegram supports it.
+Core proactive delivery -> exact Telegram destination -> in-process idempotent
+Bot API send. `metadata.telegram.replyOptions` renders non-blocking buttons whose
+answers return as normal user input, separate from blocking AskUser callbacks.
+Instance-bound send-tool contributions prepare the same outbound contract; Core
+owns tool policy, deterministic idempotency, and receipt-keyed history.
 
 ### Package structure
 
@@ -58,6 +88,8 @@ idempotent Bot API send.
 | `config.ts` | Strict configuration and env-only secret schema. |
 | `bot.ts` | Injectable Bot API transport and bounded HTTP implementation. |
 | `delivery.ts` | Exact-destination idempotent proactive delivery. |
+| `send-tools.ts` | Strict message/file tool schemas and side-effect-free outbound preparation. |
+| `transcription.ts` | Bounded OpenAI-compatible audio transcription. |
 | `index.ts` | Poll lifecycle, normalization, module definition, and health. |
 
 ## Public API
@@ -82,7 +114,9 @@ Every symbol exported by each public code entrypoint is listed below.
 CreateTelegramChannelOptions
 DEFAULT_TELEGRAM_MAX_ATTACHMENT_BYTES
 DEFAULT_TELEGRAM_POLL_SECONDS
+DEFAULT_TELEGRAM_TRANSCRIPTION_TIMEOUT_MS
 MAX_TELEGRAM_ATTACHMENT_BYTES
+MAX_TELEGRAM_TRANSCRIPTION_TIMEOUT_MS
 TelegramBotClient
 TelegramBotClientFactory
 TelegramCallbackUpdate
@@ -90,14 +124,21 @@ TelegramChannel
 TelegramConfig
 TelegramConfigError
 TelegramDelivery
+TelegramEditMessageRequest
 TelegramMessageUpdate
+TelegramQuietHours
 TelegramReactionConfig
 TelegramRemoteAttachment
 TelegramSendAttachmentRequest
 TelegramSendMessageRequest
+TelegramTranscriber
+TelegramTranscriptionConfig
+TelegramTransportConfig
 TelegramUpdate
 createTelegramBotApiClient
 createTelegramChannel
+createTelegramTranscriber
+isWithinQuietHours
 monoAgentModule
 parseTelegramConfig
 telegramConfigSchema
@@ -113,7 +154,8 @@ Depends only on `@mono-agent/module-sdk` and Node/platform HTTP primitives. It d
 
 It does not persist transcripts or delivery receipts, select runtimes, create
 Telegram credentials, or promise delivery after Telegram returns an ambiguous
-transport failure. Successful-delivery deduplication is process-local.
+transport failure. Core records confirmed send-tool receipts in destination
+history; the transport's own successful-delivery deduplication is process-local.
 
 ## Related Documentation
 

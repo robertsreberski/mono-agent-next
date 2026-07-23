@@ -1,3 +1,7 @@
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
+import { basename, extname } from "node:path";
+
 import {
   Container,
   Editor,
@@ -12,18 +16,24 @@ import {
   assertOperatorIdentity,
   evaluateOperatorRuntimeOverride,
   initialOperatorState,
+  OPERATOR_LIMITS,
+  parseTurnRequest,
   reduceOperatorFrame,
   type OperatorAction,
   type OperatorCapabilities,
   type OperatorClient,
   type OperatorConversationState,
+  type OperatorAttachment,
   type DiscoveredOperator,
   type OperatorFrame,
   type OperatorInfo,
+  type OperatorQuote,
 } from "@mono-agent/operator";
 
 import { editorTheme, markdownTheme, style } from "./theme.js";
 import { sanitizeTerminalText } from "./terminal-text.js";
+
+const MAX_INLINE_ATTACHMENT_BYTES = 512 * 1_024;
 
 export interface MonoAgentTuiAppOptions {
   readonly terminal: Terminal;
@@ -52,6 +62,8 @@ export class MonoAgentTuiApp {
   private turnStarting = false;
   private modelOverride: string | undefined;
   private effortOverride: string | undefined;
+  private attachments: OperatorAttachment[] = [];
+  private quote: OperatorQuote | undefined;
   private stopped = false;
   private exitResolve: (() => void) | undefined;
   private readonly exitPromise: Promise<void>;
@@ -166,8 +178,26 @@ export class MonoAgentTuiApp {
       case "answer":
         await this.answerAsk(argument);
         return;
+      case "attach":
+        await this.attachFile(argument);
+        return;
+      case "quote":
+        this.setQuote(argument);
+        return;
+      case "send":
+        await this.runTurn(argument);
+        return;
+      case "replay":
+        await this.showReplay();
+        return;
+      case "config":
+        await this.showConfig();
+        return;
+      case "health":
+        await this.showHealth();
+        return;
       case "help":
-        this.addNotice("/model <ref|default> · /effort <level|default> · /answer <question>=<value> · /cancel · /exit");
+        this.addNotice("/attach <path> · /quote <message-id>[=<text>] · /send [text] · /replay · /config · /health · /model <ref|default> · /effort <level|default> · /answer <question>=<value> · /cancel · /exit");
         return;
       default:
         this.addNotice(`Unknown command /${name}. Run /help.`, "warning");
@@ -192,8 +222,42 @@ export class MonoAgentTuiApp {
       this.addNotice("The selected agent is not ready to start a turn.", "warning");
       return;
     }
+    if (text.length === 0 && this.attachments.length === 0) {
+      this.addNotice("Enter text or queue an attachment before sending.", "warning");
+      return;
+    }
+    if (this.attachments.length > 0 && !this.can("attach")) {
+      this.addNotice("Queued attachments are no longer accepted by this agent.", "warning");
+      return;
+    }
+    if (this.quote !== undefined && !this.can("quote")) {
+      this.addNotice("The selected agent no longer accepts quotes.", "warning");
+      return;
+    }
+    const turnAttachments = [...this.attachments];
+    const turnQuote = this.quote;
+    const requestPreview = {
+      conversationId: this.options.conversationId,
+      input: {
+        ...(text.length === 0 ? {} : { text }),
+        ...(turnAttachments.length === 0 ? {} : { attachments: turnAttachments }),
+        ...(turnQuote === undefined ? {} : { quote: turnQuote }),
+      },
+      ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
+      ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
+      metadata: { source: "tui" },
+    };
+    if (Buffer.byteLength(JSON.stringify(requestPreview)) > OPERATOR_LIMITS.requestBytes) {
+      this.addNotice("Queued input exceeds the shared operator request bound; remove an attachment or shorten the text.", "warning");
+      return;
+    }
+    const inputSummary = [
+      text,
+      turnAttachments.length === 0 ? "" : `[attachments: ${turnAttachments.map((item) => item.name).join(", ")}]`,
+      turnQuote === undefined ? "" : `[quote: ${turnQuote.messageId}]`,
+    ].filter(Boolean).join("\n");
     this.transcript.addChild(new Text(
-      style.user(`you  ${sanitizeTerminalText(text, { multiline: true })}`),
+      style.user(`you  ${sanitizeTerminalText(inputSummary, { multiline: true })}`),
       1,
       1,
     ));
@@ -204,14 +268,24 @@ export class MonoAgentTuiApp {
     this.setStatus(this.statusText("starting turn…"));
 
     try {
+      let accepted = false;
       const frames = this.options.client.streamTurn({
         conversationId: this.options.conversationId,
-        input: { text },
+        input: {
+          ...(text.length === 0 ? {} : { text }),
+          ...(turnAttachments.length === 0 ? {} : { attachments: turnAttachments }),
+          ...(turnQuote === undefined ? {} : { quote: turnQuote }),
+        },
         ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
         ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
         metadata: { source: "tui" },
       }, { signal: controller.signal });
       for await (const frame of frames) {
+        if (frame.type === "accepted" && !accepted) {
+          accepted = true;
+          this.attachments = [];
+          this.quote = undefined;
+        }
         this.state = reduceOperatorFrame(this.state, frame);
         this.present(frame);
       }
@@ -437,6 +511,146 @@ export class MonoAgentTuiApp {
     this.addNotice(`answer ${result.status}`);
   }
 
+  private async attachFile(path: string): Promise<void> {
+    if (!this.can("attach")) {
+      this.addNotice("The selected agent does not accept attachments.", "warning");
+      return;
+    }
+    if (path.length === 0) {
+      this.addNotice("Use /attach <path>. Inline attachments are limited to 512 KiB each.", "warning");
+      return;
+    }
+    if (this.attachments.length >= 4) {
+      this.addNotice("At most four attachments may be queued for one turn.", "warning");
+      return;
+    }
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      const before = await handle.stat();
+      if (!before.isFile() || before.size > MAX_INLINE_ATTACHMENT_BYTES) {
+        throw new Error("Attachment must be a regular file no larger than 512 KiB.");
+      }
+      const data = await handle.readFile();
+      const after = await handle.stat();
+      if (before.dev !== after.dev || before.ino !== after.ino || before.size !== after.size) {
+        throw new Error("Attachment changed while it was read.");
+      }
+      const name = basename(path);
+      if (
+        name.length === 0
+        || name.length > 1_024
+        || name === "."
+        || name === ".."
+        || /[\\/\u0000-\u001f\u007f]/u.test(name)
+      ) {
+        throw new Error("Attachment filename is not safe for the operator protocol.");
+      }
+      const mediaType = attachmentMediaType(name);
+      const url = `data:${mediaType};base64,${data.toString("base64")}`;
+      if (url.length > OPERATOR_LIMITS.attachmentUrlCharacters) {
+        throw new Error("Encoded attachment exceeds the operator protocol bound.");
+      }
+      const candidate: OperatorAttachment = {
+        id: crypto.randomUUID(),
+        name,
+        mediaType,
+        sizeBytes: data.byteLength,
+        url,
+      };
+      const attachments = [...this.attachments, candidate];
+      parseTurnRequest({ conversationId: this.options.conversationId, input: { attachments } });
+      if (Buffer.byteLength(JSON.stringify({
+        conversationId: this.options.conversationId,
+        input: { attachments },
+      })) > OPERATOR_LIMITS.requestBytes) {
+        throw new Error("Queued attachments exceed the shared operator request bound.");
+      }
+      this.attachments.push(candidate);
+      this.addNotice(`queued attachment ${name} (${String(data.byteLength)} bytes)`);
+    } catch (error) {
+      this.addNotice(errorMessage(error), "warning");
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
+  }
+
+  private setQuote(value: string): void {
+    if (!this.can("quote")) {
+      this.addNotice("The selected agent does not accept quotes.", "warning");
+      return;
+    }
+    if (value === "clear") {
+      this.quote = undefined;
+      this.addNotice("quote cleared");
+      return;
+    }
+    const separator = value.indexOf("=");
+    const messageId = (separator < 0 ? value : value.slice(0, separator)).trim();
+    const text = separator < 0 ? undefined : value.slice(separator + 1);
+    if (messageId.length === 0) {
+      this.addNotice("Use /quote <message-id>[=<quoted text>] or /quote clear. Replay shows message ids.", "warning");
+      return;
+    }
+    const quote: OperatorQuote = {
+      conversationId: this.options.conversationId,
+      messageId,
+      ...(text === undefined ? {} : { text }),
+    };
+    try {
+      parseTurnRequest({ conversationId: this.options.conversationId, input: { text: "quote validation", quote } });
+      this.quote = quote;
+      this.addNotice(`queued quote ${messageId}`);
+    } catch (error) {
+      this.addNotice(errorMessage(error), "warning");
+    }
+  }
+
+  private async showReplay(): Promise<void> {
+    if (!this.can("view_replay")) {
+      this.addNotice("The selected agent does not expose replay.", "warning");
+      return;
+    }
+    try {
+      const replay = await this.options.client.getReplay(this.options.conversationId);
+      const lines = replay.messages.slice(-100).map((message) =>
+        `${message.role}${message.id === undefined ? "" : ` ${message.id}`}: ${message.text}`
+      );
+      this.addNotice(boundedView(lines.length === 0 ? "Replay is empty." : lines.join("\n")));
+    } catch (error) {
+      this.addNotice(errorMessage(error), "error");
+    }
+  }
+
+  private async showConfig(): Promise<void> {
+    if (!this.can("view_config")) {
+      this.addNotice("The selected agent does not expose a redacted config view.", "warning");
+      return;
+    }
+    try {
+      const config = await this.options.client.getConfig();
+      this.addNotice(boundedView(`config ${config.revision} (${config.generatedAt})\n${JSON.stringify(config.value, null, 2)}`));
+    } catch (error) {
+      this.addNotice(errorMessage(error), "error");
+    }
+  }
+
+  private async showHealth(): Promise<void> {
+    if (!this.can("view_health")) {
+      this.addNotice("The selected agent does not expose health.", "warning");
+      return;
+    }
+    try {
+      const health = await this.options.client.getHealth();
+      const details = health.details.map((item) =>
+        `${item.id}: ${item.status}${item.message === undefined ? "" : ` — ${item.message}`}`
+      );
+      this.addNotice(boundedView(`${health.status} (${health.checkedAt})${details.length === 0 ? "" : `\n${details.join("\n")}`}`));
+    } catch (error) {
+      this.addNotice(errorMessage(error), "error");
+    }
+  }
+
   private can(action: OperatorAction): boolean {
     const capabilities = this.state.capabilities ?? this.info?.capabilities ?? NO_CAPABILITIES;
     return availableOperatorActions(this.state, capabilities).includes(action);
@@ -479,4 +693,24 @@ const NO_CAPABILITIES: OperatorCapabilities = {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function boundedView(value: string): string {
+  return value.length <= 32_768 ? value : `${value.slice(0, 32_760)}\n[truncated]`;
+}
+
+function attachmentMediaType(name: string): string {
+  switch (extname(name).toLowerCase()) {
+    case ".png": return "image/png";
+    case ".jpg":
+    case ".jpeg": return "image/jpeg";
+    case ".gif": return "image/gif";
+    case ".webp": return "image/webp";
+    case ".mp3": return "audio/mpeg";
+    case ".wav": return "audio/wav";
+    case ".json": return "application/json";
+    case ".md": return "text/markdown";
+    case ".txt": return "text/plain";
+    default: return "application/octet-stream";
+  }
 }

@@ -15,6 +15,9 @@ export const OPERATOR_ROUTES = Object.freeze({
 
 export const OPERATOR_LIMITS = Object.freeze({
   requestBytes: 1_048_576,
+  /** Inline data URLs share the request body budget; the HTTP body cap remains authoritative. */
+  attachmentUrlCharacters: 1_048_576,
+  quoteCharacters: 32_768,
   jsonResponseBytes: 1_048_576,
   frameBytes: 262_144,
   streamBytes: 8_388_608,

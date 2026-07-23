@@ -12,6 +12,7 @@ import {
   type OperatorClient,
   type OperatorCapabilities,
   type OperatorConversationState,
+  type OperatorInfo,
   type OperatorRuntimeOverrideIntent,
 } from "@mono-agent/operator";
 
@@ -57,6 +58,13 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
     };
   };
 
+  const verifiedConnection = async (agentId: string, signal?: AbortSignal) => {
+    const { client, entry } = await connectionFor(agentId);
+    const info = await client.getInfo(signal);
+    assertIdentity(entry, info);
+    return { client, entry, info };
+  };
+
   return {
     async listAgents(): Promise<readonly WebAgent[]> {
       return (await entries()).map((entry) => ({
@@ -78,22 +86,10 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
         client?: OperatorClient;
         capabilities?: OperatorCapabilities;
       } = { state };
-      conversations.set(input.conversationId, active);
+      const activeKey = conversationKey(input.agentId, input.conversationId);
+      conversations.set(activeKey, active);
       try {
-        const { client, entry } = await connectionFor(input.agentId);
-        const info = await client.getInfo(input.signal);
-        try {
-          assertOperatorIdentity(entry, info);
-        } catch (error) {
-          if (error instanceof OperatorIdentityBindingError) {
-            throw new WebProductError(
-              "operator_identity_mismatch",
-              `Operator process identity does not match its registry descriptor (${error.field}).`,
-              502,
-            );
-          }
-          throw error;
-        }
+        const { client, info } = await verifiedConnection(input.agentId, input.signal);
         active.client = client;
         active.capabilities = info.capabilities;
         let overrides: OperatorRuntimeOverrideIntent = {};
@@ -114,13 +110,19 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
         let lastText = "";
         for await (const frame of client.streamTurn({
           conversationId: input.conversationId,
-          input: { text: input.text },
+          input: {
+            text: input.text,
+            ...(input.attachments === undefined ? {} : { attachments: input.attachments }),
+            ...(input.quote === undefined ? {} : { quote: input.quote }),
+          },
           ...overrides,
           metadata: { client: "web" },
         }, { signal: input.signal })) {
-          state = reduceOperatorFrame(state, frame);
-          active.state = state;
-          if (state.assistantText !== lastText) {
+          active.state = reduceOperatorFrame(active.state, frame);
+          state = active.state;
+          if (input.onState !== undefined) {
+            await input.onState(state);
+          } else if (state.assistantText !== lastText) {
             lastText = state.assistantText;
             await input.onText(lastText);
           }
@@ -128,17 +130,128 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
         if (state.status === "cancelled") throw new WebProductError("operator_cancelled", state.lastError?.message ?? "Operator turn was cancelled.", 409);
         if (state.status !== "completed") throw new WebProductError("operator_turn_failed", state.lastError?.message ?? "Operator turn did not complete.", 502);
       } finally {
-        if (conversations.get(input.conversationId) === active) conversations.delete(input.conversationId);
+        if (conversations.get(activeKey) === active) conversations.delete(activeKey);
       }
     },
 
-    async cancel(_agentId: string, conversationId: string): Promise<void> {
-      const active = conversations.get(conversationId);
+    async cancel(agentId: string, conversationId: string): Promise<void> {
+      const active = conversations.get(conversationKey(agentId, conversationId));
       if (active === undefined || active.client === undefined) return;
       if (!availableOperatorActions(active.state, active.capabilities).includes("cancel_turn")) return;
       await active.client.cancelConversation(conversationId, { reason: "Cancelled by web operator." });
     },
+
+    async discoverProactiveConversations() {
+      const candidates = (await entries()).filter((entry) => !entry.stale);
+      const settled = await Promise.allSettled(candidates.map(async (entry) => {
+        const { client, info } = await verifiedConnection(entry.id);
+        if (!info.capabilities.proactive || !info.capabilities.replay) return [];
+        const listed = await client.getConversations();
+        return await Promise.all(listed.conversations
+          .filter((conversation) => conversation.id.startsWith("proactive:"))
+          .map(async (conversation) => {
+            const replay = await client.getReplay(conversation.id);
+            return {
+              agentId: entry.id,
+              conversationId: conversation.id,
+              ...(conversation.title === undefined ? {} : { title: conversation.title }),
+              updatedAt: conversation.updatedAt,
+              messages: replay.messages,
+            };
+          }));
+      }));
+      return settled.flatMap((result) => result.status === "fulfilled" ? result.value : []);
+    },
+
+    async answerAsk(agentId, conversationId, request) {
+      const active = conversations.get(conversationKey(agentId, conversationId));
+      let client: OperatorClient;
+      let capabilities: OperatorCapabilities;
+      if (active?.client !== undefined && active.capabilities !== undefined) {
+        client = active.client;
+        capabilities = active.capabilities;
+      } else {
+        const verified = await verifiedConnection(agentId);
+        client = verified.client;
+        capabilities = verified.info.capabilities;
+      }
+      let state = active?.state;
+      if (state === undefined) {
+        const snapshot = await client.getPendingAsk(conversationId);
+        state = {
+          ...initialOperatorState(conversationId),
+          ...(snapshot.ask === null ? {} : { pendingAsk: snapshot.ask }),
+        };
+      }
+      if (!availableOperatorActions(state, capabilities).includes("answer_ask")) {
+        throw new WebProductError("ask_unavailable", "This operator does not currently accept an AskUser answer.", 409);
+      }
+      const result = await client.answerAsk(conversationId, request);
+      if (result.status === "accepted" && active !== undefined) {
+        const { pendingAsk: _pendingAsk, ...next } = active.state;
+        active.state = next;
+      }
+      return result;
+    },
+
+    async offerLiveInput(agentId, conversationId, text) {
+      const active = conversations.get(conversationKey(agentId, conversationId));
+      if (
+        active?.client === undefined
+        || !availableOperatorActions(active.state, active.capabilities).includes("offer_live_input")
+      ) {
+        throw new WebProductError("live_input_unavailable", "This operator does not currently accept live input.", 409);
+      }
+      return active.client.offerLiveInput(conversationId, {
+        id: crypto.randomUUID(),
+        text,
+        receivedAt: new Date().toISOString(),
+      });
+    },
+
+    async readReplay(agentId, conversationId) {
+      const { client, info } = await verifiedConnection(agentId);
+      if (!availableOperatorActions(initialOperatorState(conversationId), info.capabilities).includes("view_replay")) {
+        throw new WebProductError("replay_unsupported", "This operator does not expose replay.", 409);
+      }
+      return client.getReplay(conversationId);
+    },
+
+    async readConfig(agentId) {
+      const { client, info } = await verifiedConnection(agentId);
+      if (!availableOperatorActions(initialOperatorState("web-config-view"), info.capabilities).includes("view_config")) {
+        throw new WebProductError("config_unsupported", "This operator does not expose a redacted config view.", 409);
+      }
+      return client.getConfig();
+    },
+
+    async readHealth(agentId) {
+      const { client, info } = await verifiedConnection(agentId);
+      if (!availableOperatorActions(initialOperatorState("web-health-view"), info.capabilities).includes("view_health")) {
+        throw new WebProductError("health_unsupported", "This operator does not expose health.", 409);
+      }
+      return client.getHealth();
+    },
   };
+}
+
+function assertIdentity(entry: DiscoveredOperator, info: OperatorInfo): void {
+  try {
+    assertOperatorIdentity(entry, info);
+  } catch (error) {
+    if (error instanceof OperatorIdentityBindingError) {
+      throw new WebProductError(
+        "operator_identity_mismatch",
+        `Operator process identity does not match its registry descriptor (${error.field}).`,
+        502,
+      );
+    }
+    throw error;
+  }
+}
+
+function conversationKey(agentId: string, conversationId: string): string {
+  return `${agentId.length}:${agentId}${conversationId}`;
 }
 
 function capabilityRecord(capabilities: DiscoveredOperator["capabilities"]): Readonly<Record<string, boolean>> {

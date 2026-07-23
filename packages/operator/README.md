@@ -72,7 +72,10 @@ constructed and is never returned as directory state.
    endpoint, rejects redirects, submits bounded JSON, and decodes bounded NDJSON.
 3. Every turn starts with `accepted`, carries only validated frames, and ends
    with exactly one `completed` or `error`; stopping iteration aborts the request.
-4. Products pass decoded frames to `reduceOperatorFrame` and render the returned
+4. Inline attachment URLs and quote text use shared hard bounds; the serving
+   channel remains responsible for decoding attachments and verifying quote
+   identities against authoritative conversation replay.
+5. Products pass decoded frames to `reduceOperatorFrame` and render the returned
    state and `availableOperatorActions` without a second decoder or reducer.
 
 ### Package structure

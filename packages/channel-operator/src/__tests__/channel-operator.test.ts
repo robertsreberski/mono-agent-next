@@ -11,6 +11,7 @@ import {
   type ModuleLogger,
 } from "@mono-agent/module-sdk";
 import {
+  OPERATOR_LIMITS,
   OperatorClient,
   parseOperatorFrame,
   parseOperatorHealth,
@@ -241,6 +242,135 @@ describe("operator HTTP channel", () => {
     expect(dispatch).not.toHaveBeenCalled();
   });
 
+  it("accepts materially larger canonical inline attachments and rejects body oversize", async () => {
+    let inbound: ChannelInboundRequest | undefined;
+    const channel = await startChannel(async (request) => {
+      inbound = request;
+      return { status: "completed", text: "received" };
+    });
+    const data = Buffer.alloc(64 * 1024, 0x61);
+    const accepted = await postJson(channel.startInfo.turnsUrl, {
+      conversationId: "large-attachment",
+      input: {
+        attachments: [{
+          id: "large",
+          name: "large.bin",
+          mediaType: "application/octet-stream",
+          sizeBytes: data.byteLength,
+          url: `data:application/octet-stream;base64,${data.toString("base64")}`,
+        }],
+      },
+    });
+    expect(accepted.status).toBe(200);
+    expect((await readFrames(accepted)).at(-1)).toMatchObject({ type: "completed" });
+    expect(inbound?.attachments).toEqual([expect.objectContaining({
+      id: "large",
+      name: "large.bin",
+      sizeBytes: data.byteLength,
+      data: new Uint8Array(data),
+    })]);
+
+    await expect(oversizedBodyStatus(channel.startInfo)).resolves.toBe(413);
+  });
+
+  it("resolves quotes from bounded replay and rejects foreign, missing, or mismatched references", async () => {
+    const now = new Date().toISOString();
+    const dispatch = vi.fn(async (
+      _request: ChannelInboundRequest,
+      _reply: ChannelReplySink,
+    ): Promise<ChannelTurnResult> => ({ status: "completed", text: "quoted" }));
+    const readReplay = vi.fn<NonNullable<ChannelHost["readReplay"]>>(async ({ conversationId }) => ({
+      entries: conversationId === "quoted-conversation"
+        ? [{
+            turnId: "turn-1",
+            createdAt: now,
+            message: {
+              id: "message-1",
+              role: "assistant",
+              content: [{ type: "text", text: "canonical quoted text" }],
+            },
+          }]
+        : [],
+    }));
+    const channel = await startChannel(dispatch, { readReplay });
+    await expect(authorizedJson(channel.startInfo.infoUrl)).resolves.toMatchObject({
+      capabilities: { quotes: true, replay: true },
+    });
+    const accepted = await postJson(channel.startInfo.turnsUrl, {
+      conversationId: "quoted-conversation",
+      input: {
+        text: "Respond to this.",
+        quote: {
+          conversationId: "quoted-conversation",
+          messageId: "message-1",
+          text: "canonical quoted text",
+        },
+      },
+    });
+    expect(accepted.status).toBe(200);
+    await readFrames(accepted);
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(dispatch.mock.calls[0]?.[0]).toMatchObject({
+      conversationId: "quoted-conversation",
+      metadata: {
+        operatorQuote: {
+          conversationId: "quoted-conversation",
+          messageId: "message-1",
+          role: "assistant",
+        },
+      },
+    });
+    expect(dispatch.mock.calls[0]?.[0].text).toContain("verified from conversation replay");
+    expect(dispatch.mock.calls[0]?.[0].text).toContain(JSON.stringify({
+      conversationId: "quoted-conversation",
+      messageId: "message-1",
+      role: "assistant",
+      text: "canonical quoted text",
+    }));
+    expect(dispatch.mock.calls[0]?.[0].text).toContain("User message:\nRespond to this.");
+
+    for (const quote of [
+      { conversationId: "foreign", messageId: "message-1", text: "canonical quoted text" },
+      { conversationId: "quoted-conversation", messageId: "missing", text: "canonical quoted text" },
+      { conversationId: "quoted-conversation", messageId: "message-1", text: "tampered" },
+    ]) {
+      const rejected = await postJson(channel.startInfo.turnsUrl, {
+        conversationId: "quoted-conversation",
+        input: { text: "Do not run.", quote },
+      });
+      expect(rejected.status).toBe(422);
+    }
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(readReplay).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "quoted-conversation",
+      limit: 10_000,
+    }));
+
+    const unavailable = await startChannel(dispatch, {
+      readReplay: async () => {
+        throw new Error("secret storage path");
+      },
+    });
+    const unavailableResponse = await postJson(unavailable.startInfo.turnsUrl, {
+      conversationId: "quoted-conversation",
+      input: {
+        text: "Do not run.",
+        quote: {
+          conversationId: "quoted-conversation",
+          messageId: "message-1",
+        },
+      },
+    });
+    expect(unavailableResponse.status).toBe(503);
+    await expect(unavailableResponse.json()).resolves.toEqual({
+      error: {
+        code: "replay_unavailable",
+        message: "Conversation replay is temporarily unavailable.",
+      },
+    });
+    expect(dispatch).toHaveBeenCalledOnce();
+  });
+
   it("aborts the exact Core dispatch when the stream client disconnects", async () => {
     let observedSignal: AbortSignal | undefined;
     let resolveAbort: (() => void) | undefined;
@@ -413,6 +543,7 @@ describe("mono-agent operator channel module", () => {
         await reply.emit({ type: "text-delta", delta: "module reply" });
         return { status: "completed" };
       },
+      async readReplay() { return { entries: [] }; },
     };
     const lifecycle = new AbortController();
     const channel = await monoAgentModule.create({
@@ -439,7 +570,7 @@ describe("mono-agent operator channel module", () => {
         agent: operatorIdentity.agent,
         operator: { endpoint: channel.endpoint, tokenEnvironment: "OPERATOR_TOKEN" },
         process: { pid: process.pid, startedAt: channel.startInfo?.startedAt },
-        capabilities: { attachments: true, cancellation: true, health: true },
+        capabilities: { attachments: true, cancellation: true, health: true, quotes: true },
       },
     });
     const response = await postJson(`${channel.endpoint}/v1/turns`, {
@@ -528,6 +659,38 @@ async function authorizedJson(url: string): Promise<unknown> {
   const response = await fetch(url, { headers: { authorization: `Bearer ${TOKEN}` } });
   expect(response.status).toBe(200);
   return response.json() as Promise<unknown>;
+}
+
+async function oversizedBodyStatus(
+  info: NonNullable<OperatorChannel["startInfo"]>,
+): Promise<number> {
+  const endpoint = new URL(info.endpoint);
+  return new Promise<number>((resolve, reject) => {
+    const socket = createConnection({ host: info.host, port: info.port });
+    let response = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk: string) => {
+      response += chunk;
+      const match = /^HTTP\/1\.1 (\d{3})/u.exec(response);
+      if (match !== null) {
+        resolve(Number(match[1]));
+        socket.destroy();
+      }
+    });
+    socket.once("connect", () => {
+      socket.write([
+        "POST /v1/turns HTTP/1.1",
+        `Host: ${endpoint.host}`,
+        `Authorization: Bearer ${TOKEN}`,
+        "Content-Type: application/json",
+        `Content-Length: ${String(OPERATOR_LIMITS.requestBytes + 1)}`,
+        "Connection: close",
+        "",
+        "{}",
+      ].join("\r\n"));
+    });
+  });
 }
 
 async function readFrames(response: Response): Promise<OperatorFrame[]> {

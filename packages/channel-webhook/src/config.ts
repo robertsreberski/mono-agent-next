@@ -30,7 +30,11 @@ export interface WebhookConfig {
   readonly apiKey: string;
   /** Optional resolved HMAC-SHA256 secret required in addition to bearer auth. */
   readonly signatureSecret?: string;
+  /** Directory-backed routes replace the legacy single `path` route when set. */
+  readonly routesDirectory?: string;
   readonly path: string;
+  readonly defaultMode: WebhookMode;
+  /** Source-compatible alias for defaultMode. */
   readonly mode: WebhookMode;
   readonly maxBodyBytes: number;
   readonly maxRunMs: number;
@@ -61,7 +65,9 @@ const CONFIG_KEYS = new Set([
   "allowNonLoopback",
   "apiKey",
   "signatureSecret",
+  "routesDirectory",
   "path",
+  "defaultMode",
   "mode",
   "maxBodyBytes",
   "maxRunMs",
@@ -78,8 +84,15 @@ export function parseWebhookConfig(value: unknown): WebhookConfig {
   const allowNonLoopback = readBoolean(input.allowNonLoopback, "allowNonLoopback", false);
   const apiKey = parseApiKey(input.apiKey);
   const signatureSecret = parseOptionalSecret(input.signatureSecret, "signatureSecret");
+  const routesDirectory = parseRoutesDirectory(input.routesDirectory);
+  if (routesDirectory !== undefined && input.path !== undefined) {
+    throw new WebhookConfigError("routesDirectory and the legacy single-route path cannot be configured together.");
+  }
+  if (input.defaultMode !== undefined && input.mode !== undefined) {
+    throw new WebhookConfigError("defaultMode and the legacy mode alias cannot be configured together.");
+  }
   const path = parsePath(input.path);
-  const mode = parseMode(input.mode);
+  const defaultMode = parseMode(input.defaultMode ?? input.mode);
   const maxBodyBytes = readBoundedInteger(
     input.maxBodyBytes,
     "maxBodyBytes",
@@ -119,19 +132,21 @@ export function parseWebhookConfig(value: unknown): WebhookConfig {
   }
   const outbound = parseOutbound(input.outbound);
 
-  return {
-    listen,
+  return Object.freeze({
+    listen: Object.freeze(listen),
     allowNonLoopback,
     apiKey,
     ...(signatureSecret === undefined ? {} : { signatureSecret }),
+    ...(routesDirectory === undefined ? {} : { routesDirectory }),
     path,
-    mode,
+    defaultMode,
+    mode: defaultMode,
     maxBodyBytes,
     maxRunMs,
     retentionMs,
     maxStoredRequests,
     ...(outbound === undefined ? {} : { outbound }),
-  };
+  });
 }
 
 export const webhookConfigSchema = Object.freeze({
@@ -155,7 +170,14 @@ export const webhookConfigSchema = Object.freeze({
         pattern: "^\\S+$",
       }, { secret: true }),
       signatureSecret: envEligibleSchema({ type: "string", minLength: 20, maxLength: 4_096 }, { secret: true }),
+      routesDirectory: {
+        type: "string",
+        minLength: 1,
+        maxLength: 1_024,
+        pattern: "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*[\\u0000-\\u001f\\u007f]).+$",
+      },
       path: { type: "string", default: DEFAULT_WEBHOOK_PATH },
+      defaultMode: { enum: ["sync", "async"], default: DEFAULT_WEBHOOK_MODE },
       mode: { enum: ["sync", "async"], default: DEFAULT_WEBHOOK_MODE },
       maxBodyBytes: {
         type: "integer",
@@ -273,16 +295,20 @@ function parseOutbound(value: unknown): WebhookOutboundConfig | undefined {
   });
 }
 
-function parsePath(value: unknown): string {
+export function parseWebhookPath(value: unknown): string {
   const path = readString(value, "path", DEFAULT_WEBHOOK_PATH);
   if (
     path.length > 1_024 ||
+    path === "/" ||
     !path.startsWith("/") ||
+    path.startsWith("//") ||
+    path.includes("\\") ||
+    path.includes("%") ||
     path.includes("?") ||
     path.includes("#") ||
-    /[\u0000-\u001f\u007f]/u.test(path)
+    /\s|[\u0000-\u001f\u007f]/u.test(path)
   ) {
-    throw new WebhookConfigError("path must be an absolute HTTP path without a query or fragment.");
+    throw new WebhookConfigError("path must be one absolute origin-form HTTP path without escapes, whitespace, a query, or a fragment.");
   }
   const normalized = path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
   const segments = normalized.split("/");
@@ -292,7 +318,7 @@ function parsePath(value: unknown): string {
   return normalized;
 }
 
-function parseMode(value: unknown): WebhookMode {
+export function parseWebhookMode(value: unknown): WebhookMode {
   if (value === undefined) {
     return DEFAULT_WEBHOOK_MODE;
   }
@@ -300,6 +326,29 @@ function parseMode(value: unknown): WebhookMode {
     throw new WebhookConfigError('mode must be either "sync" or "async".');
   }
   return value;
+}
+
+function parsePath(value: unknown): string {
+  return parseWebhookPath(value);
+}
+
+function parseMode(value: unknown): WebhookMode {
+  return parseWebhookMode(value);
+}
+
+function parseRoutesDirectory(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  const path = readString(value, "routesDirectory");
+  if (path.length > 1_024
+    || path.startsWith("/")
+    || path.startsWith("\\")
+    || path.includes("\\")
+    || /^[A-Za-z]:[\\/]/u.test(path)
+    || /[\u0000-\u001f\u007f]/u.test(path)
+    || path.replace(/\\/gu, "/").split("/").some((segment) => segment === "..")) {
+    throw new WebhookConfigError("routesDirectory must be a bounded path relative to the agent config directory.");
+  }
+  return path;
 }
 
 function readRecord(value: unknown, field: string): Record<string, unknown> {

@@ -53,6 +53,93 @@ async function eventually(assertion: () => void, timeoutMs = 2_000): Promise<voi
 }
 
 describe("standalone TUI", () => {
+  it("uses shared attachment, quote, replay, config, and health contracts when advertised", async () => {
+    const terminal = new TestTerminal();
+    const root = await mkdtemp(join(tmpdir(), "mono-agent-tui-assets-"));
+    const attachmentPath = join(root, "note.txt");
+    const oversizedPath = join(root, "too-large.bin");
+    await writeFile(attachmentPath, Buffer.alloc(128 * 1_024, 0x61));
+    await writeFile(oversizedPath, Buffer.alloc((512 * 1_024) + 1, 0x62));
+    let turnBody: Record<string, unknown> | undefined;
+    const now = new Date().toISOString();
+    const frames: readonly OperatorFrame[] = [
+      { type: "accepted", turnId: "asset-turn", conversationId: "asset-conversation", startedAt: now },
+      {
+        type: "completed",
+        turnId: "asset-turn",
+        finalMessage: { id: "assistant-2", role: "assistant", text: "received" },
+        finishedAt: now,
+        stopReason: "completed",
+      },
+    ];
+    const requested: string[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      requested.push(url);
+      if (url.endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v1/config")) {
+        return json({ revision: "config-r1", generatedAt: now, value: { safe: true }, redacted: true });
+      }
+      if (url.endsWith("/v1/health")) {
+        return json({ status: "healthy", checkedAt: now, details: [{ id: "core", status: "healthy" }] });
+      }
+      if (url.endsWith("/v1/conversations/asset-conversation/replay")) {
+        return json({
+          conversationId: "asset-conversation",
+          messages: [{ id: "assistant-1", role: "assistant", text: "previous", createdAt: now }],
+        });
+      }
+      if (url.endsWith("/v1/turns")) {
+        turnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(frames.map(serializeOperatorFrame).join(""), {
+          headers: { "content-type": "application/x-ndjson" },
+        });
+      }
+      throw new Error(`unexpected request ${url}`);
+    };
+    const handle = await startMonoAgentTui({
+      endpoint: "http://127.0.0.1:4321/operator",
+      fetch: fetchImpl,
+      terminal,
+      conversationId: "asset-conversation",
+    });
+    const submit = async (value: string, expected: string) => {
+      for (const character of value) terminal.feed(character);
+      terminal.feed("\r");
+      await eventually(() => expect(stripAnsi(terminal.output())).toContain(expected));
+    };
+
+    try {
+      await submit("/config", "config-r1");
+      await submit("/health", "core: healthy");
+      await submit("/replay", "assistant-1");
+      await submit(`/attach ${oversizedPath}`, "no larger than 512 KiB");
+      await submit(`/attach ${attachmentPath}`, "queued attachment note.txt");
+      await submit("/quote assistant-1=previous", "queued quote assistant-1");
+      await submit("use the context", "received");
+      expect(turnBody).toMatchObject({
+        conversationId: "asset-conversation",
+        input: {
+          text: "use the context",
+          attachments: [{ name: "note.txt", mediaType: "text/plain", sizeBytes: 128 * 1_024 }],
+          quote: {
+            conversationId: "asset-conversation",
+            messageId: "assistant-1",
+            text: "previous",
+          },
+        },
+      });
+      expect(requested).toEqual(expect.arrayContaining([
+        "http://127.0.0.1:4321/operator/v1/config",
+        "http://127.0.0.1:4321/operator/v1/health",
+        "http://127.0.0.1:4321/operator/v1/conversations/asset-conversation/replay",
+      ]));
+    } finally {
+      await handle.stop();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("runs a real shared-client turn, renders stream activity, and exits without stopping the agent", async () => {
     const terminal = new TestTerminal();
     const requests: Array<{ url: string; method: string; authorization: string | null; body?: unknown }> = [];

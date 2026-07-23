@@ -68,7 +68,7 @@ fails if that grant is absent or malformed.
 
 1. Core resolves the schema-marked secret reference and runs the package-owned strict parser.
 2. `start()` binds an authenticated loopback HTTP listener and exposes its actual ephemeral URL.
-3. `POST /v1/turns` is parsed by `@mono-agent/operator`, then dispatched through the injected `ChannelHost`.
+3. `POST /v1/turns` is parsed by `@mono-agent/operator`, inline attachments are decoded within the shared request bound, and quotes are verified against the active conversation's Core replay before dispatch through the injected `ChannelHost`.
 4. Channel reply events become only shared operator NDJSON frames, including AskUser and usage frames; the terminal frame carries the authoritative result.
 5. Capability-gated routes project Core conversation listing, replay, redacted config, health, live input, and AskUser answers without package-local state substitutes.
 6. Client disconnect, explicit cancellation, drain, and stop abort the exact dispatch signal; proactive requests open a Core conversation with bounded in-process idempotency.
@@ -78,7 +78,7 @@ fails if that grant is absent or malformed.
 | Source module | Responsibility |
 | --- | --- |
 | `config.ts` | Exact config shape, secret annotations, strong-token validation, and loopback checks. |
-| `server.ts` | Authenticated bounded routes, NDJSON streaming, Core control projection, cancellation, health, and shutdown. |
+| `server.ts` | Authenticated bounded routes, attachment decoding, replay-verified quote projection, NDJSON streaming, Core control projection, cancellation, health, and shutdown. |
 | `index.ts` | Typed channel module definition and public exports. |
 
 ## Public API

@@ -24,6 +24,123 @@ describe("slack channel", () => {
     for (const key of ["appToken", "botToken"]) { expect(isEnvEligibleSchema(properties[key]!)).toBe(true); expect(isSecretSchema(properties[key]!)).toBe(true); }
     expect(() => parseSlackConfig({ ...CONFIG, appToken: { $env: "SLACK_APP_TOKEN" } })).toThrow(/resolved/u);
     expect(() => parseSlackConfig({ ...CONFIG, allowedTeamIds: [], surprise: true })).toThrow(/unknown/u);
+    expect(parseSlackConfig({
+      appToken: CONFIG.appToken,
+      botToken: CONFIG.botToken,
+      allowedTeamIds: ["T1"],
+      allowAllChannels: true,
+    }).allowedChannelIds).toEqual([]);
+  });
+
+  it("validates bounded shortcut and App Home actions against the destination allowlist", () => {
+    const configured = parseSlackConfig({
+      ...CONFIG,
+      shortcuts: [{
+        callbackId: "triage_request",
+        prompt: "Prepare triage.",
+        channelId: "C1",
+        ackText: "Started.",
+        threadReply: true,
+      }],
+      homeTab: {
+        enabled: true,
+        headerText: "*Quick actions*",
+        buttons: [{
+          actionId: "build_digest",
+          label: "Build digest",
+          prompt: "Build the digest.",
+          channelId: "C1",
+        }],
+      },
+    });
+    expect(configured.shortcuts).toEqual([expect.objectContaining({
+      callbackId: "triage_request",
+      threadReply: true,
+    })]);
+    expect(configured.homeTab).toMatchObject({
+      enabled: true,
+      buttons: [{ actionId: "build_digest", threadReply: false }],
+    });
+    expect(() => parseSlackConfig({
+      ...CONFIG,
+      shortcuts: [{ callbackId: "one", prompt: "One" }, { callbackId: "ONE", prompt: "Two" }],
+    })).toThrow(/unique/iu);
+    expect(() => parseSlackConfig({
+      ...CONFIG,
+      shortcuts: [{ callbackId: "threaded", prompt: "Run", threadReply: true }],
+    })).toThrow(/requires ackText/iu);
+    expect(() => parseSlackConfig({
+      ...CONFIG,
+      homeTab: {
+        enabled: true,
+        buttons: [{ actionId: "unsafe", label: "Unsafe", prompt: "Run", channelId: "C2" }],
+      },
+    })).toThrow(/authorized/iu);
+  });
+
+  it("contributes an instance-bound message tool and resolves receipt-backed destination history", async () => {
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({
+      messageId: "1712345678.000100",
+    }));
+    const channel = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async () => ({ status: "completed" }),
+      ),
+      socketFactory: () => ({ async start() {}, async stop() {} }),
+      clientFactory: () => client({ postMessage }),
+    });
+    expect(channel.sendTools.map((tool) => tool.name)).toEqual([
+      "SlackSendMessage",
+    ]);
+    const tool = channel.sendTools[0]!;
+    const toolContext = {
+      requestId: "request-1",
+      conversationId: "producer",
+      callId: "call-1",
+      signal: new AbortController().signal,
+    };
+    const topLevel = tool.prepare({
+      channel: "C1",
+      text: "Scheduled digest",
+    }, toolContext);
+    const result = await channel.deliver!({
+      ...topLevel,
+      idempotencyKey: "tool-top-level",
+    }, toolContext.signal);
+    expect(result).toMatchObject({
+      status: "delivered",
+      messageId: "1712345678.000100",
+    });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      channelId: "C1",
+      text: "Scheduled digest",
+    }));
+    expect(tool.historyConversationId(
+      { ...topLevel, idempotencyKey: "tool-top-level" },
+      result,
+    )).toBe("slack:C1:1712345678.000100");
+
+    const threaded = tool.prepare({
+      channel: "C1",
+      thread_ts: "1700000000.000001",
+      text: "Thread reply",
+    }, { ...toolContext, callId: "call-2" });
+    expect(tool.historyConversationId(
+      { ...threaded, idempotencyKey: "tool-thread" },
+      result,
+    )).toBe("slack:C1:1700000000.000001");
+    await expect(channel.deliver!({
+      ...tool.prepare({ channel: "C2", text: "forbidden" }, toolContext),
+      idempotencyKey: "tool-forbidden",
+    }, toolContext.signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "slack_destination_forbidden" },
+    });
+    expect(() => tool.prepare({
+      channel: "C1:redirect",
+      text: "unsafe",
+    }, toolContext)).toThrow(/identifier/u);
   });
 
   it("normalizes one authorized Socket Mode event, ignores unauthorized events, and deduplicates delivery", async () => {
@@ -66,7 +183,7 @@ describe("slack channel", () => {
       socketFactory: () => socket,
       clientFactory: () => client,
     });
-    expect(channel.capabilities).toMatchObject({ liveInput: true, askUser: true, approvals: false, cancellation: true, runtimeControl: false });
+    expect(channel.capabilities).toMatchObject({ liveInput: true, askUser: true, approvals: false, cancellation: true, runtimeControl: true });
     await channel.start?.({ signal: new AbortController().signal });
     await handler?.({ kind: "message", envelopeId: "e1", teamId: "T1", channelId: "C1", messageId: "1", threadId: "1", userId: "U", text: "start", files: [], receivedAt: now });
     await vi.waitFor(() => expect(postMessage).toHaveBeenCalled());
@@ -83,11 +200,245 @@ describe("slack channel", () => {
     await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
   });
 
+  it("uses assistant-thread status, retains a transient activity ledger, and applies per-thread runtime controls", async () => {
+    let handler: SlackSocketEventHandler | undefined;
+    const socket: SlackSocketTransport = { async start(next) { handler = next; }, async stop() {} };
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({ messageId: "posted" }));
+    const setAssistantStatus = vi.fn<NonNullable<SlackApiClient["setAssistantStatus"]>>(async () => undefined);
+    const addReaction = vi.fn<NonNullable<SlackApiClient["addReaction"]>>(async () => undefined);
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async (_request, reply) => {
+      await reply.emit({ type: "activity", text: "Reading project files" });
+      const health = await channel.health?.({ signal: new AbortController().signal });
+      expect(health).toMatchObject({ details: { transientActivityEntries: 1 } });
+      return { status: "completed", text: "done" };
+    });
+    const channel = createSlackChannel({
+      context: context(parseSlackConfig(CONFIG), dispatch),
+      socketFactory: () => socket,
+      clientFactory: () => client({ postMessage, setAssistantStatus, addReaction }),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await handler?.(message("model", "/model runtime/model-a"));
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringMatching(/model-a/u) })));
+    await handler?.(message("effort", "/effort high"));
+    await vi.waitFor(() => expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringMatching(/high/u) })));
+    await handler?.(message("turn", "hello"));
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    expect(dispatch.mock.calls[0]?.[0]).toMatchObject({
+      conversationId: "slack:C1:1",
+      model: "runtime/model-a",
+      effort: "high",
+      text: "hello",
+    });
+    expect(setAssistantStatus).toHaveBeenCalledWith("C1", "1", "is thinking…", expect.any(AbortSignal));
+    expect(setAssistantStatus).toHaveBeenCalledWith("C1", "1", "Reading project files", expect.any(AbortSignal));
+    expect(addReaction).not.toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal })).toMatchObject({
+        details: { transientActivityEntries: 0, deliveryMode: "final-only" },
+      });
+    });
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("falls back to the eyes reaction when assistant status is unavailable", async () => {
+    const dataDirectory = temporaryDirectory();
+    const socket = durableAckSocket(dataDirectory);
+    const addReaction = vi.fn<NonNullable<SlackApiClient["addReaction"]>>(async () => undefined);
+    const channel = createSlackChannel({
+      context: context(parseSlackConfig(CONFIG), async () => ({ status: "completed", text: "done" }), {}, dataDirectory),
+      socketFactory: () => socket.transport,
+      clientFactory: () => client({
+        async setAssistantStatus() { throw new Error("not an assistant thread"); },
+        addReaction,
+      }),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await socket.emit(message("fallback", "hello"));
+    await vi.waitFor(() => expect(addReaction).toHaveBeenCalledWith("C1", "1", "eyes", expect.any(AbortSignal)));
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
   it("rejects lookalike Slack attachment hosts before sending the bot credential", async () => {
     const fetchImpl = vi.fn<typeof fetch>();
     const client = createSlackWebApiClient(parseSlackConfig(CONFIG), fetchImpl);
     await expect(client.download({ id: "F", name: "secret.txt", mediaType: "text/plain", privateUrl: "https://evilslack.com/file" }, 1024, new AbortController().signal)).rejects.toThrow(/not trusted/u);
     expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("calls Slack's assistant thread status API with bounded auth transport", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    const client = createSlackWebApiClient(parseSlackConfig(CONFIG), fetchImpl);
+    await client.setAssistantStatus?.("C1", "1", "Reading files", new AbortController().signal);
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://slack.com/api/assistant.threads.setStatus",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ channel_id: "C1", thread_ts: "1", status: "Reading files" }),
+      }),
+    );
+  });
+
+  it("publishes App Home and runs configured shortcut and Home actions through allowlisted destinations", async () => {
+    let handler: SlackSocketEventHandler | undefined;
+    const socket: SlackSocketTransport = { async start(next) { handler = next; }, async stop() {} };
+    let posted = 0;
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({ messageId: `posted-${++posted}` }));
+    const publishHome = vi.fn<NonNullable<SlackApiClient["publishHome"]>>(async () => undefined);
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async (request) => ({
+      status: "completed",
+      text: `done:${request.text}`,
+    }));
+    const channel = createSlackChannel({
+      context: context(parseSlackConfig({
+        ...CONFIG,
+        shortcuts: [{
+          callbackId: "triage_request",
+          prompt: "Prepare triage.",
+          ackText: "Triage started.",
+          threadReply: true,
+        }],
+        homeTab: {
+          enabled: true,
+          headerText: "*Quick actions*",
+          buttons: [{
+            actionId: "build_digest",
+            label: "Build digest",
+            prompt: "Build the digest.",
+            channelId: "C1",
+          }],
+        },
+      }), dispatch),
+      socketFactory: () => socket,
+      clientFactory: () => client({ postMessage, publishHome }),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await handler?.({
+      kind: "home-opened",
+      envelopeId: "home-opened-1",
+      teamId: "T1",
+      userId: "U1",
+      receivedAt: new Date().toISOString(),
+    });
+    await vi.waitFor(() => expect(publishHome).toHaveBeenCalledOnce());
+    expect(publishHome).toHaveBeenCalledWith("U1", {
+      type: "home",
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text: "*Quick actions*" } },
+        {
+          type: "actions",
+          elements: [{
+            type: "button",
+            action_id: "build_digest",
+            text: { type: "plain_text", text: "Build digest", emoji: false },
+          }],
+        },
+      ],
+    }, expect.any(AbortSignal));
+
+    await handler?.({
+      kind: "shortcut",
+      envelopeId: "shortcut-1",
+      teamId: "T1",
+      userId: "U1",
+      callbackId: "triage_request",
+      receivedAt: new Date().toISOString(),
+    });
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(1));
+    expect(dispatch.mock.calls[0]?.[0]).toMatchObject({
+      conversationId: "slack:C1:posted-1",
+      text: "Prepare triage.",
+      metadata: { source: "shortcut" },
+    });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      channelId: "C1",
+      text: "done:Prepare triage.",
+      threadId: "posted-1",
+    }));
+
+    await handler?.({
+      kind: "home-action",
+      envelopeId: "home-action-1",
+      teamId: "T1",
+      userId: "U1",
+      actionId: "build_digest",
+      receivedAt: new Date().toISOString(),
+    });
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+    expect(dispatch.mock.calls[1]?.[0]).toMatchObject({
+      conversationId: "slack:C1:action-home-action-1",
+      text: "Build the digest.",
+      metadata: { source: "home-action" },
+    });
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      channelId: "C1",
+      text: "done:Build the digest.",
+    }));
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("normalizes Socket Mode shortcut and App Home envelopes before acknowledging them", async () => {
+    const sockets: FakeWebSocket[] = [];
+    vi.stubGlobal("WebSocket", fakeWebSocketClass(sockets));
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      ok: true,
+      url: "wss://wss-primary.slack.com/link",
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const received: SlackSocketEvent[] = [];
+    const transport = createSlackSocketModeTransport(parseSlackConfig(CONFIG), fetchImpl);
+    await transport.start(async (event) => { received.push(event); }, new AbortController().signal);
+    sockets[0]?.emitEnvelope({
+      envelope_id: "shortcut-envelope",
+      type: "interactive",
+      payload: {
+        type: "message_action",
+        callback_id: "triage_request",
+        team: { id: "T1" },
+        user: { id: "U1" },
+        channel: { id: "C1" },
+        message: { ts: "20", thread_ts: "10" },
+      },
+    });
+    sockets[0]?.emitEnvelope({
+      envelope_id: "home-opened-envelope",
+      type: "events_api",
+      payload: {
+        team_id: "T1",
+        event: { type: "app_home_opened", user: "U1", tab: "home" },
+      },
+    });
+    sockets[0]?.emitEnvelope({
+      envelope_id: "home-action-envelope",
+      type: "interactive",
+      payload: {
+        type: "block_actions",
+        team: { id: "T1" },
+        user: { id: "U1" },
+        view: { type: "home" },
+        actions: [{ action_id: "build_digest" }],
+      },
+    });
+    await vi.waitFor(() => expect(received).toHaveLength(3));
+    expect(received).toEqual([
+      expect.objectContaining({
+        kind: "shortcut",
+        callbackId: "triage_request",
+        sourceChannelId: "C1",
+        sourceMessageId: "20",
+        sourceThreadId: "10",
+      }),
+      expect.objectContaining({ kind: "home-opened", userId: "U1" }),
+      expect.objectContaining({ kind: "home-action", actionId: "build_digest" }),
+    ]);
+    await vi.waitFor(() => expect(sockets[0]?.sent.map((entry) => JSON.parse(entry))).toEqual([
+      { envelope_id: "shortcut-envelope" },
+      { envelope_id: "home-opened-envelope" },
+      { envelope_id: "home-action-envelope" },
+    ]));
+    await transport.stop();
   });
 
   it("durably admits before acknowledgement and deduplicates an envelope across restart", async () => {

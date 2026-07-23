@@ -1,13 +1,17 @@
 import type { ChannelAttachment, ChannelDeliveryResult, ChannelOutboundMessage, ModuleDiagnostic } from "@mono-agent/module-sdk";
 
-import type { TelegramConfig } from "./config.js";
+import { isWithinQuietHours, type TelegramConfig } from "./config.js";
 import type { TelegramBotClient } from "./bot.js";
 
 export class TelegramDelivery {
   private readonly settled = new Map<string, ChannelDeliveryResult>();
   private readonly pending = new Map<string, Promise<ChannelDeliveryResult>>();
 
-  constructor(private readonly config: TelegramConfig, private readonly client: TelegramBotClient) {}
+  constructor(
+    private readonly config: TelegramConfig,
+    private readonly client: TelegramBotClient,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
 
   deliver(message: ChannelOutboundMessage, signal: AbortSignal): Promise<ChannelDeliveryResult> {
     const key = message.idempotencyKey;
@@ -39,13 +43,52 @@ export class TelegramDelivery {
         return failed(message.idempotencyKey, "telegram_attachment_invalid", "Telegram delivery attachment size is invalid or exceeds the configured limit.");
       }
     }
+    const options = replyOptions(message.metadata);
+    if (options.status === "invalid") {
+      return failed(message.idempotencyKey, "telegram_reply_options_invalid", options.message);
+    }
+    if (options.buttons.length > 0 && message.text.length === 0) {
+      return failed(message.idempotencyKey, "telegram_reply_options_without_text", "Telegram reply options require a text message.");
+    }
+    const caption = attachmentCaption(message.metadata);
+    if (caption.status === "invalid") {
+      return failed(message.idempotencyKey, "telegram_attachment_caption_invalid", caption.message);
+    }
+    if (caption.value !== undefined
+      && ((message.attachments?.length ?? 0) !== 1
+        || message.text !== caption.value
+        || options.buttons.length > 0)) {
+      return failed(
+        message.idempotencyKey,
+        "telegram_attachment_caption_invalid",
+        "Telegram attachmentCaption requires exactly one attachment, matching text, and no reply options.",
+      );
+    }
+    const disableNotification = this.config.quietHours === undefined
+      ? undefined
+      : isWithinQuietHours(this.now(), this.config.quietHours);
     try {
       let messageId: string | undefined;
-      if (message.text.length > 0) {
-        messageId = (await this.client.sendMessage({ chatId, text: message.text, ...(message.replyToMessageId === undefined ? {} : { replyToMessageId: message.replyToMessageId }), idempotencyKey: message.idempotencyKey, signal })).messageId;
+      if (message.text.length > 0 && caption.value === undefined) {
+        messageId = (await this.client.sendMessage({
+          chatId,
+          text: message.text,
+          ...(message.replyToMessageId === undefined ? {} : { replyToMessageId: message.replyToMessageId }),
+          ...(options.buttons.length === 0 ? {} : { buttons: options.buttons }),
+          ...(disableNotification === undefined ? {} : { disableNotification }),
+          idempotencyKey: message.idempotencyKey,
+          signal,
+        })).messageId;
       }
       for (const attachment of message.attachments ?? []) {
-        messageId = (await this.sendAttachment(chatId, attachment, message.idempotencyKey, signal)).messageId;
+        messageId = (await this.sendAttachment(
+          chatId,
+          attachment,
+          message.idempotencyKey,
+          disableNotification,
+          caption.value,
+          signal,
+        )).messageId;
       }
       return { status: "delivered", idempotencyKey: message.idempotencyKey, ...(messageId === undefined ? {} : { messageId }) };
     } catch {
@@ -53,13 +96,91 @@ export class TelegramDelivery {
     }
   }
 
-  private sendAttachment(chatId: string, attachment: ChannelAttachment, idempotencyKey: string | undefined, signal: AbortSignal) {
-    return this.client.sendAttachment({ chatId, attachment, ...(idempotencyKey === undefined ? {} : { idempotencyKey }), signal });
+  private sendAttachment(
+    chatId: string,
+    attachment: ChannelAttachment,
+    idempotencyKey: string | undefined,
+    disableNotification: boolean | undefined,
+    caption: string | undefined,
+    signal: AbortSignal,
+  ) {
+    return this.client.sendAttachment({
+      chatId,
+      attachment,
+      ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+      ...(disableNotification === undefined ? {} : { disableNotification }),
+      ...(caption === undefined ? {} : { caption }),
+      signal,
+    });
   }
 }
 
+type ReplyOptionsResult =
+  | { readonly status: "valid"; readonly buttons: readonly { readonly label: string; readonly data: string }[] }
+  | { readonly status: "invalid"; readonly buttons: readonly []; readonly message: string };
+
+function replyOptions(metadata: ChannelOutboundMessage["metadata"]): ReplyOptionsResult {
+  const telegram = metadata?.telegram;
+  if (telegram === undefined) return { status: "valid", buttons: [] };
+  if (!isRecord(telegram)) {
+    return invalidOptions("Telegram delivery metadata.telegram must be an object.");
+  }
+  const values = telegram.replyOptions;
+  if (values === undefined) return { status: "valid", buttons: [] };
+  if (!Array.isArray(values) || values.length < 1 || values.length > 8) {
+    return invalidOptions("Telegram replyOptions must contain between 1 and 8 labels.");
+  }
+  const seen = new Set<string>();
+  const buttons: { label: string; data: string }[] = [];
+  for (const value of values) {
+    if (typeof value !== "string" || value.length === 0 || value.length > 64 || seen.has(value)) {
+      return invalidOptions("Telegram replyOptions labels must be unique non-empty strings of at most 64 characters.");
+    }
+    const data = `reply:${Buffer.from(value, "utf8").toString("base64url")}`;
+    if (Buffer.byteLength(data, "utf8") > 64) {
+      return invalidOptions("Telegram replyOptions labels exceed Telegram's callback-data bound.");
+    }
+    seen.add(value);
+    buttons.push({ label: value, data });
+  }
+  return { status: "valid", buttons: Object.freeze(buttons) };
+}
+
+function invalidOptions(message: string): ReplyOptionsResult {
+  return { status: "invalid", buttons: [], message };
+}
+
+type AttachmentCaptionResult =
+  | { readonly status: "valid"; readonly value?: string }
+  | { readonly status: "invalid"; readonly message: string };
+
+function attachmentCaption(
+  metadata: ChannelOutboundMessage["metadata"],
+): AttachmentCaptionResult {
+  const telegram = metadata?.telegram;
+  if (telegram === undefined || !isRecord(telegram)
+    || telegram.attachmentCaption === undefined) {
+    return { status: "valid" };
+  }
+  const value = telegram.attachmentCaption;
+  if (typeof value !== "string" || value.length === 0 || value.length > 1_024) {
+    return {
+      status: "invalid",
+      message: "Telegram attachmentCaption must be a non-empty string of at most 1024 characters.",
+    };
+  }
+  return { status: "valid", value };
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function destination(conversationId: string, fallback: string | undefined): string | undefined {
-  if (conversationId.startsWith("telegram:")) return conversationId.slice("telegram:".length).split(":", 1)[0];
+  if (conversationId.startsWith("telegram:")) {
+    const chatId = conversationId.slice("telegram:".length);
+    return chatId.length > 0 && !chatId.includes(":") ? chatId : undefined;
+  }
   return conversationId.length === 0 ? fallback : undefined;
 }
 

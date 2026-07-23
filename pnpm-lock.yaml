@@ -143,12 +143,18 @@ importers:
       '@mono-agent/module-sdk':
         specifier: workspace:0.15.0
         version: link:../module-sdk
+      undici:
+        specifier: 8.7.0
+        version: 8.7.0
 
   packages/channel-webhook:
     dependencies:
       '@mono-agent/module-sdk':
         specifier: workspace:0.15.0
         version: link:../module-sdk
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
 
   packages/cli:
     dependencies:
@@ -1930,6 +1936,10 @@ packages:
 
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==, tarball: https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz}
+
+  undici@8.7.0:
+    resolution: {integrity: sha512-N7iQtfyLhIMOFgQubvmLV26svHpO0bqKnAiWotTQCVKCmWrcGbBotPuW1x+xwYZ2VHdSTVUfPQQnlEt1/LouTQ==, tarball: https://registry.npmjs.org/undici/-/undici-8.7.0.tgz}
+    engines: {node: '>=22.19.0'}
 
   unpipe@1.0.0:
     resolution: {integrity: sha512-pjy2bYhSsufwWlKwPc+l3cN7+wuJlK6uz0YdJEOlQDbl6jo/YlPi4mb8agUkVC8BF7V8NuzeyPNqRksA3hztKQ==, tarball: https://registry.npmjs.org/unpipe/-/unpipe-1.0.0.tgz}
@@ -3770,6 +3780,8 @@ snapshots:
   typescript@5.9.3: {}
 
   undici-types@6.21.0: {}
+
+  undici@8.7.0: {}
 
   unpipe@1.0.0: {}
 

@@ -39,7 +39,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@mono-agent/module-sdk": "workspace:0.15.0"
+    "@mono-agent/module-sdk": "workspace:0.15.0",
+    "yaml": "^2.9.0"
   },
   "publishConfig": {
     "access": "public"

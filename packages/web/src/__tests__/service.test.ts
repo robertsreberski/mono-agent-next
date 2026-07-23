@@ -10,6 +10,102 @@ import { cleanup, temporaryDirectory } from "./helpers.js";
 afterEach(cleanup);
 
 describe("web service lifecycle", () => {
+  it("durably imports proactive conversations once and retains deletion tombstones", async () => {
+    const root = await temporaryDirectory();
+    const stateDirectory = join(root, "state");
+    const proactive = {
+      agentId: "personal",
+      conversationId: "proactive:notice-1",
+      title: "Scheduled update",
+      updatedAt: new Date().toISOString(),
+      messages: [{ id: "agent-message-1", role: "assistant" as const, text: "Backup completed." }],
+    };
+    const firstStore = await DurableWebStore.open(stateDirectory);
+    const first = new WebService(firstStore, gateway({
+      async discoverProactiveConversations() { return [proactive]; },
+    }));
+
+    const initial = await first.bootstrap();
+    expect(initial.newProactiveThreadIds).toHaveLength(1);
+    expect(initial.threads).toMatchObject([{
+      proactive: true,
+      operatorConversationId: "proactive:notice-1",
+    }]);
+    expect(first.thread(initial.newProactiveThreadIds[0]!)).toMatchObject({
+      messages: [{ operatorMessageId: "agent-message-1", text: "Backup completed." }],
+    });
+    expect((await first.bootstrap()).newProactiveThreadIds).toEqual([]);
+
+    await first.deleteThread(initial.newProactiveThreadIds[0]!);
+    expect((await first.bootstrap()).threads).toEqual([]);
+    await first.stop();
+
+    const reopenedStore = await DurableWebStore.open(stateDirectory);
+    const reopened = new WebService(reopenedStore, gateway({
+      async discoverProactiveConversations() { return [proactive]; },
+    }));
+    expect(await reopened.bootstrap()).toMatchObject({ threads: [], newProactiveThreadIds: [] });
+    await reopened.stop();
+  });
+
+  it("persists AskUser state and routes answers and live input to the exact active conversation", async () => {
+    const root = await temporaryDirectory();
+    const store = await DurableWebStore.open(join(root, "state"));
+    let release!: () => void;
+    let ready!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const readyGate = new Promise<void>((resolve) => { ready = resolve; });
+    const answerAsk = vi.fn<NonNullable<WebOperatorGateway["answerAsk"]>>(async () => ({ status: "accepted" }));
+    const offerLiveInput = vi.fn<NonNullable<WebOperatorGateway["offerLiveInput"]>>(async () => ({ status: "applied" }));
+    const service = new WebService(store, gateway({
+      answerAsk,
+      offerLiveInput,
+      async runTurn(input) {
+        await input.onState?.({
+          conversationId: input.conversationId,
+          status: "awaiting_user",
+          activeTurnId: "operator-turn",
+          assistantText: "Need a choice.",
+          thoughtText: "",
+          activities: [],
+          pendingAsk: {
+            interactionId: "ask-1",
+            requestedAt: new Date().toISOString(),
+            questions: [{
+              id: "choice",
+              prompt: "Continue?",
+              allowFreeText: false,
+              multiple: false,
+              choices: [{ value: "yes", label: "Yes" }],
+            }],
+          },
+        });
+        ready();
+        await gate;
+      },
+    }));
+    const thread = await service.createThread("personal");
+    const running = service.runTurn(thread.id, { text: "start" }, async () => undefined);
+    await readyGate;
+
+    expect(service.thread(thread.id).thread.pendingAsk).toMatchObject({ interactionId: "ask-1" });
+    await expect(service.offerLiveInput(thread.id, "More context")).resolves.toEqual({ status: "applied" });
+    await expect(service.answerAsk(thread.id, {
+      interactionId: "ask-1",
+      answers: { choice: ["yes"] },
+    })).resolves.toEqual({ status: "accepted" });
+    expect(service.thread(thread.id).thread.pendingAsk).toBeUndefined();
+    expect(offerLiveInput).toHaveBeenCalledWith("personal", `web:${thread.id}`, "More context");
+    expect(answerAsk).toHaveBeenCalledWith("personal", `web:${thread.id}`, {
+      interactionId: "ask-1",
+      answers: { choice: ["yes"] },
+    });
+
+    release();
+    await expect(running).resolves.toMatchObject({ thread: { status: "complete" } });
+    await service.stop();
+  });
+
   it("registers a durable turn before a blocked first renderer update so cancel cannot miss it", async () => {
     const root = await temporaryDirectory();
     const store = await DurableWebStore.open(join(root, "state"));

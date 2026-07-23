@@ -17,10 +17,11 @@ Communication channel.
 
 ## Responsibility
 
-Bind one HTTP listener, authenticate webhook invocations, normalize accepted
-JSON into channel requests, and expose sync results or bounded in-memory async
-status polling. When explicitly configured, deliver proactive messages to one
-fixed authenticated and optionally HMAC-signed webhook destination.
+Bind one HTTP listener, load strict Markdown-defined routes, authenticate
+webhook invocations, normalize accepted JSON into channel requests, and expose
+sync results or bounded in-memory async status polling. When explicitly
+configured, deliver proactive messages to one fixed authenticated and
+optionally HMAC-signed webhook destination.
 
 ## Install / Usage
 
@@ -48,8 +49,8 @@ Select it in `mono-agent.config.json`. Secret values are never accepted inline;
       "signatureSecret": {
         "$env": "MONO_AGENT_WEBHOOK_SIGNATURE_SECRET"
       },
-      "path": "/webhook/invoke",
-      "mode": "async",
+      "routesDirectory": "./webhook",
+      "defaultMode": "async",
       "outbound": {
         "url": "https://hooks.example.test/mono-agent",
         "apiKey": {
@@ -60,6 +61,28 @@ Select it in `mono-agent.config.json`. Secret values are never accepted inline;
   }
 }
 ```
+
+Each sorted `*.md` file in `routesDirectory` has strict YAML frontmatter and a
+private Markdown prompt:
+
+```markdown
+---
+name: triage
+path: /hooks/triage
+mode: async
+runtime: pi
+model: provider:model
+effort: high
+maxRunMs: 3600000
+---
+Classify the incident and summarize the next action.
+```
+
+The prompt is prepended to caller text but never returned in route discovery or
+status data. Route names and paths are unique; symlinks, oversized files,
+unknown fields, and route/status namespace collisions fail before listening.
+Without `routesDirectory`, the source-compatible single `path` route remains;
+`mode` is retained only as an alias for `defaultMode`.
 
 Invoke the channel with a bearer token:
 
@@ -72,9 +95,10 @@ curl --fail-with-body \
 ```
 
 The request may include `text`, `conversationId`, `runtime`, `model`, `effort`,
-and a JSON-object `metadata`. Sync mode returns the terminal result. Async mode
-returns `202` with a `requestId` and `statusUrl`; polling that URL uses the same
-bearer authentication.
+`mode`, and a JSON-object `metadata`. Request runtime fields override route
+defaults. Sync mode returns the terminal result. Async mode returns `202` with a
+`requestId` and route-local `statusUrl`; polling uses the same bearer
+authentication.
 
 When `signatureSecret` is set, invocations must also carry
 `X-Mono-Agent-Signature: sha256=<hex>` computed over the exact raw request
@@ -101,16 +125,18 @@ belongs behind a trusted TLS reverse proxy with rate limiting.
    environment reference, and runs the package-owned strict parser.
 2. `start()` revalidates the selected bind and already resolved authentication
    material, including strong dual authentication for non-loopback listeners.
-3. The HTTP handler authenticates and checks `application/json` before attaching
+3. Directory-backed config is opened without following symlinks; sorted bounded
+   route files are validated before the listener starts.
+4. The HTTP handler authenticates and checks `application/json` before attaching
    body readers, then enforces the configured byte limit and parses one exact
    JSON request shape.
-4. The channel calls the injected `submit` capability with an abort signal and
-   normalized routing fields.
-5. Sync responses settle on the same connection. Async terminal states remain in
+5. The selected private prompt and route defaults are merged with the request,
+   then the channel calls the injected `submit` capability with an abort signal.
+6. Sync responses settle on the same connection. Async terminal states remain in
    bounded process memory until retention or capacity eviction.
-6. `stop()` stops admission, aborts active work, drains within a fixed bound, and
+7. `stop()` stops admission, aborts active work, drains within a fixed bound, and
    closes listener connections idempotently.
-7. Optional proactive delivery targets only the configured URL, bounds payload
+8. Optional proactive delivery targets only the configured URL, bounds payload
    and response bytes, disables redirects, and signs the exact transmitted body.
 
 ### Package structure
@@ -118,6 +144,7 @@ belongs behind a trusted TLS reverse proxy with rate limiting.
 | Source module | Responsibility |
 | --- | --- |
 | `config.ts` | Strict config parsing, JSON Schema secret markers, resolved-token validation, and safe-bind rules. |
+| `routes.ts` | No-follow Markdown route discovery and strict frontmatter parsing. |
 | `server.ts` | Node HTTP lifecycle, auth, bounded JSON, request normalization, status retention, timeout, and shutdown. |
 | `delivery.ts` | Fixed-destination authenticated delivery, raw-body signing, response bounds, and idempotency. |
 | `index.ts` | Typed `monoAgentModule` definition and package public exports. |
@@ -155,6 +182,8 @@ MAX_BODY_BYTES
 MAX_RETENTION_MS
 MAX_RUN_MS
 MAX_STORED_REQUESTS
+MAX_WEBHOOK_ROUTES
+MAX_WEBHOOK_ROUTE_BYTES
 WebhookChannel
 WebhookChannelHealth
 WebhookChannelStartInfo
@@ -169,13 +198,18 @@ WebhookMode
 WebhookModuleChannel
 WebhookOutboundConfig
 WebhookRequestStatus
+WebhookRoute
 WebhookSubmit
 WebhookTerminalStatus
 WebhookTurnResult
 createWebhookChannel
 isLoopbackHost
+loadWebhookRoutesFromDirectory
 monoAgentModule
 parseWebhookConfig
+parseWebhookMode
+parseWebhookPath
+parseWebhookRouteMarkdown
 webhookConfigSchema
 ```
 
