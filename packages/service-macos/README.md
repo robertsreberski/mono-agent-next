@@ -51,9 +51,16 @@ mono-agent-service-macos remove --config ./service-macos.json --allow-mutation
 Removal unloads only the configured LaunchAgent labels and deletes their
 managed plist files. It never deletes agent config, state, memory, logs, or
 product data. A changed config, file observation, runtime binding, or launchd
-observation fails before mutation. A bounded failure restores the prior plist
-and loaded state when that state was safe to prove; repeating removal after
-success is a no-op.
+observation fails before mutation. Apply and removal use an owner-private,
+fsynced transaction journal and quarantine the exact fingerprinted plist inode
+before changing its canonical name. Publication and restoration are
+no-clobber operations. If a concurrent file occupies the target, both the
+operator file and the recoverable prior file are preserved and the operation
+fails closed. A bounded failure restores the prior plist and loaded state only
+when that state is safe to prove; repeating removal after success is a no-op.
+An explicitly authorized apply or removal automatically recovers a known
+interrupted transaction before creating a new plan. Inspect and plan remain
+read-only and refuse unresolved transactions.
 
 The service file uses `configVersion: 1` and a `services` map. Each entry names
 an absolute `agentConfig`, `startAtLogin`, `restartPolicy`, and owner-controlled
@@ -67,11 +74,17 @@ log directory; an optional protected environment file must be mode `0600`.
 2. Inspect resolves exact `ai.mono-agent.<service-id>` labels and plist paths, safely fingerprints owner-private plist files, and calls only `launchctl print`.
 3. Plan validates each agent config through core and binds config, package, lockfile, protected environment, Node, runner, log, plist, and launchd observations into one fingerprint.
 4. Apply first requires `allowMutation: true`, verifies the fingerprint, and rechecks every binding and observation before any write.
-5. A mode-`0600` temporary plist is fsynced and atomically promoted; `launchctl` is invoked only as an argument vector through the injected runner.
-6. Activation failure restores the prior plist and best-effort prior launchd definition.
-7. Removal uses a separately fingerprinted plan, verifies drift before each
-   mutation, unloads before unlinking, proves no resurrection, and restores the
-   previous safe state on bounded failure.
+5. Mutation creates a mode-`0700` per-service transaction directory and fsyncs
+   its bounded mode-`0600` journal before changing the canonical namespace.
+6. Update and removal move the canonical plist to quarantine, validate its
+   device, inode, uid, mode, link count, size, digest, and planned identity,
+   then publish or restore only through a no-clobber hard link.
+7. `launchctl` is invoked only as an argument vector through the injected
+   runner. Activation failure conservatively unloads ambiguous state and
+   restores only a verified prior inode.
+8. Removal deletes only the quarantined planned inode after unload and
+   no-resurrection proof. Unknown, corrupt, or occupied recovery states retain
+   every artifact and require operator resolution.
 
 ### Package structure
 
@@ -96,6 +109,7 @@ log directory; an optional protected environment file must be mode `0600`.
 | `applyServiceMacosPlan` | Recheck and apply a plan only with explicit mutation authorization. |
 | `planServiceMacosRemoval` | Produce a deterministic removal plan for selected configured services. |
 | `removeServiceMacosPlan` | Recheck, unload, remove, verify, and roll back only with explicit mutation authorization. |
+| `recoverServiceMacosTransactions` | Recover known journaled interruptions only with explicit mutation authorization; unknown artifacts fail closed. |
 | `runServiceMacosCli` | Embed the optional CLI frontend with injected paths and command runner. |
 
 <!-- public-api-inventory:start -->
@@ -120,9 +134,11 @@ MAX_SERVICE_CONFIG_BYTES
 PlanServiceMacosOptions
 PlanServiceMacosRemovalOptions
 ProtectedEnvironment
+RecoverServiceMacosOptions
 RemoveServiceMacosOptions
 SERVICE_MACOS_CONFIG_VERSION
 SERVICE_PLAN_SCHEMA_VERSION
+ServiceFileIdentity
 ServiceFileObservation
 ServiceMacosCliOptions
 ServiceMacosConfig
@@ -156,6 +172,7 @@ parseServiceMacosConfig
 planServiceMacos
 planServiceMacosRemoval
 processCommandRunner
+recoverServiceMacosTransactions
 removeServiceMacosPlan
 renderServicePlist
 runServiceMacosCli

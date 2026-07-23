@@ -11,6 +11,7 @@ import {
   inspectServiceMacos,
   planServiceMacos,
   planServiceMacosRemoval,
+  recoverServiceMacosTransactions,
   removeServiceMacosPlan,
 } from "./reconciler.js";
 
@@ -63,6 +64,11 @@ export async function runServiceMacosCli(
     }
     if (parsed.command === "remove") {
       if (!parsed.allowMutation) throw new UsageError("remove requires the explicit --allow-mutation flag");
+      await recoverServiceMacosTransactions(parsed.configPath, {
+        runtime,
+        allowMutation: true,
+        ...(options.runner === undefined ? {} : { runner: options.runner }),
+      });
       const removalPlan = await planServiceMacosRemoval(parsed.configPath, {
         runtime,
         ...(options.runner === undefined ? {} : { runner: options.runner }),
@@ -79,6 +85,13 @@ export async function runServiceMacosCli(
         observations,
       }, null, 2)}\n`);
       return 0;
+    }
+    if (parsed.command === "apply" && parsed.allowMutation) {
+      await recoverServiceMacosTransactions(parsed.configPath, {
+        runtime,
+        allowMutation: true,
+        ...(options.runner === undefined ? {} : { runner: options.runner }),
+      });
     }
     const plan = await planServiceMacos(parsed.configPath, {
       runtime,
