@@ -381,7 +381,7 @@ function packedSmokeConfig(providerBaseUrl) {
           {
             id: "local",
             baseUrl: providerBaseUrl,
-            models: [{ id: "echo", contextWindow: 16_384, maxTokens: 1_024 }],
+            models: [{ id: "echo", reasoning: true, contextWindow: 16_384, maxTokens: 1_024 }],
           },
         ],
       },

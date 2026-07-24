@@ -942,7 +942,7 @@ function hermeticScaffoldConfig(renderedConfig, template, providerBaseUrl) {
   pi.localProviders = [{
     id: "packed-local",
     baseUrl: providerBaseUrl,
-    models: [{ id: "echo", contextWindow: 16_384, maxTokens: 1_024 }],
+    models: [{ id: "echo", reasoning: true, contextWindow: 16_384, maxTokens: 1_024 }],
   }];
   proof.routing.primary = { ...proof.routing.primary, model: "packed-local:echo" };
   inbound.listen = { ...inbound.listen, port: 0 };
@@ -969,7 +969,7 @@ function hermeticPersonalScaffoldConfig(renderedConfig, providerBaseUrl, otlpEnd
   pi.localProviders = [{
     id: "packed-local",
     baseUrl: providerBaseUrl,
-    models: [{ id: "echo", contextWindow: 16_384, maxTokens: 1_024 }],
+    models: [{ id: "echo", reasoning: true, contextWindow: 16_384, maxTokens: 1_024 }],
   }];
   proof.routing.primary = { runtime: "pi", model: "packed-local:echo" };
   proof.routing.fallbacks = [];
@@ -1266,7 +1266,7 @@ function assertPersonalHermeticOverlay(rendered, proof, providerBaseUrl, otlpEnd
   expected.runtimes.pi.localProviders = [{
     id: "packed-local",
     baseUrl: providerBaseUrl,
-    models: [{ id: "echo", contextWindow: 16_384, maxTokens: 1_024 }],
+    models: [{ id: "echo", reasoning: true, contextWindow: 16_384, maxTokens: 1_024 }],
   }];
   expected.routing.primary = { runtime: "pi", model: "packed-local:echo" };
   expected.routing.fallbacks = [];
@@ -1309,7 +1309,7 @@ function assertScaffoldHermeticOverlay(rendered, proof, template, providerBaseUr
   expected.runtimes.pi.localProviders = [{
     id: "packed-local",
     baseUrl: providerBaseUrl,
-    models: [{ id: "echo", contextWindow: 16_384, maxTokens: 1_024 }],
+    models: [{ id: "echo", reasoning: true, contextWindow: 16_384, maxTokens: 1_024 }],
   }];
   expected.routing.primary = { ...expected.routing.primary, model: "packed-local:echo" };
   expected.channels.inbound.listen = {
@@ -1397,7 +1397,7 @@ function packedSystemConfig({ providerBaseUrl, otlpEndpoint, deliveryEndpoint })
         localProviders: [{
           id: "local",
           baseUrl: providerBaseUrl,
-          models: [{ id: "echo", contextWindow: 16_384, maxTokens: 1_024 }],
+          models: [{ id: "echo", reasoning: true, contextWindow: 16_384, maxTokens: 1_024 }],
         }],
       },
     },
