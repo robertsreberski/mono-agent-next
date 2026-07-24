@@ -14,6 +14,14 @@ import type { OperatorActivity } from "@mono-agent/operator";
 
 import { useConsole, type ConsoleConnection } from "./console";
 import { Icon } from "./components/Icon";
+import { ContextDisplay } from "./components/assistant-ui/ContextDisplay";
+import { ModelSelector } from "./components/assistant-ui/ModelSelector";
+import {
+  CompactionRow,
+  OrphanResult,
+  Reasoning,
+  ToolCall,
+} from "./components/assistant-ui/Reasoning";
 import type { AskQuestion, Attachment, Telemetry } from "./types";
 
 function QuoteBlock({ text }: QuoteMessagePartProps) {
@@ -46,7 +54,14 @@ function EmptyPart({ status }: EmptyMessagePartProps) {
   return <span className="thinking-indicator" role="status" aria-label="Agent is thinking"><i /><i /><i /></span>;
 }
 
-const parts = { Text: MarkdownText, Quote: QuoteBlock, Empty: EmptyPart } as const;
+const parts = {
+  Text: MarkdownText,
+  Quote: QuoteBlock,
+  Empty: EmptyPart,
+  Reasoning,
+  ToolCall,
+  Data: { "operator-compaction": CompactionRow, "operator-orphan-result": OrphanResult },
+} as const;
 
 function Attachments() {
   const raw = useAuiState((state) => state.message.metadata.custom?.attachments);
@@ -73,85 +88,6 @@ function Attachments() {
         </li>
       ))}
     </ul>
-  );
-}
-
-function TelemetryBadge() {
-  const raw = useAuiState((state) => state.message.metadata.custom?.telemetry);
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-  const telemetry = raw as Telemetry;
-  return (
-    <span className="telemetry" title="Token usage">
-      {telemetry.inputTokens.toLocaleString()} in · {telemetry.outputTokens.toLocaleString()} out
-      {telemetry.compacted ? " · compacted" : ""}
-      {telemetry.sessionEvicted ? " · session renewed" : ""}
-    </span>
-  );
-}
-
-function ActivityFeed() {
-  const raw = useAuiState((state) => state.message.metadata.custom?.activities);
-  if (!Array.isArray(raw) || raw.length === 0) return null;
-  return (
-    <div className="activity-list" aria-label="Agent activity">
-      {(raw as readonly OperatorActivity[]).map((activity, index) => {
-        if (activity.type === "activity") {
-          return <div className="activity-line" key={`${activity.type}:${index}`}><i />{activity.text}</div>;
-        }
-        if (activity.type === "compaction") {
-          const { compaction } = activity;
-          const tokens = compaction.tokensBefore === undefined
-            ? ""
-            : compaction.tokensAfter === undefined
-              ? ` · ${compactCount(compaction.tokensBefore)} tokens before`
-              : ` · ${compactCount(compaction.tokensBefore)} → ${compactCount(compaction.tokensAfter)} tokens`;
-          return (
-            <div className="context-compaction-row" key={`${activity.type}:${index}`}>
-              <i className="context-compaction-status" />{compaction.compacted ? "Context compacted" : "Context compaction skipped"}{tokens}
-            </div>
-          );
-        }
-        if (activity.type === "tool_call") {
-          return (
-            <details className="tool-call" key={`${activity.type}:${activity.call.id}:${index}`}>
-              <summary>
-                <i className="tool-status" />
-                <span className="tool-name">{activity.call.name}</span>
-                <span className="tool-state">tool call</span>
-                <Icon name="chevron" size={13} />
-              </summary>
-              <div className="tool-payload">
-                <span>Input</span>
-                <pre>{activity.call.inputOmitted ? "Input omitted by policy" : safeJson(activity.call.input)}</pre>
-              </div>
-            </details>
-          );
-        }
-        return (
-          <details
-            className={`tool-call${activity.result.isError ? " is-error" : ""}`}
-            key={`${activity.type}:${activity.result.callId}:${index}`}
-          >
-            <summary>
-              <i className="tool-status" />
-              <span className="tool-name">Tool result</span>
-              <span className="tool-state">{activity.result.isError ? "failed" : "complete"}</span>
-              <Icon name="chevron" size={13} />
-            </summary>
-            <div className="tool-payload">
-              <span>Output</span>
-              <pre>
-                {activity.result.contentOmitted
-                  ? "Output omitted by policy"
-                  : activity.result.content?.map((part) =>
-                      part.type === "text" ? part.text : safeJson(part.value)
-                    ).join("\n\n") ?? "No output"}
-              </pre>
-            </div>
-          </details>
-        );
-      })}
-    </div>
   );
 }
 
@@ -191,12 +127,10 @@ function AssistantMessage() {
     <MessagePrimitive.Root className="message message-assistant">
       <div className="assistant-mark" aria-hidden="true"><Icon name="spark" size={15} /></div>
       <div className="assistant-content">
-        <ActivityFeed />
         <MessagePrimitive.Parts components={parts} />
         <MessagePrimitive.Error>
           <div className="message-error" role="alert">The response ended with an error.</div>
         </MessagePrimitive.Error>
-        <TelemetryBadge />
         <CopyAction />
       </div>
     </MessagePrimitive.Root>
@@ -323,10 +257,12 @@ function Composer() {
     !isRunning
     && consoleState.selectedAgent?.capabilities.attachments === true;
   const models = consoleState.selectedAgent?.models;
-  const model = models?.find((candidate) =>
-    candidate.id === (consoleState.model || consoleState.selectedAgent?.defaults?.model)
-  );
-  const effortOptions = model?.efforts;
+  const defaults = consoleState.selectedAgent?.defaults;
+  const runtime = consoleState.runtime || defaults?.runtime;
+  const modelId = consoleState.model || defaults?.model;
+  const route = runtime === undefined || modelId === undefined
+    ? undefined
+    : { runtime, id: modelId };
   return (
     <div className="composer-shell">
       <AskUser />
@@ -371,58 +307,22 @@ function Composer() {
                 <button type="button" onClick={() => fileInput.current?.click()} title="Attach files">＋ File</button>
               </>
             )}
-            {consoleState.selectedAgent?.capabilities.runtimeOverrides === true && (
-              <>
-                <input
-                  className="runtime-input"
-                  value={consoleState.runtime}
-                  onChange={(event) => consoleState.setRuntime(event.target.value)}
-                  placeholder="runtime"
-                  aria-label="Runtime override"
-                />
-                {models === undefined ? (
-                  <input
-                    value={consoleState.model}
-                    onChange={(event) => {
-                      consoleState.setModel(event.target.value);
-                      consoleState.setEffort("");
-                    }}
-                    placeholder="model"
-                    aria-label="Model override"
-                  />
-                ) : (
-                  <select
-                    value={consoleState.model}
-                    onChange={(event) => {
-                      consoleState.setModel(event.target.value);
-                      consoleState.setEffort("");
-                    }}
-                    aria-label="Model"
-                  >
-                    <option value="">Default model</option>
-                    {models.map((option) => (
-                      <option key={option.id} value={option.id}>{option.label ?? option.id}</option>
-                    ))}
-                  </select>
-                )}
-                {effortOptions === undefined ? (
-                  <input
-                    value={consoleState.effort}
-                    onChange={(event) => consoleState.setEffort(event.target.value)}
-                    placeholder="effort"
-                    aria-label="Reasoning effort override"
-                  />
-                ) : (
-                  <select
-                    value={consoleState.effort}
-                    onChange={(event) => consoleState.setEffort(event.target.value)}
-                    aria-label="Reasoning effort"
-                  >
-                    <option value="">Default effort</option>
-                    {effortOptions.map((option) => <option key={option} value={option}>{option}</option>)}
-                  </select>
-                )}
-              </>
+            {consoleState.selectedAgent?.capabilities.runtimeOverrides === true
+              && models !== undefined && (
+              <ModelSelector
+                models={models}
+                {...(route === undefined ? {} : { route })}
+                effort={consoleState.effort}
+                disabled={isRunning}
+                onRouteChange={(next) => {
+                  consoleState.setRuntime(next.runtime);
+                  consoleState.setModel(next.id);
+                  // Effort is advertised per route, so a level chosen for the
+                  // previous model must not survive the switch.
+                  consoleState.setEffort("");
+                }}
+                onEffortChange={consoleState.setEffort}
+              />
             )}
           </div>
           <div className="composer-actions">

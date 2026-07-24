@@ -7,11 +7,18 @@ describe("packed assistant-ui PWA contract", () => {
     const chat = await readFile(new URL("./chat.tsx", import.meta.url), "utf8");
     const app = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
     const rail = await readFile(new URL("./components/AgentRail.tsx", import.meta.url), "utf8");
+    const runtime = await readFile(new URL("./runtime.tsx", import.meta.url), "utf8");
     expect(chat).toContain("SelectionToolbarPrimitive.Quote");
     expect(chat).toContain("ComposerPrimitive.QuoteText");
     expect(chat).toContain("ComposerPrimitive.QuoteDismiss");
-    expect(chat).toContain("activity.type === \"tool_call\"");
     expect(chat).not.toContain("thoughtText");
+    // Operator activities are projected onto assistant-ui's own part
+    // vocabulary and rendered by registered part components, rather than read
+    // back out of message metadata by a bespoke feed.
+    expect(runtime).toContain("type: \"reasoning\"");
+    expect(runtime).toContain("type: \"tool-call\"");
+    expect(chat).toMatch(/Reasoning,\s*\n\s*ToolCall,/u);
+    expect(chat).not.toContain("metadata.custom?.activities");
     // The rail expands by discrete toggle only; a drag handle would make the
     // layout width a continuously persisted preference.
     expect(rail).toContain("Collapse agent sidebar");

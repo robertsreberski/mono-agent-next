@@ -24,7 +24,12 @@ export interface Quote {
   readonly text?: string;
 }
 
+/**
+ * `{ runtime, id }` is the atomic route. The same model id reached through two
+ * runtimes is two options, and the picker must never offer one half alone.
+ */
 export interface ModelOption {
+  readonly runtime: string;
   readonly id: string;
   readonly label?: string;
   readonly efforts?: readonly string[];
