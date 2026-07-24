@@ -135,8 +135,9 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
   let controlRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let controlRetryMs = 100;
 
-  const clearPendingAsk = (chatId: string): void => {
+  const clearPendingAsk = (chatId: string, expected?: PendingTelegramAsk): void => {
     const pending = pendingAsks.get(chatId);
+    if (expected !== undefined && pending !== expected) return;
     if (pending !== undefined) for (const token of pending.tokens) callbackAnswers.delete(token);
     pendingAsks.delete(chatId);
   };
@@ -207,7 +208,9 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
             callbackAnswers.delete(update.data);
             pending.tokens.delete(update.data);
           }
-          if (await maybeAnswerAsk(context, update.chatId, pending, signal)) clearPendingAsk(update.chatId);
+          if (await maybeAnswerAsk(context, update.chatId, pending, signal)) {
+            clearPendingAsk(update.chatId, pending);
+          }
         }
       }
       await client.answerCallback?.(update.callbackId, signal).catch(() => undefined);
@@ -219,7 +222,9 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
         const question = pendingAsk.ask.questions.find((candidate) => !pendingAsk.done.has(candidate.id));
         if (question !== undefined && question.allowFreeText && update.text.trim().length > 0) {
           recordAskFreeText(pendingAsk, question.id, update.text);
-          if (await maybeAnswerAsk(context, update.chatId, pendingAsk, signal)) clearPendingAsk(update.chatId);
+          if (await maybeAnswerAsk(context, update.chatId, pendingAsk, signal)) {
+            clearPendingAsk(update.chatId, pendingAsk);
+          }
           return;
         }
       }
@@ -320,7 +325,7 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
                 }, question.prompt, buttons);
               }
             } catch (error) {
-              clearPendingAsk(update.chatId);
+              clearPendingAsk(update.chatId, pending);
               throw error;
             }
           }
@@ -374,6 +379,10 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
       && primaryControlsReady
       && primaryChatId === update.chatId
     ) return true;
+    if (
+      runtimeCommand(update.text) !== undefined
+      || /^\/help(?:@\S+)?\s*$/u.test(update.text.trim())
+    ) return false;
     return entry.controlDisposition === "eligible"
       && primaryUpdate !== undefined
       && primaryControlsReady
@@ -383,6 +392,15 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
       && update.attachments.length === 0;
   }
 
+  function hasEarlierControlBarrier(candidate: TrackedTelegramUpdate): boolean {
+    return receivedUpdateIds.some((updateId) => {
+      if (updateId >= candidate.update.updateId) return false;
+      const entry = trackedUpdates.get(updateId);
+      return entry?.state === "control"
+        || (entry?.state === "queued" && isControlUpdate(entry));
+    });
+  }
+
   function scheduleUpdates(signal: AbortSignal): void {
     if (signal.aborted || forceStopped) return;
     if (!stopped && primaryUpdate === undefined) {
@@ -390,7 +408,10 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
         .map((updateId) => trackedUpdates.get(updateId))
         .find((entry): entry is TrackedTelegramUpdate =>
           entry?.state === "queued" && !isControlUpdate(entry));
-      if (nextPrimary !== undefined) startTrackedUpdate(nextPrimary, "primary", signal);
+      if (
+        nextPrimary !== undefined
+        && !hasEarlierControlBarrier(nextPrimary)
+      ) startTrackedUpdate(nextPrimary, "primary", signal);
     }
     if (controlUpdate === undefined) {
       const nextControl = receivedUpdateIds
