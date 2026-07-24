@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 import { constants } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -76,7 +78,7 @@ export async function loadCronJobsFromDirectory(
     throw new TriggerCronConfigError(`Unable to read cron jobs directory ${directory}: ${errorMessage(error)}`);
   }
   const markdownEntries = entries.filter((entry) => entry.name.toLowerCase().endsWith(".md"));
-  const unsafe = markdownEntries.find((entry) => !entry.isFile());
+  const unsafe = markdownEntries.find((entry) => !entry.isFile() && !entry.isSymbolicLink());
   if (unsafe !== undefined) {
     throw new TriggerCronConfigError(`${join(directory, unsafe.name)} must be a regular Markdown file.`);
   }
@@ -90,22 +92,27 @@ export async function loadCronJobsFromDirectory(
   const ids = new Map<string, string>();
   for (const name of names) {
     const path = join(directory, name);
-    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try {
-      const stats = await file.stat();
-      if (!stats.isFile() || stats.size > MAX_CRON_JOB_BYTES) {
-        throw new TriggerCronConfigError(`${path} must be a regular file no larger than ${String(MAX_CRON_JOB_BYTES)} bytes.`);
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        const stats = await file.stat();
+        if (!stats.isFile() || stats.size > MAX_CRON_JOB_BYTES) {
+          throw new TriggerCronConfigError(`${path} must be a regular file no larger than ${String(MAX_CRON_JOB_BYTES)} bytes.`);
+        }
+        const content = await file.readFile("utf8");
+        const job = parseCronJobMarkdown(name, content, defaultTimezone);
+        const prior = ids.get(job.id);
+        if (prior !== undefined) {
+          throw new TriggerCronConfigError(`Duplicate cron job id "${job.id}" in ${prior} and ${name}.`);
+        }
+        ids.set(job.id, name);
+        jobs.push(Object.freeze({ ...job, source: path }));
+      } finally {
+        await file.close();
       }
-      const content = await file.readFile("utf8");
-      const job = parseCronJobMarkdown(name, content, defaultTimezone);
-      const prior = ids.get(job.id);
-      if (prior !== undefined) {
-        throw new TriggerCronConfigError(`Duplicate cron job id "${job.id}" in ${prior} and ${name}.`);
-      }
-      ids.set(job.id, name);
-      jobs.push(Object.freeze({ ...job, source: path }));
-    } finally {
-      await file.close();
+    } catch (error) {
+      if (error instanceof TriggerCronConfigError) throw error;
+      throw new TriggerCronConfigError(`Unable to load cron job ${path}: ${errorMessage(error)}`);
     }
   }
   return Object.freeze(jobs);
@@ -121,17 +128,28 @@ export function parseCronJobMarkdown(
   if (match === null) {
     throw new TriggerCronConfigError(`${fileName} must begin with a YAML frontmatter block.`);
   }
-  const document = parseDocument(match[1] ?? "", { uniqueKeys: true });
-  if (document.errors.length > 0) {
-    throw new TriggerCronConfigError(`${fileName} frontmatter is invalid YAML: ${document.errors[0]?.message ?? "unknown error"}`);
+  let metadataValue: unknown;
+  try {
+    const document = parseDocument(match[1] ?? "", { uniqueKeys: true });
+    if (document.errors.length > 0) {
+      throw new TriggerCronConfigError(
+        `${fileName} frontmatter is invalid YAML: ${document.errors[0]?.message ?? "unknown error"}`,
+      );
+    }
+    metadataValue = document.toJS({ maxAliasCount: 0 }) as unknown;
+  } catch (error) {
+    if (error instanceof TriggerCronConfigError) throw error;
+    throw new TriggerCronConfigError(`${fileName} frontmatter is invalid YAML: ${errorMessage(error)}`);
   }
-  const metadata = readRecord(document.toJS({ maxAliasCount: 0 }) as unknown, `${fileName} frontmatter`);
+  const metadata = readRecord(metadataValue, `${fileName} frontmatter`);
   rejectUnknownKeys(metadata, JOB_KEYS, `${fileName} frontmatter`);
   const prompt = normalized.slice(match[0].length).trim();
   if (prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > MAX_CRON_JOB_BYTES) {
     throw new TriggerCronConfigError(`${fileName} must contain a non-empty bounded Markdown prompt body.`);
   }
-  const id = metadata.id === undefined ? basename(fileName, ".md") : readString(metadata.id, `${fileName} id`);
+  const id = metadata.id === undefined
+    ? derivedJobId(fileName)
+    : readString(metadata.id, `${fileName} id`);
   if (!/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(id)) {
     throw new TriggerCronConfigError(`${fileName} id must match ^[a-z0-9][a-z0-9._-]{0,127}$.`);
   }
@@ -203,6 +221,11 @@ function validateCronExpression(expression: string, timezone: string, hashSeed: 
   } catch (error) {
     throw new TriggerCronConfigError(`Invalid cron expression: ${errorMessage(error)}`);
   }
+}
+
+function derivedJobId(fileName: string): string {
+  const name = basename(fileName);
+  return name.toLowerCase().endsWith(".md") ? name.slice(0, -3).toLowerCase() : name;
 }
 
 function parseNotify(value: unknown, fileName: string): string | CronNotifyDestination | undefined {

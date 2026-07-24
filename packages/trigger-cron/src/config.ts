@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 export const DEFAULT_CRON_TIMEZONE = "UTC";
 
 export interface TriggerCronConfig {
@@ -15,6 +17,8 @@ export class TriggerCronConfigError extends Error {
 }
 
 const CONFIG_KEYS = new Set(["jobsDirectory", "timezone"]);
+const MAX_JOBS_DIRECTORY_LENGTH = 1_024;
+const MAX_TIMEZONE_LENGTH = 128;
 
 export function parseTriggerCronConfig(value: unknown): TriggerCronConfig {
   const input = readRecord(value, "Trigger cron config");
@@ -22,7 +26,7 @@ export function parseTriggerCronConfig(value: unknown): TriggerCronConfig {
   const jobsDirectory = readRelativeDirectory(input.jobsDirectory, "jobsDirectory");
   const timezone = input.timezone === undefined
     ? DEFAULT_CRON_TIMEZONE
-    : readString(input.timezone, "timezone");
+    : readString(input.timezone, "timezone", MAX_TIMEZONE_LENGTH);
   assertValidTimezone(timezone, "timezone");
   return Object.freeze({ jobsDirectory, timezone });
 }
@@ -35,10 +39,15 @@ export const triggerCronConfigSchema = Object.freeze({
       jobsDirectory: {
         type: "string",
         minLength: 1,
-        maxLength: 1_024,
+        maxLength: MAX_JOBS_DIRECTORY_LENGTH,
         pattern: "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*[\\u0000-\\u001f\\u007f]).+$",
       },
-      timezone: { type: "string", minLength: 1, maxLength: 128, default: DEFAULT_CRON_TIMEZONE },
+      timezone: {
+        type: "string",
+        minLength: 1,
+        maxLength: MAX_TIMEZONE_LENGTH,
+        default: DEFAULT_CRON_TIMEZONE,
+      },
     },
     required: ["jobsDirectory"],
   }),
@@ -75,12 +84,12 @@ export function rejectUnknownKeys(
   }
 }
 
-export function readString(value: unknown, field: string): string {
+export function readString(value: unknown, field: string, maximumLength = 4_096): string {
   if (
     typeof value !== "string"
     || value.length === 0
     || value !== value.trim()
-    || value.length > 4_096
+    || exceedsCodePointLimit(value, maximumLength)
     || /[\u0000-\u001f\u007f]/u.test(value)
   ) {
     throw new TriggerCronConfigError(`${field} must be a non-empty bounded string without surrounding whitespace.`);
@@ -88,8 +97,17 @@ export function readString(value: unknown, field: string): string {
   return value;
 }
 
+function exceedsCodePointLimit(value: string, maximum: number): boolean {
+  let length = 0;
+  for (const _character of value) {
+    length += 1;
+    if (length > maximum) return true;
+  }
+  return false;
+}
+
 function readRelativeDirectory(value: unknown, field: string): string {
-  const path = readString(value, field);
+  const path = readString(value, field, MAX_JOBS_DIRECTORY_LENGTH);
   if (path.startsWith("/") || path.startsWith("\\") || /^[A-Za-z]:[\\/]/u.test(path)) {
     throw new TriggerCronConfigError(`${field} must be relative to the agent config directory.`);
   }
