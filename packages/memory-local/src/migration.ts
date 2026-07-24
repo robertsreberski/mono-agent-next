@@ -183,7 +183,13 @@ interface MemoryLocalMigrationTestHooks {
   readonly beforeSnapshotTargetCleanupRename?: (
     targetRoot: string,
   ) => void | Promise<void>;
+  readonly beforeSnapshotTargetCleanupParentSync?: (
+    targetRoot: string,
+  ) => void | Promise<void>;
   readonly beforeSnapshotFailureCleanupRename?: (
+    targetRoot: string,
+  ) => void | Promise<void>;
+  readonly beforeSnapshotFailureCleanupParentSync?: (
     targetRoot: string,
   ) => void | Promise<void>;
   readonly beforeSnapshotSourceRecheck?: (
@@ -1375,12 +1381,19 @@ async function removeObservedEmptySnapshotTarget(
     }
     await rmdir(quarantine);
     moved = false;
-    await syncDirectory(dirname(path));
-    return true;
   } catch {
     if (moved) await restoreQuarantinedSnapshotTarget(path, quarantine);
     return false;
   }
+  try {
+    await hooks.beforeSnapshotTargetCleanupParentSync?.(path);
+    await syncDirectory(dirname(path));
+  } catch {
+    throw migrationFailure(
+      "Snapshot target was removed, but parent-directory durability could not be confirmed.",
+    );
+  }
+  return true;
 }
 
 async function restoreQuarantinedSnapshotTarget(
@@ -1436,11 +1449,18 @@ async function cleanupFailedSnapshotTarget(
     await assertPinnedSnapshotDirectory(quarantine, expected, pinned);
     await rm(quarantine, { recursive: true });
     moved = false;
-    await syncDirectory(dirname(path));
   } catch {
     if (moved) await restoreQuarantinedSnapshotTarget(path, quarantine);
     throw migrationFailure(
       "Failed snapshot target could not be safely removed and remains unusable.",
+    );
+  }
+  try {
+    await hooks.beforeSnapshotFailureCleanupParentSync?.(path);
+    await syncDirectory(dirname(path));
+  } catch {
+    throw migrationFailure(
+      "Failed snapshot target was removed, but parent-directory durability could not be confirmed.",
     );
   }
 }

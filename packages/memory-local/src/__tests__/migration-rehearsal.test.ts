@@ -302,6 +302,29 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     });
   });
 
+  it("reports an already removed creation target when parent durability fails", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      beforeSnapshotTargetOpen() {
+        throw new Error("injected pre-open failure");
+      },
+      beforeSnapshotTargetCleanupParentSync() {
+        throw new Error("injected parent-sync failure");
+      },
+    })).rejects.toThrow(/target was removed.*durability could not be confirmed/u);
+
+    expect(existsSync(rehearsal)).toBe(false);
+  });
+
   it("rejects a target swap before descriptor binding without deleting either directory", async () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
@@ -424,6 +447,29 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     expect(await readFile(join(rehearsal, "operator-replacement.txt"), "utf8"))
       .toBe("preserve me\n");
     expect(existsSync(displaced)).toBe(true);
+  });
+
+  it("reports an already removed copied target when parent durability fails", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      beforeSnapshotSourceRecheck() {
+        throw new Error("injected post-copy failure");
+      },
+      beforeSnapshotFailureCleanupParentSync() {
+        throw new Error("injected parent-sync failure");
+      },
+    })).rejects.toThrow(/target was removed.*durability could not be confirmed/u);
+
+    expect(existsSync(rehearsal)).toBe(false);
   });
 
   it("rejects an oversized active database before creating a target or running backup", async () => {

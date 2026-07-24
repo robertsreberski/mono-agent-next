@@ -93,16 +93,17 @@ mono-agent-memory-local adopt-v0 \
 `snapshot-v0` never writes the source and refuses an existing target.
 It preflights the active database inside the 64 GiB tree budget, rechecks the
 identity and content of every copied static source file after online backup,
-and syncs every copied directory. A failed snapshot removes only an unchanged,
-empty target directory after observing and binding its identity; a replaced or
-otherwise ambiguous target is restored when possible and never deliberately
-deleted. An occupied target continues to block reuse, while quarantined
-ambiguous data requires operator remediation. Portable Node cannot atomically
-return a descriptor from `mkdir` or perform a no-replace directory rename, so
-concurrent namespace mutation by the same UID throughout creation and cleanup
-is outside this owner-private migration boundary. Restoration after a detected
-post-rename mismatch is best effort; an occupied target remains blocked and
-anything that cannot be restored remains quarantined.
+and syncs every copied directory. A target-creation failure removes only the
+unchanged empty directory it observed and bound. After copying begins, an
+ordinary failure removes the exact still-pinned disposable snapshot tree. A
+replaced or otherwise ambiguous target is restored when possible and never
+deliberately deleted. An occupied target continues to block reuse, while
+quarantined ambiguous data requires operator remediation. Portable Node cannot
+atomically return a descriptor from `mkdir` or perform a no-replace directory
+rename, so concurrent namespace mutation by the same UID throughout creation
+and cleanup is outside this owner-private migration boundary. Restoration after
+a detected post-rename mismatch is best effort; an occupied target remains
+blocked and anything that cannot be restored remains quarantined.
 It accepts the canonical initialized marker used by v0-final and the older
 marker-absent BuJo shape, but refuses an in-flight or malformed marker.
 `sourceStateSha256` binds stable live-root provenance: the canonical root,
