@@ -89,6 +89,12 @@ The package's manifest kind must match the slot. A module may reference another
 selected instance only through a schema-declared cross-slot reference, and core
 validates any required capability before startup.
 
+An instance may offer a bounded model tool when that behavior is inseparable
+from the selected module's private data and lifecycle. The list is static
+instance data, not a `plugins` key or registry. Core exposes it only after that
+instance starts, then owns final naming, policy, approval, sandbox eligibility,
+timeouts, normalization, and turn-scoped disposal.
+
 ## Core coordinates; modules implement
 
 `@mono-agent/core` owns strict loading, bounded admission, per-conversation
@@ -155,19 +161,24 @@ direct `SKILL.md` under the configured roots is validated with no-follow reads
 and bounded by `maxBytes`. `disclosure: "full"` places those bodies in the
 system context; `disclosure: "index"` exposes only names and descriptions plus
 Core's bounded `ReadSkill` tool, so indexed skills remain executable without
-leaking filesystem paths. Duplicate names and MCP tools named `ReadSkill` fail
-startup.
+leaking filesystem paths. Duplicate skill names fail startup. Tool-name
+collisions across selected modules, MCP, channels, and Core receive
+deterministic source-qualified names; a tool policy cannot use an ambiguous raw
+alias and reports the canonical alternatives.
 
 Project MCP servers live in the explicitly named `.mcp.json`-style file. They
 are ordinary tool servers, not module packages. `@mono-agent/docs-mcp` is a
 separately configured companion and is never activated by package presence.
+Tools inseparable from an already selected module may use its bounded
+contribution seam; this does not move ordinary project/domain tools out of MCP.
 
 ## State, memory, and product data
 
 These domains remain separate:
 
 - `@mono-agent/state-local` owns versioned CAS records, durable agent
-  conversations/runs, idempotency, and presence publication.
+  conversations/runs, idempotency, presence publication, and its effect-free
+  `RunHistory` contribution.
 - `@mono-agent/memory-local` owns long-lived BuJo memory and its permanent
   first-run identity.
 - `@mono-agent/web` owns browser-product threads and messages in its own data

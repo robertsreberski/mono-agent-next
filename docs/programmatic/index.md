@@ -34,4 +34,11 @@ Typed modules are created through the factories and compliance contracts in
 `@mono-agent/module-sdk`. Operator renderers consume `@mono-agent/operator`.
 Host integration such as launchd consumes the runner contract as a separate
 product. Ordinary model-callable project tools remain MCP servers and do not
-require a Core contract.
+require a Core contract. An already selected module may expose bounded
+`ModuleToolContribution` descriptors only for behavior inseparable from its own
+data and lifecycle; Core still owns final naming, policy, execution, and
+turn-level disposal.
+
+This does not change the host's durable state API. `AgentHost.listRuns()` and
+`AgentHost.readRun()` remain available whether or not the selected state module
+also contributes a model-visible `RunHistory` tool.

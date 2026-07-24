@@ -9,7 +9,7 @@ Persist canonical mono-agent state in an owner-private local single-writer store
 
 Category: `execution`
 Tier: `core`
-Catalog responsibility: Provides owner-private CAS state, durable transcript/run records, idempotency, and presence publication.
+Catalog responsibility: Provides owner-private CAS state, durable transcript/run records, RunHistory, idempotency, and presence publication.
 
 <!-- package-metadata:end -->
 
@@ -20,8 +20,9 @@ First-party reserved state module in the execution layer.
 Own the local `StateStore` implementation: atomic records, exact compare-and-swap
 (CAS), bounded multi-key transactions, deterministic list and forward-scan
 cursors, a live process lease, corruption detection, and optional lifecycle
-presence publication, plus bounded package-owned maintenance. The on-disk
-directory and every file are private to the current operating-system owner.
+presence publication, the state-owned `RunHistory` model tool, plus bounded
+package-owned maintenance. The on-disk directory and every file are private to
+the current operating-system owner.
 
 ## Install / Usage
 
@@ -100,6 +101,31 @@ existing owner-private path identities, writer lease, and exact state-execution
 protocol without starting the module, publishing presence, or running
 maintenance. Closed, poisoned, unsafe, or incompatible state produces a fixed
 bounded error without paths, record bytes, or underlying failure text.
+
+### RunHistory tool
+
+When this state module is selected and starts successfully, its instance
+contributes the effect-free `RunHistory` model tool. There is no separate config
+field and Core has no fallback implementation: another state module exposes the
+tool only if that implementation deliberately contributes one.
+
+The contribution binds directly to state-local's package-private
+`DurableRunJournal` for one logical turn. It supports inferred/default `list`
+and explicit `list`, `search`, and `inspect` actions with opaque turn-scoped
+cursors. Results include only terminal prior runs from the exact conversation;
+the current run, running or other non-terminal runs, and foreign conversations
+remain unavailable. Provider-session rollover does not partition the logical
+conversation.
+
+Search reads at most 200 eligible records and matches only safe user evidence
+plus bounded summary fields. Inspection and listing retain the untrusted-history
+notice, secret-key and assignment redaction, depth/item/text bounds, artifact
+omission, nested-`RunHistory` result omission, source truncation signal, and
+abort handling. Core still applies normal tool policy, cancellation,
+normalization, and result handling. Because the contribution declares no
+external effects, it requires neither approval nor additional sandboxing.
+`AgentHost.listRuns()` and `AgentHost.readRun()` remain unchanged programmatic
+state APIs.
 
 ### Durable operations
 
@@ -190,7 +216,10 @@ bounded error without paths, record bytes, or underlying failure text.
     and durable receipt-to-entry binding advance in one CAS transaction. Core
     consumes only bounded opaque operations and never reads those records
     directly.
-11. Diagnostics recheck existing path and lease guards plus the package-owned
+11. `StateLocalExecution` constructs the immutable `RunHistory` contribution
+    beside the journal. Turn binding reads that journal directly while Core
+    retains naming, policy, dispatch, and result authority.
+12. Diagnostics recheck existing path and lease guards plus the package-owned
     execution protocol identity. They do not start lifecycle services, publish
     discovery, mutate durable state, or expose raw failures.
 
@@ -200,11 +229,12 @@ bounded error without paths, record bytes, or underlying failure text.
 | --- | --- |
 | `config.ts` | Strict bounded module config and config-directory path resolution. |
 | `artifacts.ts` | Content-addressed publication reservations, reads, listings, and crash-recoverable unpublished retention. |
-| `execution.ts` | Strict versioned dispatch for the opaque state-execution protocol. |
+| `execution.ts` | Strict versioned dispatch for the opaque state-execution protocol and serialized journal access for state-owned tools. |
 | `execution-types.ts` | Package-private execution input, record, and result contracts. |
 | `execution-store.ts` | Bounded typed record/transaction adapter over the local state store. |
 | `execution-transcript.ts` | Canonical transcript and conversation persistence owned by state-local. |
 | `execution-journal.ts` | Run admission/events/settlement, sessions, artifact intents, delivery idempotency, and confirmed destination-history appends. |
+| `run-history-tool.ts` | Turn-scoped list/search/inspect projection over safe terminal prior-run evidence. |
 | `maintenance.ts` | Strict bounded maintenance request/command contracts and result counters. |
 | `secure-fs.ts` | Owner/mode/link checks, no-follow reads, pinned framed index log, reserved-sidecar checks, and process lease. |
 | `snapshot.ts` | Canonical snapshot validation, serialization, keys, versions, and record copies. |

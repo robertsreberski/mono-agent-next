@@ -30,7 +30,7 @@ afterEach(async () => {
 });
 
 describe("channel kernel", () => {
-  it("qualifies repeated instance tools and rejects reserved-name collisions", async () => {
+  it("qualifies repeated instance tools and canonicalizes reserved-name collisions", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtime = `@fixture/runtime-channel-tools-${suffix}`;
     const channels = ["alpha", "beta"].map((id) => ({
@@ -71,16 +71,30 @@ describe("channel kernel", () => {
     expect(names).toEqual([]);
 
     const reserved = await tracked([
-      { name: `${runtime}-reserved`, kind: "runtime", controller: runtimeController(() => completed("unused")) },
+      {
+        name: `${runtime}-reserved`, kind: "runtime",
+        controller: runtimeController((request) => {
+          names = toolNames(request);
+          return completed("ok");
+        }),
+      },
       {
         name: `${channels[0]!.packageName}-reserved`, kind: "channel",
-        controller: { create: () => channel([sendTool("RunHistory", "destination")]) },
+        controller: { create: () => channel([sendTool("AskUser", "destination")]) },
       },
     ]);
     await reserved.writeConfig(minimalConfig(`${runtime}-reserved`, {
       channels: { reserved: { $use: `${channels[0]!.packageName}-reserved` } },
+      policy: allowPolicy(),
     }));
-    await expect(createAgentHost(reserved.configPath)).rejects.toThrow(/RunHistory conflicts/u);
+    const reservedHost = await started(reserved);
+    await reservedHost.submit({
+      requestId: "reserved-canonical",
+      conversationId: "reserved-canonical",
+      text: "go",
+    });
+    expect(names).toHaveLength(1);
+    expect(names[0]).toMatch(/^channel__[A-Za-z0-9_-]{43}$/u);
   });
 
   it("atomically records an operator-style empty open through post-commit loss and restart", async () => {

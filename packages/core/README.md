@@ -12,7 +12,7 @@ package before import, and owns bounded turn routing and module lifecycle.
 
 Category: `core`
 Tier: `core`
-Catalog responsibility: Loads strict agent configuration and runs selected typed modules without importing concrete implementations.
+Catalog responsibility: Loads strict agent configuration, runs selected typed modules, and governs one callable-tool catalog.
 
 <!-- package-metadata:end -->
 
@@ -157,8 +157,8 @@ recall to the current conversation and turn signal, and returns at most that
 many text-only records with an untrusted-evidence warning. Module-private
 record metadata never crosses the tool boundary. Disabling the tool does not
 disable Core's separate automatic pre-turn recall, and `MemoryRecall` remains
-reserved against MCP/channel impersonation even when no model-visible recall
-tool is active.
+reserved against module, MCP, and channel impersonation even when no
+model-visible recall tool is active.
 
 When a direct interaction handler or the originating channel exposes AskUser,
 Core also offers a reserved `AskUser` request tool. Global and request-local
@@ -168,8 +168,26 @@ one to three canonical questions with bounded choices and/or free text, while
 Core generates interaction identity and time, validates the shared
 module-sdk request and answer contracts, binds the active attempt signal, and
 returns the structured answer for provider continuation. The name remains
-reserved against MCP and channel impersonation even when no interaction bridge
-is available.
+reserved against module, MCP, and channel impersonation even when no
+interaction bridge is available.
+
+After every selected instance starts, Core builds one deterministic catalog
+across Core, instruction, selected-module, MCP, and channel tools. A unique
+portable non-Core name remains available as its raw alias. Collisions and
+reserved names receive stable kind-and-source-hashed canonical names; a global
+or request policy that uses an ambiguous raw alias is rejected with the usable
+canonical identifiers. Load order never chooses a winner.
+
+Selected-module descriptors are snapshotted before serving but exposed only
+after their exact instance starts successfully. Core applies ordinary global
+and request-local tool policy before binding each exposed contribution once per
+logical turn, across all fallback attempts. Effect-free module tools require no
+approval or extra sandboxing. Effectful tools expose their exact declared
+effects to approval, and make a sandboxed route ineligible unless request policy
+removes them. Calls share Core's normalization, redaction, artifact offload,
+explicit error handling, cancellation, and 120-second hard deadline. The
+turn-level cleanup revokes signals and releases executors so retained callbacks
+cannot observe later runs.
 
 ## Architecture
 
@@ -223,6 +241,10 @@ allow/deny or a bounded approval interaction; runtime-enforced tools make a
 route ineligible whenever Core would need to narrow authority the runtime
 cannot prove.
 
+Selected-module, MCP, and channel tools enter the same catalog before this
+intersection. Core alone assigns their final identities and dispatches calls; a
+module cannot claim a Core source or bypass policy through its descriptor.
+
 Provider continuation is reused only for the exact conversation/runtime/model
 route. Canonical expiry, idle rollover, daily rollover, provider eviction,
 capability downgrades, and per-message migration remove the exact stale durable
@@ -249,12 +271,11 @@ resent.
 | `authority-read.ts` | Bounded descriptor reads, stable file identity, UTF-8 decoding, and source digests. |
 | `module-loader.ts` | Dependency, lockfile, manifest, kind, and API checks. |
 | `schema.ts` | Exact schema composition and redacted explanation. |
-| `mcp.ts` | Ordinary project stdio and HTTP MCP clients, opt-in selected-stdio per-call request context, and Core tool identity. |
+| `mcp.ts` | Ordinary project stdio and HTTP MCP clients plus opt-in selected-stdio per-call request context. |
 | `native-tool-policy.ts` | Runtime-owned tool, approval, request-narrowing, and sandbox-policy intersection. |
 | `state-execution-client.ts` | Typed, bounded, fail-closed client for the state module's opaque execution protocol. Durable storage formats remain state-owned. |
 | `bounded-value.ts` | Shared descriptor-safe snapshots and exact object/array boundary checks. |
-| `run-history-tool.ts` | Conversation-scoped, redacted, untrusted historical run evidence for capable runtimes. |
-| `host.ts` | Admission, serialized turns, exact sessions, safe fallback, model-visible memory recall and AskUser, settlement, lifecycle, and health. |
+| `host.ts` | Admission, serialized turns, deterministic tool catalog and dispatch, exact sessions, safe fallback, model-visible memory recall and AskUser, settlement, lifecycle, and health. |
 
 ## Public API
 

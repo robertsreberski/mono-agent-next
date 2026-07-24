@@ -17,6 +17,8 @@ import {
   assertChannelModuleCompliance,
   assertMemoryInstanceCompliance,
   assertMemoryModuleCompliance,
+  assertModuleToolBindingCompliance,
+  assertModuleToolContributionsCompliance,
   assertMonoAgentModuleExport,
   assertRuntimeInstanceCompliance,
   assertRuntimeModuleCompliance,
@@ -133,6 +135,182 @@ describe("public compliance assertions", () => {
       capabilities: { capture: false, forget: false },
       recall() {},
     })).not.toThrow();
+  });
+
+  it("validates bounded own-data module tool contributions and bindings", () => {
+    const contribution = {
+      name: "Lookup",
+      description: "Look up bounded fixture data.",
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { query: { type: "string" } },
+      },
+      effects: ["read"] as const,
+      bind: () => ({ execute: () => ({ ok: true }) }),
+    };
+    expect(() => assertModuleToolContributionsCompliance([contribution])).not.toThrow();
+    expect(() => assertModuleToolBindingCompliance(contribution.bind())).not.toThrow();
+
+    expect(() => assertModuleToolContributionsCompliance([
+      contribution,
+      { ...contribution },
+    ])).toThrow("contains duplicate Lookup");
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      effects: ["read", "read"],
+    }])).toThrow("effects contains duplicate read");
+    let coercions = 0;
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      effects: [{
+        toString() {
+          coercions += 1;
+          return "read";
+        },
+      }],
+    }])).toThrow("effects[0] is invalid");
+    expect(coercions).toBe(0);
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      description: "x".repeat(16 * 1_024 + 1),
+    }])).toThrow("description exceeds 16384 UTF-8 bytes");
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: { description: "x".repeat(64 * 1_024) },
+    }])).toThrow("inputSchema exceeds 65536 UTF-8 bytes");
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: { description: "\n".repeat(40_000) },
+    }])).toThrow("inputSchema exceeds 65536 UTF-8 bytes");
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      unexpected: true,
+    }])).toThrow("contains unsupported property unexpected");
+    expect(() => assertModuleToolBindingCompliance({
+      execute() {},
+      dispose() {},
+    })).toThrow("contains unsupported property dispose");
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: { default: undefined },
+    }])).toThrow("must contain only JSON values");
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: { maximum: Number.POSITIVE_INFINITY },
+    }])).toThrow("must contain only finite numbers");
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: new Proxy({}, {}),
+    }])).toThrow("must not be a Proxy");
+
+    let tooDeep: Record<string, unknown> = {};
+    for (let depth = 0; depth < 32; depth += 1) tooDeep = { nested: tooDeep };
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: tooDeep,
+    }])).toThrow("exceeds JSON depth 32");
+
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: {
+        enum: Array.from(
+          { length: 10_000 },
+          (_value, index) => index,
+        ),
+      },
+    }])).toThrow("exceeds 10000 JSON items");
+  });
+
+  it("rejects getter-backed and exotic module tool contributions without invoking accessors", () => {
+    let descriptorReads = 0;
+    const getterBacked = {
+      name: "Lookup",
+      inputSchema: {},
+      effects: [],
+      bind: () => ({ execute() {} }),
+    } as Record<string, unknown>;
+    Object.defineProperty(getterBacked, "description", {
+      enumerable: true,
+      get() {
+        descriptorReads += 1;
+        return "unsafe";
+      },
+    });
+    expect(() => assertModuleToolContributionsCompliance([getterBacked]))
+      .toThrow(".description must be an enumerable data property");
+    expect(descriptorReads).toBe(0);
+
+    let collectionReads = 0;
+    const instance = validRuntimeInstance();
+    Object.defineProperty(instance, "toolContributions", {
+      enumerable: true,
+      get() {
+        collectionReads += 1;
+        return [];
+      },
+    });
+    expect(() => assertRuntimeInstanceCompliance(instance))
+      .toThrow("toolContributions must be an own data property");
+    expect(collectionReads).toBe(0);
+
+    const exotic = Object.assign(Object.create({ inherited: true }), {
+      name: "Lookup",
+      description: "safe",
+      inputSchema: {},
+      effects: [],
+      bind: () => ({ execute() {} }),
+    });
+    expect(() => assertModuleToolContributionsCompliance([exotic]))
+      .toThrow("must be a plain object");
+    expect(descriptorReads).toBe(0);
+    expect(() => assertModuleToolContributionsCompliance(
+      Object.assign(Object.create(Array.prototype), []),
+    )).toThrow("must be an ordinary array");
+
+    let effectReads = 0;
+    const effects = ["read"];
+    Object.defineProperty(effects, "0", {
+      enumerable: true,
+      get() {
+        effectReads += 1;
+        return "read";
+      },
+    });
+    expect(() => assertModuleToolContributionsCompliance([{
+      name: "Lookup",
+      description: "safe",
+      inputSchema: {},
+      effects,
+      bind: () => ({ execute() {} }),
+    }])).toThrow("effects.0 must be a data property");
+    expect(effectReads).toBe(0);
+
+    const nonEnumerable = {
+      name: "Lookup",
+      description: "safe",
+      inputSchema: {},
+      effects: [],
+      bind: () => ({ execute() {} }),
+    };
+    Object.defineProperty(nonEnumerable, "description", {
+      value: "safe",
+      enumerable: false,
+    });
+    expect(() => assertModuleToolContributionsCompliance([nonEnumerable]))
+      .toThrow(".description must be an enumerable data property");
+
+    const proxied = new Proxy({
+      name: "Lookup",
+      description: "safe",
+      inputSchema: {},
+      effects: [],
+      bind: () => ({ execute() {} }),
+    }, {});
+    expect(() => assertModuleToolContributionsCompliance([proxied]))
+      .toThrow("must not be a Proxy");
+    expect(() => assertModuleToolContributionsCompliance(new Proxy([], {})))
+      .toThrow("must be an ordinary array");
   });
 
   it("rejects identity, API, capability, and reserved-directive drift", () => {
@@ -480,6 +658,21 @@ describe("public compliance assertions", () => {
     expect(instanceAccessorCalls).toBe(0);
   });
 });
+
+function validRuntimeInstance(): Record<string, unknown> {
+  return {
+    capabilities: {
+      tools: false,
+      mcp: false,
+      attachments: false,
+      approvals: false,
+      structuredOutput: false,
+      sandbox: false,
+      sessions: false,
+    },
+    runTurn() {},
+  };
+}
 
 describe("entrypoint boundary", () => {
   it("does not export reserved-slot factories from any supported entrypoint", () => {

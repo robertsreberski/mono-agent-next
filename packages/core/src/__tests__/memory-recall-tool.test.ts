@@ -30,11 +30,15 @@ describe("MemoryRecall Core tool", () => {
       const runtimeName = `@fixture/runtime-memory-channel-${suffix}`;
       const memoryName = `@fixture/memory-channel-${suffix}`;
       const channelName = `@fixture/channel-memory-recall-${suffix}`;
+      let names: string[] = [];
       const project = await createFixtureProject([
         {
           name: runtimeName,
           kind: "runtime",
-          controller: runtimeController(() => completed("unused")),
+          controller: runtimeController((request) => {
+            names = (request as RuntimeTurnRequest).tools.map((tool) => tool.name);
+            return completed("ok");
+          }),
         },
         {
           name: channelName,
@@ -71,8 +75,24 @@ describe("MemoryRecall Core tool", () => {
       await project.writeConfig(minimalConfig(runtimeName, {
         channels: { output: { $use: channelName } },
         ...(recallTool === undefined ? {} : { memory: { $use: memoryName } }),
+        policy: {
+          tools: { default: "allow" },
+          approvals: { default: "allow" },
+          sandbox: { mode: "off" },
+        },
       }));
-      await expect(createAgentHost(project.configPath)).rejects.toThrow(/MemoryRecall conflicts/u);
+      const host = await createAgentHost(project.configPath);
+      try {
+        await host.submit({
+          requestId: `channel-reserved-${suffix}`,
+          conversationId: `channel-reserved-${suffix}`,
+          text: "go",
+        });
+      } finally {
+        await host.stop();
+      }
+      expect(names.filter((name) => name === "MemoryRecall")).toHaveLength(recallTool === true ? 1 : 0);
+      expect(names.filter((name) => /^channel__[A-Za-z0-9_-]{43}$/u.test(name))).toHaveLength(1);
     }
   });
 

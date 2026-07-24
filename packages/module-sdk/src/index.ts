@@ -252,6 +252,11 @@ export interface ModuleCommand {
 }
 export interface ModuleInstance {
   readonly commands?: readonly ModuleCommand[];
+  /**
+   * Static model-tool descriptors owned by this exact selected instance.
+   * Core snapshots, names, governs, and binds them before exposing a turn.
+   */
+  readonly toolContributions?: readonly ModuleToolContribution[];
   start?(context: ModuleStartContext): Awaitable<void>;
   drain?(context: ModuleDrainContext): Awaitable<void>;
   stop?(context: ModuleStopContext): Awaitable<void>;
@@ -645,6 +650,39 @@ export interface TurnMessage {
 }
 export interface RuntimeToolDefinition {
   readonly name: string; readonly description: string; readonly inputSchema: JsonSchema;
+}
+/** Shared hard bounds for one selected instance's static tool descriptors. */
+export const MODULE_TOOL_LIMITS = Object.freeze({
+  perInstance: 64,
+  total: 256,
+  nameCharacters: 64,
+  descriptionBytes: 16 * 1_024,
+  inputSchemaBytes: 64 * 1_024,
+  inputSchemaDepth: 32,
+  inputSchemaItems: 10_000,
+} as const);
+export interface ModuleToolTurnContext {
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly requestId?: string;
+  /** Revoked when the logical turn settles, even if a runtime retained the binding. */
+  readonly signal: AbortSignal;
+}
+export interface ModuleToolCallContext {
+  readonly callId: string;
+  /** Composes the turn, runtime-call, cancellation, and Core deadline signals. */
+  readonly signal: AbortSignal;
+}
+export interface ModuleToolBinding {
+  execute(input: JsonValue, context: ModuleToolCallContext): Awaitable<unknown>;
+}
+/**
+ * A selected module's bounded declaration of domain behavior that Core may
+ * expose as a governed model tool. Binding is synchronous and turn-scoped.
+ */
+export interface ModuleToolContribution extends RuntimeToolDefinition {
+  readonly effects: readonly RuntimeNativeToolEffect[];
+  bind(context: ModuleToolTurnContext): ModuleToolBinding;
 }
 export interface RuntimeSession {
   /** Runtime-owned opaque identifier of at most 512 UTF-8 bytes. */ readonly id: string;

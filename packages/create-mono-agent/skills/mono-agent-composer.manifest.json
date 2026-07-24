@@ -14,13 +14,13 @@
     },
     {
       "path": "references/config.md",
-      "sha256": "sha256:f9a904b4957b2076d2f32cf48f008604a1df5afeb51cf58575fce59b4aa236cd",
-      "sizeBytes": 2033
+      "sha256": "sha256:d3033e57a347e7d85e593152f9a6448416b1ca18fdd4097edc4534aef4e184b5",
+      "sizeBytes": 2275
     },
     {
       "path": "references/validation.md",
-      "sha256": "sha256:530cceb18e56866d4ccf22406a818bf4d7db3fbd40543374aa5d22d428303158",
-      "sizeBytes": 1672
+      "sha256": "sha256:20f2ac68168e3e2a0e9c02054eea902d909b00aea04deef36403500b94efd76f",
+      "sizeBytes": 1958
     }
   ]
 }

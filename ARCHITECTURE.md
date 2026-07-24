@@ -106,7 +106,10 @@ Loading proceeds in a fail-closed order:
    schema paths reject inline values.
 6. Import `monoAgentModule`, verify its exported metadata again, parse its exact
    schema, and validate cross-slot references and required capabilities.
-7. Only then instantiate and start the selected modules.
+7. Only then instantiate each selected module and snapshot any bounded
+   module-owned tool descriptors.
+8. Start that instance and expose its descriptor snapshot only after startup
+   succeeds.
 
 There is no automatic package installation, path loading, hidden registry, or
 compatibility fallback.
@@ -127,6 +130,16 @@ and native session context. A failure after a committed side effect is not
 blindly replayed. Cancellation, live input, AskUser answers, health, delivery,
 and module commands cross typed host interfaces rather than implementation
 imports.
+
+A non-channel instance may offer a model tool only through Module SDK's narrow
+`toolContributions` seam when the behavior is inseparable from that selected
+module's data and lifecycle. Channel instances retain their existing typed
+`sendTools` contract. This is not discovery or registration: importing or
+installing a package contributes nothing, and no new config key exists. Core
+builds one deterministic catalog across Core, instruction, module, MCP, and
+channel tools; it owns final names, policy, approval, sandbox eligibility,
+timeouts, cancellation, normalization, and turn-level disposal. Ordinary
+project and domain tools remain `.mcp.json` services.
 
 ## Operator boundary
 
@@ -161,6 +174,7 @@ schema and identity-binds it before use. The token value is never published.
 | Operator transport | Agent endpoint is authenticated and loopback-only; discovery records are owner-private and identity-bound before use. |
 | Local state | State and web stores reject permissive/wrong-owner/non-regular/linked/swapped paths, corrupt content, and unknown schema versions without rewriting them. Atomic replace plus directory synchronization makes complete snapshots visible. |
 | Memory | The local memory module separately owns a protected SQLite database, mutation fencing, recovery, and permanent first-run identity. |
+| Tools | Core snapshots static selected-module descriptors, assigns collision-safe identities, intersects policy, and revokes turn bindings; modules cannot claim Core authority. |
 | Sandbox | SRT path/settings fingerprints, command paths, environment, input/output, timeout, and cancellation are checked; mismatch has no host fallback. |
 | Export | Remote OTLP requires HTTPS, loopback HTTP is literal-only, redirects are checked, credentials are not forwarded cross-origin, queues are bounded, and sensitive body export is off by default. |
 | Lifecycle | Queues, turns, retries, streams, flushes, drains, and stops have explicit bounds; ambiguous durability poisons the open writer until reopen. |

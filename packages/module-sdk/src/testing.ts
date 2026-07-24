@@ -1,10 +1,14 @@
+import { isProxy } from "node:util/types";
+
 import {
   MODULE_API_VERSION,
+  MODULE_TOOL_LIMITS,
   MODULE_SCHEMA_SLOT_REFERENCE,
   OPEN_MODULE_KINDS,
   readCrossSlotReference,
   type Awaitable, type Channel, type ChannelOutboundMessage, type ChannelModuleDefinition,
   type Memory, type MemoryModuleDefinition, type ModuleKind, type ModuleSchema,
+  type ModuleToolBinding,
   type OpenModuleDefinition, type Runtime, type RuntimeModuleDefinition,
 } from "./index.js";
 const RESERVED_DIRECTIVES = new Set(["$schema", "$use", "$env"]);
@@ -144,6 +148,68 @@ export function assertSchemaCompliance(value: unknown): asserts value is ModuleS
   if (typeof schema.parse !== "function") fail("schema.parse must be a function");
   assertSchemaGraph(jsonSchema);
 }
+export function assertModuleToolContributionsCompliance(
+  value: unknown,
+  label = "module instance toolContributions",
+): void {
+  if (value === undefined) return;
+  const contributions = requireOwnDataArray(value, label, MODULE_TOOL_LIMITS.perInstance);
+  const names = new Set<string>();
+  for (const [index, raw] of contributions.entries()) {
+    const toolLabel = `${label}[${String(index)}]`;
+    const tool = requirePlainRecord(raw, toolLabel);
+    assertExactOwnDataKeys(tool, toolLabel, [
+      "name", "description", "inputSchema", "effects", "bind",
+    ]);
+    const name = readOwnDataProperty(tool, "name", toolLabel, true);
+    if (typeof name !== "string"
+      || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(name)) {
+      fail(`${toolLabel}.name must be a portable tool name`);
+    }
+    if (names.has(name)) fail(`${label} contains duplicate ${name}`);
+    names.add(name);
+    const description = readOwnDataProperty(tool, "description", toolLabel, true);
+    requireNonEmptyString(description, `${toolLabel}.description`);
+    if (utf8Bytes(description) > MODULE_TOOL_LIMITS.descriptionBytes) {
+      fail(`${toolLabel}.description exceeds ${String(MODULE_TOOL_LIMITS.descriptionBytes)} UTF-8 bytes`);
+    }
+    const inputSchema = requirePlainRecord(
+      readOwnDataProperty(tool, "inputSchema", toolLabel, true),
+      `${toolLabel}.inputSchema`,
+    );
+    assertBoundedModuleToolSchema(inputSchema, `${toolLabel}.inputSchema`);
+    assertSchemaGraph(inputSchema);
+    const effects = requireOwnDataArray(
+      readOwnDataProperty(tool, "effects", toolLabel, true),
+      `${toolLabel}.effects`,
+      4,
+    );
+    const seenEffects = new Set<string>();
+    for (const [effectIndex, effect] of effects.entries()) {
+      if (typeof effect !== "string"
+        || !["read", "write", "execute", "network"].includes(effect)) {
+        fail(`${toolLabel}.effects[${String(effectIndex)}] is invalid`);
+      }
+      if (seenEffects.has(effect)) {
+        fail(`${toolLabel}.effects contains duplicate ${effect}`);
+      }
+      seenEffects.add(effect);
+    }
+    if (typeof readOwnDataProperty(tool, "bind", toolLabel, true) !== "function") {
+      fail(`${toolLabel}.bind must be a function`);
+    }
+  }
+}
+export function assertModuleToolBindingCompliance(
+  value: unknown,
+  label = "module tool binding",
+): asserts value is ModuleToolBinding {
+  const binding = requirePlainRecord(value, label);
+  assertExactOwnDataKeys(binding, label, ["execute"]);
+  if (typeof readOwnDataProperty(binding, "execute", label, true) !== "function") {
+    fail(`${label}.execute must be a function`);
+  }
+}
 function assertChannelSendTools(value: unknown): number {
   if (value === undefined) return 0;
   if (!Array.isArray(value) || value.length > 64) fail("channel instance sendTools must be an array of at most 64 tools");
@@ -169,6 +235,14 @@ function assertModuleInstance(value: unknown, kind: ModuleKind): Record<string, 
   const label = `${kind} instance`;
   const instance = requireRecord(value, label);
   for (const method of INSTANCE_METHODS) assertOptionalFunction(instance[method], `${label} ${method}`);
+  const contributionDescriptor = Object.getOwnPropertyDescriptor(instance, "toolContributions");
+  if (contributionDescriptor !== undefined && !("value" in contributionDescriptor)) {
+    fail(`${label}.toolContributions must be an own data property`);
+  }
+  assertModuleToolContributionsCompliance(
+    contributionDescriptor === undefined ? undefined : contributionDescriptor.value,
+    `${label}.toolContributions`,
+  );
   if (instance.commands !== undefined) {
     if (!Array.isArray(instance.commands)) fail(`${label} commands must be an array`);
     for (const [index, commandValue] of instance.commands.entries()) {
@@ -284,6 +358,7 @@ function assertOptionalFunction(value: unknown, label: string): void {
 }
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) fail(`${label} must be an object`);
+  if (isProxy(value)) fail(`${label} must not be a Proxy`);
   return value as Record<string, unknown>;
 }
 function requirePlainRecord(value: unknown, label: string): Record<string, unknown> {
@@ -291,6 +366,46 @@ function requirePlainRecord(value: unknown, label: string): Record<string, unkno
   const prototype = Object.getPrototypeOf(record);
   if (prototype !== Object.prototype && prototype !== null) fail(`${label} must be a plain object`);
   return record;
+}
+function requireOwnDataArray(value: unknown, label: string, maximum: number): readonly unknown[] {
+  if (!Array.isArray(value) || isProxy(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    fail(`${label} must be an ordinary array`);
+  }
+  const length = Object.getOwnPropertyDescriptor(value, "length")?.value;
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+    fail(`${label}.length must be a non-negative safe integer`);
+  }
+  if (length > maximum) fail(`${label} must contain at most ${String(maximum)} entries`);
+  const allowed = new Set<PropertyKey>(["length"]);
+  for (let index = 0; index < length; index += 1) allowed.add(String(index));
+  for (const key of Reflect.ownKeys(value)) {
+    if (!allowed.has(key)) fail(`${label} contains an unsupported property`);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor)) {
+      fail(`${label}.${String(key)} must be a data property`);
+    }
+  }
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+      fail(`${label}[${String(index)}] must be an enumerable data property`);
+    }
+  }
+  return value;
+}
+function assertExactOwnDataKeys(
+  value: Record<string, unknown>,
+  label: string,
+  allowedKeys: readonly string[],
+): void {
+  const allowed = new Set<PropertyKey>(allowedKeys);
+  for (const key of Reflect.ownKeys(value)) {
+    if (!allowed.has(key)) fail(`${label} contains unsupported property ${String(key)}`);
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+      fail(`${label}.${String(key)} must be an enumerable data property`);
+    }
+  }
 }
 function readOwnDataProperty(
   value: Record<string, unknown>, key: string, label: string, required = false,
@@ -305,6 +420,84 @@ function readOwnDataProperty(
 }
 function requireNonEmptyString(value: unknown, label: string): asserts value is string {
   if (typeof value !== "string" || value.trim().length === 0) fail(`${label} must be a non-empty string`);
+}
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+function assertBoundedModuleToolSchema(value: Record<string, unknown>, label: string): void {
+  let bytes = 0;
+  let items = 0;
+  let serializedBytes = 0;
+  const active = new Set<object>();
+  const charge = (amount: number): void => {
+    bytes += amount;
+    if (bytes > MODULE_TOOL_LIMITS.inputSchemaBytes) {
+      fail(`${label} exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaBytes)} UTF-8 bytes`);
+    }
+  };
+  const chargeSerialized = (amount: number): void => {
+    serializedBytes += amount;
+    if (serializedBytes > MODULE_TOOL_LIMITS.inputSchemaBytes) {
+      fail(`${label} exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaBytes)} UTF-8 bytes`);
+    }
+  };
+  const addItems = (amount: number): void => {
+    items += amount;
+    if (items > MODULE_TOOL_LIMITS.inputSchemaItems) {
+      fail(`${label} exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaItems)} JSON items`);
+    }
+  };
+  const visit = (current: unknown, path: string, depth: number): void => {
+    if (depth === 0) addItems(1);
+    if (current === null) { charge(8); chargeSerialized(4); return; }
+    if (typeof current === "boolean") {
+      charge(8); chargeSerialized(current ? 4 : 5); return;
+    }
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) fail(`${path} must contain only finite numbers`);
+      charge(16); chargeSerialized(jsonScalarBytes(current)); return;
+    }
+    if (typeof current === "string") {
+      charge(utf8Bytes(current)); chargeSerialized(jsonScalarBytes(current)); return;
+    }
+    if (current === null || typeof current !== "object") {
+      fail(`${path} must contain only JSON values`);
+    }
+    if (isProxy(current)) fail(`${path} must not contain a Proxy`);
+    if (depth >= MODULE_TOOL_LIMITS.inputSchemaDepth) {
+      fail(`${path} exceeds JSON depth ${String(MODULE_TOOL_LIMITS.inputSchemaDepth)}`);
+    }
+    if (active.has(current)) fail(`${path} must not contain cycles`);
+    const source = Array.isArray(current)
+      ? requireOwnDataArray(current, path, MODULE_TOOL_LIMITS.inputSchemaItems)
+      : requirePlainRecord(current, path);
+    const entries = Reflect.ownKeys(source)
+      .filter((key) => !Array.isArray(current) || key !== "length");
+    addItems(entries.length);
+    chargeSerialized(2 + Math.max(0, entries.length - 1));
+    active.add(current);
+    try {
+      for (const key of entries) {
+        if (typeof key !== "string") fail(`${path} contains an unknown symbol key`);
+        if (UNSAFE_KEYS.has(key)) fail(`${path} contains unsafe key ${JSON.stringify(key)}`);
+        const descriptor = Object.getOwnPropertyDescriptor(source, key);
+        if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+          fail(`${path}.${key} must be an enumerable data property`);
+        }
+        if (!Array.isArray(current)) {
+          charge(utf8Bytes(key));
+          chargeSerialized(jsonScalarBytes(key) + 1);
+        }
+        visit(descriptor.value, Array.isArray(current) ? `${path}[${key}]` : `${path}.${key}`, depth + 1);
+      }
+    } finally {
+      active.delete(current);
+    }
+  }
+  visit(value, label, 0);
+}
+function jsonScalarBytes(value: string | number): number {
+  return utf8Bytes(JSON.stringify(value));
 }
 function fail(message: string): never {
   throw new ModuleComplianceError(message);

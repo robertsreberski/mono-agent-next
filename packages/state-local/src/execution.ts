@@ -1,6 +1,7 @@
 import type {
   ArtifactRef,
   JsonObject,
+  ModuleToolContribution,
   RouteIdentity,
 } from "@mono-agent/module-sdk";
 import type {
@@ -31,6 +32,7 @@ import type {
   AgentInteractionEvidence,
   AgentRunAttemptEvidence,
 } from "./execution-types.js";
+import { createRunHistoryToolContribution } from "./run-history-tool.js";
 
 const EXECUTION_OPERATION_MAX_BYTES = 128;
 
@@ -80,15 +82,27 @@ export interface StateLocalExecutionOptions {
  * without promoting Core domain objects into public module contracts.
  */
 export class StateLocalExecution implements StateExecution {
+  readonly toolContributions: readonly ModuleToolContribution[];
   readonly #journal: DurableRunJournal;
   #operation: Promise<void> = Promise.resolve();
 
   constructor(state: StateStore, options: StateLocalExecutionOptions = {}) {
     this.#journal = new DurableRunJournal(new ExecutionStore(state), options);
+    this.toolContributions = Object.freeze([
+      createRunHistoryToolContribution({
+        listRuns: (cursor, signal) =>
+          this.#enqueue(() => this.#journal.listRuns(cursor, signal)),
+        readRun: (runId, signal) =>
+          this.#enqueue(() => this.#journal.readRun(runId, signal)),
+      }),
+    ]);
   }
 
   perform(request: StateExecutionRequest): Promise<unknown> {
-    const execute = (): Promise<unknown> => this.#perform(request);
+    return this.#enqueue(() => this.#perform(request));
+  }
+
+  #enqueue<T>(execute: () => Promise<T>): Promise<T> {
     const pending = this.#operation.then(execute, execute);
     this.#operation = pending.then(
       () => undefined,

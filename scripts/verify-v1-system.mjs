@@ -44,6 +44,9 @@ const ASK_USER_QUERY = "packed-ask-user-query-b52d";
 const ASK_USER_CALL_ID = "packed-ask-user-call";
 const ASK_USER_ANSWER = "Keep it concise and avoid jargon.";
 const ASK_USER_COMPLETION = "packed AskUser answer observed";
+const RUN_HISTORY_QUERY = "packed-run-history-query-c63e";
+const RUN_HISTORY_CALL_ID = "packed-run-history-call";
+const RUN_HISTORY_COMPLETION = "packed RunHistory result observed";
 const PERSONAL_WEBHOOK_PROMPT = "Handle this authenticated project webhook request.";
 const WEBHOOK_SECRET = "packed-system-webhook-token";
 const OPERATOR_SECRET = "packed-system-operator-token-0000000000000001";
@@ -1474,7 +1477,7 @@ function packedSystemConfig({ providerBaseUrl, otlpEndpoint, deliveryEndpoint })
       },
     },
     policy: {
-      tools: { default: "deny", allow: ["AskUser", "MemoryRecall"] },
+      tools: { default: "deny", allow: ["AskUser", "MemoryRecall", "RunHistory"] },
       approvals: { default: "allow" },
       sandbox: { mode: "off" },
     },
@@ -1504,6 +1507,9 @@ const ASK_USER_QUERY = "packed-ask-user-query-b52d";
 const ASK_USER_CALL_ID = "packed-ask-user-call";
 const ASK_USER_ANSWER = "Keep it concise and avoid jargon.";
 const ASK_USER_COMPLETION = "packed AskUser answer observed";
+const RUN_HISTORY_QUERY = "packed-run-history-query-c63e";
+const RUN_HISTORY_CALL_ID = "packed-run-history-call";
+const RUN_HISTORY_COMPLETION = "packed RunHistory result observed";
 const configPath = resolve(process.argv[2] ?? "mono-agent.config.json");
 const configDirectory = dirname(configPath);
 const webhookSecret = requiredEnvironment("SYSTEM_WEBHOOK_TOKEN");
@@ -1604,6 +1610,36 @@ try {
   assert.equal((await persisted.client.getPendingAsk("packed-ask-user")).ask, null);
   assert.equal((await persisted.client.getReplay("packed-ask-user")).messages.length, 4);
 
+  const priorRuns = (await secondHost.listRuns()).runs.filter((run) =>
+    run.conversationId === "packed-system" && run.status === "completed");
+  assert.ok(priorRuns.length > 0, "packed RunHistory proof needs a prior terminal run");
+  const priorRunIds = new Set(priorRuns.map((run) => run.runId));
+  const historyFrames = [];
+  for await (const frame of persisted.client.streamTurn({
+    conversationId: "packed-system",
+    input: { text: RUN_HISTORY_QUERY },
+  })) {
+    historyFrames.push(frame);
+  }
+  const historyCompleted = historyFrames.find((frame) => frame.type === "completed");
+  assert.equal(historyCompleted?.finalMessage.text, RUN_HISTORY_COMPLETION);
+  const historyToolCall = historyFrames.find((frame) =>
+    frame.type === "tool_call" && frame.call.name === "RunHistory");
+  assert.deepEqual(historyToolCall?.call.input, { action: "list", limit: 5 });
+  const historyToolResult = historyFrames.find((frame) =>
+    frame.type === "tool_result" && frame.result.callId === RUN_HISTORY_CALL_ID);
+  assert.equal(historyToolResult?.result.contentOmitted, false);
+  const historyContent = JSON.stringify(historyToolResult?.result.content);
+  assert.ok(
+    priorRuns.some((run) => historyContent.includes(run.runId)),
+    "RunHistory did not return a prior terminal run from the exact conversation",
+  );
+  const currentRun = (await secondHost.listRuns()).runs.find((run) =>
+    run.conversationId === "packed-system" && !priorRunIds.has(run.runId));
+  assert.ok(currentRun, "RunHistory proof did not persist its current run");
+  assert.equal(historyContent.includes(currentRun.runId), false);
+  assert.equal(historyFrames.some((frame) => frame.type === "approval"), false);
+
   const duplicate = await secondHost.runModuleCommand("cron", "trigger-cron:invoke", {
     jobId: "packed-system",
     scheduledAt: cronInstant,
@@ -1642,6 +1678,7 @@ try {
     operatorFrames: operatorFrames.map((frame) => frame.type),
     webQuoteProof,
     askFrames: askFrames.map((frame) => frame.type),
+    historyFrames: historyFrames.map((frame) => frame.type),
   }) + "\n");
 } finally {
   if (webServer !== undefined) await within(webServer.stop(), 5000, "web server failure cleanup").catch(() => undefined);
@@ -1889,6 +1926,11 @@ function assertScenarioOutput(stdout) {
     || !parsed.askFrames.includes("tool_call") || !parsed.askFrames.includes("tool_result")) {
     throw new Error(`Packed scenario did not stream the AskUser round trip: ${stdout}`);
   }
+  if (!parsed.historyFrames?.includes("completed")
+    || !parsed.historyFrames.includes("tool_call")
+    || !parsed.historyFrames.includes("tool_result")) {
+    throw new Error(`Packed scenario did not stream the state-local RunHistory round trip: ${stdout}`);
+  }
   return {
     expectedCronKey: expectedKey,
     webConversationId: parsed.webQuoteProof.conversationId,
@@ -1907,9 +1949,9 @@ function assertProviderRequests(requests, scenarioProof) {
   }
   const captureRequests = requests.filter((request) => isStructuredCaptureRequest(request.parsed));
   const userRequests = requests.filter((request) => !isStructuredCaptureRequest(request.parsed));
-  if (captureRequests.length !== 6 || userRequests.length !== 12) {
+  if (captureRequests.length !== 7 || userRequests.length !== 14) {
     throw new Error(
-      `Fake provider expected twelve agent turns and six memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
+      `Fake provider expected fourteen agent turns and seven memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
     );
   }
   const userInputs = userRequests.map((request) => finalProviderUserText(request.parsed));
@@ -1941,8 +1983,13 @@ function assertProviderRequests(requests, scenarioProof) {
   ) {
     throw new Error(`Packed web quote projection did not preserve authoritative replay identity: ${projectedQuote[1]}`);
   }
-  if (JSON.stringify(userInputs.slice(10)) !== JSON.stringify([ASK_USER_QUERY, ASK_USER_QUERY])) {
-    throw new Error(`Packed AskUser provider inputs were not exact: ${JSON.stringify(userInputs.slice(10))}`);
+  if (JSON.stringify(userInputs.slice(10)) !== JSON.stringify([
+    ASK_USER_QUERY,
+    ASK_USER_QUERY,
+    RUN_HISTORY_QUERY,
+    RUN_HISTORY_QUERY,
+  ])) {
+    throw new Error(`Packed interactive provider inputs were not exact: ${JSON.stringify(userInputs.slice(10))}`);
   }
   for (const personalRequest of [userRequests[1], userRequests[2]]) {
     if (!JSON.stringify(personalRequest.parsed.tools ?? []).includes("project_status")) {
@@ -1976,9 +2023,23 @@ function assertProviderRequests(requests, scenarioProof) {
     || !askResult.content.includes(ASK_USER_ANSWER)) {
     throw new Error("Pi did not continue after the packed operator answered AskUser");
   }
+  const historyRequest = userRequests[12];
+  if (!hasProviderTool(historyRequest.parsed, "RunHistory")) {
+    throw new Error("Provider request did not receive state-local's RunHistory contribution");
+  }
+  const historyContinuation = userRequests[13];
+  const historyResult = historyContinuation.parsed.messages?.find((message) =>
+    message?.role === "tool" && message.tool_call_id === RUN_HISTORY_CALL_ID);
+  if (!hasProviderTool(historyContinuation.parsed, "RunHistory")
+    || typeof historyResult?.content !== "string"
+    || !historyResult.content.includes("packed-system")) {
+    throw new Error("Pi did not continue after executing RunHistory against packed state-local");
+  }
   const capturedReplies = [];
   for (const request of captureRequests) {
-    if (hasProviderTool(request.parsed, "MemoryRecall") || hasProviderTool(request.parsed, "AskUser")) {
+    if (hasProviderTool(request.parsed, "MemoryRecall")
+      || hasProviderTool(request.parsed, "AskUser")
+      || hasProviderTool(request.parsed, "RunHistory")) {
       throw new Error("Tool-free memory capture unexpectedly received an interactive Core tool");
     }
     const input = finalProviderUserText(request.parsed);
@@ -1987,6 +2048,9 @@ function assertProviderRequests(requests, scenarioProof) {
     }
     if (input.endsWith(`Assistant: ${EXPECTED_REPLY}`)) capturedReplies.push(EXPECTED_REPLY);
     else if (input.endsWith(`Assistant: ${ASK_USER_COMPLETION}`)) capturedReplies.push(ASK_USER_COMPLETION);
+    else if (input.endsWith(`Assistant: ${RUN_HISTORY_COMPLETION}`)) {
+      capturedReplies.push(RUN_HISTORY_COMPLETION);
+    }
     else throw new Error(`Memory capture received an unexpected completion: ${JSON.stringify(input)}`);
   }
   const expectedCapturedReplies = [
@@ -1996,6 +2060,7 @@ function assertProviderRequests(requests, scenarioProof) {
     EXPECTED_REPLY,
     EXPECTED_REPLY,
     ASK_USER_COMPLETION,
+    RUN_HISTORY_COMPLETION,
   ].sort();
   if (JSON.stringify(capturedReplies.sort()) !== JSON.stringify(expectedCapturedReplies)) {
     throw new Error(`Memory capture completions must be ${JSON.stringify(expectedCapturedReplies)}; found ${JSON.stringify(capturedReplies)}`);
@@ -2254,6 +2319,8 @@ async function startOpenAiCompatibleProvider() {
         message?.role === "tool" && message.tool_call_id === MEMORY_RECALL_CALL_ID);
       const hasAskUserResult = parsed.messages?.some((message) =>
         message?.role === "tool" && message.tool_call_id === ASK_USER_CALL_ID);
+      const hasRunHistoryResult = parsed.messages?.some((message) =>
+        message?.role === "tool" && message.tool_call_id === RUN_HISTORY_CALL_ID);
       if (!hasAskUserResult
         && finalProviderUserText(parsed) === ASK_USER_QUERY
         && hasProviderTool(parsed, "AskUser")) {
@@ -2341,12 +2408,55 @@ async function startOpenAiCompatibleProvider() {
         response.end("data: [DONE]\n\n");
         return;
       }
+      if (!hasRunHistoryResult
+        && finalProviderUserText(parsed) === RUN_HISTORY_QUERY
+        && hasProviderTool(parsed, "RunHistory")) {
+        response.write(sse({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: "echo",
+          choices: [{
+            index: 0,
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: RUN_HISTORY_CALL_ID,
+                type: "function",
+                function: {
+                  name: "RunHistory",
+                  arguments: JSON.stringify({ action: "list", limit: 5 }),
+                },
+              }],
+            },
+            finish_reason: null,
+          }],
+        }));
+        response.write(sse({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: "echo",
+          choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+          usage: { prompt_tokens: 8, completion_tokens: 8, total_tokens: 16 },
+        }));
+        response.end("data: [DONE]\n\n");
+        return;
+      }
       response.write(sse({
         id,
         object: "chat.completion.chunk",
         created,
         model: "echo",
-        choices: [{ index: 0, delta: { content: hasAskUserResult ? ASK_USER_COMPLETION : EXPECTED_REPLY }, finish_reason: null }],
+        choices: [{
+          index: 0,
+          delta: {
+            content: hasAskUserResult
+              ? ASK_USER_COMPLETION
+              : hasRunHistoryResult ? RUN_HISTORY_COMPLETION : EXPECTED_REPLY,
+          },
+          finish_reason: null,
+        }],
       }));
       response.write(sse({
         id,

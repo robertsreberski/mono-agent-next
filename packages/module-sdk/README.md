@@ -11,7 +11,7 @@ implementation.
 
 Category: `core`
 Tier: `core`
-Catalog responsibility: Defines the Apache-licensed typed module contracts, schemas, compliance helpers, and bounded host primitives.
+Catalog responsibility: Defines Apache-licensed typed module, selected-instance tool, schema, compliance, and bounded host contracts.
 
 <!-- package-metadata:end -->
 
@@ -19,10 +19,11 @@ Catalog responsibility: Defines the Apache-licensed typed module contracts, sche
 
 Define the stable module manifest and executable-schema shape, normalized
 runtime/channel/memory contracts, lifecycle and diagnostic primitives,
-configuration provenance and cross-slot reference helpers, and public
-compliance assertions used at the mono-agent extension boundary. The package
-also owns the small owner-private filesystem and bounded HTTP primitives shared
-by modules so their security behavior does not drift by implementation.
+configuration provenance and cross-slot reference helpers, bounded
+selected-instance tool declarations, and public compliance assertions used at
+the mono-agent extension boundary. The package also owns the small owner-private
+filesystem and bounded HTTP primitives shared by modules so their security
+behavior does not drift by implementation.
 
 ## Install / Usage
 
@@ -117,6 +118,29 @@ working directory.
 5. The resulting kind-specific instance participates in host lifecycle,
    health, diagnostics, and normalized turn, delivery, or memory operations.
 
+### Selected-instance tools
+
+An instance may expose an own-data `toolContributions` list when a model tool is
+inseparable from that selected module's data and lifecycle. “Contribution”
+means only that the selected instance offers a static descriptor to Core; it is
+not package self-registration, a plugin registry, or a new configuration
+surface. Importing or merely installing the package activates nothing.
+
+Each `ModuleToolContribution` declares a portable name, bounded description and
+JSON input schema, exact external effects, and a synchronous `bind()` function.
+Core snapshots at most 64 descriptors per instance and 256 across selected
+instances, then catalogs only instances whose `start()` succeeded. Binding
+happens once per logical turn with the exact conversation, run, optional
+request, and revocable turn signal. Each call receives only its call id and
+composed cancellation signal. The binding is released when the turn settles.
+
+Core remains the authority for final names, global and request-local tool
+policy, approval, sandbox eligibility, the 120-second call deadline,
+normalization, redaction, artifact handling, and explicit errors. An empty
+effect list is read-only for approval purposes. Effectful module tools are
+ineligible while sandboxing is active because v1 has no module-execution
+sandbox bridge.
+
 For channel-dispatched completions, `ChannelTurnResult.messageId` is Core's
 bounded assistant transcript identity, not a provider-native message id. It is
 non-empty, NUL-free, and at most 522 UTF-8 bytes. A channel may carry it into a
@@ -165,7 +189,7 @@ all-or-none.
 | `@mono-agent/module-sdk` | Public module authors and core | Open runtime, channel, and memory contracts plus schema/provenance, lifecycle, and shared security primitives. |
 | `@mono-agent/module-sdk/secure-fs` | Durable modules and host products | Exact-owner/mode, no-follow file inspection and transactional create/replace helpers. |
 | `@mono-agent/module-sdk/http` | Modules with bounded HTTP clients | HTTPS-or-literal-loopback URL policy, checked redirects, timeout, and bounded response reads. |
-| `@mono-agent/module-sdk/testing` | Module test suites and loaders | Structural compliance assertions for definitions and created instances. |
+| `@mono-agent/module-sdk/testing` | Module test suites and loaders | Structural compliance assertions for definitions, created instances, static tool contributions, and turn bindings. |
 | `@mono-agent/module-sdk/internal` | First-party monorepo packages only | Reserved state, trigger, exporter, and sandbox definitions pending future promotion. |
 
 The module definition has exactly three load-bearing fields: import-safe
@@ -185,6 +209,7 @@ There is no generic plugin hook or discovery registry.
 | Implement a channel | `defineChannelModule`, `Channel`, `ChannelHost`, `ChannelInboundRequest`, `ChannelReplyEvent`, `ChannelReplySink`, `ChannelCapabilities`, `ChannelSendTool`, `ChannelSendToolContext`, `ChannelCurrentRunOutputRequest` |
 | Normalize attachments and blocking questions | `NormalizedAttachment`, `AskUserRequest`, `AskUserAnswer` |
 | Implement memory | `defineMemoryModule`, `Memory`, `MemoryRecallRequest`, `MemoryRecallResult`, `MemoryRuntimeCaptureGrant` |
+| Offer a tool inseparable from a selected module | `ModuleToolContribution`, `ModuleToolTurnContext`, `ModuleToolBinding`, `ModuleToolCallContext`, `MODULE_TOOL_LIMITS` |
 | Report lifecycle and health | `ModuleInstance`, `ModuleHealth`, `ModuleDiagnostic`, `ModuleCommand` |
 | Explain config sources safely | `ConfigProvenance`, `ConfigProvenanceMap`, `configPathToPointer`, `provenanceAt` |
 | Return structured config failures | `ModuleConfigError`, `ConfigIssue`, `configIssue`, `parseModuleConfig` |
@@ -192,7 +217,7 @@ There is no generic plugin hook or discovery registry.
 | Reference another selected slot | `crossSlotReferenceSchema`, `readCrossSlotReference`, `MODULE_SCHEMA_SLOT_REFERENCE` |
 | Read or atomically replace owner-private data | `readOwnerPrivateFile`, `createOwnerPrivateFile`, `atomicReplaceOwnerPrivateFile` from `@mono-agent/module-sdk/secure-fs` |
 | Make a bounded checked HTTP request | `checkedFetch`, `assertSafeHttpUrl` from `@mono-agent/module-sdk/http` |
-| Test a third-party implementation | `assertRuntimeModuleCompliance`, `assertChannelModuleCompliance`, `assertChannelBehaviorCompliance`, `assertMemoryModuleCompliance` from `@mono-agent/module-sdk/testing` |
+| Test a third-party implementation | `assertRuntimeModuleCompliance`, `assertChannelModuleCompliance`, `assertChannelBehaviorCompliance`, `assertMemoryModuleCompliance`, `assertModuleToolContributionsCompliance`, `assertModuleToolBindingCompliance` from `@mono-agent/module-sdk/testing` |
 
 Reserved-slot definitions are not public extension contracts. They are
 available only from `@mono-agent/module-sdk/internal` for first-party packages.
@@ -317,6 +342,7 @@ MODULE_API_VERSION
 MODULE_SCHEMA_ENV_ELIGIBLE
 MODULE_SCHEMA_SECRET
 MODULE_SCHEMA_SLOT_REFERENCE
+MODULE_TOOL_LIMITS
 Memory
 MemoryCapabilities
 MemoryCaptureRequest
@@ -357,6 +383,10 @@ ModuleSlot
 ModuleStartContext
 ModuleStopContext
 ModuleStopReason
+ModuleToolBinding
+ModuleToolCallContext
+ModuleToolContribution
+ModuleToolTurnContext
 MonoAgentModule
 NormalizedAttachment
 OPEN_MODULE_KINDS
@@ -583,6 +613,8 @@ assertChannelModuleCompliance
 assertMemoryInstanceCompliance
 assertMemoryModuleCompliance
 assertModuleDefinitionCompliance
+assertModuleToolBindingCompliance
+assertModuleToolContributionsCompliance
 assertMonoAgentModuleExport
 assertRuntimeInstanceCompliance
 assertRuntimeModuleCompliance

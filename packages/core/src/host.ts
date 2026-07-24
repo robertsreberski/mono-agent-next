@@ -4,6 +4,7 @@ import { lstat, opendir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import {
   AGENT_INTERACTION_LIMITS, DEFAULT_APPROVAL_TIMEOUT_MS, HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE,
+  MODULE_TOOL_LIMITS,
   RUNTIME_SESSION_UNAVAILABLE_CODE, parseApprovalDecision, parseApprovalRequest, parseArtifactRef,
   parseAskUserRequest, parseAskUserAnswer, snapshotRuntimeTurnError,
   type ArtifactRef, type ApprovalDecision, type ApprovalRequest, type AskUserAnswer, type AskUserRequest,
@@ -15,11 +16,20 @@ import {
   type JsonObject, type JsonValue, type Memory, type MemoryHost, type MemoryModuleDefinition, type MemoryRecord,
   type MemoryRuntimeCaptureRequest, type MemoryRuntimeCaptureResult, type ModuleDiagnostic,
   type ModuleHost, type ModuleHealth, type ModuleInstance, type ModuleLogger, type Runtime, type RuntimeLiveInputHandler,
-  type RuntimeModuleDefinition, type RuntimeNativeToolDescriptor, type RuntimeSession, type RuntimeTurnErrorSnapshot, type RuntimeToolCall,
+  type ModuleToolBinding, type ModuleToolContribution, type ModuleToolTurnContext,
+  type RuntimeModuleDefinition,
+  type RuntimeNativeToolDescriptor, type RuntimeNativeToolEffect, type RuntimeSession,
+  type RuntimeTurnErrorSnapshot, type RuntimeToolCall,
   type RuntimeToolResult, type RuntimeTurnEvent, type RuntimeTurnResult, type TurnMessage,
 } from "@mono-agent/module-sdk";
 import type { Exporter, ReservedModuleDefinition, Sandbox, StateStore, TriggerEvent, TriggerHost, TriggerReceipt } from "@mono-agent/module-sdk/internal";
-import { assertChannelInstanceCompliance, assertMemoryInstanceCompliance, assertRuntimeInstanceCompliance } from "@mono-agent/module-sdk/testing";
+import {
+  assertChannelInstanceCompliance,
+  assertMemoryInstanceCompliance,
+  assertModuleToolBindingCompliance,
+  assertModuleToolContributionsCompliance,
+  assertRuntimeInstanceCompliance,
+} from "@mono-agent/module-sdk/testing";
 import { ensureLoadedAgentConfig, environmentFor } from "./config.js";
 import { cloneIntrinsicUint8Array } from "./binary.js";
 import { assertOwnKeys, denseOwnDataArray as boundedOwnDataArray, ownDataRecord as boundedOwnDataRecord, snapshotBoundedValue } from "./bounded-value.js";
@@ -32,7 +42,6 @@ import { moduleConfigFor } from "./module-loader.js";
 import { nativeToolAllowed, runtimeNativeToolPolicyIssue } from "./native-tool-policy.js";
 import { normalizeToolResult, type ToolResultArtifactSink } from "./tool-result-normalizer.js";
 import { StateExecutionClient, type DurableFingerprint, type CanonicalTranscript } from "./state-execution-client.js";
-import { RUN_HISTORY_TOOL_NAME, createRunHistoryTool } from "./run-history-tool.js";
 import { assertRuntimeTurnEventBoundaryHealthy, createRuntimeTurnEventBoundary, normalizeChannelCapabilities,
   normalizeRuntimeCapabilities, normalizeModuleDiagnostic, normalizeRuntimeModelValidation, normalizeRuntimeToolCall,
   normalizeRuntimeTurnEvent, normalizeRuntimeTurnResult } from "./runtime-result-normalizer.js";
@@ -51,11 +60,21 @@ const CACHED_RESPONSE_MAX_BYTES = 8 * 1024 * 1024, MAX_TRANSCRIPT_ARTIFACT_BYTES
 const MODULE_OUTPUT_MAX_BYTES = 1024 * 1024, MODULE_OUTPUT_MAX_ITEMS = 10_000, MODULE_OUTPUT_MAX_DEPTH = 32, MODULE_DIAGNOSTIC_MAX_ITEMS = 100;
 const MAX_CONFIGURED_SKILLS = 256, MAX_SKILL_ROOT_ENTRIES = 1_024;
 const ASK_USER_TOOL_NAME = "AskUser", MEMORY_RECALL_TOOL_NAME = "MemoryRecall", PROACTIVE_SUPPRESSION_SENTINEL = "NOTHING_TO_REPORT";
+const MODULE_TOOL_CALL_TIMEOUT_MS = 120_000;
 type SessionDisposition = "retain" | "isolate" | "evict";
 interface RunningModule { readonly loaded: LoadedAgentModule; readonly instance: ModuleInstance }
 type VerbatimEntry = Extract<AgentTranscriptEntry, { readonly kind: "verbatim" }>;
 type DeliveryIntent = Awaited<ReturnType<StateExecutionClient["prepareDelivery"]>> | undefined;
 interface BoundChannelTool { readonly instanceId: string; readonly channel: Channel; readonly name: string; readonly tool: ChannelSendTool }
+interface BoundModuleTool {
+  readonly loaded: LoadedAgentModule;
+  readonly name: string;
+  readonly tool: ModuleToolContribution;
+}
+interface AmbiguousToolAlias {
+  readonly alias: string;
+  readonly canonicalNames: readonly string[];
+}
 interface ChannelDeliveryOutcome { readonly result: ChannelDeliveryResult; readonly destinationConversationId?: string }
 interface ActiveTurn {
   readonly id: string;
@@ -125,8 +144,10 @@ class AgentHostImplementation implements AgentHost {
   readonly #channelCapabilities = new Map<string, Readonly<ChannelCapabilities>>();
   readonly #createdChannelCapabilities = new WeakMap<object, Readonly<ChannelCapabilities>>();
   readonly #createdChannelTools = new WeakMap<object, readonly ChannelSendTool[]>();
+  readonly #createdModuleTools = new WeakMap<object, readonly ModuleToolContribution[]>();
+  #moduleTools: readonly BoundModuleTool[] = [];
   #channelTools: readonly BoundChannelTool[] = [];
-  #ambiguousToolAliases: readonly string[] = [];
+  #ambiguousToolAliases: readonly AmbiguousToolAlias[] = [];
   readonly #exporterInstances = new Map<string, Exporter>();
   readonly #running: RunningModule[] = [];
   readonly #history = new Map<string, readonly TurnMessage[]>();
@@ -902,33 +923,12 @@ class AgentHostImplementation implements AgentHost {
           requestContextServers: this.config.raw.context.mcp.requestContextServers,
         }),
       });
-      assertUnambiguousToolPolicy(
-        this.config.raw.policy.tools.allow,
-        this.config.raw.policy.tools.deny,
-        this.#mcp.ambiguousAliases ?? [],
-        "agent tool policy",
-      );
       const reservedCoreTools = [
-        ...this.#instructionTools.map((tool) => tool.name), ASK_USER_TOOL_NAME, RUN_HISTORY_TOOL_NAME, MEMORY_RECALL_TOOL_NAME,
+        ...this.#instructionTools.map((tool) => tool.name),
+        ASK_USER_TOOL_NAME,
+        MEMORY_RECALL_TOOL_NAME,
       ];
-      for (const name of reservedCoreTools) {
-        if (this.#mcp.tools.some((tool) => tool.name === name)) {
-          throw new AgentConfigError(`Project MCP tool conflicts with reserved Core tool ${name}`, [{
-            path: "context.mcp.configPath",
-            message: `${name} is reserved by Core`,
-            code: "tool_name_conflict",
-          }]);
-        }
-      }
       await this.#startKind("channel");
-      const bound = bindChannelTools(this.#channelInstances, this.#createdChannelTools,
-        reservedCoreTools.concat(this.#mcp.tools.map((tool) => tool.name)));
-      this.#channelTools = bound.tools;
-      this.#ambiguousToolAliases = Object.freeze([
-        ...(this.#mcp.ambiguousAliases ?? []), ...bound.ambiguousAliases,
-      ]);
-      assertUnambiguousToolPolicy(this.config.raw.policy.tools.allow, this.config.raw.policy.tools.deny,
-        this.#ambiguousToolAliases, "agent tool policy");
       this.#startInfo = {
         ...this.#startInfo,
         channels: [...this.#channelInstances.entries()].map(([instanceId, channel]) => ({
@@ -938,6 +938,26 @@ class AgentHostImplementation implements AgentHost {
         })),
       };
       await this.#startKind("trigger");
+      const connectedMcp = this.#mcp;
+      const catalog = resolveToolCatalog(
+        this.#moduleTools,
+        connectedMcp.tools,
+        collectChannelTools(this.#channelInstances, this.#createdChannelTools),
+        reservedCoreTools,
+      );
+      this.#moduleTools = catalog.moduleTools;
+      this.#channelTools = catalog.channelTools;
+      this.#ambiguousToolAliases = catalog.ambiguousAliases;
+      this.#mcp = Object.freeze({
+        tools: catalog.mcpTools,
+        close: () => connectedMcp.close(),
+      });
+      assertUnambiguousToolPolicy(
+        this.config.raw.policy.tools.allow,
+        this.config.raw.policy.tools.deny,
+        this.#ambiguousToolAliases,
+        "agent tool policy",
+      );
       await this.#publishChannelPresence();
       this.#state = "running";
     } catch (error) {
@@ -1017,6 +1037,20 @@ class AgentHostImplementation implements AgentHost {
           `${module.instanceId} start`,
         );
       }
+      const contributions = this.#createdModuleTools.get(instance as object) ?? [];
+      if (this.#moduleTools.length + contributions.length > MODULE_TOOL_LIMITS.total) {
+        throw new Error(
+          `Selected modules contribute more than ${String(MODULE_TOOL_LIMITS.total)} tools`,
+        );
+      }
+      this.#moduleTools = Object.freeze([
+        ...this.#moduleTools,
+        ...contributions.map((tool): BoundModuleTool => Object.freeze({
+          loaded: module,
+          name: tool.name,
+          tool,
+        })),
+      ]);
     }
   }
   async #publishChannelPresence(): Promise<void> {
@@ -1105,6 +1139,10 @@ class AgentHostImplementation implements AgentHost {
         );
       }
       assertCreatedInstanceCompliance(module.slot, instance);
+      this.#createdModuleTools.set(
+        instance as object,
+        snapshotModuleToolContributions(instance, module.instanceId),
+      );
       if (module.slot === "channel") this.#createdChannelTools.set(
         instance as object, snapshotChannelSendTools(instance, module.instanceId));
     } catch (error) {
@@ -1827,19 +1865,6 @@ class AgentHostImplementation implements AgentHost {
     await this.#loadConversation(input.conversationId, signal);
     const recalled = await this.#recallMemory(input, signal);
     const routes = routeCandidates(this.config, input);
-    const runHistoryTool = this.#execution === undefined
-      ? []
-      : [createRunHistoryTool({
-          reader: {
-            listRuns: (cursor, toolSignal) =>
-              this.#execution!.listRuns(cursor, toolSignal),
-            readRun: (runId, toolSignal) =>
-              this.#execution!.readRun(runId, toolSignal),
-          },
-          conversationId: input.conversationId,
-          currentRunId: active.id,
-          signal,
-        })];
     const memoryRecallTool = this.#memoryRecallEnabled && this.#memory !== undefined
       ? [createMemoryRecallTool(this.#memory, input.conversationId, signal)] : [];
     const askUserTool = input.interactionHandler === undefined && emitAsk === undefined ? [] : [createAskUserTool(
@@ -1847,15 +1872,24 @@ class AgentHostImplementation implements AgentHost {
         if (active.route === undefined) throw new Error("AskUser route is unavailable");
         return this.#requestAskUser(input, active, active.route, request, askSignal, emitAsk);
       }, signal)];
-    const tools = filterTools(
+    const selectedTools = filterTools(
       [
-        ...this.#instructionTools, ...runHistoryTool, ...memoryRecallTool, ...askUserTool, ...this.#mcp.tools,
+        ...this.#instructionTools, ...memoryRecallTool, ...askUserTool,
+        ...this.#moduleTools.map(moduleRuntimeTool), ...this.#mcp.tools,
         ...this.#channelTools.map((tool) => this.#channelRuntimeTool(tool, input, active, signal)),
       ],
       this.config,
       input,
       this.#ambiguousToolAliases,
     );
+    const moduleBindings = bindModuleTools(selectedTools, this.#moduleTools, {
+      conversationId: input.conversationId,
+      runId: active.id,
+      requestId: input.requestId!,
+      signal,
+    });
+    const tools = moduleBindings.tools;
+    try {
     const requiredCapabilities = new Set(input.requiredCapabilities ?? []);
     if ((input.attachments?.length ?? 0) > 0) requiredCapabilities.add("attachments");
     if (input.responseSchema !== undefined) requiredCapabilities.add("structuredOutput");
@@ -1986,8 +2020,9 @@ class AgentHostImplementation implements AgentHost {
             observeEffect();
             const normalizedCall = normalizeRuntimeToolCall(call);
             const tool = tools.find((candidate) => candidate.name === normalizedCall.name);
+            const effects = tool === undefined ? [] : toolEffects(tool);
             if (tool !== undefined
-              && tool.source.kind !== "core"
+              && effects.length > 0
               && this.config.raw.policy.approvals.default === "ask") {
               const decision = await this.#requestApproval(
                 input,
@@ -1998,7 +2033,7 @@ class AgentHostImplementation implements AgentHost {
                   callId: normalizedCall.id,
                   toolId: tool.name,
                   displayName: tool.name,
-                  effects: ["execute", "network"],
+                  effects,
                   summary: `Allow ${tool.name} to execute for this turn?`,
                   requestedAt: new Date().toISOString(),
                 },
@@ -2222,6 +2257,9 @@ class AgentHostImplementation implements AgentHost {
         runId: active.id,
       },
     );
+    } finally {
+      moduleBindings.revoke();
+    }
   }
   async #requestAskUser(
     input: AgentSubmitInput,
@@ -3371,6 +3409,9 @@ class AgentHostImplementation implements AgentHost {
     this.#runtimeCapabilities.clear();
     this.#channelInstances.clear();
     this.#channelCapabilities.clear();
+    this.#moduleTools = [];
+    this.#channelTools = [];
+    this.#ambiguousToolAliases = [];
     this.#exporterInstances.clear();
     this.#memory = undefined;
     this.#execution = undefined;
@@ -3572,11 +3613,17 @@ function runtimeEligibility(
   if (tools.length > 0 && !capabilities.tools) return "tools unsupported";
   if (tools.some((tool) => tool.source.kind === "mcp") && !capabilities.mcp) return "MCP tools unsupported";
   if (config.raw.policy.approvals.default === "ask"
-    && tools.some((tool) => tool.source.kind !== "core")
+    && tools.some((tool) => toolEffects(tool).length > 0)
     && !hasInteractionHandler) {
     return "approval interaction handler unavailable";
   }
-  if (!("mode" in config.raw.policy.sandbox && config.raw.policy.sandbox.mode === "off") && !capabilities.sandbox) {
+  const sandboxActive =
+    !("mode" in config.raw.policy.sandbox && config.raw.policy.sandbox.mode === "off");
+  if (sandboxActive
+    && tools.some((tool) => tool.source.kind === "module" && toolEffects(tool).length > 0)) {
+    return "effectful selected-module tools cannot execute under the active sandbox";
+  }
+  if (sandboxActive && !capabilities.sandbox) {
     return "sandbox unsupported";
   }
   for (const capability of required) {
@@ -3589,7 +3636,7 @@ function filterTools(
   tools: readonly CoreRuntimeTool[],
   config: LoadedAgentConfig,
   input: AgentSubmitInput,
-  ambiguousAliases: readonly string[],
+  ambiguousAliases: readonly AmbiguousToolAlias[],
 ): readonly CoreRuntimeTool[] {
   assertUnambiguousToolPolicy(
     input.toolPolicy?.allow,
@@ -3612,26 +3659,34 @@ function filterTools(
   }
   for (const denied of input.toolPolicy?.deny ?? []) allowed.delete(denied);
   return [...instructionTools, ...governedTools.filter((tool) =>
-    allowed.has(tool.name) && (config.raw.policy.approvals.default !== "deny" || tool.source.kind === "core"))];
+    allowed.has(tool.name)
+    && (config.raw.policy.approvals.default !== "deny" || toolEffects(tool).length === 0))];
 }
 function assertUnambiguousToolPolicy(
   allow: readonly string[] | undefined,
   deny: readonly string[] | undefined,
-  ambiguousAliases: readonly string[],
+  ambiguousAliases: readonly AmbiguousToolAlias[],
   label: string,
 ): void {
   if (ambiguousAliases.length === 0) return;
-  const ambiguous = new Set(ambiguousAliases);
+  const ambiguous = new Map(ambiguousAliases.map((entry) => [entry.alias, entry.canonicalNames]));
   const conflicts = [...new Set([...(allow ?? []), ...(deny ?? [])])]
     .filter((name) => ambiguous.has(name))
     .sort((left, right) => left.localeCompare(right));
   if (conflicts.length > 0) {
-    throw new AgentConfigError(`${label} contains ambiguous MCP tool aliases`, [{
+    throw new AgentConfigError(`${label} contains ambiguous tool aliases`, [{
       path: label === "agent tool policy" ? "policy.tools" : "toolPolicy",
-      message: `use canonical tool ids instead of ${conflicts.map((name) => JSON.stringify(name)).join(", ")}`,
+      message: conflicts.map((name) =>
+        `${JSON.stringify(name)} resolves to ${ambiguous.get(name)!.map((entry) =>
+          JSON.stringify(entry)).join(", ")}`).join("; "),
       code: "ambiguous_tool_alias",
     }]);
   }
+}
+function toolEffects(tool: CoreRuntimeTool): readonly RuntimeNativeToolEffect[] {
+  if (tool.source.kind === "module") return tool.effects ?? [];
+  if (tool.source.kind === "core") return [];
+  return ["execute", "network"];
 }
 async function executeTool(
   call: RuntimeToolCall,
@@ -4091,26 +4146,277 @@ function snapshotChannelSendTools(value: unknown, instanceId: string): readonly 
       prepare: tool.prepare as ChannelSendTool["prepare"] });
   }));
 }
-function bindChannelTools(
-  instances: ReadonlyMap<string, Channel>, snapshots: WeakMap<object, readonly ChannelSendTool[]>, reserved: readonly string[],
-): { readonly tools: readonly BoundChannelTool[]; readonly ambiguousAliases: readonly string[] } {
-  const rows = [...instances].flatMap(([instanceId, channel]) =>
+function snapshotModuleToolContributions(
+  value: unknown,
+  instanceId: string,
+): readonly ModuleToolContribution[] {
+  const instance = requireInstanceRecord(value, `${instanceId} module instance`);
+  const descriptor = Object.getOwnPropertyDescriptor(instance, "toolContributions");
+  if (descriptor === undefined || ("value" in descriptor && descriptor.value === undefined)) return [];
+  if (!("value" in descriptor)) {
+    throw new TypeError(`${instanceId} module toolContributions must be an own data property`);
+  }
+  assertModuleToolContributionsCompliance(
+    descriptor.value,
+    `${instanceId} module toolContributions`,
+  );
+  return Object.freeze(boundedOwnDataArray(
+    descriptor.value,
+    `${instanceId} module toolContributions`,
+    MODULE_TOOL_LIMITS.perInstance,
+    true,
+    true,
+  ).map((raw, index) => {
+    const label = `${instanceId} module toolContributions[${String(index)}]`;
+    const tool = boundedOwnDataRecord(raw, label, true);
+    assertOwnKeys(tool, ["name", "description", "inputSchema", "effects", "bind"], label);
+    const inputSchema = snapshotBoundedValue<Readonly<Record<string, unknown>>>(
+      tool.inputSchema,
+      {
+        path: `${label}.inputSchema`,
+        maxBytes: MODULE_TOOL_LIMITS.inputSchemaBytes,
+        maxItems: MODULE_TOOL_LIMITS.inputSchemaItems,
+        maxDepth: MODULE_TOOL_LIMITS.inputSchemaDepth,
+        label: "JSON",
+        freeze: true,
+        requireEnumerable: true,
+        requireOrdinaryArrays: true,
+      },
+    ).value;
+    const effects = Object.freeze(boundedOwnDataArray(
+      tool.effects,
+      `${label}.effects`,
+      4,
+      true,
+      true,
+    ) as RuntimeNativeToolEffect[]);
+    return Object.freeze({
+      name: tool.name as string,
+      description: tool.description as string,
+      inputSchema,
+      effects,
+      bind: tool.bind as ModuleToolContribution["bind"],
+    });
+  }));
+}
+function collectChannelTools(
+  instances: ReadonlyMap<string, Channel>,
+  snapshots: WeakMap<object, readonly ChannelSendTool[]>,
+): readonly BoundChannelTool[] {
+  return Object.freeze([...instances].flatMap(([instanceId, channel]) =>
     (snapshots.get(channel) ?? []).map((tool) => ({ instanceId, channel, tool })))
     .sort((left, right) => left.instanceId.localeCompare(right.instanceId)
-      || left.tool.name.localeCompare(right.tool.name));
-  const counts = new Map<string, number>();
-  for (const row of rows) counts.set(row.tool.name, (counts.get(row.tool.name) ?? 0) + 1);
+      || left.tool.name.localeCompare(right.tool.name))
+    .map((row): BoundChannelTool => Object.freeze({ ...row, name: row.tool.name })));
+}
+interface ToolCatalogName {
+  readonly identity: string;
+  readonly kind: "module" | "mcp" | "channel";
+  readonly rawName: string;
+}
+interface ResolvedToolCatalog {
+  readonly moduleTools: readonly BoundModuleTool[];
+  readonly mcpTools: readonly CoreRuntimeTool[];
+  readonly channelTools: readonly BoundChannelTool[];
+  readonly ambiguousAliases: readonly AmbiguousToolAlias[];
+}
+function resolveToolCatalog(
+  moduleTools: readonly BoundModuleTool[],
+  mcpTools: readonly CoreRuntimeTool[],
+  channelTools: readonly BoundChannelTool[],
+  reservedNames: readonly string[],
+): ResolvedToolCatalog {
+  const rows: ToolCatalogName[] = [
+    ...moduleTools.map((row) => ({
+      identity: moduleToolIdentity(row),
+      kind: "module" as const,
+      rawName: row.tool.name,
+    })),
+    ...mcpTools.map((tool) => {
+      if (tool.source.kind !== "mcp") throw new Error("Connected MCP catalog contains a non-MCP tool");
+      return {
+        identity: mcpToolIdentity(tool.source.server, tool.source.tool),
+        kind: "mcp" as const,
+        rawName: tool.source.tool,
+      };
+    }),
+    ...channelTools.map((row) => ({
+      identity: channelToolIdentity(row),
+      kind: "channel" as const,
+      rawName: row.tool.name,
+    })),
+  ].sort((left, right) => left.identity.localeCompare(right.identity));
+  const identities = new Set<string>();
+  const rawCounts = new Map<string, number>();
+  for (const row of rows) {
+    if (identities.has(row.identity)) {
+      throw new Error(`Tool catalog contains duplicate source identity ${row.identity}`);
+    }
+    identities.add(row.identity);
+    rawCounts.set(row.rawName, (rawCounts.get(row.rawName) ?? 0) + 1);
+  }
+  const reserved = new Set<string>();
+  for (const name of reservedNames) {
+    if (reserved.has(name)) throw new Error(`Core tool name ${name} is declared more than once`);
+    reserved.add(name);
+  }
   const finalNames = new Set(reserved);
-  const tools = rows.map((row): BoundChannelTool => {
-    if (finalNames.has(row.tool.name)) throw new Error(`Channel tool ${row.tool.name} conflicts with another tool`);
-    const name = counts.get(row.tool.name) === 1 ? row.tool.name : `channel__${createHash("sha256")
-      .update(`${row.instanceId}\0${row.tool.name}`).digest("base64url")}`;
-    if (finalNames.has(name)) throw new Error(`Channel tool final name collision: ${name}`);
+  const names = new Map<string, string>();
+  for (const row of rows) {
+    const useRaw = rawCounts.get(row.rawName) === 1
+      && isPortableCatalogAlias(row.rawName)
+      && !reserved.has(row.rawName);
+    const name = useRaw
+      ? row.rawName
+      : `${row.kind}__${createHash("sha256").update(row.identity, "utf8").digest("base64url")}`;
+    if (finalNames.has(name)) throw new Error(`Tool catalog final name collision: ${name}`);
     finalNames.add(name);
-    return Object.freeze({ ...row, name });
+    names.set(row.identity, name);
+  }
+  const ambiguousAliases = Object.freeze([...rawCounts]
+    .filter(([, count]) => count > 1)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([alias]): AmbiguousToolAlias => Object.freeze({
+      alias,
+      canonicalNames: Object.freeze(rows
+        .filter((row) => row.rawName === alias)
+        .map((row) => names.get(row.identity)!)
+        .sort((left, right) => left.localeCompare(right))),
+    })));
+  return Object.freeze({
+    moduleTools: Object.freeze(moduleTools
+      .map((row): BoundModuleTool => Object.freeze({
+        ...row,
+        name: names.get(moduleToolIdentity(row))!,
+      }))
+      .sort((left, right) => moduleToolIdentity(left).localeCompare(moduleToolIdentity(right)))),
+    mcpTools: Object.freeze(mcpTools.map((tool): CoreRuntimeTool => {
+      if (tool.source.kind !== "mcp") throw new Error("Connected MCP catalog contains a non-MCP tool");
+      const name = names.get(mcpToolIdentity(tool.source.server, tool.source.tool))!;
+      const { rawAlias: _rawAlias, ...snapshot } = tool;
+      return Object.freeze({
+        ...snapshot,
+        name,
+        ...(name === tool.source.tool ? { rawAlias: tool.source.tool } : {}),
+      });
+    })),
+    channelTools: Object.freeze(channelTools
+      .map((row): BoundChannelTool => Object.freeze({
+        ...row,
+        name: names.get(channelToolIdentity(row))!,
+      }))
+      .sort((left, right) => channelToolIdentity(left).localeCompare(channelToolIdentity(right)))),
+    ambiguousAliases,
   });
-  return Object.freeze({ tools: Object.freeze(tools),
-    ambiguousAliases: Object.freeze([...counts].filter(([, count]) => count > 1).map(([name]) => name).sort()) });
+}
+function moduleToolIdentity(row: BoundModuleTool): string {
+  return framedToolIdentity("module-tool-v1", [
+    row.loaded.slot,
+    row.loaded.instanceId,
+    row.loaded.packageName,
+    row.tool.name,
+  ]);
+}
+function mcpToolIdentity(server: string, tool: string): string {
+  return framedToolIdentity("mcp-tool-v1", [server, tool]);
+}
+function channelToolIdentity(row: BoundChannelTool): string {
+  return framedToolIdentity("channel-tool-v1", [row.instanceId, row.tool.name]);
+}
+function framedToolIdentity(kind: string, values: readonly string[]): string {
+  return [kind, ...values.map((value) => `${String(Buffer.byteLength(value, "utf8"))}:${value}`)]
+    .join("\0");
+}
+function isPortableCatalogAlias(name: string): boolean {
+  return /^[A-Za-z0-9_-]{1,64}$/u.test(name)
+    && !["core__", "runtime__", "module__", "mcp__", "channel__"]
+      .some((prefix) => name.startsWith(prefix));
+}
+function moduleRuntimeTool(row: BoundModuleTool): CoreRuntimeTool {
+  return Object.freeze({
+    name: row.name,
+    description: row.tool.description,
+    inputSchema: row.tool.inputSchema,
+    effects: row.tool.effects,
+    source: Object.freeze({
+      kind: "module",
+      slot: row.loaded.slot,
+      instanceId: row.loaded.instanceId,
+      packageName: row.loaded.packageName,
+      tool: row.tool.name,
+    }),
+    async execute() {
+      throw new Error(`Module tool ${row.name} is not bound to a turn`);
+    },
+  });
+}
+function bindModuleTools(
+  tools: readonly CoreRuntimeTool[],
+  moduleTools: readonly BoundModuleTool[],
+  context: ModuleToolTurnContext,
+): { readonly tools: readonly CoreRuntimeTool[]; revoke(): void } {
+  const rows = new Map(moduleTools.map((row) => [row.name, row]));
+  const controller = new AbortController();
+  const signal = AbortSignal.any([context.signal, controller.signal]);
+  const cells: Array<{ execute: ModuleToolBinding["execute"] | undefined }> = [];
+  let revoked = false;
+  const revoke = (): void => {
+    if (revoked) return;
+    revoked = true;
+    for (const cell of cells) cell.execute = undefined;
+    controller.abort(new Error("Module tool turn binding is closed"));
+  };
+  try {
+    const bound = tools.map((tool): CoreRuntimeTool => {
+      if (tool.source.kind !== "module") return tool;
+      const row = rows.get(tool.name);
+      if (row === undefined) throw new Error(`Module tool ${tool.name} has no selected source`);
+      const rawBinding = row.tool.bind(Object.freeze({
+        conversationId: context.conversationId,
+        runId: context.runId,
+        ...(context.requestId === undefined ? {} : { requestId: context.requestId }),
+        signal,
+      }));
+      assertModuleToolBindingCompliance(rawBinding, `${tool.name} module tool binding`);
+      const cell: { execute: ModuleToolBinding["execute"] | undefined } = {
+        execute: rawBinding.execute.bind(rawBinding),
+      };
+      cells.push(cell);
+      return Object.freeze({
+        ...tool,
+        async execute(
+          input: unknown,
+          options: NonNullable<Parameters<CoreRuntimeTool["execute"]>[1]> = {},
+        ) {
+          const callId = options.callId;
+          if (callId === undefined) throw new Error("Module tool call identity is unavailable");
+          const execute = cell.execute;
+          if (execute === undefined || revoked) {
+            throw new Error(`Module tool ${tool.name} binding is closed`);
+          }
+          const parent = options.signal === undefined
+            ? signal
+            : AbortSignal.any([signal, options.signal]);
+          return withTimeoutSignal(
+            (callSignal) => {
+              const current = cell.execute;
+              if (current === undefined || revoked) {
+                throw new Error(`Module tool ${tool.name} binding is closed`);
+              }
+              return current(input as JsonValue, Object.freeze({ callId, signal: callSignal }));
+            },
+            MODULE_TOOL_CALL_TIMEOUT_MS,
+            parent,
+            `Module tool ${tool.name}`,
+          );
+        },
+      });
+    });
+    return Object.freeze({ tools: Object.freeze(bound), revoke });
+  } catch (error) {
+    revoke();
+    throw error;
+  }
 }
 function assertCreatedInstanceCompliance(kind: ModuleKind, value: unknown): asserts value is ModuleInstance {
   if (kind === "runtime") {

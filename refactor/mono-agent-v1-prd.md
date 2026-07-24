@@ -2,7 +2,7 @@
 
 Status: Accepted by `docs/reference/v1-architecture.md` (V1-001); execution in progress
 Target release: 1.0 beta, followed by 1.0 stable
-Last updated: 2026-07-22
+Last updated: 2026-07-24
 Primary audience: maintainers, contributors, and individual agent builders
 Decision scope: complete v1 architecture, configuration, deletion ledger, migration, and production rollout
 
@@ -10,11 +10,11 @@ Decision scope: complete v1 architecture, configuration, deletion ledger, migrat
 
 Mono-agent v1 is a production-grade, config-first wrapper around independently selected agent runtimes. Its user-facing center is one strict `mono-agent.config.json` describing one portable agent. The host loads runtime, channel, memory, state, trigger, exporter, and sandbox implementations only through typed capability slots. Every replaceable implementation is visible at the point of use through an exact `"$use"` package reference.
 
-There is no generic `plugins` registry, no hidden built-in-name-to-package mapping, no package self-registration, and no runtime package download. Stable instance ids are config keys; `$use` identifies the installed implementation. Project-specific model tools remain ordinary MCP servers in `.mcp.json`, instructions remain skills, scheduled work remains Markdown, and independent collectors or watchdogs remain project or host operations.
+There is no generic `plugins` registry, no hidden built-in-name-to-package mapping, no package self-registration, and no runtime package download. Stable instance ids are config keys; `$use` identifies the installed implementation. Project-specific model tools remain ordinary MCP servers in `.mcp.json`; a model tool inseparable from an already selected module's own data and lifecycle may be offered through the bounded Module SDK contribution seam. Instructions remain skills, scheduled work remains Markdown, and independent collectors or watchdogs remain project or host operations.
 
 Config-first does not mean mega-config-first. TUI, web, service-macos, docs-mcp, and create-mono-agent have independent ownership and lifecycle. They are installed explicitly and use their own small configuration, if they need configuration at all. TUI and web consume one shared operator protocol exposed by an explicitly selected operator endpoint inside the agent. service-macos is only macOS boot integration; the agent remains usable in foreground or under another supervisor when it is absent.
 
-The product of this refactor is a smaller system. The authoritative stacked clean-successor G0 baseline is 182,217 handwritten production-source lines across 523 files and 22 publishable packages; agent-app alone holds approximately 66,000. Stable v1 ships at most 130,000 lines — the binding number, with a roadmap-rounded 28.66% reduction and 71.34% retained while the exact percentage remains report output rather than a second gate — and core + module-sdk + cli are capped at 15,000 lines. These are machine-tracked release gates.
+The product of this refactor is a smaller system. The authoritative stacked clean-successor G0 baseline is 182,217 handwritten production-source lines across 523 files and 22 publishable packages; agent-app alone holds approximately 66,000. Stable v1 ships at most 130,000 lines — the binding number, with a roadmap-rounded 28.66% reduction and 71.34% retained while the exact percentage remains report output rather than a second gate — and core + module-sdk + cli are capped at 15,500 lines. These are machine-tracked release gates.
 
 Package count is not a success metric. The current v1 roster contains 23 publishable packages because runtimes, communication transports, durable stores, operator products, and host integration have genuinely different ownership and failure boundaries. Architecture gates protect narrow responsibilities and selected dependency closure; they never combine unrelated concerns merely to reduce a count.
 
@@ -28,14 +28,14 @@ A mono-agent project is an ordinary directory, and understanding any agent means
 
 1. **What code exists here?** `package.json` and the lockfile answer completely. Installing or removing a dependency is the only way code enters or leaves; no config edit, no download, no discovery.
 2. **What does this agent use?** `mono-agent.config.json` answers completely. Presence means selected; absence means off. Every replaceable choice names its implementation at the point of use — the map key is the instance's stable name, `$use` is the exact installed package.
-3. **Who owns everything else?** The scope table in section 2.1: model tools live in `.mcp.json`, instructions in `skills/`, schedules in `cron/*.md`, and each product (TUI, web, service-macos, docs-mcp) has its own small config. Nothing outside a file's scope can be caused by that file.
+3. **Who owns everything else?** The scope table in section 2.1: project/domain model tools live in `.mcp.json`; a selected module may own a tool inseparable from its own selected behavior; instructions live in `skills/`, schedules in `cron/*.md`, and each product (TUI, web, service-macos, docs-mcp) has its own small config. Nothing outside a file's scope can be caused by that file.
 
 Two rules follow, and they are the contract this architecture defends:
 
 - **Reading rule** — every behavior of a running agent traces to one visible line in one of those files. If no line selects it, the behavior does not exist. There is nothing to discover that the files do not say.
 - **Writing rule** — behavior changes in exactly this order: install (`package.json`), select (config), restart. No step happens implicitly, and no later step can occur without the earlier one.
 
-When extending, ask "what is my thing?" before "how do I hook in": a tool is an MCP server; know-how is a skill; a schedule is a Markdown job; durable detached work is an external service that re-enters through an explicit channel or webhook; a new user interface is an operator product; only a replacement for a framework semantic is a typed module. The full ladder is section 2.3.
+When extending, ask "what is my thing?" before "how do I hook in": a project/domain tool is an MCP server; an inseparable tool for an already selected module stays with that module; know-how is a skill; a schedule is a Markdown job; durable detached work is an external service that re-enters through an explicit channel or webhook; a new user interface is an operator product; only a replacement for a framework semantic is a typed module. The full ladder is section 2.3.
 
 Hold this page and the rest of the document is elaboration; the architecture's job — and its gates' job — is to keep this page true.
 
@@ -101,6 +101,11 @@ The loader:
 4. composes and applies the package-owned leaf schema;
 5. performs no installation, self-registration, lifecycle start, or host mutation while loading or validating.
 
+An instance may expose a static bounded `toolContributions` list only after the
+package has been explicitly selected. Core snapshots descriptors during
+creation and catalogs only successfully started instances. This adds no
+discovery, activation, or configuration mechanism.
+
 ### 2.3 MCP-first extension ladder
 
 Project authors should not create a mono-agent module for ordinary integrations:
@@ -108,6 +113,7 @@ Project authors should not create a mono-agent module for ordinary integrations:
 | Desired capability | Lowest correct boundary |
 | --- | --- |
 | The model calls a project or domain tool | MCP server in `.mcp.json` |
+| The model calls behavior inseparable from an already selected module's private data and lifecycle | That module's bounded tool contribution |
 | Work must outlive the originating turn | External service with its own durable lifecycle and explicit delivery through an existing webhook or channel |
 | The model needs instructions for an existing CLI or MCP | Skill |
 | Work should run on a schedule | Trigger module plus Markdown job |
@@ -119,8 +125,10 @@ Project authors should not create a mono-agent module for ordinary integrations:
 
 A stdio MCP child may be started and stopped by the configured harness. A remote MCP server owns its own process lifecycle. Mono-agent does not turn MCP into a generic daemon manager.
 
-Model-visible tool names and orchestration UX remain MCP-owned. Ordinary MCP
-servers receive only their configured stdio environment or HTTP headers. The
+Core owns one deterministic model-visible catalog across Core, instruction,
+selected-module, MCP, and channel tools. Ordinary MCP servers still own their
+project/domain tool behavior and receive only their configured stdio
+environment or HTTP headers. The
 admitted Personal transcription consumer is the sole narrow exception:
 `context.mcp.requestContextServers` may name an existing direct stdio transport to
 receive immutable per-call current-request input/output/progress context. The
@@ -348,7 +356,7 @@ Production and test source are reported separately. Reducing tests never satisfi
 
 | Budget | Gate |
 | --- | --- |
-| Kernel: core + module-sdk + cli | ≤15,000 production-source lines |
+| Kernel: core + module-sdk + cli | ≤15,500 production-source lines |
 | Repository production source at G8 | ≤130,000 (binding); roadmap-rounded 28.66% reduction and 71.34% retained, with exact reduction reported |
 | Package responsibilities | One coherent ownership and lifecycle boundary per package; count reported, not gated |
 | Config representations per field | One authoritative schema field; generated projections are not parallel representations |
@@ -360,14 +368,14 @@ Indicative ring allocation, derived from the section 3.3 targets and measured v0
 
 | Ring | Packages | Planning allocation |
 | --- | --- | --- |
-| Kernel | core, module-sdk, cli | ≤15,000 (gate) |
+| Kernel | core, module-sdk, cli | ≤15,500 (gate) |
 | Runtime modules | runtime-pi, runtime-claude, runtime-codex, runtime-opencode | ~12,000 |
 | Channel modules | five channels | ~15,000 |
 | Trigger and durable modules | trigger-cron, memory-local, state-local, exporter-otlp, sandbox-srt | ~14,000 |
 | Operator layer | operator, tui, web | ~18,000 |
 | Products and companions | create-mono-agent, service-macos, docs-mcp | ~6,500 |
 
-The allocations sum to roughly 80,500; the 130,000 ceiling exists as honest slack, not a target. The 15,000-line kernel cap is at most 18.6% of that planning allocation, and the remainder sits behind replaceable module seams or independent product boundaries. The minimal-agent closure (kernel + runtime-pi + channel-webhook) is expected near 22,000 lines with zero native modules.
+The allocations sum to roughly 80,500; the 130,000 ceiling exists as honest slack, not a target. The 15,500-line kernel cap is at most 19.3% of that planning allocation, and the remainder sits behind replaceable module seams or independent product boundaries. The minimal-agent closure (kernel + runtime-pi + channel-webhook) is expected near 22,500 lines with zero native modules.
 
 The report also tracks public exports, dependency edges, cycles, config fields, selected-package closure, and duplicated protocol/config implementations. Rules are paired deletion, one implementation, and boundary before budget. The 130,000-line cap is binding; the percentage is a rounded roadmap label, not a second gate. A line target never justifies mixed lifecycles, weaker reliability, deleted required tests, or compressed unreadable code.
 
@@ -418,15 +426,30 @@ module-sdk exports focused definitions rather than `definePlugin`, and slots are
 - Open slots — runtime, channel, and memory — have public factories (`defineRuntimeModule`, `defineChannelModule`, `defineMemoryModule`), published compliance suites, and third-party replacement support at v1. Each is justified by at least two real implementations or a demonstrated replacement demand.
 - Reserved slots — state, trigger, exporter, and sandbox — use the same `$use` selection shape and are internally typed identically, but their contracts stay internal to the monorepo until a second real implementation is admitted. The public factory and compliance suite for a reserved slot ship with that promotion, post-1.0 at the earliest. This keeps the kernel small without ossifying the config format.
 
-Every package manifest declares exact package identity, version, `apiVersion: 1`, one capability kind, one-line responsibility, executable schema, optional bounded diagnostics, and optional namespaced maintenance/auth commands. A package cannot receive undeclared host capabilities or return contributions outside its kind.
+Every package manifest declares exact package identity, version, `apiVersion: 1`, one capability kind, one-line responsibility, executable schema, optional bounded diagnostics, and optional namespaced maintenance/auth commands. A package cannot receive undeclared host capabilities or return behavior outside its kind. The one cross-kind output is a static bounded model-tool descriptor owned by the selected instance; Core retains naming, policy, approval, sandbox, execution, normalization, and disposal authority.
 
 The module definition must be import-side-effect-free. Import may construct static schemas/manifests but may not read secrets, access the network, spawn a process, or write project/host state. Compliance tests instrument those boundaries.
+
+`ModuleInstance.toolContributions` is optional and own-data-only. Core accepts at
+most 64 per instance and 256 across selected modules, snapshots bounded
+descriptions and schemas, rejects malformed effects and duplicate raw names,
+and exposes only successfully started instances. It preserves unique portable
+raw aliases and assigns stable kind-and-source-hashed names to non-Core
+collisions. Ambiguous raw policy names fail with the usable canonical ids.
+Binding is synchronous once per logical turn and receives only exact
+conversation/run/request identity plus a revocable signal; calls receive only
+call identity and composed cancellation. Core applies global/request policy,
+exact effect approval, sandbox eligibility, a 120-second hard deadline,
+normalization/redaction/artifact handling, and finally revokes signals and
+clears executors. An active sandbox rejects a route with an exposed effectful
+module tool because v1 has no module-execution sandbox bridge; request policy
+may remove that tool first.
 
 The selected config's inline fields are validated by the selected module schema. Core-owned directive keys begin with `$`; v1 defines `$schema`, `$use`, and `$env`. Module schemas may not redefine them.
 
 Multiple runtime/channel/trigger/exporter instances may select the same package. Singleton slots select at most one implementation. state-local may coherently own transcript, run recorder, presence, and delivery-idempotency because they share one local durability discipline. OTLP remains separate because its lifecycle, failures, and operations differ.
 
-Third-party typed modules are supported at the open seams — runtime, channel, and memory. They must be installed direct dependencies and pass the relevant compliance contract; no first-party catalog edit is required. Project-local domain behavior should still use MCP instead of creating a module.
+Third-party typed modules are supported at the open seams — runtime, channel, and memory. They must be installed direct dependencies and pass the relevant compliance contract; no first-party catalog edit is required. An already justified selected module may contribute a tool inseparable from its responsibility. Project-local domain behavior should still use MCP instead of creating a module.
 
 ### 5.4 Runtime routing and authentication
 
@@ -452,7 +475,7 @@ Runtime-neutral history commits user-visible input, settled output, AskUser evid
 
 ### 5.5 Channel and trigger contracts
 
-Channels validate/redact their config; emit normalized inbound requests; manage reply streams; declare attachment, live-input, AskUser, proactive, and runtime-control capabilities; enforce allowlists/auth; expose bounded health; and stop idempotently. A channel advertising proactive capability may also contribute model-visible send tools — message and file delivery bound to its configured instance and recorded in destination history — exposed under normal tool policy. When a send tool must deliver an artifact created in the current run, it asks the host to read one safe output basename through `ChannelSendToolContext.readCurrentRunOutput`; channels never receive an arbitrary path or ambient filesystem authority.
+Channels validate/redact their config; emit normalized inbound requests; manage reply streams; declare attachment, live-input, AskUser, proactive, and runtime-control capabilities; enforce allowlists/auth; expose bounded health; and stop idempotently. A channel advertising proactive capability may expose model-visible send tools — message and file delivery bound to its configured instance and recorded in destination history — through the same deterministic Core catalog as selected-module tools. When a send tool must deliver an artifact created in the current run, it asks the host to read one safe output basename through `ChannelSendToolContext.readCurrentRunOutput`; channels never receive an arbitrary path or ambient filesystem authority.
 
 Configuration, authentication, and structural failures fail closed. Transport failure is visible degradation with bounded recovery and does not crash an otherwise healthy agent. A degraded channel never reports healthy.
 
@@ -460,9 +483,10 @@ Triggers initiate runs but are not communication channels. trigger-cron owns job
 
 ### 5.6 MCP and detached-work boundary
 
-Model-visible tool names and orchestration UX remain MCP-owned. Ordinary MCP
-servers receive only their configured stdio environment or HTTP headers. The
-Personal transcription consumer admits one bounded exception:
+Core assigns model-visible names across Core, instruction, selected-module,
+MCP, and channel sources. Ordinary project/domain tool behavior remains
+MCP-owned, and those servers receive only their configured stdio environment or
+HTTP headers. The Personal transcription consumer admits one bounded exception:
 
 - `context.mcp.requestContextServers` is off by default, accepts at most 32
   unique names, and may name only existing direct `stdio` transports from the
@@ -1327,7 +1351,7 @@ configs use only `capture` and disabled).
 
 **State**
 
-Atomic canonical transcript, duplicate protection, provider-session linkage, verbatim append, AskUser evidence, run summaries/events, retention, stale-run classification, memory-run separation, owner-private discovery/presence with the optional machine-wide discovery mirror, a rollover-independent cursor-paged run-history model tool, and channel delivery-idempotency indexes.
+Atomic canonical transcript, duplicate protection, provider-session linkage, verbatim append, AskUser evidence, run summaries/events, retention, stale-run classification, memory-run separation, owner-private discovery/presence with the optional machine-wide discovery mirror, channel delivery-idempotency indexes, and state-local's own effect-free rollover-independent cursor-paged `RunHistory` contribution. The tool exposes only terminal prior runs from the exact logical conversation, with bounded safe search/projection, redaction, artifact and nested-result omission, turn-scoped cursors, and cancellation.
 
 **Observability**
 
@@ -1344,6 +1368,10 @@ SRT off/native/network/integrity behavior.
 
 **MCP-first project extension**
 
+- one deterministic Core catalog across Core, instruction, selected-module,
+  MCP, and channel tool sources;
+- bounded selected-module descriptors and turn bindings for behavior
+  inseparable from an already selected module, with no registry or config key;
 - named standard MCP config loading;
 - custom MCP without mono-agent package/catalog changes;
 - no ambient, remote, process-start-environment, or hidden-core host grant for
@@ -1478,7 +1506,7 @@ Immediate rollback triggers: duplicate Telegram/Slack consumption, memory corrup
 | G5 — durable capabilities | state-local, memory-local BuJo-only with permanent descriptor-bound first-run marker, exporter-otlp, sandbox-srt; old state/memory/observability deleted | Durable review; memory rehearsal; permanent canonical marker proof; descriptor/no-follow SQLite identity and adversarial symlink/swap proof; exporter/sandbox proofs |
 | G6 — products/release | Refactor existing create-mono-agent and docs-mcp; add service-macos as a separate product; generate docs and migration guide; adapt lockstep beta; after canonical cutover, establish approved successor registry authority and publish the exact packed beta candidate | Packed minimal/Personal/multi-runtime scaffolds; all packages accounted; service/docs smokes; guard-absent exact-SHA authority preflight; registry publish/install verification |
 | G7 — production beta | Install the registry-verified beta; migrate Personal Agent, then active A8C Assistant | Exact published version/SHA; consumer matrices, audits, rollback, exact single consumer, 24-hour soak each |
-| G8 — stable | Ledger green; source ≤130k (binding; roadmap-rounded 28.66% reduction, 71.34% retained); kernel ≤15k; clean-history release readiness; separately approved stable publish | Exact-SHA reports; packed consumer install; section 2.6 OSS and section 2.7 history checks green; clean public clone; post-launch dispositions |
+| G8 — stable | Ledger green; source ≤130k (binding; roadmap-rounded 28.66% reduction, 71.34% retained); kernel ≤15.5k; clean-history release readiness; separately approved stable publish | Exact-SHA reports; packed consumer install; section 2.6 OSS and section 2.7 history checks green; clean public clone; post-launch dispositions |
 
 Gates merge in order. Work inside a gate may run concurrently only where the task graph permits. V1-004 PR A and PR B use the default/G0 checks plus their dedicated archive-evidence checker; aggregate G0.25 intentionally waits for the final V1-005 evidence and SHA.
 
@@ -1550,7 +1578,7 @@ or leaves unowned work.
 | Risk | Mitigation |
 | --- | --- |
 | Explicit `$use` feels verbose | It appears only at real replaceable seams; exact implementation is reviewable and no alias magic exists |
-| module-sdk grows into a generic plugin framework | Three public factories at open slots, reserved-slot contracts internal until an admitted second implementation, no generic lifecycle hook/tool/extension kind, architecture and 15k kernel gates |
+| module-sdk grows into a generic plugin framework | Three public factories at open slots, reserved-slot contracts internal until an admitted second implementation, one bounded selected-instance tool seam rather than a registry or extension kind, architecture and 15.5k kernel gates |
 | Agent config becomes a mega-config | Products, MCP definitions, job bodies, skills, and host ops have separate authoritative surfaces |
 | Product behavior becomes hidden after leaving agent config | Product package and product-specific config are explicit; package presence never activates anything |
 | Custom MCP is abused as a daemon manager | Decision ladder and lifecycle docs distinguish stdio tools, remote services, collectors, and watchdogs |

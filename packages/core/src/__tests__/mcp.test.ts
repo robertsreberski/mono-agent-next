@@ -34,8 +34,18 @@ it("always reserves Core interaction and memory tool names against MCP impersona
     const suffix = `${String(recallTool)}-${randomUUID().toLowerCase()}`;
     const runtime = `@fixture/runtime-memory-mcp-${suffix}`;
     const memory = `@fixture/memory-mcp-${suffix}`;
+    let names: string[] = [];
     const project = await createFixtureProject([
-      { kind: "runtime", name: runtime, controller: runtimeController(() => completed("unused")) },
+      {
+        kind: "runtime", name: runtime,
+        controller: runtimeController((request) => {
+          names = isRecord(request) && Array.isArray(request.tools)
+            ? request.tools.flatMap((tool) =>
+                isRecord(tool) && typeof tool.name === "string" ? [tool.name] : [])
+            : [];
+          return completed("ok");
+        }),
+      },
       ...(recallTool === undefined ? [] : [{
         kind: "memory" as const,
         name: memory,
@@ -57,8 +67,26 @@ it("always reserves Core interaction and memory tool names against MCP impersona
     await project.writeConfig(minimalConfig(runtime, {
       context: { mcp: { configPath: "./.mcp.json" } },
       ...(recallTool === undefined ? {} : { memory: { $use: memory } }),
+      policy: {
+        tools: { default: "allow" },
+        approvals: { default: "allow" },
+        sandbox: { mode: "off" },
+      },
     }));
-    await expect(createAgentHost(project.configPath)).rejects.toThrow(`reserved Core tool ${toolName}`);
+    const host = await createAgentHost(project.configPath);
+    try {
+      await host.submit({
+        requestId: `mcp-reserved-${toolName}-${suffix}`,
+        conversationId: `mcp-reserved-${toolName}-${suffix}`,
+        text: "go",
+      });
+    } finally {
+      await host.stop();
+    }
+    expect(names.filter((name) => name === toolName)).toHaveLength(
+      toolName === "MemoryRecall" && recallTool === true ? 1 : 0,
+    );
+    expect(names.filter((name) => /^mcp__[A-Za-z0-9_-]{43}$/u.test(name))).toHaveLength(1);
   }
 });
 

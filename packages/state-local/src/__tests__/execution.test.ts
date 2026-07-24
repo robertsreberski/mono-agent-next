@@ -25,6 +25,16 @@ afterEach(async () => {
 describe("state-local execution ownership", () => {
   it("owns the opaque protocol and proactive conversation representation", async () => {
     const store = await open(await createConfig(), () => new Date(NOW));
+    expect(store.toolContributions).toBe(store.execution.toolContributions);
+    expect(store.toolContributions).toEqual([
+      expect.objectContaining({ name: "RunHistory", effects: [] }),
+    ]);
+    expect(Object.isFrozen(store.toolContributions)).toBe(true);
+    expect(Object.isFrozen(store.toolContributions[0])).toBe(true);
+    expect(Object.isFrozen(store.toolContributions[0]?.effects)).toBe(true);
+    expect(Object.isFrozen(store.toolContributions[0]?.inputSchema)).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(store, "toolContributions"))
+      .toMatchObject({ value: store.toolContributions });
     const protocol = await perform<{
       readonly protocol: string;
       readonly version: number;
