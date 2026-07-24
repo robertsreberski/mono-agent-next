@@ -17,7 +17,7 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `5d4273ab8aae325804bea7cc9bebae9d9050068b7b72339c32223e54be53f2d5`
+Source manifest digest: `a99f372c90c55c063957a2f0ef8558c91f093c9ce5405dec1b2f949337122190`
 
 ## Lines of code
 

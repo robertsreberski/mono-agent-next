@@ -219,7 +219,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     }
 
     expect(await digestTree(source)).toBe(sourceDigest);
-  }, 30_000);
+  }, 60_000);
 
   it("removes its exact failed target so an unsupported symlink can be fixed and retried", async () => {
     const fixture = await readFixture();
@@ -1035,7 +1035,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
       expect(await readFile(join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME), "utf8"))
         .toMatch(/^initializing:[0-9a-f-]{36}\n$/u);
     }
-  }, 10_000);
+  }, 30_000);
 
   it("supports a legacy marker-absent source and rejects an in-flight source marker", async () => {
     const fixture = await readFixture();

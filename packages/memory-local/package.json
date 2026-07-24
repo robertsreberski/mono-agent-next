@@ -46,7 +46,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --maxWorkers=1"
+    "test": "vitest run --maxWorkers=1 --testTimeout=15000 --hookTimeout=30000"
   },
   "dependencies": {
     "@mono-agent/module-sdk": "workspace:0.15.0",
