@@ -214,7 +214,7 @@ function optionalString(value: unknown, field: string, rejectControl: boolean): 
     typeof value !== "string"
     || value.length === 0
     || value !== value.trim()
-    || value.length > 4_096
+    || Array.from(value).length > 4_096
     || (rejectControl && /[\u0000-\u001f\u007f]/u.test(value))
   ) {
     throw new ServiceMacosConfigError(`${field} must be a non-empty bounded string without surrounding whitespace.`);

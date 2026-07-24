@@ -4,7 +4,6 @@ import { constants, type BigIntStats } from "node:fs";
 import {
   lstat,
   mkdir,
-  mkdtemp,
   open,
   readdir,
   realpath,
@@ -174,6 +173,9 @@ interface EmbeddingIdentity {
 type SourceMarkerEvidence = MemoryLocalV0SnapshotResult["sourceMarker"];
 
 interface MemoryLocalMigrationTestHooks {
+  readonly beforeSnapshotTargetCreate?: (
+    targetRoot: string,
+  ) => void | Promise<void>;
   readonly beforeSnapshotSourceRecheck?: (
     sourceRoot: string,
     targetRoot: string,
@@ -244,6 +246,7 @@ async function snapshotV0MemoryLocalRootInternal(
     const sourceStateBefore = sourceStateDigest(source, managed, sourceMarker);
     const activeDatabaseBytes = await sourceDatabaseFootprint(managed.path);
     await assertDistinctTarget(source, targetRoot);
+    await hooks.beforeSnapshotTargetCreate?.(targetRoot);
     target = await createPrivateTargetRoot(targetRoot);
     createdTargetIdentity = target.identity;
     await syncDirectory(dirname(targetRoot));
@@ -1264,32 +1267,24 @@ async function createPrivateTargetRoot(path: string): Promise<SecureRoot> {
   ) {
     throw migrationFailure("Snapshot target parent is not protected.");
   }
-  const stagingPath = await mkdtemp(
-    join(parent, `.${basename(path)}.snapshot-creating-`),
-  );
-  let staging: SecureRoot | undefined;
-  let published = false;
   try {
-    staging = await openSecureRoot(stagingPath);
-    if (await lstat(path).then(() => true).catch((error: unknown) => {
-      if (isErrno(error, "ENOENT")) return false;
-      throw error;
-    })) {
+    await mkdir(path, { mode: 0o700 });
+  } catch (error) {
+    if (isErrno(error, "EEXIST")) {
       throw migrationFailure("Snapshot target must not already exist.");
     }
-    await rename(stagingPath, path);
-    published = true;
-    await assertPinnedSnapshotDirectory(path, staging.identity, staging);
-    return Object.freeze({
-      path,
-      handle: staging.handle,
-      identity: staging.identity,
-    });
+    throw error;
+  }
+  let target: SecureRoot | undefined;
+  try {
+    target = await openSecureRoot(path);
+    await assertPinnedSnapshotDirectory(path, target.identity, target);
+    return target;
   } catch (error) {
-    if (!published && staging !== undefined) {
-      await removePinnedSnapshotDirectory(stagingPath, staging).catch(() => undefined);
+    if (target !== undefined) {
+      await removePinnedSnapshotDirectory(path, target).catch(() => undefined);
     }
-    await staging?.handle.close().catch(() => undefined);
+    await target?.handle.close().catch(() => undefined);
     throw error;
   }
 }

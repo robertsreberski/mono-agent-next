@@ -167,6 +167,20 @@ describe("service-macos config", () => {
     expect(optionalPattern.test("https://mono-agent.dev/schema.json")).toBe(true);
     expect(optionalPattern.test(" https://mono-agent.dev/schema.json")).toBe(false);
     expect(optionalPattern.test("https://mono-agent.dev/schema.json\t")).toBe(false);
+    const withSchema = ($schema: string) => ({
+      $schema,
+      configVersion: 1,
+      services: {
+        agent: {
+          target: { kind: "agent", config: "/tmp/mono-agent.config.json" },
+          startAtLogin: false,
+          restartPolicy: "on-failure",
+          logs: { directory: "/tmp/logs" },
+        },
+      },
+    });
+    expect(() => parseServiceMacosConfig(withSchema("😀".repeat(4_096)))).not.toThrow();
+    expect(() => parseServiceMacosConfig(withSchema("😀".repeat(4_097)))).toThrow(/bounded string/u);
   });
 });
 

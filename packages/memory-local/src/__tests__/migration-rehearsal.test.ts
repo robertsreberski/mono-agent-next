@@ -237,6 +237,43 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     });
   });
 
+  it.each(["directory", "symlink"] as const)(
+    "does not replace a concurrently created %s target",
+    async (replacementKind) => {
+      const fixture = await readFixture();
+      const testRoot = await createTestRoot();
+      const source = join(testRoot, "v0-source");
+      const rehearsal = join(testRoot, "v1-rehearsal-copy");
+      const replacement = replacementKind === "directory"
+        ? rehearsal
+        : join(testRoot, "operator-target");
+      await seedV0FinalStore(source, fixture);
+
+      await expect(snapshotV0MemoryLocalRootForTesting({
+        sourceRoot: source,
+        targetRoot: rehearsal,
+        signal,
+      }, {
+        async beforeSnapshotTargetCreate() {
+          await mkdir(replacement, { mode: 0o700 });
+          await writeFile(join(replacement, "operator-replacement.txt"), "preserve me\n", {
+            flag: "wx",
+            mode: 0o600,
+          });
+          if (replacementKind === "symlink") {
+            await symlink(replacement, rehearsal);
+          }
+        },
+      })).rejects.toThrow(/must not already exist/u);
+
+      expect(await readFile(join(replacement, "operator-replacement.txt"), "utf8"))
+        .toBe("preserve me\n");
+      if (replacementKind === "symlink") {
+        expect(await realpath(rehearsal)).toBe(replacement);
+      }
+    },
+  );
+
   it("preserves a replacement target and blocks retry when the created root identity changes", async () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
