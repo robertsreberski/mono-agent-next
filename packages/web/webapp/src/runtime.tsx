@@ -129,7 +129,22 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
     isRunning && consoleState.selectedAgent?.capabilities.liveInput === true
       ? {
           items: [],
-          enqueue: (message) => { onNew(message); },
+          // `onNew` reaches `api.liveInput`, which rejects with 409
+          // `live_input_unavailable` when the turn settles between the composer
+          // accepting the steer and the request landing. Dropping the promise
+          // turned that ordinary race into an unhandled rejection, and the
+          // operator saw nothing at all.
+          enqueue: (message) => {
+            void onNew(message).catch((error: unknown) => {
+              window.dispatchEvent(new CustomEvent("mono-agent:notice", {
+                detail: {
+                  message: error instanceof Error && error.message.trim()
+                    ? error.message
+                    : "Live input could not be delivered.",
+                },
+              }));
+            });
+          },
           steer: () => undefined,
           remove: () => undefined,
           clear: () => undefined,
