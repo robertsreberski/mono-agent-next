@@ -20,7 +20,10 @@ import type {
   RuntimeTurnEvent,
   RuntimeTurnRequest,
 } from "@mono-agent/module-sdk";
-import { RUNTIME_SESSION_UNAVAILABLE_CODE } from "@mono-agent/module-sdk";
+import {
+  AGENT_INTERACTION_LIMITS,
+  RUNTIME_SESSION_UNAVAILABLE_CODE,
+} from "@mono-agent/module-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { parseRuntimePiConfig } from "../config.js";
@@ -510,6 +513,113 @@ describe("Pi-native runtime module", () => {
         content: [{ type: "text", text: "42" }],
       },
     });
+    await stop(runtime);
+  });
+
+  it("executes approved Bash for composite Pi call ids without changing result identity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "runtime-pi-composite-bash-"));
+    roots.push(root);
+    const firstMarker = join(root, "first-executed.txt");
+    const secondMarker = join(root, "second-executed.txt");
+    const compositeCallId = "call_TerraApprovalProbe123|fc_0ea6d06dbcf4ce22";
+    const validCollisionCandidate =
+      "pi-call-9143b1b46edac8943eac571a46464b59655bdaef6f3b895ed82bc7d1812fec16";
+    const command = (marker: string, output: string): string => {
+      const script = [
+        `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "executed")`,
+        `process.stdout.write(${JSON.stringify(output)})`,
+      ].join(";");
+      return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`;
+    };
+    const faux = fauxProvider({
+      provider: "faux",
+      models: [{ id: "faux-model", input: ["text"] }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("Bash", {
+        command: command(firstMarker, "first Bash completed"),
+        timeout: 30_000,
+        workdir: root,
+        max_output_chars: 1_024,
+      }, { id: compositeCallId })]),
+      fauxAssistantMessage([fauxToolCall("Bash", {
+        command: command(secondMarker, "second Bash completed"),
+        timeout: 30_000,
+        workdir: root,
+        max_output_chars: 1_024,
+      }, { id: validCollisionCandidate })]),
+      fauxAssistantMessage([fauxText("bash observed")]),
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const runtime = createRuntimePi({
+      config: parseRuntimePiConfig({}),
+      instanceId: "composite-bash-runtime",
+      configDirectory: root,
+      workspaceDirectory: root,
+      models,
+    });
+    const requestApproval = vi.fn<NonNullable<RuntimeTurnContext["requestApproval"]>>(
+      async (approval) => ({
+        interactionId: approval.interactionId,
+        decision: "allow_once",
+        decidedAt: new Date().toISOString(),
+      }),
+    );
+    const { context, events } = turnContext(undefined, { requestApproval });
+    await start(runtime);
+
+    await expect(runtime.runTurn(request("run both Bash calls"), context))
+      .resolves.toMatchObject({
+        status: "completed",
+        message: { content: [{ type: "text", text: "bash observed" }] },
+      });
+
+    expect(await readFile(firstMarker, "utf8")).toBe("executed");
+    expect(await readFile(secondMarker, "utf8")).toBe("executed");
+    expect(requestApproval).toHaveBeenCalledTimes(2);
+    const approvals = requestApproval.mock.calls.map(([approval]) => approval);
+    expect(approvals[0]).toMatchObject({
+      callId: validCollisionCandidate,
+      toolId: "Bash",
+      displayName: "Bash",
+      effects: ["read", "write", "execute", "network"],
+    });
+    expect(approvals[0]?.callId).not.toBe(compositeCallId);
+    expect(approvals[1]?.callId).toMatch(/^pi-call-escaped-[0-9a-f]{64}$/u);
+    expect(approvals[1]?.callId).not.toBe(validCollisionCandidate);
+    expect(new Set(approvals.map((approval) => approval.callId)).size).toBe(2);
+    expect(new Set(approvals.map((approval) => approval.interactionId)).size).toBe(2);
+    for (const approval of approvals) {
+      expect(approval.callId.length)
+        .toBeLessThanOrEqual(AGENT_INTERACTION_LIMITS.identifierCharacters);
+      expect(approval.callId).toMatch(/^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u);
+    }
+    for (const [callId, output] of [
+      [compositeCallId, "first Bash completed"],
+      [validCollisionCandidate, "second Bash completed"],
+    ] as const) {
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "tool-call",
+        call: expect.objectContaining({ id: callId, name: "Bash" }),
+      }));
+      const resultEvent = events.find(
+        (event) => event.type === "tool-result" && event.result.callId === callId,
+      );
+      expect(resultEvent).toEqual(expect.objectContaining({
+        type: "tool-result",
+        result: expect.objectContaining({
+          callId,
+          content: [expect.objectContaining({
+            type: "text",
+            text: expect.stringContaining(output),
+          })],
+        }),
+      }));
+      if (resultEvent?.type === "tool-result") {
+        expect(resultEvent.result.isError).not.toBe(true);
+      }
+    }
     await stop(runtime);
   });
 

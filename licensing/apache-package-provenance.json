@@ -75,7 +75,7 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/contract-codecs.test.ts",
-      "sha256": "9d0e998091d61963d1bc1e3b4d0ed8d3954e02abfb78595aacc16a3279e26df3",
+      "sha256": "1fd7974142cef193a8c707b57bca774dc5900b26217af02ad0b974e9661f8d82",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",

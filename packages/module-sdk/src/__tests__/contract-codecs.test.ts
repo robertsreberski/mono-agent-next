@@ -244,6 +244,10 @@ describe("approval codecs", () => {
       ...APPROVAL_REQUEST,
       effects: ["read", "read"],
     })).toThrow("must not contain duplicate effects");
+    expect(() => parseApprovalRequest({
+      ...APPROVAL_REQUEST,
+      callId: "call_x|fc_y",
+    })).toThrow("approval request.callId contains unsupported characters");
     expect(() => parseApprovalDecision({
       interactionId: "approval-other",
       decision: "deny",
