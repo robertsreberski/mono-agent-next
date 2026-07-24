@@ -43,39 +43,20 @@ import type { AgentHealth, AgentHost, AgentHostOptions, AgentHostStartInfo, Agen
   AgentRunRecord, AgentSubmitInput, AgentTranscriptContentPart, AgentTranscriptEntry, LoadedAgentConfig,
   LoadedAgentModule, ModuleKind, RuntimeRoute } from "./types.js";
 const DEFAULT_MAX_CONCURRENT_TURNS = 4, DEFAULT_MAX_PENDING_TURNS = 64;
-const DEFAULT_DRAIN_TIMEOUT_MS = 30_000;
-const DEFAULT_LIFECYCLE_TIMEOUT_MS = 10_000;
-const DEFAULT_LIVE_INPUT_ACK_TIMEOUT_MS = 5_000;
-const DEFAULT_INSTRUCTION_BYTES = 1_000_000;
-const DEFAULT_MESSAGE_BYTES = 1_000_000;
-const DEFAULT_MAX_ATTACHMENTS = 10;
-const DEFAULT_ATTACHMENT_BYTES = 25_000_000;
-const DEFAULT_TOTAL_ATTACHMENT_BYTES = 50_000_000;
-const SUBMIT_SNAPSHOT_MAX_ITEMS = 20_000;
-const SUBMIT_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024;
-const SUBMIT_SNAPSHOT_MAX_DEPTH = 64;
-const CACHED_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
-const MAX_TRANSCRIPT_ARTIFACT_BYTES = 64 * 1024 * 1024;
-const MODULE_OUTPUT_MAX_BYTES = 1024 * 1024;
-const MODULE_OUTPUT_MAX_ITEMS = 10_000;
-const MODULE_OUTPUT_MAX_DEPTH = 32;
-const MODULE_DIAGNOSTIC_MAX_ITEMS = 100;
-const MAX_CONFIGURED_SKILLS = 256;
-const ASK_USER_TOOL_NAME = "AskUser", MEMORY_RECALL_TOOL_NAME = "MemoryRecall";
-const MAX_SKILL_ROOT_ENTRIES = 1_024;
-const PROACTIVE_SUPPRESSION_SENTINEL = "NOTHING_TO_REPORT";
+const DEFAULT_DRAIN_TIMEOUT_MS = 30_000, DEFAULT_LIFECYCLE_TIMEOUT_MS = 10_000, DEFAULT_LIVE_INPUT_ACK_TIMEOUT_MS = 5_000;
+const DEFAULT_INSTRUCTION_BYTES = 1_000_000, DEFAULT_MESSAGE_BYTES = 1_000_000;
+const DEFAULT_MAX_ATTACHMENTS = 10, DEFAULT_ATTACHMENT_BYTES = 25_000_000, DEFAULT_TOTAL_ATTACHMENT_BYTES = 50_000_000;
+const SUBMIT_SNAPSHOT_MAX_ITEMS = 20_000, SUBMIT_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024, SUBMIT_SNAPSHOT_MAX_DEPTH = 64;
+const CACHED_RESPONSE_MAX_BYTES = 8 * 1024 * 1024, MAX_TRANSCRIPT_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const MODULE_OUTPUT_MAX_BYTES = 1024 * 1024, MODULE_OUTPUT_MAX_ITEMS = 10_000, MODULE_OUTPUT_MAX_DEPTH = 32, MODULE_DIAGNOSTIC_MAX_ITEMS = 100;
+const MAX_CONFIGURED_SKILLS = 256, MAX_SKILL_ROOT_ENTRIES = 1_024;
+const ASK_USER_TOOL_NAME = "AskUser", MEMORY_RECALL_TOOL_NAME = "MemoryRecall", PROACTIVE_SUPPRESSION_SENTINEL = "NOTHING_TO_REPORT";
 type SessionDisposition = "retain" | "isolate" | "evict";
-interface RunningModule {
-  readonly loaded: LoadedAgentModule;
-  readonly instance: ModuleInstance;
-}
+interface RunningModule { readonly loaded: LoadedAgentModule; readonly instance: ModuleInstance }
 type VerbatimEntry = Extract<AgentTranscriptEntry, { readonly kind: "verbatim" }>;
 type DeliveryIntent = Awaited<ReturnType<StateExecutionClient["prepareDelivery"]>> | undefined;
 interface BoundChannelTool { readonly instanceId: string; readonly channel: Channel; readonly name: string; readonly tool: ChannelSendTool }
-interface ChannelDeliveryOutcome {
-  readonly result: ChannelDeliveryResult;
-  readonly destinationConversationId?: string;
-}
+interface ChannelDeliveryOutcome { readonly result: ChannelDeliveryResult; readonly destinationConversationId?: string }
 interface ActiveTurn {
   readonly id: string;
   readonly requestId: string;
@@ -101,16 +82,9 @@ interface ActiveTurn {
     readonly reject: (error: Error) => void;
   } | undefined;
 }
-interface TranscriptArtifactDraft {
-  readonly kind: "pending-artifact";
-  readonly slot: string;
-  readonly name?: string;
-}
+interface TranscriptArtifactDraft { readonly kind: "pending-artifact"; readonly slot: string; readonly name?: string }
 type TranscriptContentDraft = AgentTranscriptContentPart | TranscriptArtifactDraft;
-interface LoadedInstructions {
-  readonly text: string;
-  readonly tools: readonly CoreRuntimeTool[];
-}
+interface LoadedInstructions { readonly text: string; readonly tools: readonly CoreRuntimeTool[] }
 type HostState = "new" | "starting" | "running" | "draining" | "stopped" | "failed";
 export async function createAgentHost(
   config: string | LoadedAgentConfig,
