@@ -1,12 +1,20 @@
 import { createHash } from "node:crypto";
-import { constants, type BigIntStats } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import {
+  constants,
+  fstatSync,
+  ftruncateSync,
+  type BigIntStats,
+} from "node:fs";
+import { lstat, open, type FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { ServiceRunnerActivation } from "./plist.js";
 type ActivationLogs = ServiceRunnerActivation["logs"];
 type ReadinessRecord = { readonly event: "reset" } | {
   readonly event: "started" | "stopped"; readonly serviceMacosProof: string; readonly pid: number;
 };
+interface ServiceLogRotationTestHooks {
+  readonly afterArchiveWrite?: (path: string) => void | Promise<void>;
+}
 export interface ServiceLogBinding { readonly stdout: string; readonly stderr: string }
 export interface ManagedServiceLogSnapshot {
   readonly exists: boolean;
@@ -127,9 +135,26 @@ async function readOptionalManagedFile(
 export async function maintainServiceLogs(
   logs: ActivationLogs, uid: number, binding?: ServiceLogBinding,
 ): Promise<void> {
+  await maintainServiceLogsInternal(logs, uid, binding, {});
+}
+/** @internal Test-only adversarial hook surface; not exported by the package entrypoint. */
+export async function maintainServiceLogsForTesting(
+  logs: ActivationLogs,
+  uid: number,
+  hooks: ServiceLogRotationTestHooks,
+  binding?: ServiceLogBinding,
+): Promise<void> {
+  await maintainServiceLogsInternal(logs, uid, binding, hooks);
+}
+async function maintainServiceLogsInternal(
+  logs: ActivationLogs,
+  uid: number,
+  binding: ServiceLogBinding | undefined,
+  hooks: ServiceLogRotationTestHooks,
+): Promise<void> {
   await Promise.all([
-    rotate(logs.stdoutPath, logs, uid, false, binding?.stdout),
-    rotate(logs.stderrPath, logs, uid, false, binding?.stderr),
+    rotate(logs.stdoutPath, logs, uid, false, binding?.stdout, hooks),
+    rotate(logs.stderrPath, logs, uid, false, binding?.stderr, hooks),
   ]);
 }
 export async function readManagedServiceLog(
@@ -258,7 +283,12 @@ async function rewriteReadiness(
   } finally { await handle.close(); }
 }
 async function rotate(
-  path: string, logs: ActivationLogs, uid: number, force: boolean, expected?: string,
+  path: string,
+  logs: ActivationLogs,
+  uid: number,
+  force: boolean,
+  expected?: string,
+  hooks: ServiceLogRotationTestHooks = {},
 ): Promise<void> {
   await assertDirectory(logs, uid);
   let handle;
@@ -277,13 +307,19 @@ async function rotate(
     if (before.size === 0n || (!force && before.size <= BigInt(logs.maxBytes))) return;
     const bytes = Number(before.size > BigInt(logs.maxBytes) ? BigInt(logs.maxBytes) : before.size);
     const archive = Buffer.alloc(bytes);
-    await handle.read(archive, 0, bytes, Number(before.size) - bytes);
+    await readExact(handle, archive, Number(before.size) - bytes, path);
     const after = await handle.stat({ bigint: true });
     assertSame(path, before, after);
     await assertBound(logs, path, after, uid);
     await writeArchive(path, archive, logs, uid);
+    await hooks.afterArchiveWrite?.(path);
     await assertBound(logs, path, after, uid);
-    await handle.truncate(0); await handle.sync();
+    // The managed target shares this Node event loop. Keep the final descriptor
+    // stability check and truncate synchronous so its writes cannot interleave.
+    const preTruncate = fstatSync(handle.fd, { bigint: true });
+    assertSame(path, after, preTruncate);
+    ftruncateSync(handle.fd, 0);
+    await handle.sync();
     const final = await handle.stat({ bigint: true });
     if (!sameFile(after, final)) throw new Error(`${path} changed during log rotation.`);
     await assertBound(logs, path, final, uid);
@@ -313,9 +349,44 @@ async function writeArchive(path: string, bytes: Buffer, logs: ActivationLogs, u
     const opened = await handle.stat({ bigint: true }); assertSafe(selected.path, opened, uid);
     if (selected.stats !== undefined && !sameFile(selected.stats, opened)) throw new Error(`${selected.path} changed before archive rotation.`);
     await assertBound(logs, selected.path, opened, uid);
-    await handle.truncate(0); await handle.write(bytes, 0, bytes.length, 0); await handle.sync();
+    await handle.truncate(0); await writeExact(handle, bytes, selected.path); await handle.sync();
     await assertBound(logs, selected.path, await handle.stat({ bigint: true }), uid);
   } finally { await handle.close(); }
+}
+async function readExact(
+  handle: FileHandle,
+  target: Buffer,
+  position: number,
+  path: string,
+): Promise<void> {
+  let offset = 0;
+  while (offset < target.byteLength) {
+    const { bytesRead } = await handle.read(
+      target,
+      offset,
+      target.byteLength - offset,
+      position + offset,
+    );
+    if (bytesRead === 0) throw new Error(`${path} changed during log rotation.`);
+    offset += bytesRead;
+  }
+}
+async function writeExact(
+  handle: FileHandle,
+  source: Buffer,
+  path: string,
+): Promise<void> {
+  let offset = 0;
+  while (offset < source.byteLength) {
+    const { bytesWritten } = await handle.write(
+      source,
+      offset,
+      source.byteLength - offset,
+      offset,
+    );
+    if (bytesWritten === 0) throw new Error(`${path} archive write was incomplete.`);
+    offset += bytesWritten;
+  }
 }
 async function bindFile(logs: ActivationLogs, path: string, uid: number): Promise<string> {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);

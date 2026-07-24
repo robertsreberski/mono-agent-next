@@ -96,7 +96,12 @@ log inputs reject group/world-writable files. `logs.maxBytes` and
 `logs.retainFiles` are enforced independently for stdout and stderr through a
 fixed number of exact owner-private archive slots and copy-truncate tail
 rotation. The runner binds the planned log directory and live log inodes, so a
-replaced path fails closed instead of truncating an operator file. Lowering
+replaced path fails closed instead of truncating an operator file. A live
+append detected after archive publication also aborts truncation, retaining
+the live log even if a later cycle duplicates the archived tail. The final
+descriptor check and truncate are a synchronous no-yield pair because the
+managed host and rotation share one Node event loop; mutation through an
+external same-UID descriptor is outside this owner-private boundary. Lowering
 `retainFiles` is rejected before mutation while higher-numbered managed slots
 remain; remove those explicit archive files before applying the decrease.
 

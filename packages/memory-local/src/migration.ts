@@ -9,6 +9,7 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   type FileHandle,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -176,6 +177,15 @@ interface MemoryLocalMigrationTestHooks {
   readonly beforeSnapshotTargetCreate?: (
     targetRoot: string,
   ) => void | Promise<void>;
+  readonly beforeSnapshotTargetOpen?: (
+    targetRoot: string,
+  ) => void | Promise<void>;
+  readonly beforeSnapshotTargetCleanupRename?: (
+    targetRoot: string,
+  ) => void | Promise<void>;
+  readonly beforeSnapshotFailureCleanupRename?: (
+    targetRoot: string,
+  ) => void | Promise<void>;
   readonly beforeSnapshotSourceRecheck?: (
     sourceRoot: string,
     targetRoot: string,
@@ -247,7 +257,7 @@ async function snapshotV0MemoryLocalRootInternal(
     const activeDatabaseBytes = await sourceDatabaseFootprint(managed.path);
     await assertDistinctTarget(source, targetRoot);
     await hooks.beforeSnapshotTargetCreate?.(targetRoot);
-    target = await createPrivateTargetRoot(targetRoot);
+    target = await createPrivateTargetRoot(targetRoot, hooks);
     createdTargetIdentity = target.identity;
     await syncDirectory(dirname(targetRoot));
     if (sameRoot(source.identity, target.identity)) {
@@ -345,6 +355,7 @@ async function snapshotV0MemoryLocalRootInternal(
           targetRoot,
           createdTargetIdentity,
           target,
+          hooks,
         );
       } catch (error) {
         cleanupError = error;
@@ -1253,7 +1264,10 @@ async function inspectSourceMarker(root: string): Promise<SourceMarkerEvidence> 
   });
 }
 
-async function createPrivateTargetRoot(path: string): Promise<SecureRoot> {
+async function createPrivateTargetRoot(
+  path: string,
+  hooks: MemoryLocalMigrationTestHooks,
+): Promise<SecureRoot> {
   const parent = dirname(path);
   const parentReal = await realpath(parent).catch(() => undefined);
   if (parentReal !== parent) {
@@ -1275,17 +1289,120 @@ async function createPrivateTargetRoot(path: string): Promise<SecureRoot> {
     }
     throw error;
   }
+  let observed: BigIntStats | undefined;
+  let handle: FileHandle | undefined;
   let target: SecureRoot | undefined;
   try {
-    target = await openSecureRoot(path);
+    observed = await lstat(path, { bigint: true });
+    assertFreshSnapshotTarget(observed);
+    // Portable Node does not expose mkdir-with-fd or openat. Within this
+    // owner-private migration boundary, a same-UID swap before the first
+    // observation is excluded because that principal can already inspect and
+    // mutate this process's private data. From this observation onward, bind
+    // and recheck the exact directory identity before copying.
+    await hooks.beforeSnapshotTargetOpen?.(path);
+    handle = await open(
+      path,
+      constants.O_RDONLY
+        | (constants.O_DIRECTORY ?? 0)
+        | (constants.O_NOFOLLOW ?? 0),
+    );
+    const opened = await handle.stat({ bigint: true });
+    if (!sameObservedSnapshotDirectory(observed, opened)) {
+      throw migrationFailure("Snapshot target identity changed while binding its created directory.");
+    }
+    target = Object.freeze({
+      path,
+      handle,
+      identity: snapshotDirectoryIdentity(opened),
+    });
     await assertPinnedSnapshotDirectory(path, target.identity, target);
     return target;
   } catch (error) {
-    if (target !== undefined) {
-      await removePinnedSnapshotDirectory(path, target).catch(() => undefined);
+    const removed = observed !== undefined
+      && await removeObservedEmptySnapshotTarget(path, observed, target, hooks);
+    await handle?.close().catch(() => undefined);
+    if (!removed) {
+      throw migrationFailure(
+        "Snapshot target identity changed during creation; preserving it as unusable.",
+      );
     }
-    await target?.handle.close().catch(() => undefined);
     throw error;
+  }
+}
+
+async function removeObservedEmptySnapshotTarget(
+  path: string,
+  expected: BigIntStats,
+  pinned: SecureRoot | undefined,
+  hooks: MemoryLocalMigrationTestHooks,
+): Promise<boolean> {
+  const current = await lstat(path, { bigint: true }).catch(() => undefined);
+  if (
+    current === undefined
+    || !sameObservedSnapshotDirectory(expected, current)
+    || (await readdir(path).catch(() => ["unsafe"])).length !== 0
+  ) {
+    return false;
+  }
+  const quarantine = join(
+    dirname(path),
+    `.${basename(path)}.snapshot-creation-cleanup-${randomUUID()}`,
+  );
+  let moved = false;
+  try {
+    if (pinned !== undefined) {
+      await assertPinnedSnapshotDirectory(path, pinned.identity, pinned);
+    }
+    await hooks.beforeSnapshotTargetCleanupRename?.(path);
+    await rename(path, quarantine);
+    moved = true;
+    const movedStats = await lstat(quarantine, { bigint: true });
+    if (
+      !sameObservedSnapshotDirectoryObject(expected, movedStats)
+      || (await readdir(quarantine)).length !== 0
+    ) {
+      await restoreQuarantinedSnapshotTarget(path, quarantine);
+      return false;
+    }
+    if (pinned !== undefined) {
+      try {
+        await assertPinnedSnapshotDirectory(quarantine, pinned.identity, pinned);
+      } catch {
+        await restoreQuarantinedSnapshotTarget(path, quarantine);
+        return false;
+      }
+    }
+    await rmdir(quarantine);
+    moved = false;
+    await syncDirectory(dirname(path));
+    return true;
+  } catch {
+    if (moved) await restoreQuarantinedSnapshotTarget(path, quarantine);
+    return false;
+  }
+}
+
+async function restoreQuarantinedSnapshotTarget(
+  path: string,
+  quarantine: string,
+): Promise<void> {
+  const occupied = await lstat(path).then(
+    () => true,
+    (error: unknown) => {
+      if (isErrno(error, "ENOENT")) return false;
+      return true;
+    },
+  );
+  if (occupied) return;
+  // Portable Node has no no-replace directory rename. This best-effort restore
+  // avoids overwriting an observed pathname; the remaining same-UID race is the
+  // same explicitly excluded threat boundary as target creation.
+  try {
+    await rename(quarantine, path);
+    await syncDirectory(dirname(path));
+  } catch {
+    // Restored or quarantined ambiguous data remains for operator remediation.
   }
 }
 
@@ -1293,6 +1410,7 @@ async function cleanupFailedSnapshotTarget(
   path: string,
   expected: FileIdentity,
   pinned: SecureRoot | undefined,
+  hooks: MemoryLocalMigrationTestHooks,
 ): Promise<void> {
   if (pinned === undefined) {
     throw migrationFailure(
@@ -1310,25 +1428,64 @@ async function cleanupFailedSnapshotTarget(
       "Failed snapshot target identity changed; preserving it as unusable.",
     );
   }
+  let moved = false;
   try {
+    await hooks.beforeSnapshotFailureCleanupRename?.(path);
     await rename(path, quarantine);
+    moved = true;
     await assertPinnedSnapshotDirectory(quarantine, expected, pinned);
     await rm(quarantine, { recursive: true });
+    moved = false;
     await syncDirectory(dirname(path));
   } catch {
+    if (moved) await restoreQuarantinedSnapshotTarget(path, quarantine);
     throw migrationFailure(
       "Failed snapshot target could not be safely removed and remains unusable.",
     );
   }
 }
 
-async function removePinnedSnapshotDirectory(
-  path: string,
-  pinned: SecureRoot,
-): Promise<void> {
-  await assertPinnedSnapshotDirectory(path, pinned.identity, pinned);
-  await rm(path, { recursive: true });
-  await syncDirectory(dirname(path));
+function assertFreshSnapshotTarget(stats: BigIntStats): void {
+  if (
+    !stats.isDirectory()
+    || stats.isSymbolicLink()
+    || stats.uid !== BigInt(currentUid())
+    || (stats.mode & 0o777n) !== 0o700n
+  ) {
+    throw migrationFailure("Exclusively created snapshot target is not owner-private.");
+  }
+}
+
+function sameObservedSnapshotDirectory(
+  left: BigIntStats,
+  right: BigIntStats,
+): boolean {
+  return sameObservedSnapshotDirectoryObject(left, right)
+    && left.ctimeNs === right.ctimeNs;
+}
+
+function sameObservedSnapshotDirectoryObject(
+  left: BigIntStats,
+  right: BigIntStats,
+): boolean {
+  return left.isDirectory()
+    && right.isDirectory()
+    && left.dev === right.dev
+    && left.ino === right.ino
+    && left.uid === right.uid
+    && left.mode === right.mode
+    && left.nlink === right.nlink;
+}
+
+function snapshotDirectoryIdentity(stats: BigIntStats): FileIdentity {
+  return Object.freeze({
+    device: String(stats.dev),
+    inode: String(stats.ino),
+    mode: Number(stats.mode & 0o7777n),
+    links: Number(stats.nlink),
+    owner: Number(stats.uid),
+    size: Number(stats.size),
+  });
 }
 
 async function assertPinnedSnapshotDirectory(

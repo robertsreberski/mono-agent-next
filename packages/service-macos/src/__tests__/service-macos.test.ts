@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import {
   access,
+  appendFile,
   chmod,
   lstat,
   mkdir,
@@ -54,6 +55,7 @@ import {
 import {
   bindServiceLogs,
   maintainServiceLogs,
+  maintainServiceLogsForTesting,
   preflightServiceLogs,
   readManagedServiceLog,
   readServiceReadiness,
@@ -181,6 +183,7 @@ describe("service-macos config", () => {
     });
     expect(() => parseServiceMacosConfig(withSchema("😀".repeat(4_096)))).not.toThrow();
     expect(() => parseServiceMacosConfig(withSchema("😀".repeat(4_097)))).toThrow(/bounded string/u);
+    expect(() => parseServiceMacosConfig(withSchema("x".repeat(1_000_000)))).toThrow(/bounded string/u);
   });
 });
 
@@ -663,6 +666,34 @@ describe("service-macos reconciliation", () => {
     await writeFile(stderrPath, "unsafe", { mode: 0o644 });
     await chmod(stderrPath, 0o644);
     await expect(maintainServiceLogs(logs, fixture.runtime.uid)).rejects.toThrow(/owner-private/u);
+  });
+
+  it("preserves a live append that arrives after the archive write", async () => {
+    const fixture = await createFixture();
+    const stdoutPath = join(fixture.root, "logs", "personal-agent.stdout.log");
+    const directory = await lstat(join(fixture.root, "logs"), { bigint: true });
+    const logs = {
+      directory: join(fixture.root, "logs"),
+      directoryIdentity: [directory.dev, directory.ino, directory.uid, directory.mode & 0o777n].join(":"),
+      stdoutPath,
+      stderrPath: join(fixture.root, "logs", "personal-agent.stderr.log"),
+      readinessPath: join(fixture.root, "logs", "personal-agent.ready.json"),
+      maxBytes: 4,
+      retainFiles: 2,
+    };
+    await writeFile(stdoutPath, "12345", { mode: 0o600 });
+
+    await expect(maintainServiceLogsForTesting(logs, fixture.runtime.uid, {
+      async afterArchiveWrite(path) {
+        if (path === stdoutPath) await appendFile(path, "later");
+      },
+    })).rejects.toThrow(/changed during operation/u);
+
+    expect(await readFile(stdoutPath, "utf8")).toBe("12345later");
+    const archives = (await readdir(logs.directory))
+      .filter((name) => name.endsWith(".mono-agent-log"));
+    expect(archives).toHaveLength(1);
+    expect(await readFile(join(logs.directory, archives[0]!), "utf8")).toBe("2345");
   });
 
   it("rejects owner-private FIFOs without blocking managed log readers", async () => {

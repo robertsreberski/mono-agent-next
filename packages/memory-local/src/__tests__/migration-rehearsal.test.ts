@@ -274,6 +274,93 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     },
   );
 
+  it("removes its observed empty target when opening fails before descriptor binding", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      beforeSnapshotTargetOpen() {
+        throw new Error("injected pre-open failure");
+      },
+    })).rejects.toThrow(/injected pre-open failure/u);
+    expect(existsSync(rehearsal)).toBe(false);
+
+    await expect(snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    })).resolves.toMatchObject({
+      targetRoot: rehearsal,
+      database: { records: 3 },
+    });
+  });
+
+  it("rejects a target swap before descriptor binding without deleting either directory", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const displaced = join(testRoot, "displaced-created-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      async beforeSnapshotTargetOpen() {
+        await rename(rehearsal, displaced);
+        await mkdir(rehearsal, { mode: 0o700 });
+        await writeFile(join(rehearsal, "operator-replacement.txt"), "preserve me\n", {
+          flag: "wx",
+          mode: 0o600,
+        });
+      },
+    })).rejects.toThrow(/identity changed during creation/u);
+
+    expect(await readFile(join(rehearsal, "operator-replacement.txt"), "utf8"))
+      .toBe("preserve me\n");
+    expect(existsSync(displaced)).toBe(true);
+  });
+
+  it("restores a replacement moved by a target-creation cleanup race", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const displaced = join(testRoot, "displaced-created-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      beforeSnapshotTargetOpen() {
+        throw new Error("injected pre-open failure");
+      },
+      async beforeSnapshotTargetCleanupRename() {
+        await rename(rehearsal, displaced);
+        await mkdir(rehearsal, { mode: 0o700 });
+        await writeFile(join(rehearsal, "operator-replacement.txt"), "preserve me\n", {
+          flag: "wx",
+          mode: 0o600,
+        });
+      },
+    })).rejects.toThrow(/preserving it as unusable/u);
+
+    expect(await readFile(join(rehearsal, "operator-replacement.txt"), "utf8"))
+      .toBe("preserve me\n");
+    expect(existsSync(displaced)).toBe(true);
+  });
+
   it("preserves a replacement target and blocks retry when the created root identity changes", async () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
@@ -306,6 +393,37 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
       targetRoot: rehearsal,
       signal,
     })).rejects.toThrow(/must not already exist/u);
+  });
+
+  it("restores a replacement moved by post-copy failure cleanup", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const displaced = join(testRoot, "displaced-created-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      beforeSnapshotSourceRecheck() {
+        throw new Error("injected post-copy failure");
+      },
+      async beforeSnapshotFailureCleanupRename() {
+        await rename(rehearsal, displaced);
+        await mkdir(rehearsal, { mode: 0o700 });
+        await writeFile(join(rehearsal, "operator-replacement.txt"), "preserve me\n", {
+          flag: "wx",
+          mode: 0o600,
+        });
+      },
+    })).rejects.toThrow(/could not be safely removed/u);
+
+    expect(await readFile(join(rehearsal, "operator-replacement.txt"), "utf8"))
+      .toBe("preserve me\n");
+    expect(existsSync(displaced)).toBe(true);
   });
 
   it("rejects an oversized active database before creating a target or running backup", async () => {
