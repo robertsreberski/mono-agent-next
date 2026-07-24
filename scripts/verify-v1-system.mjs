@@ -39,6 +39,7 @@ const COMMAND_TIMEOUT_MS = 300_000;
 const SHUTDOWN_TIMEOUT_MS = 10_000;
 const EXPECTED_REPLY = "mono-agent-next durable provider fact 7d3f9c";
 const MEMORY_QUERY = "packed-memory-query-a41c";
+const MEMORY_RECALL_CALL_ID = "packed-memory-recall-call";
 const PERSONAL_WEBHOOK_PROMPT = "Handle this authenticated project webhook request.";
 const WEBHOOK_SECRET = "packed-system-webhook-token";
 const OPERATOR_SECRET = "packed-system-operator-token-0000000000000001";
@@ -1469,7 +1470,7 @@ function packedSystemConfig({ providerBaseUrl, otlpEndpoint, deliveryEndpoint })
       },
     },
     policy: {
-      tools: { default: "deny", allow: [] },
+      tools: { default: "deny", allow: ["MemoryRecall"] },
       approvals: { default: "allow" },
       sandbox: { mode: "off" },
     },
@@ -1494,6 +1495,7 @@ import { startWebServer } from "@mono-agent/web";
 const EXPECTED_REPLY = "mono-agent-next durable provider fact 7d3f9c";
 const MEMORY_QUERY = "packed-memory-query-a41c";
 const WEB_TOKEN = "packed-system-web-token-0000000000000001";
+const MEMORY_RECALL_CALL_ID = "packed-memory-recall-call";
 const configPath = resolve(process.argv[2] ?? "mono-agent.config.json");
 const configDirectory = dirname(configPath);
 const webhookSecret = requiredEnvironment("SYSTEM_WEBHOOK_TOKEN");
@@ -1537,6 +1539,13 @@ try {
   const completed = operatorFrames.find((frame) => frame.type === "completed");
   assert.ok(completed, "operator turn did not emit a completed frame");
   assert.equal(completed.finalMessage.text, EXPECTED_REPLY);
+  const memoryToolCall = operatorFrames.find((frame) =>
+    frame.type === "tool_call" && frame.call.name === "MemoryRecall");
+  assert.deepEqual(memoryToolCall?.call.input, { query: MEMORY_QUERY });
+  const memoryToolResult = operatorFrames.find((frame) =>
+    frame.type === "tool_result" && frame.result.callId === MEMORY_RECALL_CALL_ID);
+  assert.equal(memoryToolResult?.result.contentOmitted, false);
+  assert.ok(JSON.stringify(memoryToolResult?.result.content).includes(EXPECTED_REPLY));
   const recalledReplay = await persisted.client.getReplay("packed-memory-recall");
   assert.equal(recalledReplay.messages.length, 2);
   assert.equal(typeof completed.finalMessage.id, "string");
@@ -1834,6 +1843,9 @@ function assertScenarioOutput(stdout) {
   ) {
     throw new Error(`Packed scenario did not prove authoritative web quote identities: ${stdout}`);
   }
+  if (!parsed.operatorFrames.includes("tool_call") || !parsed.operatorFrames.includes("tool_result")) {
+    throw new Error(`Packed scenario did not stream the MemoryRecall round trip: ${stdout}`);
+  }
   return {
     expectedCronKey: expectedKey,
     webConversationId: parsed.webQuoteProof.conversationId,
@@ -1852,9 +1864,9 @@ function assertProviderRequests(requests, scenarioProof) {
   }
   const captureRequests = requests.filter((request) => isStructuredCaptureRequest(request.parsed));
   const userRequests = requests.filter((request) => !isStructuredCaptureRequest(request.parsed));
-  if (captureRequests.length !== 5 || userRequests.length !== 9) {
+  if (captureRequests.length !== 5 || userRequests.length !== 10) {
     throw new Error(
-      `Fake provider expected nine agent turns and five memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
+      `Fake provider expected ten agent turns and five memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
     );
   }
   const userInputs = userRequests.map((request) => finalProviderUserText(request.parsed));
@@ -1865,6 +1877,7 @@ function assertProviderRequests(requests, scenarioProof) {
     "packed scaffold multi-runtime first turn",
     MEMORY_QUERY,
     "Run the packed system cron proof.",
+    MEMORY_QUERY,
     MEMORY_QUERY,
     "prove authoritative quote identity",
   ];
@@ -1894,7 +1907,21 @@ function assertProviderRequests(requests, scenarioProof) {
   if (!JSON.stringify(memoryRecallRequest.parsed.messages).includes(EXPECTED_REPLY)) {
     throw new Error("Fresh operator conversation did not receive Core-recalled memory in its Pi provider request");
   }
+  if (!hasProviderTool(memoryRecallRequest.parsed, "MemoryRecall")) {
+    throw new Error("Memory-enabled provider request did not receive the Core-owned MemoryRecall tool");
+  }
+  const memoryRecallContinuation = userRequests[7];
+  const toolResult = memoryRecallContinuation.parsed.messages?.find((message) =>
+    message?.role === "tool" && message.tool_call_id === MEMORY_RECALL_CALL_ID);
+  if (!hasProviderTool(memoryRecallContinuation.parsed, "MemoryRecall")
+    || typeof toolResult?.content !== "string"
+    || !toolResult.content.includes(EXPECTED_REPLY)) {
+    throw new Error("Pi did not continue after executing MemoryRecall against packed memory-local");
+  }
   for (const request of captureRequests) {
+    if (hasProviderTool(request.parsed, "MemoryRecall")) {
+      throw new Error("Tool-free memory capture unexpectedly received MemoryRecall");
+    }
     const input = finalProviderUserText(request.parsed);
     if (!input?.startsWith("User: ") || !input.includes(`Assistant: ${EXPECTED_REPLY}`)) {
       throw new Error(`Memory capture did not receive an exact completed turn: ${JSON.stringify(input)}`);
@@ -1903,9 +1930,12 @@ function assertProviderRequests(requests, scenarioProof) {
 }
 
 function isStructuredCaptureRequest(request) {
-  return Array.isArray(request?.tools) && request.tools.some((tool) =>
-    tool?.function?.name === "mono_agent_structured_output"
-    || tool?.name === "mono_agent_structured_output");
+  return hasProviderTool(request, "mono_agent_structured_output");
+}
+
+function hasProviderTool(request, name) {
+  return Array.isArray(request?.tools)
+    && request.tools.some((tool) => tool?.function?.name === name || tool?.name === name);
 }
 
 function finalProviderUserText(request) {
@@ -2075,6 +2105,7 @@ function readPackedManifest(tarballPath) {
 
 async function startOpenAiCompatibleProvider() {
   const requests = [];
+  let memoryRecallPrompts = 0;
   const server = createServer(async (request, response) => {
     try {
       const body = await readRequestBody(request);
@@ -2129,6 +2160,44 @@ async function startOpenAiCompatibleProvider() {
                 function: {
                   name: "mono_agent_structured_output",
                   arguments: JSON.stringify({ records: [{ text: capturedTurn }] }),
+                },
+              }],
+            },
+            finish_reason: null,
+          }],
+        }));
+        response.write(sse({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: "echo",
+          choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+          usage: { prompt_tokens: 8, completion_tokens: 8, total_tokens: 16 },
+        }));
+        response.end("data: [DONE]\n\n");
+        return;
+      }
+      const hasMemoryResult = parsed.messages?.some((message) =>
+        message?.role === "tool" && message.tool_call_id === MEMORY_RECALL_CALL_ID);
+      if (!hasMemoryResult
+        && finalProviderUserText(parsed) === MEMORY_QUERY
+        && hasProviderTool(parsed, "MemoryRecall")
+        && ++memoryRecallPrompts === 2) {
+        response.write(sse({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: "echo",
+          choices: [{
+            index: 0,
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: MEMORY_RECALL_CALL_ID,
+                type: "function",
+                function: {
+                  name: "MemoryRecall",
+                  arguments: JSON.stringify({ query: MEMORY_QUERY }),
                 },
               }],
             },

@@ -365,11 +365,15 @@ describe("public compliance assertions", () => {
       recall() {},
     })).toThrow("forget-capable memory instance forget must be a function");
     expect(() => assertMemoryInstanceCompliance({
-      capabilities: { capture: true, forget: true },
+      capabilities: { capture: true, forget: true, recallTool: true },
       recall() {},
       capture() {},
       forget() { return false; },
     })).not.toThrow();
+    expect(() => assertMemoryInstanceCompliance({
+      capabilities: { capture: false, forget: false, recallTool: "sometimes" },
+      recall() {},
+    })).toThrow("memory capabilities.recallTool must be a boolean when present");
 
     expect(() => assertRuntimeInstanceCompliance({
       capabilities: {

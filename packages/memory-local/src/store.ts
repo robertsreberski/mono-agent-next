@@ -257,7 +257,7 @@ let testingFactory: (
 };
 
 export class MemoryLocal implements Memory {
-  readonly capabilities = Object.freeze({ capture: true, forget: true });
+  readonly capabilities;
   readonly commands: readonly ModuleCommand[];
   readonly directory: string;
   readonly config: MemoryLocalConfig;
@@ -288,6 +288,7 @@ export class MemoryLocal implements Memory {
     beforeCaptureCommit: (() => void) | undefined,
   ) {
     this.config = config;
+    this.capabilities = Object.freeze({ capture: true, forget: true, recallTool: config.recallTool.enabled });
     this.directory = state.root.path;
     this.#state = state;
     this.#runtimeCapture = runtimeCapture;

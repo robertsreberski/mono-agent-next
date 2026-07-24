@@ -75,7 +75,7 @@ const channel: Channel = {
 };
 
 const memory: Memory = {
-  capabilities: { capture: true, forget: true },
+  capabilities: { capture: true, forget: true, recallTool: true },
   async recall() {
     return { records: [] };
   },

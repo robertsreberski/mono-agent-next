@@ -122,7 +122,7 @@ export function assertChannelInstanceCompliance(value: unknown): asserts value i
 }
 export function assertMemoryInstanceCompliance(value: unknown): asserts value is Memory {
   const instance = assertModuleInstance(value, "memory");
-  const capabilities = assertInstanceCapabilities(instance, "memory", ["capture", "forget"]);
+  const capabilities = assertInstanceCapabilities(instance, "memory", ["capture", "forget"], ["recallTool"]);
   if (typeof instance.recall !== "function") fail("memory instance recall must be a function");
   for (const method of ["capture", "forget"] as const)
     assertOptionalFunction(instance[method], `memory instance ${method}`);

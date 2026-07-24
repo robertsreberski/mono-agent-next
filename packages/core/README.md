@@ -148,6 +148,18 @@ A selected producer returns one safe `outputName` basename, optionally with
 bounded identifiers and metadata, but no absolute-path field. Host-bound
 channel delivery resolves only that basename inside the current run.
 
+When selected memory advertises `capabilities.recallTool: true`, Core offers the
+read-only `MemoryRecall` tool to ordinary runtime requests subject to global
+and request-local tool policy. As a read-only Core operation it never requires
+effect approval. It accepts a required, trimmed natural-language `query` of at
+most 64 KiB UTF-8 plus an optional `limit` from 1 through 50 (default 8), binds
+recall to the current conversation and turn signal, and returns at most that
+many text-only records with an untrusted-evidence warning. Module-private
+record metadata never crosses the tool boundary. Disabling the tool does not
+disable Core's separate automatic pre-turn recall, and `MemoryRecall` remains
+reserved against MCP/channel impersonation even when no model-visible recall
+tool is active.
+
 ## Architecture
 
 ### Data flow
@@ -231,7 +243,7 @@ resent.
 | `state-execution-client.ts` | Typed, bounded, fail-closed client for the state module's opaque execution protocol. Durable storage formats remain state-owned. |
 | `bounded-value.ts` | Shared descriptor-safe snapshots and exact object/array boundary checks. |
 | `run-history-tool.ts` | Conversation-scoped, redacted, untrusted historical run evidence for capable runtimes. |
-| `host.ts` | Admission, serialized turns, exact sessions, safe fallback, settlement, lifecycle, and health. |
+| `host.ts` | Admission, serialized turns, exact sessions, safe fallback, model-visible memory recall, settlement, lifecycle, and health. |
 
 ## Public API
 

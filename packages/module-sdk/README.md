@@ -205,6 +205,10 @@ Runtime-owned `RuntimeSession.id` and transport-owned
 keeps tool calls, tool results, and compaction structured. A host must redact
 tool activity before emitting it across a user-facing channel; thinking is a
 live presentation signal and must not be treated as durable conversation text.
+`MemoryCapabilities.recallTool` is the optional, instance-owned declaration
+that a host may expose the module's existing `recall()` operation as a
+model-visible read-only tool. Omitting it is equivalent to `false`; it does not
+disable host-side recall.
 For an exact empty adapter-owned default request, a selected channel may use
 `resolveDefaultDeliveryConversationId()` to return its canonical non-empty
 destination before durable delivery admission; explicit destinations still

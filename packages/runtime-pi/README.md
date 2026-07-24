@@ -95,7 +95,8 @@ never contain keys, tokens, or raw provider/storage errors.
 
 This runtime reports `approvals: true`, `structuredOutput: true`,
 `maxOutputTokens: true`, and `sandbox: false`, both globally and for exact
-model routes. Core-owned tools still execute through Core. Nine runtime-owned
+model routes. Core-owned tools, including an enabled `MemoryRecall`, are
+forwarded to Pi unchanged and still execute through Core. Nine runtime-owned
 tools are advertised before ordinary provider dispatch:
 
 - `NodeRepl`: `read`, `write`, `execute`, and `network`;

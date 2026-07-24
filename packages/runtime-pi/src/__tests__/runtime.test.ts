@@ -236,36 +236,47 @@ describe("Pi-native runtime module", () => {
     await stop(runtime);
   });
 
-  it("delegates Pi tool calls through the host context and emits normalized tool events", async () => {
+  it("exposes Core-owned MemoryRecall through Pi and emits normalized tool events", async () => {
     const { runtime, faux } = fauxRuntime();
     faux.setResponses([
-      fauxAssistantMessage([fauxToolCall("Echo", { value: "hello" }, { id: "call-1" })]),
+      fauxAssistantMessage([fauxToolCall("MemoryRecall", { query: "durable preference" }, { id: "call-1" })]),
       fauxAssistantMessage([fauxText("tool complete")]),
     ]);
     const executeTool = vi.fn(async (call: RuntimeToolCall, _signal: AbortSignal) => ({
       callId: call.id,
-      content: [{ type: "text" as const, text: `echo:${(call.input as { value: string }).value}` }],
+      content: [{ type: "json" as const, value: { records: [{ text: "concise output" }] } }],
     }));
     const { context, events } = turnContext(executeTool);
     await start(runtime);
     const result = await runtime.runTurn(request("use the tool", {
       tools: [{
-        name: "Echo",
-        description: "Echo a value.",
+        name: "MemoryRecall",
+        description: "Recall durable memory.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
-          required: ["value"],
-          properties: { value: { type: "string" } },
+          required: ["query"],
+          properties: { query: { type: "string" } },
         },
       }],
     }), context);
 
     expect(result.message?.content).toContainEqual({ type: "text", text: "tool complete" });
     expect(executeTool).toHaveBeenCalledTimes(1);
-    expect(executeTool.mock.calls[0]?.[0]).toEqual({ id: "call-1", name: "Echo", input: { value: "hello" } });
+    expect(executeTool.mock.calls[0]?.[0]).toEqual({
+      id: "call-1",
+      name: "MemoryRecall",
+      input: { query: "durable preference" },
+    });
     expect(executeTool.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal);
-    expect(events).toContainEqual({ type: "tool-call", call: { id: "call-1", name: "Echo", input: { value: "hello" } } });
+    expect(events).toContainEqual({
+      type: "tool-call",
+      call: {
+        id: "call-1",
+        name: "MemoryRecall",
+        input: { query: "durable preference" },
+      },
+    });
     expect(events.some((event) => event.type === "tool-result")).toBe(true);
     await stop(runtime);
   });

@@ -60,7 +60,7 @@ export interface CoreRuntimeTool {
   readonly source:
     | { readonly kind: "mcp"; readonly server: string; readonly tool: string }
     | { readonly kind: "channel"; readonly instanceId: string; readonly tool: string }
-    | { readonly kind: "core"; readonly capability: "skills.read" | "run-history.read" };
+    | { readonly kind: "core"; readonly capability: "skills.read" | "run-history.read" | "memory.recall" };
   execute(input: unknown, options?: {
     readonly signal?: AbortSignal;
     readonly callId?: string;

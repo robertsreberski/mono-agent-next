@@ -1099,7 +1099,7 @@ export interface MemoryRecallRequest {
 export interface MemoryRecallResult { readonly records: readonly MemoryRecord[]; }
 export interface MemoryCaptureRequest { readonly record: MemoryRecord; readonly signal: AbortSignal; }
 export interface MemoryForgetRequest { readonly recordId: string; readonly signal: AbortSignal; }
-export interface MemoryCapabilities { readonly capture: boolean; readonly forget: boolean; }
+export interface MemoryCapabilities { readonly capture: boolean; readonly forget: boolean; readonly recallTool?: boolean; }
 export const HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE = "memory.runtime-capture" as const;
 /** Tool-free, session-free completion surface granted only to selected memory. */
 export interface MemoryRuntimeCaptureRequest {
