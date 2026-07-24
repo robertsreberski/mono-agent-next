@@ -1,23 +1,16 @@
-import { createHash } from "node:crypto";
-import { lstat } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { validateAgentConfig, type AgentLoadOptions, type AgentValidationResult } from "@mono-agent/core";
-import { loadWebConfig, type WebConfig } from "@mono-agent/web";
-import { type CommandRunner, processCommandRunner } from "./command.js";
+import { dirname } from "node:path";
+
+import { validateAgentConfig } from "@mono-agent/core";
+import { loadWebConfig } from "@mono-agent/web";
+
+import { processCommandRunner } from "./command.js";
 import {
   type LoadedServiceMacosConfig,
-  type ServiceMacosServiceConfig,
   loadServiceMacosConfig,
 } from "./config.js";
-import { loadProtectedEnvironment } from "./environment.js";
-import { readServiceInput } from "./input.js";
 import {
   assertServiceLogRetention,
-  preflightServiceLogs,
   readManagedServiceLog,
-  readServiceReadiness,
-  resetServiceLogs,
-  type ManagedServiceLogSnapshot,
 } from "./logs.js";
 export {
   ServiceMacosDriftError,
@@ -28,124 +21,87 @@ import {
   ServiceMacosMutationDisabledError,
 } from "./errors.js";
 import {
+  activateExisting,
+  assertBindingCurrent,
+  boundLogs,
+  createServiceBinding,
+  promoteAndActivate,
+  removeAndDisable,
+  transactionLifecycle,
+} from "./lifecycle.js";
+import {
+  assertOwnedDirectory,
+  assertOwnedDirectoryCurrent,
+  assertObservationMatches,
+  assertRuntimeFile,
+  inspectLoadedConfig,
+  inspectTarget,
+} from "./observe.js";
+export { LAUNCHCTL_PATH } from "./observe.js";
+import {
   type ServiceMacosRuntimePaths,
-  type ServiceRunnerActivation,
-  type ServiceRunnerBinding,
-  type ServiceMacosTarget,
   assertRuntimePaths,
   encodeServiceRunnerActivation,
   renderServicePlist,
   serviceTarget,
 } from "./plist.js";
-import { parseServiceRunnerActivation } from "./runner.js";
+import { digest } from "./internal-fs.js";
+import type {
+  ApplyServiceMacosOptions,
+  CompleteServiceMacosObservation,
+  InspectServiceMacosOptions,
+  MutateSelectedServiceMacosOptions,
+  PlanSelectedServiceMacosOptions,
+  PlanServiceMacosOptions,
+  PlanServiceMacosRemovalOptions,
+  ReadServiceMacosLogsOptions,
+  RecoverServiceMacosOptions,
+  RemoveServiceMacosOptions,
+  SelectedServiceMacosOptions,
+  ServiceMacosLogsSnapshot,
+  ServiceMacosObservation,
+  ServiceMacosPlan,
+  ServiceMacosPlanEntry,
+  ServiceMacosRemovalPlan,
+  ServiceMacosRemovalPlanEntry,
+  ServiceMacosStatus,
+  ServiceMacosStopPlan,
+  ServicePlanAction,
+  StopServiceMacosOptions,
+} from "./service-types.js";
+export type {
+  ApplyServiceMacosOptions,
+  InspectServiceMacosOptions,
+  MutateSelectedServiceMacosOptions,
+  PlanSelectedServiceMacosOptions,
+  PlanServiceMacosOptions,
+  PlanServiceMacosRemovalOptions,
+  ReadServiceMacosLogsOptions,
+  RecoverServiceMacosOptions,
+  RemoveServiceMacosOptions,
+  SelectedServiceMacosOptions,
+  ServiceFileIdentity,
+  ServiceFileObservation,
+  ServiceMacosLogsSnapshot,
+  ServiceMacosObservation,
+  ServiceMacosPlan,
+  ServiceMacosPlanEntry,
+  ServiceMacosRemovalPlan,
+  ServiceMacosRemovalPlanEntry,
+  ServiceMacosStatus,
+  ServiceMacosStopPlan,
+  ServiceMacosStopPlanEntry,
+  ServicePlanAction,
+  ServicePlanBinding,
+  ServiceRemovalAction,
+  StopServiceMacosOptions,
+} from "./service-types.js";
 import {
   assertNoPendingServiceMacosTransaction,
-  observeOwnerPrivatePlist,
   recoverPendingServiceMacosTransaction,
-  removeServicePlistTransaction,
-  replaceServicePlistTransaction,
-  type ServiceMacosTransactionLifecycle,
 } from "./transactions.js";
+
 export const SERVICE_PLAN_SCHEMA_VERSION = 1;
-export const LAUNCHCTL_PATH = "/bin/launchctl";
-const LAUNCHCTL_COMMAND_TIMEOUT_MS = 5_000;
-export interface ServiceFileIdentity {
-  readonly device: string; readonly inode: string; readonly ctimeNanoseconds: string;
-  readonly uid: number; readonly mode: number; readonly links: number; readonly size: number;
-}
-export interface ServiceFileObservation {
-  readonly exists: boolean; readonly digest?: string; readonly bytes?: number; readonly identity?: ServiceFileIdentity;
-}
-export interface ServiceMacosObservation {
-  readonly target: ServiceMacosTarget; readonly file: ServiceFileObservation; readonly loaded: boolean;
-  readonly launchdState: "absent" | "running" | "exited" | "unknown"; readonly pid?: number; readonly ready: boolean;
-}
-export interface ServicePlanBinding extends ServiceRunnerBinding {
-  readonly environmentFile?: string;
-}
-export type ServicePlanAction = "create" | "update" | "load" | "restart" | "noop";
-export type ServiceRemovalAction = "remove" | "noop";
-export interface ServiceMacosPlanEntry {
-  readonly serviceId: string; readonly service: ServiceMacosServiceConfig; readonly target: ServiceMacosTarget;
-  readonly binding: ServicePlanBinding; readonly observed: ServiceMacosObservation; readonly desiredPlist: string;
-  readonly desiredDigest: string; readonly readinessToken: string; readonly action: ServicePlanAction;
-}
-export interface ServiceMacosPlan {
-  readonly schemaVersion: 1; readonly configPath: string; readonly configDigest: string;
-  readonly runtime: ServiceMacosRuntimePaths; readonly launchAgentsDirectoryIdentity: string;
-  readonly entries: readonly ServiceMacosPlanEntry[]; readonly fingerprint: string;
-}
-export interface ServiceMacosRemovalPlanEntry {
-  readonly serviceId: string; readonly target: ServiceMacosTarget;
-  readonly observed: ServiceMacosObservation; readonly action: ServiceRemovalAction;
-}
-export interface ServiceMacosRemovalPlan {
-  readonly schemaVersion: 1; readonly operation: "remove"; readonly configPath: string; readonly configDigest: string;
-  readonly runtime: ServiceMacosRuntimePaths; readonly launchAgentsDirectoryIdentity: string;
-  readonly entries: readonly ServiceMacosRemovalPlanEntry[]; readonly fingerprint: string;
-}
-export interface ServiceMacosStopPlanEntry {
-  readonly serviceId: string; readonly service: ServiceMacosServiceConfig;
-  readonly target: ServiceMacosTarget; readonly observed: ServiceMacosObservation;
-  readonly action: "stop" | "noop";
-}
-export interface ServiceMacosStopPlan {
-  readonly schemaVersion: 1; readonly operation: "stop";
-  readonly configPath: string; readonly configDigest: string;
-  readonly runtime: ServiceMacosRuntimePaths; readonly launchAgentsDirectoryIdentity: string;
-  readonly entry: ServiceMacosStopPlanEntry; readonly fingerprint: string;
-}
-export interface ServiceMacosStatus {
-  readonly schemaVersion: 1; readonly operation: "status";
-  readonly configPath: string; readonly configDigest: string;
-  readonly serviceId: string; readonly observation: ServiceMacosObservation;
-  readonly fingerprint: string;
-}
-export interface ServiceMacosLogsSnapshot {
-  readonly schemaVersion: 1; readonly operation: "logs";
-  readonly configPath: string; readonly configDigest: string;
-  readonly serviceId: string; readonly observation: ServiceMacosObservation;
-  readonly stdout: ManagedServiceLogSnapshot; readonly stderr: ManagedServiceLogSnapshot;
-  readonly fingerprint: string;
-}
-export interface InspectServiceMacosOptions {
-  readonly runtime: ServiceMacosRuntimePaths; readonly runner?: CommandRunner; readonly signal?: AbortSignal;
-}
-export interface PlanServiceMacosOptions extends InspectServiceMacosOptions {
-  readonly validateAgent?: (path: string, options?: AgentLoadOptions) => Promise<AgentValidationResult>;
-  readonly validateWeb?: (
-    path: string,
-    options?: { readonly environment?: Readonly<Record<string, string | undefined>> },
-  ) => Promise<WebConfig>;
-}
-export interface ApplyServiceMacosOptions extends PlanServiceMacosOptions {
-  readonly allowMutation?: boolean;
-}
-export interface PlanServiceMacosRemovalOptions extends InspectServiceMacosOptions {
-  readonly serviceId: string;
-}
-export interface RemoveServiceMacosOptions extends InspectServiceMacosOptions {
-  readonly allowMutation?: boolean;
-}
-export interface RecoverServiceMacosOptions extends InspectServiceMacosOptions {
-  readonly allowMutation?: boolean;
-  readonly serviceId?: string;
-}
-export interface SelectedServiceMacosOptions extends InspectServiceMacosOptions {
-  readonly serviceId: string;
-}
-export interface PlanSelectedServiceMacosOptions extends PlanServiceMacosOptions {
-  readonly serviceId: string;
-}
-export interface MutateSelectedServiceMacosOptions extends PlanServiceMacosOptions {
-  readonly allowMutation?: boolean;
-}
-export interface StopServiceMacosOptions extends InspectServiceMacosOptions {
-  readonly allowMutation?: boolean;
-}
-export interface ReadServiceMacosLogsOptions extends SelectedServiceMacosOptions {
-  readonly maxBytes?: number;
-}
 interface InternalPlanServiceMacosOptions extends PlanServiceMacosOptions {
   readonly serviceIds?: readonly string[];
   readonly forceRestart?: boolean;
@@ -161,7 +117,13 @@ export async function inspectServiceMacos(
   );
   const loaded = await loadServiceMacosConfig(configPath);
   await assertNoPendingTransactions(loaded, options.runtime, launchAgentsDirectoryIdentity);
-  const observations = await inspectLoadedConfig(loaded, options, launchAgentsDirectoryIdentity);
+  const observations = await inspectLoadedConfig(
+    loaded,
+    options,
+    launchAgentsDirectoryIdentity,
+    undefined,
+    true,
+  );
   await assertOwnedDirectoryCurrent(
     options.runtime.launchAgentsDirectory,
     options.runtime.uid,
@@ -532,6 +494,7 @@ export async function statusServiceMacos(
     options.runner ?? processCommandRunner,
     options.signal,
     launchAgentsDirectoryIdentity,
+    true,
   );
   const partial = Object.freeze({
     schemaVersion: SERVICE_PLAN_SCHEMA_VERSION as 1,
@@ -767,26 +730,6 @@ export function fingerprintPlan(plan: Omit<ServiceMacosPlan, "fingerprint">): st
 export function fingerprintRemovalPlan(plan: Omit<ServiceMacosRemovalPlan, "fingerprint">): string {
   return `service-macos:remove:v1:${digest(JSON.stringify(plan))}`;
 }
-async function inspectLoadedConfig(
-  loaded: LoadedServiceMacosConfig,
-  options: InspectServiceMacosOptions,
-  expectedLaunchAgentsDirectoryIdentity: string,
-  serviceIds: readonly string[] = Object.keys(loaded.config.services),
-): Promise<readonly ServiceMacosObservation[]> {
-  const runner = options.runner ?? processCommandRunner;
-  const observations = [];
-  for (const serviceId of serviceIds) {
-    const service = loaded.config.services[serviceId]!;
-    observations.push(await inspectTarget(
-      serviceTarget(serviceId, service, options.runtime),
-      options.runtime.uid,
-      runner,
-      options.signal,
-      expectedLaunchAgentsDirectoryIdentity,
-    ));
-  }
-  return Object.freeze(observations);
-}
 async function assertNoPendingTransactions(
   loaded: LoadedServiceMacosConfig,
   runtime: ServiceMacosRuntimePaths,
@@ -799,523 +742,6 @@ async function assertNoPendingTransactions(
       expectedParentIdentity,
     );
   }
-}
-async function inspectTarget(
-  target: ServiceMacosTarget,
-  expectedUid: number,
-  runner: CommandRunner,
-  signal?: AbortSignal,
-  expectedLaunchAgentsDirectoryIdentity?: string,
-): Promise<ServiceMacosObservation> {
-  if (expectedLaunchAgentsDirectoryIdentity !== undefined) {
-    await assertOwnedDirectoryCurrent(
-      dirname(target.plistPath),
-      expectedUid,
-      expectedLaunchAgentsDirectoryIdentity,
-    );
-  }
-  const file = await inspectPlistFile(target.plistPath, expectedUid);
-  const result = await runLaunchctlCommand(runner, ["print", target.launchdTarget], signal);
-  if (result.exitCode !== 0 && result.exitCode !== 3 && result.exitCode !== 113) {
-    throw new Error(`launchctl print ${target.launchdTarget} failed (${String(result.exitCode)}): ${bounded(result.stderr)}`);
-  }
-  const loaded = result.exitCode === 0;
-  const stateText = loaded ? /^\s*state = ([^\r\n]+)$/mu.exec(result.stdout)?.[1]?.trim() : undefined;
-  const launchdState = !loaded ? "absent" : stateText === "running" || stateText === "exited" ? stateText : "unknown";
-  const pidText = loaded ? /^\s*pid = ([0-9]+)$/mu.exec(result.stdout)?.[1] : undefined;
-  const pid = pidText === undefined ? undefined : Number(pidText);
-  const ready = launchdState === "running" && pid !== undefined && Number.isSafeInteger(pid) && pid > 0
-    ? await installedReadiness(target, file, pid, expectedUid) : false;
-  if (expectedLaunchAgentsDirectoryIdentity !== undefined) {
-    await assertOwnedDirectoryCurrent(
-      dirname(target.plistPath),
-      expectedUid,
-      expectedLaunchAgentsDirectoryIdentity,
-    );
-  }
-  return Object.freeze({ target, file, loaded, launchdState, ...(pid === undefined ? {} : { pid }), ready });
-}
-async function installedReadiness(
-  target: ServiceMacosTarget, file: ServiceFileObservation, pid: number, uid: number,
-): Promise<boolean> {
-  if (!file.exists) return false;
-  try {
-    const installed = await readInstalledActivation(target, uid, file.digest);
-    return await readServiceReadiness(
-      installed.activation.logs,
-      installed.readinessToken,
-      pid,
-      uid,
-    );
-  } catch {
-    return false;
-  }
-}
-
-interface InstalledActivation {
-  readonly activation: ServiceRunnerActivation;
-  readonly readinessToken: string;
-}
-
-async function readInstalledActivation(
-  target: ServiceMacosTarget,
-  uid: number,
-  expectedDigest?: string,
-): Promise<InstalledActivation> {
-  const source = await readServiceInput(
-    target.plistPath,
-    1_048_576,
-    { uid, mode: 0o600 },
-  );
-  if (expectedDigest !== undefined && source.digest !== expectedDigest) {
-    throw new ServiceMacosDriftError(
-      `Installed plist changed while reading activation for ${target.serviceId}.`,
-    );
-  }
-  const encoded = /<string>--activation<\/string>\s*<string>([A-Za-z0-9_-]+)<\/string>/u
-    .exec(source.source.toString("utf8"))?.[1];
-  if (encoded === undefined) {
-    throw new ServiceMacosDriftError(
-      `Installed plist has no valid activation for ${target.serviceId}.`,
-    );
-  }
-  return Object.freeze({
-    activation: parseServiceRunnerActivation(encoded),
-    readinessToken: digest(encoded),
-  });
-}
-async function inspectPlistFile(path: string, expectedUid: number): Promise<ServiceFileObservation> {
-  return await observeOwnerPrivatePlist(path, expectedUid);
-}
-interface ServiceValidators {
-  readonly validateAgent: (
-    path: string,
-    options?: AgentLoadOptions,
-  ) => Promise<AgentValidationResult>;
-  readonly validateWeb: (
-    path: string,
-    options?: { readonly environment?: Readonly<Record<string, string | undefined>> },
-  ) => Promise<WebConfig>;
-}
-async function createServiceBinding(
-  service: ServiceMacosServiceConfig,
-  runtime: ServiceMacosRuntimePaths,
-  validators: ServiceValidators,
-): Promise<ServicePlanBinding> {
-  const environment = service.environmentFile === undefined
-    ? undefined
-    : await loadProtectedEnvironment(service.environmentFile, runtime.uid);
-  const mergedEnvironment = environment?.values ?? Object.freeze(Object.create(null) as Record<string, string>);
-  if (service.target.kind === "agent") {
-    const validation = await validators.validateAgent(service.target.config, { environment: mergedEnvironment });
-    if (!validation.ok) {
-      throw new Error(
-        `Agent config ${service.target.config} is invalid: ${validation.issues
-          .map((issue) => `${issue.path}: ${issue.message}`).join("; ")}`,
-      );
-    }
-  } else {
-    const validation = await validators.validateWeb(service.target.config, { environment: mergedEnvironment });
-    if (validation.sourcePath !== service.target.config) {
-      throw new Error(`Web config ${service.target.config} did not resolve from its exact planned path.`);
-    }
-  }
-  const root = dirname(service.target.config);
-  const targetSource = await readServiceInput(service.target.config, 1_048_576);
-  const packageSource = await readServiceInput(join(root, "package.json"), 8_388_608);
-  const directDependencyName = service.target.kind === "agent" ? "@mono-agent/core" : "@mono-agent/web";
-  const directDependencyVersion = readExactDirectDependency(
-    packageSource.source,
-    join(root, "package.json"),
-    directDependencyName,
-  );
-  const lock = await readFirstLockfile(root);
-  const [nodeSource, runnerSource] = await Promise.all([
-    readServiceInput(runtime.nodePath, 268_435_456),
-    readServiceInput(runtime.runnerScriptPath, 8_388_608),
-  ]);
-  return Object.freeze({
-    targetConfig: service.target.config,
-    targetKind: service.target.kind,
-    targetConfigDigest: targetSource.digest,
-    directDependencyName,
-    directDependencyVersion,
-    packageManifestDigest: packageSource.digest,
-    lockfilePath: lock.path,
-    lockfileDigest: lock.source.digest,
-    nodePath: runtime.nodePath,
-    nodeDigest: nodeSource.digest,
-    runnerScriptPath: runtime.runnerScriptPath,
-    runnerScriptDigest: runnerSource.digest,
-    logsDirectoryIdentity: await assertOwnedDirectory(service.logs.directory, runtime.uid),
-    ...(service.environmentFile === undefined || environment === undefined
-      ? {}
-      : { environmentFile: service.environmentFile, environmentFileDigest: digest(environment.source) }),
-  });
-}
-async function assertBindingCurrent(
-  entry: ServiceMacosPlanEntry,
-  validators: ServiceValidators,
-  runtime: ServiceMacosRuntimePaths,
-): Promise<void> {
-  const current = await createServiceBinding(entry.service, runtime, validators);
-  if (JSON.stringify(current) !== JSON.stringify(entry.binding)) {
-    throw new ServiceMacosDriftError(`Validated target closure changed for ${entry.serviceId}.`);
-  }
-  await assertServiceLogRetention(
-    boundLogs(entry.target, entry.service, current.logsDirectoryIdentity),
-    runtime.uid,
-  );
-}
-async function promoteAndActivate(
-  entry: ServiceMacosPlanEntry,
-  runner: CommandRunner,
-  expectedParentIdentity: string,
-  expectedUid: number,
-): Promise<void> {
-  const lifecycle = transactionLifecycle(
-    entry.target,
-    entry.service,
-    entry.binding.logsDirectoryIdentity,
-    expectedParentIdentity,
-    expectedUid,
-    runner,
-  );
-  await lifecycle.preflight();
-  await replaceServicePlistTransaction({
-    target: entry.target,
-    expectedUid,
-    expectedParentIdentity,
-    expectedFile: entry.observed.file,
-    expectedLoaded: entry.observed.loaded,
-    desiredPlist: entry.desiredPlist,
-    desiredDigest: entry.desiredDigest,
-    readinessToken: entry.readinessToken,
-    lifecycle,
-  });
-}
-async function activateExisting(
-  entry: ServiceMacosPlanEntry,
-  runner: CommandRunner,
-  expectedParentIdentity: string,
-  expectedUid: number,
-  restart: boolean,
-): Promise<void> {
-  const lifecycle = transactionLifecycle(
-    entry.target,
-    entry.service,
-    entry.binding.logsDirectoryIdentity,
-    expectedParentIdentity,
-    expectedUid,
-    runner,
-  );
-  await lifecycle.preflight();
-  try {
-    if (restart) await lifecycle.bootoutIfPresent();
-    await lifecycle.bootstrap();
-    await lifecycle.proveReady(entry.readinessToken);
-  } catch (error) {
-    await lifecycle.bootoutIfPresent().catch(() => undefined);
-    throw error;
-  }
-}
-async function removeAndDisable(
-  entry: ServiceMacosRemovalPlanEntry,
-  service: ServiceMacosServiceConfig,
-  runner: CommandRunner,
-  expectedParentIdentity: string,
-  expectedUid: number,
-): Promise<void> {
-  await removeServicePlistTransaction({
-    target: entry.target,
-    expectedUid,
-    expectedParentIdentity,
-    expectedFile: entry.observed.file,
-    expectedLoaded: entry.observed.loaded,
-    lifecycle: transactionLifecycle(
-      entry.target,
-      service,
-      undefined,
-      expectedParentIdentity,
-      expectedUid,
-      runner,
-    ),
-  });
-}
-function transactionLifecycle(
-  target: ServiceMacosTarget,
-  service: ServiceMacosServiceConfig,
-  expectedDirectoryIdentity: string | undefined,
-  expectedParentIdentity: string,
-  expectedUid: number,
-  runner: CommandRunner,
-): ServiceMacosTransactionLifecycle {
-  const parent = async () => {
-    await assertOwnedDirectoryCurrent(dirname(target.plistPath), expectedUid, expectedParentIdentity);
-  };
-  const logs = async () => {
-    const directoryIdentity = await assertOwnedDirectory(service.logs.directory, expectedUid);
-    if (expectedDirectoryIdentity !== undefined && directoryIdentity !== expectedDirectoryIdentity) {
-      throw new ServiceMacosDriftError(`Log directory changed for ${target.serviceId}.`);
-    }
-    return boundLogs(target, service, directoryIdentity);
-  };
-  const bootstrap = async (forceStart: boolean): Promise<void> => {
-    await parent();
-    await resetServiceLogs(await logs(), expectedUid);
-    await parent();
-    await launchctl(runner, ["bootstrap", target.launchdDomain, target.plistPath]);
-    await parent();
-    if (forceStart || !service.startAtLogin) {
-      await launchctl(runner, ["kickstart", target.launchdTarget]);
-    }
-    await parent();
-  };
-  const bootstrapRestored = async (): Promise<void> => {
-    await parent();
-    const installed = await readInstalledActivation(target, expectedUid);
-    await resetServiceLogs(installed.activation.logs, expectedUid);
-    await parent();
-    await launchctl(runner, ["bootstrap", target.launchdDomain, target.plistPath]);
-    await parent();
-    await launchctl(runner, ["kickstart", target.launchdTarget]);
-    await parent();
-  };
-  return Object.freeze({
-    async preflight(): Promise<void> {
-      await parent();
-      await preflightServiceLogs(await logs(), expectedUid);
-      await parent();
-    },
-    async inspectLoaded(): Promise<boolean> {
-      await parent();
-      const result = await runLaunchctlCommand(runner, ["print", target.launchdTarget]);
-      await parent();
-      if (result.exitCode !== 0 && result.exitCode !== 3 && result.exitCode !== 113) {
-        throw new Error(
-          `launchctl print ${target.launchdTarget} failed (${String(result.exitCode)}): ${bounded(result.stderr)}`,
-        );
-      }
-      return result.exitCode === 0;
-    },
-    async bootoutRequired(): Promise<void> {
-      await parent();
-      await stopService(runner, target.launchdTarget, true);
-      await parent();
-    },
-    async bootoutIfPresent(): Promise<void> {
-      await parent();
-      await bootoutIfPresent(runner, target.launchdTarget);
-      await parent();
-    },
-    async bootstrap(): Promise<void> {
-      await bootstrap(false);
-    },
-    async bootstrapRestored(): Promise<void> {
-      await bootstrapRestored();
-    },
-    async proveReady(readinessToken: string): Promise<void> {
-      await parent();
-      await proveServiceReady(target, await logs(), readinessToken, expectedUid, runner);
-      await parent();
-    },
-    async proveInstalledReady(): Promise<void> {
-      for (let attempt = 0; attempt < 50; attempt += 1) {
-        const observation = await inspectTarget(
-          target,
-          expectedUid,
-          runner,
-          undefined,
-          expectedParentIdentity,
-        );
-        if (observation.launchdState === "running" && observation.ready) return;
-        if (observation.launchdState === "exited") {
-          throw new ServiceMacosDriftError(`Restored service ${target.serviceId} exited before readiness.`);
-        }
-        await new Promise<void>((resolve) => setTimeout(resolve, 100));
-      }
-      throw new ServiceMacosDriftError(`Restored service ${target.serviceId} did not prove readiness.`);
-    },
-  });
-}
-function boundLogs(target: ServiceMacosTarget, service: ServiceMacosServiceConfig, directoryIdentity: string) {
-  return Object.freeze({ ...service.logs, directoryIdentity, stdoutPath: target.stdoutPath,
-    stderrPath: target.stderrPath, readinessPath: target.readinessPath });
-}
-async function proveServiceReady(
-  target: ServiceMacosTarget,
-  logs: Parameters<typeof readServiceReadiness>[0],
-  readinessToken: string,
-  expectedUid: number,
-  runner: CommandRunner,
-): Promise<void> {
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    const result = await runLaunchctlCommand(runner, ["print", target.launchdTarget]);
-    if (result.exitCode === 0) {
-      const state = /^\s*state = ([^\r\n]+)$/mu.exec(result.stdout)?.[1]?.trim();
-      const pidText = /^\s*pid = ([0-9]+)$/mu.exec(result.stdout)?.[1];
-      const pid = pidText === undefined ? 0 : Number(pidText);
-      if (state === "running" && Number.isSafeInteger(pid) && pid > 0) {
-        if (await readServiceReadiness(logs, readinessToken, pid, expectedUid)) return;
-      } else if (state === "exited" || /^\s*last exit code = [1-9][0-9]*$/mu.test(result.stdout)) {
-        throw new ServiceMacosDriftError(`Service ${target.serviceId} exited before readiness.`);
-      }
-    } else if (result.exitCode === 3 || result.exitCode === 113) {
-      if (attempt >= 2) {
-        throw new ServiceMacosDriftError(`Activation did not retain loaded state for ${target.serviceId}.`);
-      }
-    } else {
-      throw new Error(`launchctl print ${target.launchdTarget} failed (${String(result.exitCode)}): ${bounded(result.stderr)}`);
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, 100));
-  }
-  throw new ServiceMacosDriftError(`Service ${target.serviceId} did not prove healthy planned-input readiness.`);
-}
-async function launchctl(runner: CommandRunner, arguments_: readonly string[]): Promise<void> {
-  const result = await runLaunchctlCommand(runner, arguments_);
-  if (result.exitCode !== 0) throw new Error(`launchctl ${arguments_.join(" ")} failed (${String(result.exitCode)}): ${bounded(result.stderr)}`);
-}
-async function bootoutIfPresent(runner: CommandRunner, target: string): Promise<void> {
-  await stopService(runner, target, false);
-}
-async function stopService(
-  runner: CommandRunner, target: string, required: boolean,
-): Promise<void> {
-  const before = await runLaunchctlCommand(runner, ["print", target]);
-  if (before.exitCode === 3 || before.exitCode === 113) {
-    if (required) throw new ServiceMacosDriftError(`Required service ${target} was not loaded before stop.`);
-    return;
-  }
-  if (before.exitCode !== 0) {
-    throw new Error(`launchctl print ${target} failed (${String(before.exitCode)}): ${bounded(before.stderr)}`);
-  }
-  const state = /^\s*state = ([^\r\n]+)$/mu.exec(before.stdout)?.[1]?.trim();
-  const pidValue = /^\s*pid = ([^\r\n]+)$/mu.exec(before.stdout)?.[1]?.trim();
-  const pid = pidValue === undefined ? undefined : Number(pidValue);
-  if (
-    (state !== "running" && state !== "exited" && state !== "waiting" && state !== "not running")
-    || (pidValue !== undefined && (!Number.isSafeInteger(pid) || (pid ?? 0) <= 0))
-    || (state === "running" && pid === undefined)
-  ) {
-    throw new ServiceMacosDriftError(
-      `Cannot prove prior process identity for ${target} from launchd state ${state ?? "missing"}.`,
-    );
-  }
-  await launchctl(runner, ["bootout", target]);
-  for (let attempt = 0; attempt < 50; attempt += 1) {
-    const result = await runLaunchctlCommand(runner, ["print", target]);
-    if ((result.exitCode === 3 || result.exitCode === 113) && (pid === undefined || !processIsAlive(pid))) return;
-    if (result.exitCode !== 0 && result.exitCode !== 3 && result.exitCode !== 113) {
-      throw new Error(`launchctl print ${target} failed (${String(result.exitCode)}): ${bounded(result.stderr)}`);
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, 100));
-  }
-  throw new ServiceMacosDriftError(`Service ${target} did not prove unload and process death.`);
-}
-async function runLaunchctlCommand(
-  runner: CommandRunner,
-  arguments_: readonly string[],
-  signal?: AbortSignal,
-): Promise<Awaited<ReturnType<CommandRunner["run"]>>> {
-  if (signal?.aborted === true) throw signal.reason;
-  const controller = new AbortController();
-  const forwardAbort = () => controller.abort(signal?.reason);
-  signal?.addEventListener("abort", forwardAbort, { once: true });
-  let rejectAbort!: (reason: unknown) => void;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    rejectAbort = reject;
-  });
-  const onAbort = () => rejectAbort(controller.signal.reason);
-  controller.signal.addEventListener("abort", onAbort, { once: true });
-  const timer = setTimeout(() => {
-    controller.abort(new ServiceMacosDriftError(
-      `launchctl ${arguments_.join(" ")} timed out after ${String(LAUNCHCTL_COMMAND_TIMEOUT_MS)} ms.`,
-    ));
-  }, LAUNCHCTL_COMMAND_TIMEOUT_MS);
-  try {
-    return await Promise.race([
-      Promise.resolve().then(async () => await runner.run(
-        LAUNCHCTL_PATH,
-        arguments_,
-        { signal: controller.signal },
-      )),
-      aborted,
-    ]);
-  } finally {
-    clearTimeout(timer);
-    controller.signal.removeEventListener("abort", onAbort);
-    signal?.removeEventListener("abort", forwardAbort);
-  }
-}
-function processIsAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch (error) { return !isErrno(error, "ESRCH"); }
-}
-async function assertRuntimeFile(path: string, expectedUid: number, executable: boolean): Promise<void> {
-  const stats = await lstat(path);
-  if (
-    !stats.isFile() || stats.isSymbolicLink() || (stats.uid !== expectedUid && stats.uid !== 0)
-    || (stats.mode & 0o022) !== 0
-  ) {
-    throw new Error(`${path} must be a protected regular file owned by uid ${String(expectedUid)} or root.`);
-  }
-  if (executable && (stats.mode & 0o111) === 0) throw new Error(`${path} must be executable.`);
-}
-async function assertOwnedDirectory(path: string, expectedUid: number): Promise<string> {
-  const stats = await lstat(path, { bigint: true });
-  if (!stats.isDirectory() || stats.isSymbolicLink() || stats.uid !== BigInt(expectedUid) || (stats.mode & 0o022n) !== 0n) {
-    throw new Error(`${path} must be a non-group-writable, non-world-writable directory owned by uid ${String(expectedUid)}.`);
-  }
-  return [stats.dev, stats.ino, stats.uid, stats.mode & 0o777n].join(":");
-}
-async function assertOwnedDirectoryCurrent(
-  path: string,
-  expectedUid: number,
-  expectedIdentity: string,
-): Promise<void> {
-  const currentIdentity = await assertOwnedDirectory(path, expectedUid);
-  if (currentIdentity !== expectedIdentity) {
-    throw new ServiceMacosDriftError(`Protected directory changed after planning: ${path}.`);
-  }
-}
-async function readFirstLockfile(root: string): Promise<{ readonly path: string; readonly source: Awaited<ReturnType<typeof readServiceInput>> }> {
-  for (const name of ["pnpm-lock.yaml", "package-lock.json"] as const) {
-    const path = join(root, name);
-    try {
-      return { path, source: await readServiceInput(path, 67_108_864) };
-    } catch (error) {
-      if (!isErrno(error, "ENOENT")) throw error;
-    }
-  }
-  throw new Error(`${root} must contain pnpm-lock.yaml or package-lock.json.`);
-}
-function readExactDirectDependency(
-  source: Uint8Array,
-  packagePath: string,
-  dependencyName: "@mono-agent/core" | "@mono-agent/web",
-): string {
-  let manifest: unknown;
-  try {
-    manifest = JSON.parse(Buffer.from(source).toString("utf8")) as unknown;
-  } catch {
-    throw new Error(`${packagePath} must contain strict JSON.`);
-  }
-  if (typeof manifest !== "object" || manifest === null || Array.isArray(manifest)) {
-    throw new Error(`${packagePath} must contain a package object.`);
-  }
-  const dependencies = (manifest as Record<string, unknown>).dependencies;
-  if (typeof dependencies !== "object" || dependencies === null || Array.isArray(dependencies)) {
-    throw new Error(`${packagePath} must declare ${dependencyName} as a direct dependency.`);
-  }
-  const version = (dependencies as Record<string, unknown>)[dependencyName];
-  if (
-    typeof version !== "string"
-    || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(version)
-  ) {
-    throw new Error(
-      `${packagePath} must pin ${dependencyName} to one exact semantic version.`,
-    );
-  }
-  return version;
 }
 function selectServiceIds(
   loaded: LoadedServiceMacosConfig,
@@ -1350,9 +776,12 @@ function assertSingleServicePlan(
 function requireServiceObservation(
   observations: readonly ServiceMacosObservation[],
   serviceId: string,
-): ServiceMacosObservation {
+): CompleteServiceMacosObservation {
   const observation = observations.find((candidate) => candidate.target.serviceId === serviceId);
-  if (observation === undefined) {
+  if (
+    observation === undefined
+    || observation.observationError !== undefined
+  ) {
     throw new ServiceMacosDriftError(`Final observation for ${serviceId} is missing.`);
   }
   return observation;
@@ -1362,18 +791,4 @@ function sameRuntime(left: ServiceMacosRuntimePaths, right: ServiceMacosRuntimeP
     && left.runnerScriptPath === right.runnerScriptPath
     && left.launchAgentsDirectory === right.launchAgentsDirectory
     && left.uid === right.uid;
-}
-function assertObservationMatches(expected: ServiceMacosObservation, actual: ServiceMacosObservation): void {
-  if (JSON.stringify(expected) !== JSON.stringify(actual)) {
-    throw new ServiceMacosDriftError(`Observed launchd or plist state drifted for ${expected.target.serviceId}.`);
-  }
-}
-function digest(value: string | Uint8Array): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-function bounded(value: string): string {
-  return value.trim().slice(0, 1_024);
-}
-function isErrno(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === code;
 }

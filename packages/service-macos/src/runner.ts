@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { createAgentHost, validateAgentConfig } from "@mono-agent/core";
@@ -6,6 +5,7 @@ import { parseWebConfig, startWebServer } from "@mono-agent/web";
 
 import { loadProtectedEnvironment } from "./environment.js";
 import { readServiceInput } from "./input.js";
+import { digest, isRecord } from "./internal-fs.js";
 import {
   bindServiceLogs,
   maintainServiceLogs,
@@ -33,6 +33,8 @@ export interface ForegroundServiceCommand {
 export interface ForegroundServiceTestHooks {
   readonly afterRunnerClosureRead?: () => void | Promise<void>;
   readonly afterManagedStart?: (startInfo: unknown) => void | Promise<void>;
+  readonly maintenanceIntervalMilliseconds?: number;
+  readonly maintainLogs?: typeof maintainServiceLogs;
 }
 
 export async function runForegroundService(
@@ -49,7 +51,7 @@ export async function runForegroundService(
     : await loadProtectedEnvironment(command.environmentFile, uid);
   const environmentDigest = protectedEnvironment === undefined
     ? undefined
-    : createHash("sha256").update(protectedEnvironment.source).digest("hex");
+    : digest(protectedEnvironment.source);
   if (environmentDigest !== activation.binding.environmentFileDigest) {
     throw new Error("Protected environment does not match the planned activation.");
   }
@@ -86,7 +88,7 @@ export async function runForegroundService(
   const managed = activation.binding.targetKind === "agent"
     ? await startAgent(command.configPath, environment, activation.binding.targetConfigDigest)
     : await startWeb(command.configPath, before[0]!.source, environment);
-  const proof = createHash("sha256").update(command.activation).digest("hex");
+  const proof = digest(command.activation);
   let maintenanceFailed = false;
   let maintenanceRun: Promise<void> | undefined;
   let maintenance: NodeJS.Timeout | undefined;
@@ -111,15 +113,16 @@ export async function runForegroundService(
       targetKind: activation.binding.targetKind,
       ...managed.startInfo,
     })}\n`);
+    const maintainLogs = hooks.maintainLogs ?? maintainServiceLogs;
     maintenance = setInterval(() => {
       if (maintenanceRun !== undefined) return;
-      maintenanceRun = maintainServiceLogs(activation.logs, uid, logBinding).catch(() => {
+      maintenanceRun = maintainLogs(activation.logs, uid, logBinding).catch(() => {
         maintenanceFailed = true;
         process.kill(process.pid, "SIGTERM");
       }).finally(() => {
         maintenanceRun = undefined;
       });
-    }, 1_000);
+    }, hooks.maintenanceIntervalMilliseconds ?? 1_000);
     await signal.promise;
   } finally {
     if (maintenance !== undefined) clearInterval(maintenance);
@@ -205,7 +208,7 @@ async function startWeb(
         }
         if (
           response.status !== 200
-          || !record(value)
+          || !isRecord(value)
           || Object.keys(value).length !== 1
           || value.status !== "healthy"
         ) {
@@ -242,12 +245,12 @@ export function parseServiceRunnerActivation(encoded: string): ServiceRunnerActi
   } catch {
     throw new Error("Runner activation is not valid encoded JSON.");
   }
-  if (!record(value) || value.schemaVersion !== 1 || !record(value.binding) || !record(value.logs)) {
+  if (!isRecord(value) || value.schemaVersion !== 1 || !isRecord(value.binding) || !isRecord(value.logs)) {
     throw new Error("Runner activation has an invalid shape.");
   }
   const binding = value.binding;
   const logs = value.logs;
-  const digest = (candidate: unknown): candidate is string =>
+  const isSha256Digest = (candidate: unknown): candidate is string =>
     typeof candidate === "string" && /^[a-f0-9]{64}$/u.test(candidate);
   if (
     Object.keys(value).some((key) => !["schemaVersion", "binding", "logs"].includes(key))
@@ -270,24 +273,27 @@ export function parseServiceRunnerActivation(encoded: string): ServiceRunnerActi
     || (binding.targetKind !== "agent" && binding.targetKind !== "web")
     || typeof binding.targetConfig !== "string"
     || !isAbsolute(binding.targetConfig)
-    || !digest(binding.targetConfigDigest)
+    || !isSha256Digest(binding.targetConfigDigest)
     || (binding.directDependencyName !== "@mono-agent/core"
       && binding.directDependencyName !== "@mono-agent/web")
     || typeof binding.directDependencyVersion !== "string"
     || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(binding.directDependencyVersion)
-    || !digest(binding.packageManifestDigest)
+    || !isSha256Digest(binding.packageManifestDigest)
     || typeof binding.lockfilePath !== "string"
     || !isAbsolute(binding.lockfilePath)
-    || !digest(binding.lockfileDigest)
+    || !isSha256Digest(binding.lockfileDigest)
     || typeof binding.nodePath !== "string"
     || !isAbsolute(binding.nodePath)
-    || !digest(binding.nodeDigest)
+    || !isSha256Digest(binding.nodeDigest)
     || typeof binding.runnerScriptPath !== "string"
     || !isAbsolute(binding.runnerScriptPath)
-    || !digest(binding.runnerScriptDigest)
+    || !isSha256Digest(binding.runnerScriptDigest)
     || typeof binding.logsDirectoryIdentity !== "string"
     || !/^\d+:\d+:\d+:\d+$/u.test(binding.logsDirectoryIdentity)
-    || (binding.environmentFileDigest !== undefined && !digest(binding.environmentFileDigest))
+    || (
+      binding.environmentFileDigest !== undefined
+      && !isSha256Digest(binding.environmentFileDigest)
+    )
     || Object.keys(logs).some((key) => ![
       "directory",
       "directoryIdentity",
@@ -318,17 +324,13 @@ export function parseServiceRunnerActivation(encoded: string): ServiceRunnerActi
   return Object.freeze(value as unknown as ServiceRunnerActivation);
 }
 
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function readDirectDependency(
   source: Uint8Array,
   name: "@mono-agent/core" | "@mono-agent/web",
 ): unknown {
   try {
     const manifest = JSON.parse(Buffer.from(source).toString("utf8")) as unknown;
-    if (!record(manifest) || !record(manifest.dependencies)) return undefined;
+    if (!isRecord(manifest) || !isRecord(manifest.dependencies)) return undefined;
     return manifest.dependencies[name];
   } catch {
     return undefined;

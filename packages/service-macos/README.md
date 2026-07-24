@@ -81,6 +81,11 @@ on the failed desired log directory.
 An explicitly authorized apply or removal automatically recovers a known
 interrupted transaction before creating a new plan. Inspect and plan remain
 read-only and refuse unresolved transactions.
+Multi-service `inspect` and selected-service `status` report target-local
+observation failures through `observationError` without hiding healthy sibling
+services. Failed observations omit any file or launchd facts that were not
+actually read. Planning, apply, lifecycle mutation, removal, and recovery stay
+strict and fail closed on the same error.
 
 The service file uses `configVersion: 1` and a `services` map. Each entry names
 exactly one strict target,
@@ -154,7 +159,13 @@ remain; remove those explicit archive files before applying the decrease.
 | `logs.ts` | Owner-private readiness proof plus bounded log rotation and retention. |
 | `command.ts` | Shell-free bounded subprocess runner. |
 | `runner.ts` | Fingerprinted foreground agent/web startup, health, readiness, and shutdown. |
-| `reconciler.ts` | Safe inspect, fingerprinted apply/removal plans, drift checks, atomic mutation, and rollback. |
+| `observe.ts` | Read-only plist, launchd, readiness, and protected-directory observations. |
+| `lifecycle.ts` | Strict target binding plus bounded launchd start, stop, readiness, and rollback operations. |
+| `reconciler.ts` | Public inspect, plan, apply, lifecycle, removal, and recovery orchestration. |
+| `transactions.ts` | Journaled plist transaction state machine and rollback policy. |
+| `journal-storage.ts` / `journal-guards.ts` | Crash-safe journal publication and pure successor/identity validation. |
+| `transaction-fs.ts` / `plist-observation.ts` | No-clobber filesystem primitives, locks, and owner-private plist reads. |
+| `internal-fs.ts` | Shared digest, errno, process-liveness, and explicitly scoped file-identity helpers. |
 | `cli.ts` | Thin selected-service JSON lifecycle frontend. |
 
 ## Public API

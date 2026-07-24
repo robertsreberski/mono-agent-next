@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentValidationResult } from "@mono-agent/core";
 
@@ -35,6 +35,7 @@ import {
   planServiceMacosRemoval,
   planStartServiceMacos,
   planStopServiceMacos,
+  processCommandRunner,
   readServiceMacosLogs,
   recoverServiceMacosTransactions,
   removeServiceMacosPlan,
@@ -70,6 +71,7 @@ const execFile = promisify(execFileCallback);
 
 afterEach(() => {
   installServiceMacosTransactionTestHook(undefined);
+  vi.restoreAllMocks();
 });
 
 describe("service-macos config", () => {
@@ -187,6 +189,73 @@ describe("service-macos config", () => {
   });
 });
 
+describe("process command runner", () => {
+  it("captures real subprocess output, aborts, and kills oversized output", async () => {
+    const captured = await processCommandRunner.run(process.execPath, [
+      "-e",
+      "process.stdout.write('captured stdout'); process.stderr.write('captured stderr'); process.exitCode = 7;",
+    ]);
+    expect(captured).toEqual({
+      exitCode: 7,
+      stdout: "captured stdout",
+      stderr: "captured stderr",
+    });
+
+    const fixture = await createFixture();
+    const childPids = new Set<number>();
+    try {
+      const abortedPidPath = join(fixture.root, "aborted.pid");
+      const controller = new AbortController();
+      const aborted = processCommandRunner.run(process.execPath, [
+        "-e",
+        "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); setInterval(() => undefined, 1000);",
+        abortedPidPath,
+      ], { signal: controller.signal });
+      const abortedError = aborted.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      const abortedPid = await waitForPid(abortedPidPath);
+      childPids.add(abortedPid);
+      controller.abort();
+      expect(await abortedError).toMatchObject({
+        name: "AbortError",
+        message: expect.stringMatching(/aborted/u),
+      });
+      await expectProcessExit(abortedPid);
+      childPids.delete(abortedPid);
+
+      const oversizedPidPath = join(fixture.root, "oversized.pid");
+      const oversized = processCommandRunner.run(process.execPath, [
+        "-e",
+        "require('node:fs').writeFileSync(process.argv[1], String(process.pid)); process.stdout.write(Buffer.alloc(1048577, 120)); setInterval(() => undefined, 1000);",
+        oversizedPidPath,
+      ]);
+      const oversizedError = oversized.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      const oversizedPid = await waitForPid(oversizedPidPath);
+      childPids.add(oversizedPid);
+      expect(await oversizedError).toEqual(
+        expect.objectContaining({
+          message: expect.stringMatching(/exceeded 1 MiB/u),
+        }),
+      );
+      await expectProcessExit(oversizedPid);
+      childPids.delete(oversizedPid);
+    } finally {
+      for (const pid of childPids) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already exited.
+        }
+      }
+    }
+  }, 10_000);
+});
+
 describe("service-macos reconciliation", () => {
   it("keeps inspect and plan filesystem-read-only while binding exact targets and inputs", async () => {
     const fixture = await createFixture();
@@ -217,6 +286,94 @@ describe("service-macos reconciliation", () => {
     expect(plan.fingerprint).toMatch(/^service-macos:v1:[a-f0-9]{64}$/u);
     expect(plan.entries[0]?.desiredPlist).toContain(`<string>${fixture.runtime.nodePath}</string>`);
     expect(fixture.runner.calls.every((call) => call.command === LAUNCHCTL_PATH && call.arguments_[0] === "print")).toBe(true);
+  });
+
+  it("isolates per-service read-only drift while strict planning fails closed", async () => {
+    const fixture = await createFixture();
+    const raw = JSON.parse(await readFile(fixture.configPath, "utf8")) as {
+      services: Record<string, Record<string, unknown>>;
+    };
+    raw.services["unsafe-agent"] = structuredClone(
+      raw.services["personal-agent"]!,
+    );
+    await writeFile(
+      fixture.configPath,
+      `${JSON.stringify(raw)}\n`,
+      { mode: 0o600 },
+    );
+    const unsafePlist = join(
+      fixture.runtime.launchAgentsDirectory,
+      "ai.mono-agent.unsafe-agent.plist",
+    );
+    await writeFile(unsafePlist, "operator plist\n", { mode: 0o644 });
+    await chmod(unsafePlist, 0o644);
+
+    const observations = await inspectServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+    });
+    expect(observations).toHaveLength(2);
+    expect(
+      observations.find(
+        (observation) => observation.target.serviceId === "personal-agent",
+      ),
+    ).toMatchObject({
+      file: { exists: false },
+      loaded: false,
+      launchdState: "absent",
+      ready: false,
+    });
+    const unsafe = observations.find(
+      (observation) => observation.target.serviceId === "unsafe-agent",
+    );
+    expect(unsafe).toMatchObject({
+      file: { exists: true },
+      launchdState: "unknown",
+      ready: false,
+      observationError: expect.stringMatching(/owner-private regular plist/u),
+    });
+    expect(unsafe).not.toHaveProperty("loaded");
+
+    const status = await statusServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      serviceId: "unsafe-agent",
+    });
+    expect(status.observation.observationError).toMatch(
+      /owner-private regular plist/u,
+    );
+    await expect(planServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+    })).rejects.toThrow(/owner-private regular plist/u);
+
+    const controller = new AbortController();
+    controller.abort(new Error("inspection cancelled"));
+    await expect(inspectServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      signal: controller.signal,
+    })).rejects.toThrow("inspection cancelled");
+
+    const originalLaunchAgents =
+      `${fixture.runtime.launchAgentsDirectory}.original`;
+    fixture.runner.failPrintAfter = 0;
+    fixture.runner.onPrint = async () => {
+      await rename(
+        fixture.runtime.launchAgentsDirectory,
+        originalLaunchAgents,
+      );
+      await mkdir(
+        fixture.runtime.launchAgentsDirectory,
+        { mode: 0o700 },
+      );
+    };
+    await expect(statusServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      serviceId: "personal-agent",
+    })).rejects.toThrow(/Protected directory changed/u);
   });
 
   it("requires explicit mutation authorization and performs argument-vector launchctl calls", async () => {
@@ -486,6 +643,88 @@ describe("service-macos reconciliation", () => {
       .toMatchObject({ event: "stopped", pid: process.pid });
     await expect(fetch(`http://127.0.0.1:${String(started.port)}/healthz`)).rejects.toThrow();
   });
+
+  it("self-shuts down and withdraws readiness when log maintenance fails", async () => {
+    const fixture = await createFixture();
+    const project = join(fixture.root, "agent");
+    const webConfig = join(project, "web.config.json");
+    const environmentFile = join(fixture.root, "web.env");
+    const registry = join(fixture.root, "registry");
+    await mkdir(registry, { mode: 0o700 });
+    await writeFile(
+      environmentFile,
+      "WEB_TOKEN=web-test-token-placeholder-not-secret\n",
+      { mode: 0o600 },
+    );
+    await writeFile(webConfig, `${JSON.stringify({
+      configVersion: 1,
+      listen: { host: "127.0.0.1", port: 0 },
+      auth: { token: { $env: "WEB_TOKEN" } },
+      dataDirectory: join(fixture.root, "web-state"),
+      agentRegistries: [registry],
+    })}\n`, { mode: 0o600 });
+    await writeFile(join(project, "package.json"), `${JSON.stringify({
+      dependencies: { "@mono-agent/web": "0.15.0" },
+    })}\n`, { mode: 0o600 });
+    const serviceConfig = JSON.parse(await readFile(fixture.configPath, "utf8")) as {
+      services: Record<string, Record<string, unknown>>;
+    };
+    serviceConfig.services["personal-agent"]!.target = {
+      kind: "web",
+      config: webConfig,
+    };
+    serviceConfig.services["personal-agent"]!.environmentFile = environmentFile;
+    await writeFile(
+      fixture.configPath,
+      `${JSON.stringify(serviceConfig)}\n`,
+      { mode: 0o600 },
+    );
+    const plan = await planServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+    });
+    const entry = plan.entries[0]!;
+    const encoded = /<string>--activation<\/string>\s*<string>([A-Za-z0-9_-]+)<\/string>/u
+      .exec(entry.desiredPlist)?.[1];
+    expect(encoded).toBeDefined();
+    await writeFile(entry.target.stdoutPath, "", { mode: 0o600 });
+    await writeFile(entry.target.stderrPath, "", { mode: 0o600 });
+
+    type Listener = () => void;
+    const listeners = new Map<"SIGINT" | "SIGTERM", Listener>();
+    const signals = {
+      once(signal: "SIGINT" | "SIGTERM", listener: Listener) {
+        listeners.set(signal, listener);
+      },
+      removeListener(signal: "SIGINT" | "SIGTERM", listener: Listener) {
+        if (listeners.get(signal) === listener) listeners.delete(signal);
+      },
+    };
+    const kill = vi.spyOn(process, "kill").mockImplementation((
+      pid: number,
+      signal?: string | number,
+    ) => {
+      if (pid === process.pid && signal === "SIGTERM") {
+        listeners.get("SIGTERM")?.();
+      }
+      return true;
+    });
+
+    await expect(runForegroundService({
+      configPath: webConfig,
+      environmentFile,
+      activation: encoded!,
+    }, () => undefined, signals, {
+      maintenanceIntervalMilliseconds: 5,
+      async maintainLogs() {
+        throw new Error("injected maintenance failure");
+      },
+    })).rejects.toThrow("Service log rotation failed; the runner stopped.");
+
+    expect(kill).toHaveBeenCalledWith(process.pid, "SIGTERM");
+    expect(JSON.parse(await readFile(entry.target.readinessPath, "utf8")))
+      .toMatchObject({ event: "stopped", pid: process.pid });
+  }, 10_000);
 
   it("starts web from the fingerprinted snapshot and stops when the live config drifts", async () => {
     const fixture = await createFixture();
@@ -867,8 +1106,10 @@ describe("service-macos reconciliation", () => {
       totalBytes: 10,
       returnedBytes: 4,
       truncated: true,
+      digest: createHash("sha256").update("6789").digest("hex"),
       content: "6789",
     });
+    expect(logs.stdout.content).not.toContain("\0");
     expect(logs.stderr.content).toBe("ghij");
     expect(logs.fingerprint).toMatch(/^service-macos:logs:v1:[a-f0-9]{64}$/u);
 
@@ -1829,6 +2070,44 @@ class FakeRunner implements CommandRunner {
 
 function result(exitCode: number, stderr = "", stdout = ""): CommandResult {
   return { exitCode, stdout, stderr };
+}
+
+async function waitForPid(path: string): Promise<number> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const pid = Number(await readFile(path, "utf8"));
+      if (Number.isSafeInteger(pid) && pid > 0) return pid;
+    } catch (error) {
+      if (
+        typeof error !== "object"
+        || error === null
+        || (error as { code?: unknown }).code !== "ENOENT"
+      ) {
+        throw error;
+      }
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Subprocess did not publish its pid at ${path}.`);
+}
+
+async function expectProcessExit(pid: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (
+        typeof error === "object"
+        && error !== null
+        && (error as { code?: unknown }).code === "ESRCH"
+      ) {
+        return;
+      }
+      throw error;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Subprocess ${String(pid)} remained alive.`);
 }
 
 async function snapshot(root: string): Promise<readonly string[]> {
