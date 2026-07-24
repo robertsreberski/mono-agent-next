@@ -17,31 +17,31 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `105804f5ec668cdaa6b3d9747d244cb6132f90a3a755ad4ab5ecd2a154154ed8`
+Source manifest digest: `87fd752bbddab1db0ce4ab048f30a43b67e2b2e13349bb8d3d32a132dfecf4c3`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 229 | 87920 |
-| Tests | 140 | 71226 |
-| Repository and product tooling | 63 | 22966 |
+| Production | 249 | 90946 |
+| Tests | 145 | 72900 |
+| Repository and product tooling | 63 | 22962 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **432** | **182112** |
+| **Total executable source** | **457** | **186808** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 383.9 lines.
+Average production file size is 365.2 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 87920 | 130000 | within limit |
-| kernel-production | 15368 | 15500 | within limit |
+| repository-production | 90946 | 130000 | within limit |
+| kernel-production | 15459 | 15500 | within limit |
 
 ## Largest package ownership surfaces
 
@@ -52,9 +52,9 @@ Average production file size is 383.9 lines.
 | `@mono-agent/runtime-pi` | 15 | 7921 | 4473 |
 | `@mono-agent/memory-local` | 14 | 7529 | 3932 |
 | `@mono-agent/web` | 28 | 7132 | 2202 |
-| `@mono-agent/service-macos` | 14 | 4336 | 1851 |
+| `@mono-agent/service-macos` | 22 | 5749 | 2130 |
+| `create-mono-agent` | 11 | 4472 | 1616 |
 | `@mono-agent/channel-slack` | 15 | 3747 | 2189 |
-| `create-mono-agent` | 7 | 3505 | 1289 |
 
 The complete package table is retained in the generated report model exposed by
 `pnpm --silent run report:source-beta -- --json`.

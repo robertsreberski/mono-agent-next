@@ -50,14 +50,10 @@ export default defineConfig({
     outDir: resolve(root, "dist"),
     emptyOutDir: true,
     target: "es2022",
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (id.includes("@assistant-ui")) return "assistant-ui";
-          if (id.includes("react")) return "react";
-          return undefined;
-        },
-      },
-    },
+    // Vendor chunking is left to Rollup. Hand-splitting by substring put any
+    // dependency whose path merely contains "react" — `@base-ui/react` among
+    // them — into a chunk that could initialize before the one it depends on,
+    // which surfaces only in a browser as a temporal dead zone ReferenceError
+    // while the build, typecheck, and jsdom tests all stay green.
   },
 });

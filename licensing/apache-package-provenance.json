@@ -437,7 +437,7 @@
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "bcad02df7bfd6efe45080ac270da9cfa00ae8c70",
+        "commit": "d8b85badfbb0eec031286e04eca2e9813d1a803e",
         "path": "packages/operator/src/validation.ts"
       },
       "copyrightHolder": "Robert Sreberski",
