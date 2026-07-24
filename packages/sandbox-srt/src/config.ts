@@ -1,3 +1,5 @@
+import { SandboxSrtError } from "./errors.js";
+
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_TIMEOUT_MS = 600_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
@@ -171,7 +173,10 @@ function boundedInteger(input: unknown, fallback: number, minimum: number, maxim
 }
 
 function fail(path: string, message: string): never {
-  throw new TypeError(`sandbox-srt config ${path} ${message}`);
+  throw new SandboxSrtError(
+    "invalid_config",
+    `sandbox-srt config ${path} ${message}`,
+  );
 }
 
 function fileSchema(): Readonly<Record<string, unknown>> {

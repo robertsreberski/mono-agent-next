@@ -126,7 +126,7 @@ arbitrary settings file allows or denies any particular destination.
 2. The module opens and hashes the canonical executable and settings paths with no-follow descriptors, pinning their filesystem fingerprints.
 3. Each request validates an absolute command, canonical working directory, argument/input/environment bounds, allowlisted non-preloader environment, timeout, and cancellation.
 4. Immediately before launch, both selected files are reopened with no-follow descriptors, rehashed positionally, and compared with the pinned fingerprints while those descriptors remain open.
-5. Node passes those descriptors into the child. A self-contained ESM bundle is loaded from `/proc/self/fd` on Linux or `/dev/fd` on macOS; its loader permits only `node:` built-ins and rejects every external module edge. Linux native executables launch directly through `/proc/self/fd`. The settings argument is descriptor-backed on both platforms.
+5. Node passes those descriptors into the child. A self-contained ESM bundle is loaded from `/proc/self/fd` on Linux or `/dev/fd` on macOS; its loader parses the exact descriptor-bound source with Acorn before evaluation, rejects dynamic imports, permits only static `node:` built-ins, and rejects every other external module edge. Linux native executables launch directly through `/proc/self/fd`. The settings argument is descriptor-backed on both platforms.
 6. The module collects a combined bounded stdout/stderr budget; overflow, abort, timeout, and stop terminate the whole process group. Later runs and health independently re-prove the selected paths, but a post-run pathname check is not treated as the execution-race defense.
 
 ### Package structure
@@ -135,7 +135,8 @@ arbitrary settings file allows or denies any particular destination.
 | --- | --- |
 | `config.ts` | Strict executable, settings, limit, and environment configuration. |
 | `security.ts` | Canonical no-follow file resolution, POSIX safety checks, positional hashing, fingerprints, and retained descriptor bindings. |
-| `sandbox.ts` | Command validation, descriptor-bound process launch, bounded I/O, timeout, cancellation, health, and stop. |
+| `bound-launch.ts` | Descriptor-bound native and self-contained Node launch vectors and loader validation. |
+| `sandbox.ts` | Command validation, bounded I/O, timeout, cancellation, health, and stop. |
 | `status-command.ts` | Strict read-only integrity and settings-authority status reporting. |
 | `errors.ts` | Stable fail-closed sandbox error codes. |
 | `index.ts` | The typed reserved `monoAgentModule` definition and public exports. |
@@ -180,10 +181,12 @@ sandboxSrtJsonSchema
 
 ## Dependency Boundary
 
-This GPL package depends only on first-party reserved contracts at
-`@mono-agent/module-sdk/internal` and Node built-ins. It does not import SRT as
-a package, search `PATH`, resolve managed installations, import Core, or depend
-on a runtime, product, channel, state store, or v0 sandbox helper.
+This GPL package depends on first-party reserved contracts at
+`@mono-agent/module-sdk/internal`, Node built-ins, and the zero-dependency
+pure-JavaScript Acorn parser used for pre-evaluation import detection. It does
+not import SRT as a package, search `PATH`, resolve managed installations,
+import Core, or depend on a runtime, product, channel, state store, native
+addon, or v0 sandbox helper.
 
 ## What This Package Does Not Own
 
@@ -212,12 +215,18 @@ pnpm --filter @mono-agent/sandbox-srt test
 
 The focused suite uses a deterministic fake SRT executable to prove exact
 argument vectors, environment isolation, bounded input/output/timeout/cancel,
+per-command timeout and environment limits, in-flight stop escalation,
 settings/executable digest and identity drift, missing and unsafe modes,
 symlink and hard-link rejection, canonical working directories, pinned
 network-deny/network-allow policy handoff, health, closed-instance behavior,
 and a deterministic executable/settings replacement at the exact
 verify-to-spawn boundary. It also rewrites a relative dependency and proves
-static, dynamic, and `file:` imports fail without executing that dependency.
+static imports (including import attributes), dynamic imports, and `file:`
+imports fail without executing that dependency. Static `node:` imports,
+`import.meta`, top-level await, Unicode identifiers, and literal `import(` text
+in strings, templates, methods, and regular expressions remain valid; malformed
+source also fails before evaluation. The Linux native-binary launch vector is
+covered directly.
 The suite also proves Node and native-loader injection variables fail before a
 `NODE_OPTIONS --import` marker can run. The fake policy seam is contract
 evidence; a real provisioned bundled-SRT smoke remains the deployment-time

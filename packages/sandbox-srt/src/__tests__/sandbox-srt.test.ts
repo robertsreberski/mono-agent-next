@@ -5,15 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { parse } from "acorn";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ModuleCommand, ModuleLogger } from "@mono-agent/module-sdk";
 import type { SandboxCommand } from "@mono-agent/module-sdk/internal";
 
+import { boundLaunch } from "../bound-launch.js";
 import {
   openSandboxSrt,
   parseSandboxSrtConfig,
+  SandboxSrtError,
   type SandboxSrtConfig,
+  type TrustedFile,
 } from "../index.js";
 
 const spawnBoundary = vi.hoisted(() => ({
@@ -72,6 +76,17 @@ describe("sandbox-srt", () => {
       expect(() => parseSandboxSrtConfig(config(fixture, {
         environment: { inherit: [name], allow: [] },
       }))).toThrow(/reserved for the host runtime/u);
+    }
+  });
+
+  it("classifies invalid configuration with the reachable stable error code", async () => {
+    const fixture = await createFixture();
+    try {
+      parseSandboxSrtConfig({ ...config(fixture), unknown: true });
+      throw new Error("Expected invalid sandbox-srt configuration to fail.");
+    } catch (error) {
+      expect(error).toBeInstanceOf(SandboxSrtError);
+      expect(error).toMatchObject({ code: "invalid_config" });
     }
   });
 
@@ -135,6 +150,19 @@ exit 0`,
       controller.abort(reason);
       await expect(command.run(undefined, commandContext(controller.signal)))
         .rejects.toBe(reason);
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
+  it("propagates an already-aborted health signal", async () => {
+    const fixture = await createFixture();
+    const sandbox = await openSandboxSrt({ config: config(fixture) });
+    try {
+      const controller = new AbortController();
+      controller.abort();
+      await expect(sandbox.health({ signal: controller.signal }))
+        .rejects.toMatchObject({ name: "AbortError" });
     } finally {
       await sandbox.stop();
     }
@@ -215,6 +243,40 @@ exit 0`,
     }
   });
 
+  it("builds the boundLaunch Linux native-binary vector", () => {
+    const platform = Object.getOwnPropertyDescriptor(process, "platform");
+    Object.defineProperty(process, "platform", {
+      configurable: true,
+      enumerable: true,
+      value: "linux",
+    });
+    try {
+      const executable: TrustedFile = Object.freeze({
+        path: "/private/srt",
+        sha256: "0".repeat(64),
+        device: "1",
+        inode: "2",
+        mode: 0o700,
+        owner: 501,
+        links: 1,
+        size: 1,
+      });
+      const launch = boundLaunch(
+        executable,
+        { descriptor: 3, close: async () => {} },
+        { descriptor: 4, close: async () => {} },
+      );
+      expect(launch).toEqual({
+        command: "/proc/self/fd/3",
+        arguments: ["--settings", "/proc/self/fd/4"],
+      });
+    } finally {
+      if (platform !== undefined) {
+        Object.defineProperty(process, "platform", platform);
+      }
+    }
+  });
+
   it("rejects runtime preloader environment before NODE_OPTIONS can import code", async () => {
     const fixture = await createFixture();
     const injectedModule = join(fixture.root, "injected-before-srt.mjs");
@@ -278,8 +340,19 @@ exec "$@"`,
     }
   });
 
-  it("rejects static, dynamic, and file-URL local dependencies before dependency code runs", async () => {
-    for (const importKind of ["static", "dynamic", "file"] as const) {
+  it("rejects static and dynamic local dependencies before dependency code runs", async () => {
+    for (const importKind of [
+      "static",
+      "static-attributes",
+      "dynamic",
+      "dynamic-cr",
+      "dynamic-line-separator",
+      "dynamic-asi-block",
+      "function-expression-division",
+      "class-expression-division",
+      "file",
+      "object-division",
+    ] as const) {
       const fixture = await createFixture({
         executable: dependentFakeSrt(importKind),
       });
@@ -301,7 +374,10 @@ exec "$@"`,
           { mode: 0o600 },
         );
         const result = await sandbox.execute(command(fixture.root, "/usr/bin/true"));
-        expect(result).toMatchObject({ exitCode: 126, timedOut: false });
+        expect(result, `${importKind}: ${text(result.stderr)}`).toMatchObject({
+          exitCode: 126,
+          timedOut: false,
+        });
         expect(text(result.stdout)).toBe("");
         expect(text(result.stderr)).toBe(
           "The bound SRT entrypoint is not self-contained.",
@@ -312,6 +388,59 @@ exec "$@"`,
       } finally {
         await sandbox.stop();
       }
+    }
+  });
+
+  it("runs current self-contained ESM syntax with import text in literal contexts", async () => {
+    const fixture = await createFixture({ executable: fakeSrtWithImportLiterals() });
+    const sandbox = await openSandboxSrt({ config: config(fixture) });
+    try {
+      const result = await sandbox.execute(command(
+        fixture.root,
+        "/usr/bin/true",
+      ));
+      expect(result).toMatchObject({
+        exitCode: 0,
+        timedOut: false,
+      });
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
+  it("parses current import attributes with the loader's exact Acorn options", () => {
+    expect(() => parse(
+      `#!/usr/bin/env node
+import data from "./fixture.json" with { type: "json" };
+import { readFile } from "node:fs";
+export default await Promise.resolve([data, readFile, import.meta.url]);`,
+      {
+        allowHashBang: true,
+        ecmaVersion: "latest",
+        sourceType: "module",
+      },
+    )).not.toThrow();
+  });
+
+  it("fails closed before evaluating a malformed entrypoint", async () => {
+    const fixture = await createFixture({
+      executable: `#!/usr/bin/env node
+process.stdout.write("malformed entrypoint ran");
+export {`,
+    });
+    const sandbox = await openSandboxSrt({ config: config(fixture) });
+    try {
+      const result = await sandbox.execute(command(fixture.root, "/usr/bin/true"));
+      expect(result).toMatchObject({
+        exitCode: 126,
+        timedOut: false,
+      });
+      expect(text(result.stdout)).toBe("");
+      expect(text(result.stderr)).toBe(
+        "The bound SRT entrypoint is not self-contained.",
+      );
+    } finally {
+      await sandbox.stop();
     }
   });
 
@@ -404,6 +533,70 @@ exec "$@"`,
       });
       setTimeout(() => controller.abort(reason), 20);
       await expect(running).rejects.toBe(reason);
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
+  it("rejects per-command bounds and uses the default timeout", async () => {
+    const fixture = await createFixture();
+    const sandbox = await openSandboxSrt({
+      config: config(fixture, {
+        limits: {
+          defaultTimeoutMs: 20,
+          maxTimeoutMs: 1_000,
+          maxEnvironmentVariables: 1,
+          maxEnvironmentBytes: 64,
+        },
+        environment: { inherit: [], allow: ["ONE", "TWO"] },
+      }),
+    });
+    try {
+      await expect(sandbox.execute({
+        ...command(fixture.root, "/usr/bin/true"),
+        timeoutMs: 2_000,
+      })).rejects.toMatchObject({ code: "invalid_command" });
+      await expect(sandbox.execute({
+        ...command(fixture.root, "/usr/bin/true"),
+        environment: { ONE: "1", TWO: "2" },
+      })).rejects.toMatchObject({ code: "invalid_command" });
+      await expect(sandbox.execute({
+        ...command(fixture.root, "/usr/bin/true"),
+        environment: { ONE: "x".repeat(64) },
+      })).rejects.toMatchObject({ code: "invalid_command" });
+
+      const timedOut = await sandbox.execute(
+        command(fixture.root, "/bin/sleep", ["2"]),
+      );
+      expect(timedOut).toMatchObject({
+        exitCode: null,
+        timedOut: true,
+      });
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
+  it("stop() escalates an in-flight command", async () => {
+    const fixture = await createFixture({ executable: stubbornFakeSrt() });
+    const sandbox = await openSandboxSrt({ config: config(fixture) });
+    try {
+      const running = sandbox.execute(
+        command(fixture.root, "/bin/sleep", ["10"]),
+      );
+      await vi.waitFor(async () => {
+        await expect(statusCommand(sandbox).run(undefined, commandContext()))
+          .resolves.toMatchObject({ activeCommands: 1 });
+        await expect(readFile(`${fixture.executable}.ready`, "utf8"))
+          .resolves.toBe("ready");
+      });
+
+      const [, result] = await Promise.all([sandbox.stop(), running]);
+      expect(result).toMatchObject({
+        exitCode: null,
+        signal: "SIGKILL",
+        timedOut: false,
+      });
     } finally {
       await sandbox.stop();
     }
@@ -562,12 +755,86 @@ const MALICIOUS_FAKE_SRT = `#!/usr/bin/env node
 process.stdout.write("malicious executable ran");
 process.exit(0);`;
 
-function dependentFakeSrt(importKind: "static" | "dynamic" | "file"): string {
+function fakeSrtWithImportLiterals(): string {
+  return FAKE_SRT.replace(
+    "const arguments_ = process.argv.slice(2);",
+    [
+      'const doubleQuoted = "import(";',
+      "const singleQuoted = 'import(';",
+      "const templateQuoted = `import(`;",
+      'const interpolated = `${"import("}`;',
+      "const regexQuoted = /import\\(/u;",
+      "export default /import(group)/u;",
+      'if (true) /import\\(/u.test("");',
+      'if (true) {} /import(group)/u.test("importgroup");',
+      'for await (const value of []) /import(group)/u.test(value);',
+      "const πimport = () => 1;",
+      "πimport();",
+      "const moduleUrl = import.meta.url;",
+      "const objectMethods = {",
+      "import() { return 1; },",
+      "async import() { return 2; },",
+      "get import() { return 3; },",
+      "};",
+      "class ClassMethods {",
+      "import() { return 1; }",
+      "static import() { return 2; }",
+      "}",
+      "void [doubleQuoted, singleQuoted, templateQuoted, interpolated, regexQuoted, moduleUrl, objectMethods, ClassMethods];",
+      "const arguments_ = process.argv.slice(2);",
+    ].join("\n"),
+  );
+}
+
+function stubbornFakeSrt(): string {
+  return FAKE_SRT
+    .replace(
+      'import { readFileSync } from "node:fs";',
+      'import { readFileSync, writeFileSync } from "node:fs";',
+    )
+    .replace(
+      "const arguments_ = process.argv.slice(2);",
+      [
+        'process.on("SIGTERM", () => {});',
+        "setInterval(() => {}, 1_000);",
+        'writeFileSync(`${process.argv[1]}.ready`, "ready");',
+        "const arguments_ = process.argv.slice(2);",
+      ].join("\n"),
+    );
+}
+
+function dependentFakeSrt(
+  importKind:
+    | "static"
+    | "static-attributes"
+    | "dynamic"
+    | "dynamic-cr"
+    | "dynamic-line-separator"
+    | "dynamic-asi-block"
+    | "function-expression-division"
+    | "class-expression-division"
+    | "file"
+    | "object-division",
+): string {
   const importStatement = importKind === "static"
     ? 'import "./mutable-support.mjs";'
-    : importKind === "dynamic"
-      ? 'void import /* dependency edge */ ("./mutable-support.mjs");'
-      : 'void import(new URL("./mutable-support.mjs", import.meta.url));';
+    : importKind === "static-attributes"
+      ? 'import data from "./mutable-support.mjs" with { type: "json" }; void data;'
+      : importKind === "dynamic"
+        ? 'void import /* dependency edge */ ("./mutable-support.mjs");'
+        : importKind === "dynamic-cr"
+          ? 'void import// dependency edge\r("./mutable-support.mjs");'
+          : importKind === "dynamic-line-separator"
+            ? 'void import// dependency edge\u2028("./mutable-support.mjs");'
+            : importKind === "dynamic-asi-block"
+              ? 'void import("./mutable-support.mjs")\n{}'
+              : importKind === "function-expression-division"
+                ? 'const value = function() {} / import("./mutable-support.mjs"); void value;'
+                : importKind === "class-expression-division"
+                  ? 'const value = class {} / import("./mutable-support.mjs"); void value;'
+                  : importKind === "file"
+                    ? 'void import(new URL("./mutable-support.mjs", import.meta.url));'
+                    : 'void ({} / import("./mutable-support.mjs"));';
   return `#!/usr/bin/env node
 ${importStatement}
 process.stdout.write("unbundled entrypoint ran");

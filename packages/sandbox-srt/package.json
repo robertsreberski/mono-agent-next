@@ -46,7 +46,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@mono-agent/module-sdk": "workspace:0.15.0"
+    "@mono-agent/module-sdk": "workspace:0.15.0",
+    "acorn": "8.17.0"
   },
   "publishConfig": {
     "access": "public"
