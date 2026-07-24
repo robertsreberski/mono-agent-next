@@ -296,7 +296,11 @@ describe("operator HTTP channel", () => {
         type: "compaction",
         compaction: { compacted: true, tokensBefore: 30, tokensAfter: 20 },
       });
-      return { status: "completed", text: "final answer" } as const;
+      return {
+        status: "completed",
+        text: "final answer",
+        messageId: "canonical-assistant-message",
+      } as const;
     });
     const channel = await startChannel(dispatch);
     const response = await postJson(channel.startInfo.turnsUrl, {
@@ -361,7 +365,11 @@ describe("operator HTTP channel", () => {
       {
         type: "completed",
         turnId,
-        finalMessage: { role: "assistant", text: "final answer" },
+        finalMessage: {
+          id: "canonical-assistant-message",
+          role: "assistant",
+          text: "final answer",
+        },
         finishedAt: expect.any(String),
         stopReason: "completed",
       },
@@ -378,6 +386,25 @@ describe("operator HTTP channel", () => {
       attachments: [],
     });
     expect(inbound?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("fails invalid channel result message identities closed", async () => {
+    for (const messageId of ["", "x".repeat(523), "invalid\0identity"]) {
+      const channel = await startChannel(async () => ({
+        status: "completed",
+        text: "must not become a completed frame",
+        messageId,
+      }));
+      const frames = await readFrames(await postJson(channel.startInfo.turnsUrl, {
+        conversationId: "invalid-message-id",
+        input: { text: "run" },
+      }));
+      expect(frames.map((frame) => frame.type)).toEqual(["accepted", "error"]);
+      expect(frames.at(-1)).toMatchObject({
+        type: "error",
+        error: { code: "dispatch_failed", message: "The operator turn failed." },
+      });
+    }
   });
 
   it("omits oversized structured tool payloads without losing correlation or the terminal result", async () => {
@@ -590,6 +617,73 @@ describe("operator HTTP channel", () => {
     expect(dispatch).toHaveBeenCalledOnce();
   });
 
+  it("uses one deterministic opaque wire identity for broad Core message ids", async () => {
+    const now = new Date().toISOString();
+    const canonicalMessageId = `${"r".repeat(512)}:assistant`;
+    const dispatch = vi.fn(async (
+      _request: ChannelInboundRequest,
+      _reply: ChannelReplySink,
+    ): Promise<ChannelTurnResult> => ({
+      status: "completed",
+      text: "quoted",
+      messageId: canonicalMessageId,
+    }));
+    const readReplay = vi.fn<NonNullable<ChannelHost["readReplay"]>>(async () => ({
+      entries: [
+        {
+          turnId: "turn-broad",
+          createdAt: now,
+          message: {
+            id: canonicalMessageId,
+            role: "assistant",
+            content: [{ type: "text", text: "broad canonical identity" }],
+          },
+        },
+        {
+          turnId: "turn-surrogate-one",
+          createdAt: now,
+          message: { id: "\ud800", role: "assistant", content: [{ type: "text", text: "one" }] },
+        },
+        {
+          turnId: "turn-surrogate-two",
+          createdAt: now,
+          message: { id: "\ud801", role: "assistant", content: [{ type: "text", text: "two" }] },
+        },
+      ],
+    }));
+    const channel = await startChannel(dispatch, { readReplay });
+    const client = new OperatorClient({ endpoint: channel.startInfo.endpoint, token: TOKEN });
+    const replay = await client.getReplay("broad-identity");
+    const wireMessageId = replay.messages[0]?.id;
+    expect(wireMessageId).toMatch(/^message~u16:[A-Za-z0-9_-]+$/);
+    expect(Buffer.from(canonicalMessageId, "utf8")).toHaveLength(522);
+    if (wireMessageId === undefined) throw new Error("replay omitted the broad message identity");
+    expect(replay.messages[1]?.id).toMatch(/^message~u16:/);
+    expect(replay.messages[2]?.id).toMatch(/^message~u16:/);
+    expect(replay.messages[1]?.id).not.toBe(replay.messages[2]?.id);
+
+    const response = await postJson(channel.startInfo.turnsUrl, {
+      conversationId: "broad-identity",
+      input: {
+        text: "Respond to this.",
+        quote: {
+          conversationId: "broad-identity",
+          messageId: wireMessageId,
+          text: "broad canonical identity",
+        },
+      },
+    });
+    const frames = await readFrames(response);
+    expect(frames.at(-1)).toMatchObject({
+      type: "completed",
+      finalMessage: { id: wireMessageId, text: "quoted" },
+    });
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(dispatch.mock.calls[0]?.[0].metadata).toMatchObject({
+      operatorQuote: { messageId: wireMessageId, role: "assistant" },
+    });
+  });
+
   it("aborts the exact Core dispatch when the stream client disconnects", async () => {
     let observedSignal: AbortSignal | undefined;
     let resolveAbort: (() => void) | undefined;
@@ -671,12 +765,20 @@ describe("operator HTTP channel", () => {
       offerLiveInput,
       async listConversations() {
         return {
-          conversations: [{
-            conversationId: "conversation-controls",
-            title: "Controls",
-            updatedAt: now,
-            metadata: { triggerKind: "webhook" },
-          }],
+          conversations: [
+            {
+              conversationId: "conversation-controls",
+              title: "Controls",
+              updatedAt: now,
+              metadata: { source: "operator-proactive", triggerKind: "webhook" },
+            },
+            {
+              conversationId: "trigger:cron:internal",
+              title: "Internal trigger execution",
+              updatedAt: now,
+              metadata: { triggerKind: "cron" },
+            },
+          ],
         };
       },
       readReplay,
@@ -732,6 +834,9 @@ describe("operator HTTP channel", () => {
         id: "conversation-controls",
         title: "Controls",
         triggerKind: "webhook",
+      }, {
+        id: "trigger:cron:internal",
+        title: "Internal trigger execution",
       }],
     });
     await expect(client.getReplay("conversation-controls")).resolves.toMatchObject({ conversationId: "conversation-controls", messages: [{ id: "message-1", text: "remembered" }] });

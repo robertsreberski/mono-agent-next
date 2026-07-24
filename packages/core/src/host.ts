@@ -1437,7 +1437,8 @@ class AgentHostImplementation implements AgentHost {
         }
       }
       if (!emittedText && response.text.length > 0) await reply.emit({ type: "text-replace", text: response.text });
-      return { status: response.status === "completed" ? "completed" : "cancelled", text: response.text };
+      return { status: response.status === "completed" ? "completed" : "cancelled", text: response.text,
+        ...(response.message === undefined ? {} : { messageId: `${response.runId}:assistant` }) };
     } catch (error) {
       if (isAbort(error)) return { status: "cancelled" };
       const conflict = error instanceof AgentAdmissionError && error.code === "request_conflict";
@@ -2890,6 +2891,9 @@ class AgentHostImplementation implements AgentHost {
       this.#loadedConversations.add(input.conversationId);
     } else {
       const history = this.#history.get(input.conversationId) ?? [];
+      const assistantEntryId = entries.find((entry) => entry.kind === "message" && entry.role === "assistant")?.entryId;
+      if (result.message !== undefined && assistantEntryId === undefined)
+        throw new Error("completed assistant message lacks a canonical transcript identity");
       const user: TurnMessage = {
         role: "user",
         content: [
@@ -2904,7 +2908,9 @@ class AgentHostImplementation implements AgentHost {
       this.#history.set(input.conversationId, immutableClone([
         ...history,
         user,
-        ...(result.message === undefined ? [] : [result.message]),
+        ...(result.message === undefined
+          ? []
+          : [{ ...result.message, id: assistantEntryId! }]),
       ]));
       this.#loadedConversations.add(input.conversationId);
     }

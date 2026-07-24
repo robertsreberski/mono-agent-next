@@ -61,6 +61,7 @@ const TERMINAL_FRAME_RESERVE_BYTES = 1_024;
 const CANCELLATION_MESSAGE = "The operator turn was cancelled.";
 const MAX_PENDING_ASKS = 1_000;
 const CORE_REPLAY_PAGE_LIMIT = 10_000;
+const CORE_ASSISTANT_MESSAGE_ID_MAX_BYTES = 522;
 
 export interface OperatorChannelStartInfo {
   readonly host: string;
@@ -481,6 +482,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
           type: "completed",
           turnId,
           finalMessage: {
+            ...(result.messageId === undefined ? {} : { id: operatorMessageId(result.messageId) }),
             role: "assistant",
             text: result.text ?? text,
           },
@@ -800,7 +802,7 @@ async function resolveOperatorQuote(
     throw new HttpError(503, "replay_unavailable", "Conversation replay is temporarily unavailable.");
   }
   const entry = replay.entries.find((candidate) =>
-    (candidate.message.id ?? candidate.turnId) === quote.messageId);
+    operatorMessageId(candidate.message.id ?? candidate.turnId) === quote.messageId);
   if (entry === undefined
     || (entry.message.role !== "user" && entry.message.role !== "assistant")) {
     throw new HttpError(422, "quote_not_found", "The quoted operator message does not exist in this conversation.");
@@ -885,8 +887,31 @@ function validGrantText(value: unknown, maximum: number): value is string {
 }
 
 function operatorTriggerKind(metadata: JsonObject | undefined): "cron" | "webhook" | undefined {
+  if (metadata?.source !== "operator-proactive") return undefined;
   const kind = metadata?.triggerKind;
   return kind === "cron" || kind === "webhook" ? kind : undefined;
+}
+
+function operatorMessageId(value: unknown): string {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.includes("\0")
+    || Buffer.byteLength(value, "utf8") > CORE_ASSISTANT_MESSAGE_ID_MAX_BYTES
+  ) {
+    throw new TypeError("channel turn result messageId is invalid");
+  }
+  if (
+    value.length <= OPERATOR_LIMITS.identifierCharacters
+    && /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u.test(value)
+  ) {
+    return value;
+  }
+  const encoded = `message~u16:${Buffer.from(value, "utf16le").toString("base64url")}`;
+  if (encoded.length > OPERATOR_LIMITS.messageIdentifierCharacters) {
+    throw new TypeError("channel turn result messageId is invalid");
+  }
+  return encoded;
 }
 
 function toChannelAttachment(attachment: NonNullable<OperatorTurnRequest["input"]["attachments"]>[number]): ChannelAttachment {
@@ -913,7 +938,7 @@ function toOperatorMessage(message: TurnMessage, createdAt: string, fallbackId?:
     ? [{ id: part.attachment.id, name: part.attachment.name, mediaType: part.attachment.mediaType, sizeBytes: part.attachment.sizeBytes }]
     : []);
   return {
-    ...(id === undefined ? {} : { id }),
+    ...(id === undefined ? {} : { id: operatorMessageId(id) }),
     role: message.role === "assistant" ? "assistant" : "user",
     text,
     ...(attachments.length === 0 ? {} : { attachments }),

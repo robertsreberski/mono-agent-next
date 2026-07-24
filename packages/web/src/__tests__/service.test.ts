@@ -145,7 +145,6 @@ describe("web service lifecycle", () => {
             sessionEvicted: true,
           },
           finalMessage: {
-            id: "operator-final",
             role: "assistant",
             text: "First <literal> line\nSecond & final line",
           },
@@ -158,7 +157,6 @@ describe("web service lifecycle", () => {
         { role: "user", text: "measure" },
         {
           role: "assistant",
-          operatorMessageId: "operator-final",
           text: "First <literal> line\nSecond & final line",
           telemetry: {
             inputTokens: 110,

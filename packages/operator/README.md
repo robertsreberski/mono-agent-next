@@ -85,10 +85,13 @@ constructed and is never returned as directory state.
    while compaction and provider-session-eviction flags stay sticky.
 5. Inline attachment URLs and quote text use shared hard bounds; the serving
    channel remains responsible for decoding attachments and verifying quote
-   identities against authoritative conversation replay.
-6. Conversation summaries carry only an explicit `cron` or `webhook` trigger
-   kind supplied by the originating module; products never infer provenance
-   from an opaque conversation id.
+   identities against authoritative conversation replay. Message identities are
+   opaque: legacy-safe ids retain their spelling, while broader canonical Core
+   ids use one deterministic bounded wire encoding.
+6. Conversation summaries carry an explicit `cron` or `webhook` trigger kind
+   only for externally delivered proactive conversations; products never infer
+   provenance from an opaque conversation id or import Core's internal trigger
+   execution thread.
 7. Products pass decoded frames to `reduceOperatorFrame` and render the returned
    state and `availableOperatorActions` without a second decoder or reducer.
 

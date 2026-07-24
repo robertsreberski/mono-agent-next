@@ -31,6 +31,8 @@ export const OPERATOR_LIMITS = Object.freeze({
   streamBytes: 8_388_608,
   liveInputCharacters: 8_000,
   identifierCharacters: 256,
+  /** Opaque message identities may encode a canonical Core assistant id (522 UTF-8 bytes). */
+  messageIdentifierCharacters: 1_408,
   askQuestions: 3,
   askChoicesPerQuestion: 20,
   askPromptBytes: 16_384,

@@ -92,6 +92,16 @@ function identifier(value: unknown, path: string): string {
   return parsed;
 }
 
+function messageIdentifier(value: unknown, path: string): string {
+  const parsed = text(value, path, { max: OPERATOR_LIMITS.messageIdentifierCharacters });
+  const legacy = parsed.length <= OPERATOR_LIMITS.identifierCharacters
+    && /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/.test(parsed);
+  if (!legacy && !/^message~u16:[A-Za-z0-9_-]+$/.test(parsed)) {
+    fail(path, "contains unsupported characters");
+  }
+  return parsed;
+}
+
 function bool(value: unknown, path: string): boolean {
   if (typeof value !== "boolean") fail(path, "must be a boolean");
   return value;
@@ -273,7 +283,7 @@ function quote(value: unknown, path: string): OperatorQuote {
   keys(input, ["conversationId", "messageId", "text"], path);
   return {
     conversationId: identifier(input.conversationId, `${path}.conversationId`),
-    messageId: identifier(input.messageId, `${path}.messageId`),
+    messageId: messageIdentifier(input.messageId, `${path}.messageId`),
     ...(input.text === undefined ? {} : {
       text: text(input.text, `${path}.text`, {
         allowEmpty: true,
@@ -449,7 +459,7 @@ function message(value: unknown, path: string): OperatorMessage {
   const input = record(value, path);
   keys(input, ["id", "role", "text", "attachments", "createdAt"], path);
   return {
-    ...(input.id === undefined ? {} : { id: identifier(input.id, `${path}.id`) }),
+    ...(input.id === undefined ? {} : { id: messageIdentifier(input.id, `${path}.id`) }),
     role: oneOf(input.role, ["user", "assistant"] as const, `${path}.role`),
     text: text(input.text, `${path}.text`, { allowEmpty: true, max: 1_048_576 }),
     ...(input.attachments === undefined ? {} : { attachments: array(input.attachments, `${path}.attachments`, attachment, 32) }),

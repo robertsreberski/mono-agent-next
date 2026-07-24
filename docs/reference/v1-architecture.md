@@ -188,6 +188,14 @@ Markdown jobs, derives deterministic event ids, and emits through the trigger
 host. Proactive delivery names a selected channel and uses an idempotency key;
 failed or unsupported delivery remains explicit.
 
+Core returns its canonical assistant transcript id with a channel-dispatched
+completion. The operator channel carries a deterministic opaque wire identity
+derived from that id in both replay and the terminal frame, so web can persist
+an ordinary live reply as a replay-verifiable quote target.
+Operator conversation discovery marks only external `cron`/`webhook`
+conversations opened by proactive delivery; products do not infer provenance
+from opaque ids or import Core's internal trigger execution thread.
+
 ## Operator protocol and products
 
 The agent selects `@mono-agent/channel-operator` to expose one authenticated

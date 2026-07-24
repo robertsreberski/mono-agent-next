@@ -962,7 +962,7 @@ export type ChannelReplyEvent =
   | ChannelReplySessionEvictedEvent;
 export interface ChannelReplySink { emit(event: ChannelReplyEvent): Awaitable<void>; }
 export interface ChannelTurnResult {
-  readonly status: "completed" | "cancelled" | "rejected"; readonly text?: string;
+  readonly status: "completed" | "cancelled" | "rejected"; readonly text?: string; /** Non-empty, NUL-free, at most 522 UTF-8 bytes. */ readonly messageId?: string;
   readonly diagnostics?: readonly ModuleDiagnostic[];
 }
 export interface ChannelCancelRequest {

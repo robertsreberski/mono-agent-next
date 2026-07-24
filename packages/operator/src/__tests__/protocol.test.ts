@@ -46,6 +46,42 @@ describe("operator protocol", () => {
     }
   });
 
+  it("accepts bounded opaque message identities without widening other identifiers", () => {
+    const messageId = `message~u16:${"a".repeat(1_350)}`;
+    expect(parseOperatorFrame({
+      type: "completed",
+      turnId: "fixture-turn",
+      finalMessage: { id: messageId, role: "assistant", text: "done" },
+      finishedAt: "2026-01-02T03:04:06.500Z",
+      stopReason: "completed",
+    })).toMatchObject({ finalMessage: { id: messageId } });
+    expect(parseTurnRequest({
+      conversationId: "conversation",
+      input: {
+        text: "quote",
+        quote: { conversationId: "conversation", messageId },
+      },
+    })).toMatchObject({ input: { quote: { messageId } } });
+    expect(() => parseOperatorFrame({
+      type: "completed",
+      turnId: "fixture-turn",
+      finalMessage: { id: "a".repeat(257), role: "assistant", text: "done" },
+      finishedAt: "2026-01-02T03:04:06.500Z",
+      stopReason: "completed",
+    })).toThrow("contains unsupported characters");
+    expect(() => parseOperatorFrame({
+      type: "completed",
+      turnId: "fixture-turn",
+      finalMessage: {
+        id: `message~u16:${"a".repeat(OPERATOR_LIMITS.messageIdentifierCharacters)}`,
+        role: "assistant",
+        text: "done",
+      },
+      finishedAt: "2026-01-02T03:04:06.500Z",
+      stopReason: "completed",
+    })).toThrow(`at most ${String(OPERATOR_LIMITS.messageIdentifierCharacters)} characters`);
+  });
+
   it("preserves only explicit whitelisted trigger provenance in conversation summaries", () => {
     const updatedAt = "2026-07-24T00:00:00.000Z";
     expect(parseConversationList({

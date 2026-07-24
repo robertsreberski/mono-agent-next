@@ -79,11 +79,13 @@ absent or malformed.
    results, compaction, AskUser, and usage retain distinct bounded shapes.
    Compaction and session-eviction also merge into sticky usage flags without
    erasing the latest token counts; the terminal frame carries the
-   authoritative result.
+   authoritative result and a deterministic opaque identity derived from the
+   Core-owned assistant transcript id when a reply exists.
 5. Capability-gated routes project Core conversation listing, replay, redacted
    config, health, live input, and AskUser answers without package-local state
-   substitutes. Conversation listing exposes only explicit whitelisted
-   `cron`/`webhook` provenance retained in Core conversation metadata.
+   substitutes. Conversation listing exposes `cron`/`webhook` provenance only
+   for conversations explicitly opened by operator proactive delivery; Core's
+   internal trigger execution conversation remains unmarked.
 6. Client disconnect, explicit cancellation, drain, and stop abort the exact dispatch signal; an empty proactive destination is canonicalized to the stable adapter-owned `operator:new-conversation` operation before Core's durable admission, then opens a Core conversation behind Core/state restart-safe delivery authority plus a bounded fingerprint-aware live-instance guard. Conflicting keys fail, ambiguous opens remain unknown, and exhausted guard capacity fails closed.
 
 ### Package structure

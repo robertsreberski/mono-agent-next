@@ -170,10 +170,7 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
         if (!info.capabilities.proactive || !info.capabilities.replay) return [];
         const listed = await client.getConversations();
         return await Promise.all(listed.conversations
-          .filter((conversation) =>
-            conversation.id.startsWith("proactive:")
-            || conversation.id.startsWith("trigger:")
-          )
+          .filter((conversation) => conversation.triggerKind !== undefined)
           .map(async (conversation) => {
             const replay = await client.getReplay(conversation.id);
             return {

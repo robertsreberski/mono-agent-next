@@ -21,9 +21,10 @@ Catalog responsibility: Runs the standalone authenticated browser product with o
 - Discover owner-private operator registry entries through `@mono-agent/operator`.
 - Authenticate every browser API request and reject cross-origin mutations.
 - Persist conversations and messages through atomic owner-private state commits.
-- Discover agent-owned `proactive:*` conversations, import their replay once,
-  persist them durably, and retain dismissal tombstones so deleted notices do
-  not reappear.
+- Discover explicitly provenance-marked external `cron`/`webhook` proactive
+  conversations, import their replay once, persist them durably, and retain
+  dismissal tombstones so deleted notices do not reappear. Conversation ids
+  remain opaque and Core's internal trigger execution threads are not imported.
 - Stream turns through the shared operator client and reducer, and cancel the
   exact active conversation only on explicit operator cancellation or product shutdown.
 - Persist and render per-turn numeric usage plus compaction and provider-session
@@ -102,7 +103,7 @@ web.config.json -> web server -> @mono-agent/operator directory
                                 -> atomic owner-private conversation state
 browser UI       <- browser-state NDJSON snapshots <- web server
 browser actions  -> shared action policy/client -> one agent operator endpoint
-proactive replay -> durable import/tombstone -> notification hint -> browser UI
+marked proactive replay -> durable import/tombstone -> notification hint -> browser UI
 ```
 
 Web never parses the agent wire or implements a second action reducer. Its

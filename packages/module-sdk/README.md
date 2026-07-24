@@ -117,6 +117,12 @@ working directory.
 5. The resulting kind-specific instance participates in host lifecycle,
    health, diagnostics, and normalized turn, delivery, or memory operations.
 
+For channel-dispatched completions, `ChannelTurnResult.messageId` is Core's
+bounded assistant transcript identity, not a provider-native message id. It is
+non-empty, NUL-free, and at most 522 UTF-8 bytes. A channel may carry it into a
+transport's reply/quote primitive so a later request can be verified against
+Core replay.
+
 `RuntimeSession` is provider-private continuation state with one exact public
 authority envelope: `{ id, conversationId, route: { runtimeInstanceId, model },
 createdAt?, expiresAt?, metadata? }`. A runtime must emit that exact

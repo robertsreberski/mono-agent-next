@@ -38,22 +38,24 @@ describe("web operator gateway", () => {
       }
       if (url.endsWith("/v2/conversations")) {
         return new Response(JSON.stringify({ conversations: [
-          { id: "proactive:one", title: "Update", updatedAt: now, triggerKind: "cron" },
-          { id: "trigger:cron:morning", title: "Morning", updatedAt: now },
+          { id: "opaque-external-cron", title: "Update", updatedAt: now, triggerKind: "cron" },
+          { id: "opaque-external-webhook", title: "Webhook", updatedAt: now, triggerKind: "webhook" },
+          { id: "trigger:cron:morning", title: "Internal trigger", updatedAt: now },
+          { id: "proactive:unmarked", title: "Unmarked delivery", updatedAt: now },
           { id: "web:ordinary", updatedAt: now },
         ] }), { headers: { "content-type": "application/json" } });
       }
       if (
-        url.endsWith("/v2/conversations/proactive%3Aone/replay")
-        || url.endsWith("/v2/conversations/trigger%3Acron%3Amorning/replay")
+        url.endsWith("/v2/conversations/opaque-external-cron/replay")
+        || url.endsWith("/v2/conversations/opaque-external-webhook/replay")
       ) {
-        const cron = url.includes("trigger%3Acron");
+        const webhook = url.includes("webhook");
         return new Response(JSON.stringify({
-          conversationId: cron ? "trigger:cron:morning" : "proactive:one",
+          conversationId: webhook ? "opaque-external-webhook" : "opaque-external-cron",
           messages: [{
-            id: cron ? "m-2" : "m-1",
+            id: webhook ? "m-2" : "m-1",
             role: "assistant",
-            text: cron ? "Good morning" : "Done",
+            text: webhook ? "Webhook received" : "Done",
             createdAt: now,
           }],
         }), { headers: { "content-type": "application/json" } });
@@ -64,17 +66,18 @@ describe("web operator gateway", () => {
 
     await expect(gateway.discoverProactiveConversations?.()).resolves.toEqual([{
       agentId: "personal",
-      conversationId: "proactive:one",
+      conversationId: "opaque-external-cron",
       title: "Update",
       triggerKind: "cron",
       updatedAt: now,
       messages: [{ id: "m-1", role: "assistant", text: "Done", createdAt: now }],
     }, {
       agentId: "personal",
-      conversationId: "trigger:cron:morning",
-      title: "Morning",
+      conversationId: "opaque-external-webhook",
+      title: "Webhook",
+      triggerKind: "webhook",
       updatedAt: now,
-      messages: [{ id: "m-2", role: "assistant", text: "Good morning", createdAt: now }],
+      messages: [{ id: "m-2", role: "assistant", text: "Webhook received", createdAt: now }],
     }]);
   });
 
