@@ -25,7 +25,7 @@ line against the old consumer.
 | Schedules and long prompts | `@mono-agent/trigger-cron` plus `cron/*.md` | Move schedules to selected trigger config and keep job prompts in Markdown. References use stable runtime and channel instance ids. |
 | Tracing/export | `observability.exporters.<id>` | Select `@mono-agent/exporter-otlp` explicitly. Keep sensitive content export disabled unless separately reviewed. |
 | Sandbox | `policy.sandbox` | Use `{"mode":"off"}` or select the sandbox package explicitly. Do not translate old implicit defaults. |
-| Model-callable project tools | `.mcp.json` | Use standard MCP configuration. There is no v1 host-grant or generic plugin plane. |
+| Model-callable project tools | `.mcp.json` plus optional `context.mcp.requestContextServers` | Use standard MCP configuration. Leave request context off unless an audited direct stdio transport needs current-request staged attachments, per-run output, and transient progress; missing, duplicate, and HTTP-transport selections are invalid. A stdio command may proxy remotely, so selection is not proof of locality. There is no generic host-grant or plugin plane. |
 | Instructions, identity, operational know-how | `agent.instructions` and `skills/` | Consolidate the old identity/soul pair into one instructions source. Keep reusable workflows as selected skills. |
 | Agent foreground lifecycle | `@mono-agent/core` public API or `mono-agent start` | Validate the exact project before start. A service manager is optional. |
 | Terminal and browser UI | Standalone TUI and web products | Configure, install, and start independently. Neither belongs in agent config. |
@@ -41,8 +41,8 @@ Do not copy these v0 surfaces into a v1 project:
 - WhatsApp;
 - Supermemory;
 - the generic orchestrator extra;
-- continuations, continuation host grants, and request-scoped child-run host
-  capabilities;
+- continuations, continuation host grants, generic MCP host grants, and every
+  child-run spawn/observe/cancel capability;
 - conversational self-configuration and `tui --configure`;
 - historical backfill/resend;
 - lite and journal memory modes;
@@ -83,6 +83,20 @@ consumer's transcription, research, or other private tools were migrated.
 Review the resulting `.mcp.json` and config as consumer-specific security
 boundaries.
 
+The Personal transcription consumer is the one admitted request-context case.
+Its config explicitly lists the real direct stdio transport in
+`context.mcp.requestContextServers`. The server accepts `attachment_id`
+selecting one staged `attachments[].id`, not an arbitrary source path; reads
+only an exact path/device/inode allowlist whose device and inode values are
+canonical unsigned-decimal strings; writes beneath the supplied current-run
+output directory; emits bounded transient progress; and returns an `outputName`
+basename plus, at most, bounded identifiers and metadata for host-bound channel
+delivery. The result contains no absolute-path field. `file_path` is
+default-deny; legacy local paths require a bounded static
+`TRANSCRIBE_LOCAL_PATH_ROOTS` absolute-directory allowlist that cannot select
+the managed attachments root. Do not migrate the old process-start request
+environment or an absolute-path send-tool input.
+
 ## Source rehearsal
 
 Perform this work in a copy while v0 remains the unchanged live source.
@@ -95,7 +109,11 @@ Perform this work in a copy while v0 remains the unchanged live source.
 3. Scaffold the closest v1 template: `minimal`, `personal`, or
    `multi-runtime`.
 4. Replace generated examples with explicitly reviewed consumer values. Keep
-   TUI, web, service-macos, and docs-mcp out of the agent config.
+   TUI, web, service-macos, and docs-mcp out of the agent config. If
+   `context.mcp.requestContextServers` is present, prove every name is a
+   required direct stdio transport, audit whether its command proxies or uses
+   the network, and prove that omitted, missing, duplicate, and HTTP-transport
+   selections fail as designed.
 5. Confirm every `$use` package is an exact direct production dependency and
    appears in the lockfile. Remove every unselected runtime, channel, trigger,
    memory, state, exporter, and sandbox dependency.
@@ -107,7 +125,11 @@ Perform this work in a copy while v0 remains the unchanged live source.
    links, an unpublished checkout, or a mutable dist-tag.
 8. Execute a bounded first turn against a non-live endpoint and destination.
    Prove the selected runtime route, state append, delivery behavior, and clean
-   stop.
+   stop. For Personal transcription, use a real staged audio attachment and
+   prove attachment-id resolution, concurrent-call isolation, transient
+   progress, current-run output basename delivery, and rejection of metadata
+   spoofing, traversal, symlink/hard-link or identity swaps, cross-run access,
+   replacement cleanup, oversize output/progress, timeout, and cancellation.
 9. For the Personal fixture, prove both memory first-run states on the copied
    root:
    - a successful initialization permanently leaves the canonical marker in

@@ -550,6 +550,7 @@ describe("channel kernel", () => {
         controller: runtimeController(async (_request, context) => {
           const emit = method(context, "emit");
           await emit({ type: "thinking-delta", delta: "private transient thought" });
+          await emit({ type: "activity", text: "Transcribing 25%" });
           await emit({ type: "tool-call", call: {
             id: `before${secret}after`, name: secret,
             input: { arbitrary: `before${secret}after` },
@@ -606,7 +607,9 @@ describe("channel kernel", () => {
     expect(repeated).not.toContain(shortSecret);
     expect(events).toContainEqual({ type: "session-evicted" });
     expect(events).toContainEqual({ type: "thinking-delta", delta: "private transient thought" });
+    expect(events).toContainEqual({ type: "activity", text: "Transcribing 25%" });
     expect(JSON.stringify(await host.replay("events"))).not.toContain("private transient thought");
+    expect(JSON.stringify(await host.replay("events"))).not.toContain("Transcribing 25%");
     expect(events).toContainEqual(expect.objectContaining({ type: "compaction" }));
     expect(events.find((event) => event.type === "tool-result")).toMatchObject({
       result: { content: expect.arrayContaining([expect.objectContaining({ type: "text", text: expect.stringMatching(/file result omitted/u) })]) },

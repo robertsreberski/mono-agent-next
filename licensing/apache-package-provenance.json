@@ -38,7 +38,7 @@
     },
     {
       "path": "packages/module-sdk/README.md",
-      "sha256": "8797e151ab0b7c2501d4e7149928b43ab7b1cce3da9d5b1503cc3fb46fc73c70",
+      "sha256": "752dd8631a7f5d999a71c0c4ceb3d06b002343da0006b309fd9760d7ea1a04ee",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -135,7 +135,7 @@
     },
     {
       "path": "packages/module-sdk/src/index.ts",
-      "sha256": "6caeb26f12a9a57d4efb6f0269c2289c34c02e1cf17f6ddce52032ac2933489b",
+      "sha256": "3dcc13860066eef9873a34205f5bcc2964cc740aba5fada65ccce920d89d9077",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -171,7 +171,7 @@
     },
     {
       "path": "packages/module-sdk/src/testing.ts",
-      "sha256": "41a5ba818db68d7b891e84cf5d7fd3e3ed5172050cd95e19c15e91b94c3b9d53",
+      "sha256": "7da8321ec03a1a1f1df9c0d5b8a302e2731971a8e55700ea792add1614c1f9e3",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",

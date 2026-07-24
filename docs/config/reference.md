@@ -70,6 +70,8 @@ instance ids.
 | `context` | `object` | no | — | `closed object` | no | no | — |
 | `context.mcp` | `object` | no | — | `closed object` | no | no | — |
 | `context.mcp.configPath` | `string` | yes | — | `minLength 1` | no | no | — |
+| `context.mcp.requestContextServers` | `array` | no | — | `maxItems 32; unique items` | no | no | — |
+| `context.mcp.requestContextServers[]` | `string` | item | — | `minLength 1` | no | no | — |
 | `context.skills` | `object` | no | — | `closed object` | no | no | — |
 | `context.skills.disclosure` | `string` | no | `"index"` | `enum ["full","index"]` | no | no | — |
 | `context.skills.load` | `string` | no | `"all"` | `const "all"` | no | no | — |

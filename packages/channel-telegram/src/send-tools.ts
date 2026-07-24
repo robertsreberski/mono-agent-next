@@ -86,11 +86,21 @@ export function createTelegramSendTools(
     } satisfies ChannelSendTool),
     Object.freeze({
       name: "TelegramSendFile",
-      description: `Send one inline base64 document or photo of at most ${String(inlineFileBytes)} bytes to a Telegram chat authorized by this configured channel instance.`,
+      description: `Send one document or photo to an authorized Telegram chat. Use either inline base64 data (at most ${String(inlineFileBytes)} bytes) or one current-run output_name (at most ${String(config.maxAttachmentBytes)} bytes).`,
       inputSchema: Object.freeze({
         type: "object",
         additionalProperties: false,
-        required: ["kind", "chat_id", "data", "filename"],
+        required: ["kind", "chat_id"],
+        oneOf: [
+          {
+            required: ["data", "filename"],
+            not: { required: ["output_name"] },
+          },
+          {
+            required: ["output_name"],
+            not: { required: ["data"] },
+          },
+        ],
         properties: {
           kind: { type: "string", enum: ["document", "photo"] },
           chat_id: chatIdSchema,
@@ -99,6 +109,11 @@ export function createTelegramSendTools(
             minLength: 4,
             maxLength: Math.ceil(inlineFileBytes / 3) * 4,
             pattern: "^[A-Za-z0-9+/]+={0,2}$",
+          },
+          output_name: {
+            type: "string",
+            minLength: 1,
+            maxLength: 255,
           },
           filename: { type: "string", minLength: 1, maxLength: 255 },
           media_type: { type: "string", minLength: 3, maxLength: 255 },
@@ -109,20 +124,50 @@ export function createTelegramSendTools(
           },
         },
       }),
-      prepare(input: JsonValue) {
+      async prepare(input: JsonValue, context) {
         const value = record(
           input,
-          ["kind", "chat_id", "data", "filename", "media_type", "caption"],
+          ["kind", "chat_id", "data", "output_name", "filename", "media_type", "caption"],
           "TelegramSendFile input",
         );
         if (value.kind !== "document" && value.kind !== "photo") {
           throw new TypeError("kind must be document or photo.");
         }
         const chatId = identifier(value.chat_id, "chat_id");
-        const data = canonicalBase64(value.data, inlineFileBytes);
-        const filename = safeFileName(value.filename);
+        const hasInlineData = value.data !== undefined;
+        const hasOutputName = value.output_name !== undefined;
+        if (hasInlineData === hasOutputName) {
+          throw new TypeError("TelegramSendFile requires exactly one of data or output_name.");
+        }
+        let data: Uint8Array;
+        let sourceMediaType: string | undefined;
+        let filename: string;
+        if (hasInlineData) {
+          data = canonicalBase64(value.data, inlineFileBytes);
+          filename = safeFileName(value.filename);
+        } else {
+          const outputName = safeFileName(value.output_name);
+          if (context.readCurrentRunOutput === undefined) {
+            throw new Error("Current-run output delivery is unavailable for this tool call.");
+          }
+          const output = await context.readCurrentRunOutput({
+            name: outputName,
+            maxBytes: config.maxAttachmentBytes,
+          });
+          data = currentRunOutputBytes(
+            output,
+            outputName,
+            config.maxAttachmentBytes,
+          );
+          sourceMediaType = validMediaType(output.mediaType);
+          filename = value.filename === undefined
+            ? outputName
+            : safeFileName(value.filename);
+        }
         const mediaType = value.media_type === undefined
-          ? value.kind === "photo" ? "image/jpeg" : "application/octet-stream"
+          ? value.kind === "photo"
+            ? "image/jpeg"
+            : sourceMediaType ?? "application/octet-stream"
           : validMediaType(value.media_type);
         if (value.kind === "photo" && !mediaType.startsWith("image/")) {
           throw new TypeError("TelegramSendFile photo media_type must be an image type.");
@@ -229,6 +274,27 @@ function canonicalBase64(value: unknown, maxBytes: number): Uint8Array {
     throw new RangeError(`data exceeds the ${String(maxBytes)}-byte inline file bound.`);
   }
   return new Uint8Array(bytes);
+}
+
+function currentRunOutputBytes(
+  attachment: unknown,
+  expectedName: string,
+  maxBytes: number,
+): Uint8Array {
+  if (typeof attachment !== "object"
+    || attachment === null
+    || Reflect.get(attachment, "name") !== expectedName
+    || !(Reflect.get(attachment, "data") instanceof Uint8Array)) {
+    throw new TypeError("Current-run output reader returned an invalid attachment.");
+  }
+  const data = Reflect.get(attachment, "data") as Uint8Array;
+  const sizeBytes = Reflect.get(attachment, "sizeBytes");
+  if (data.byteLength === 0
+    || data.byteLength > maxBytes
+    || sizeBytes !== data.byteLength) {
+    throw new RangeError("Current-run output attachment violates the configured byte bound.");
+  }
+  return new Uint8Array(data);
 }
 
 function safeFileName(value: unknown): string {

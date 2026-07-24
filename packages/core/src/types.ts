@@ -84,6 +84,7 @@ export interface AgentConfig {
     };
     readonly mcp?: {
       readonly configPath: string;
+      readonly requestContextServers?: readonly string[];
     };
   };
   readonly channels?: Readonly<Record<string, SelectedModuleConfig>>;

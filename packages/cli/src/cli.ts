@@ -13,6 +13,7 @@ import {
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { parseArgs } from "node:util";
 const VERSION = "0.15.0";
 export type CliSignal = "SIGINT" | "SIGTERM";
 export interface CliSignalSource {
@@ -26,69 +27,51 @@ export interface CliIo {
   signalSource?: CliSignalSource;
 }
 interface ResolvedCliIo {
-  stdout: (text: string) => void;
-  stderr: (text: string) => void;
-  cwd: string;
-  signalSource: CliSignalSource;
+  stdout: (text: string) => void; stderr: (text: string) => void;
+  cwd: string; signalSource: CliSignalSource;
 }
 interface ParsedCommand {
-  configPath: string;
-  json?: boolean;
-  write?: boolean;
-  module?: string;
-  command?: string;
-  input?: unknown;
-  path?: string;
+  configPath: string; json?: boolean; write?: boolean;
+  module?: string; command?: string; input?: unknown; path?: string;
 }
 type ArgumentKey = Exclude<keyof ParsedCommand, "path">;
-interface ParseFlags {
-  readonly json?: boolean;
-  readonly write?: boolean;
-  readonly path?: boolean;
-  readonly moduleRequired?: boolean;
+type FlagKey = Extract<ArgumentKey, "json" | "write">;
+type ValueKey = Exclude<ArgumentKey, FlagKey>;
+interface ParseSpec {
+  readonly context?: "module command" | "route"; readonly flag?: FlagKey;
+  readonly positional?: "command" | "path"; readonly module?: "optional" | "required";
 }
-type ParseMode = "standard" | "module" | "route";
+interface CommandDescriptor {
+  readonly words: readonly string[]; readonly parse?: ParseSpec;
+  run(options: ParsedCommand, io: ResolvedCliIo): Promise<number>;
+}
 class UsageError extends Error {}
-const OPTION_KEYS = new Map<string, ArgumentKey>([
-  ["--config", "configPath"],
-  ["-c", "configPath"],
-  ["--json", "json"],
-  ["--write", "write"],
-  ["--module", "module"],
-  ["--name", "command"],
-  ["--input-json", "input"],
-]);
-const ARGUMENT_MESSAGES = {
+const CLI_OPTIONS = {
+  config: { type: "string", short: "c", key: "configPath" },
+  json: { type: "boolean", key: "json" }, write: { type: "boolean", key: "write" },
+  module: { type: "string", key: "module" }, name: { type: "string", key: "command" },
+  "input-json": { type: "string", key: "input" },
+} as const;
+const ARGUMENT_MESSAGES: Record<ValueKey, readonly [value: string, required: string]> = {
   configPath: ["--config requires a path", "--config is required"],
   module: ["--module requires one instance id", "--module is required"],
   command: ["--name requires one command name", "--name is required"],
   input: ["--input-json requires one JSON value", "--input-json is required"],
-  json: ["--json does not take a value", "--json is required"],
-  write: ["--write does not take a value", "--write is required"],
-} as const;
-const COMMANDS: readonly (readonly [
-  readonly string[],
-  (argv: readonly string[], io: ResolvedCliIo) => Promise<number>,
-])[] = [
-  [["validate"], (argv, io) => runValidate(parseArguments(argv, io.cwd, "standard", { json: true }), io)],
-  [["doctor"], (argv, io) => runDoctor(parseArguments(argv, io.cwd, "standard", { json: true }), io)],
-  [["config", "schema"], (argv, io) => runSchema(parseArguments(argv, io.cwd, "standard", { write: true }), io)],
-  [["config", "explain"], (argv, io) =>
-    runExplain(parseArguments(argv, io.cwd, "standard", { json: true, path: true }), io)],
-  [["inspect"], async (argv, io) => {
-    const options = parseArguments(argv, io.cwd, "standard", { json: true });
-    const inspection = await inspectAgent(options.configPath);
-    io.stdout(`${stringifyJson(inspection, options.json ? undefined : 2)}\n`);
-    return 0;
-  }],
-  [["module", "command"], (argv, io) => runModuleCommand(parseArguments(argv, io.cwd, "module"), io)],
-  [["auth"], (argv, io) =>
-    runRoutedCommand("auth", "runtime", parseArguments(argv, io.cwd, "route", { moduleRequired: true }), io)],
-  [["sandbox"], (argv, io) =>
-    runRoutedCommand("sandbox", "sandbox", parseArguments(argv, io.cwd, "route"), io)],
-  [["runs"], (argv, io) => runRoutedCommand("runs", "state", parseArguments(argv, io.cwd, "route"), io)],
-  [["memory"], (argv, io) => runRoutedCommand("memory", "memory", parseArguments(argv, io.cwd, "route"), io)],
-  [["start"], (argv, io) => runStart(parseArguments(argv, io.cwd, "standard"), io)],
+};
+const ROUTE_PARSE = { context: "route", positional: "command", module: "optional" } as const;
+const COMMANDS: readonly CommandDescriptor[] = [
+  { words: ["validate"], parse: { flag: "json" }, run: runValidate },
+  { words: ["doctor"], parse: { flag: "json" }, run: runDoctor },
+  { words: ["config", "schema"], parse: { flag: "write" }, run: runSchema },
+  { words: ["config", "explain"], parse: { flag: "json", positional: "path" }, run: runExplain },
+  { words: ["inspect"], parse: { flag: "json" }, run: runInspect },
+  { words: ["module", "command"], parse: { context: "module command", module: "required" }, run: runModuleCommand },
+  { words: ["auth"], parse: { ...ROUTE_PARSE, module: "required" },
+    run: (options, io) => runRoutedCommand("auth", "runtime", options, io) },
+  { words: ["sandbox"], parse: ROUTE_PARSE, run: (options, io) => runRoutedCommand("sandbox", "sandbox", options, io) },
+  { words: ["runs"], parse: ROUTE_PARSE, run: (options, io) => runRoutedCommand("runs", "state", options, io) },
+  { words: ["memory"], parse: ROUTE_PARSE, run: (options, io) => runRoutedCommand("memory", "memory", options, io) },
+  { words: ["start"], run: runStart },
 ];
 export async function runCli(argv: readonly string[], io: CliIo = {}): Promise<number> {
   const resolvedIo: ResolvedCliIo = {
@@ -97,25 +80,19 @@ export async function runCli(argv: readonly string[], io: CliIo = {}): Promise<n
     cwd: resolve(io.cwd ?? process.cwd()),
     signalSource: io.signalSource ?? process,
   };
-  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
-    resolvedIo.stdout(usage());
-    return 0;
-  }
-  if (argv.length === 1 && (argv[0] === "--version" || argv[0] === "-v")) {
-    resolvedIo.stdout(`${VERSION}\n`);
-    return 0;
-  }
+  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") { resolvedIo.stdout(usage()); return 0; }
+  if (argv.length === 1 && (argv[0] === "--version" || argv[0] === "-v")) { resolvedIo.stdout(`${VERSION}\n`); return 0; }
   const wantsJson = argv.includes("--json");
   try {
-    const route = COMMANDS.find(([words]) => words.every((word, index) => argv[index] === word));
+    const route = COMMANDS.find(({ words }) => words.every((word, index) => argv[index] === word));
     if (route === undefined) throw new UsageError(`Unknown command: ${argv.join(" ")}`);
-    return await route[1](argv.slice(route[0].length), resolvedIo);
+    return await route.run(parseArguments(argv.slice(route.words.length), resolvedIo.cwd, route.parse), resolvedIo);
   } catch (error) {
     if (error instanceof UsageError) {
       resolvedIo.stderr(`${error.message}\n\n${usage()}`);
       return 2;
     }
-    const message = reasonOf(error);
+    const message = error instanceof Error ? error.message : String(error);
     if (wantsJson) {
       resolvedIo.stderr(`${stringifyJson({ ok: false, error: message })}\n`);
     } else {
@@ -186,6 +163,10 @@ async function runExplain(options: ParsedCommand, io: ResolvedCliIo): Promise<nu
   io.stdout(`${stringifyJson(explanation, options.json ? undefined : 2)}\n`);
   return 0;
 }
+async function runInspect(options: ParsedCommand, io: ResolvedCliIo): Promise<number> {
+  io.stdout(`${stringifyJson(await inspectAgent(options.configPath), options.json ? undefined : 2)}\n`);
+  return 0;
+}
 async function runStart(options: ParsedCommand, io: ResolvedCliIo): Promise<number> {
   const validation = await validateAgentConfig(options.configPath);
   if (!validation.ok) {
@@ -219,16 +200,10 @@ async function runModuleCommand(options: ParsedCommand, io: ResolvedCliIo): Prom
   io.stdout(`${stringifyJson({ ok: true, ...result })}\n`);
   return 0;
 }
-async function runRoutedCommand(
-  route: string,
-  slot: ModuleKind,
-  options: ParsedCommand,
-  io: ResolvedCliIo,
-): Promise<number> {
+async function runRoutedCommand(route: string, slot: ModuleKind, options: ParsedCommand,
+  io: ResolvedCliIo): Promise<number> {
   const loaded = await requireLoadedConfig(options.configPath);
-  const selected = options.module === undefined
-    ? onlyModule(loaded.modules.filter((module) => module.slot === slot), route, slot)
-    : moduleInSlot(loaded.modules, options.module, route, slot);
+  const selected = selectModule(loaded.modules, options.module, route, slot);
   const result = await runAgentModuleCommand(loaded, selected.instanceId, options.command!, options.input);
   io.stdout(`${stringifyJson({ ok: true, route, ...result })}\n`);
   return 0;
@@ -239,40 +214,34 @@ async function requireLoadedConfig(configPath: string): Promise<LoadedAgentConfi
   if (validation.loaded === undefined) throw new Error("Validation succeeded without an immutable loaded configuration");
   return validation.loaded;
 }
-function parseArguments(
-  argv: readonly string[],
-  cwd: string,
-  mode: ParseMode,
-  options: ParseFlags = {},
-): ParsedCommand {
+function parseArguments(argv: readonly string[], cwd: string, spec: ParseSpec = {}): ParsedCommand {
   const values = Object.create(null) as Partial<ParsedCommand> & Record<string, unknown>;
-  const positional = mode === "route" ? "command" : mode === "standard" && options.path ? "path" : undefined;
-  const unknown = mode === "module" ? "Unknown module command option"
-    : mode === "route" ? "Unknown route option" : "Unknown option";
-  for (let index = 0; index < argv.length; index += 1) {
-    const argument = argv[index]!;
-    const inlineConfig = mode !== "module" && argument.startsWith("--config=");
-    const key = inlineConfig ? "configPath" : OPTION_KEYS.get(argument);
-    const allowed = key === "configPath"
-      || (mode === "standard" ? key === "json" && options.json || key === "write" && options.write
-        : key === "module" || key === "command" || key === "input");
-    if (key === undefined || !allowed) {
-      if ((key === "json" || key === "write") && mode === "standard") {
-        throw new UsageError(`${argument} is not valid here`);
-      }
-      if (key === undefined && !argument.startsWith("-")
-        && positional !== undefined && !Object.hasOwn(values, positional)) {
-        values[positional] = argument;
+  const unknown = `Unknown${spec.context === undefined ? "" : ` ${spec.context}`} option`;
+  const { tokens } = parseArgs({ args: argv, options: CLI_OPTIONS, strict: false, allowPositionals: true, tokens: true });
+  for (const token of tokens) {
+    const argument = argv[token.index]!;
+    if (token.kind !== "option") {
+      if (!argument.startsWith("-") && token.kind === "positional" && spec.positional !== undefined
+        && !Object.hasOwn(values, spec.positional)) {
+        values[spec.positional] = token.value;
         continue;
       }
-      const prefix = argument.startsWith("-")
-        || (positional === undefined && mode !== "standard")
-        ? unknown
-        : "Unexpected argument";
+      const prefix = argument.startsWith("-") || token.kind === "option-terminator"
+        || (spec.positional === undefined && spec.context !== undefined) ? unknown : "Unexpected argument";
       throw new UsageError(`${prefix}: ${argument}`);
     }
+    const option = CLI_OPTIONS[token.name as keyof typeof CLI_OPTIONS];
+    const inlineConfig = spec.context !== "module command" && argument.startsWith("--config=");
+    const key = argument === token.rawName || inlineConfig ? option?.key : undefined;
+    const allowed = key === "configPath"
+      || key === spec.flag
+      || (spec.module !== undefined && (key === "module" || key === "command" || key === "input"));
+    if (key === undefined || !allowed) {
+      if (key === "json" || key === "write") throw new UsageError(`${argument} is not valid here`);
+      throw new UsageError(`${unknown}: ${argument}`);
+    }
     if (Object.hasOwn(values, key)) {
-      throw new UsageError(key === "configPath" && mode !== "module"
+      throw new UsageError(key === "configPath" && spec.context !== "module command"
         ? "--config may be supplied only once"
         : key === "json" || key === "write" ? `${argument} is not valid here`
           : key === "configPath" ? "--config requires one path" : ARGUMENT_MESSAGES[key][0]);
@@ -281,13 +250,13 @@ function parseArguments(
       values[key] = true;
       continue;
     }
-    const value = inlineConfig ? argument.slice("--config=".length) : argv[index + 1];
-    if (value === undefined || value.length === 0 || (!inlineConfig && key !== "input" && value.startsWith("-"))) {
-      throw new UsageError(key === "configPath" && mode === "module"
+    const value = token.value;
+    if (typeof value !== "string" || value.length === 0
+      || (!inlineConfig && key !== "input" && value.startsWith("-"))) {
+      throw new UsageError(key === "configPath" && spec.context === "module command"
         ? "--config requires one path"
         : ARGUMENT_MESSAGES[key][0]);
     }
-    if (!inlineConfig) index += 1;
     if (key === "input") {
       try {
         values.input = JSON.parse(value) as unknown;
@@ -295,36 +264,27 @@ function parseArguments(
         throw new UsageError("--input-json must be valid JSON");
       }
     } else {
-      values[key] = key === "configPath" ? resolvePath(value, cwd) : value;
+      values[key] = key === "configPath" ? isAbsolute(value) ? value : resolve(cwd, value) : value;
     }
   }
-  const required: readonly ArgumentKey[] = mode === "module"
+  const required: readonly ValueKey[] = spec.context === "module command"
     ? ["configPath", "module", "command"]
-    : mode === "route" && options.moduleRequired ? ["configPath", "module"] : ["configPath"];
+    : spec.module === "required" ? ["configPath", "module"] : ["configPath"];
   for (const key of required) if (!Object.hasOwn(values, key)) throw new UsageError(ARGUMENT_MESSAGES[key][1]);
-  if (mode === "route" && !Object.hasOwn(values, "command")) {
+  if (spec.context === "route" && !Object.hasOwn(values, "command"))
     throw new UsageError("A module command name is required");
-  }
   return values as ParsedCommand;
 }
-function resolvePath(value: string, cwd: string): string {
-  return isAbsolute(value) ? value : resolve(cwd, value);
-}
-function onlyModule(
-  modules: readonly LoadedAgentModule[],
-  route: string,
-  slot: ModuleKind,
+function selectModule(
+  modules: readonly LoadedAgentModule[], instanceId: string | undefined, route: string, slot: ModuleKind,
 ): LoadedAgentModule {
-  if (modules.length === 0) throw new Error(`No ${slot} module is configured; ${route} is unavailable`);
-  if (modules.length > 1) throw new Error(`${route} requires --module because multiple ${slot} modules are configured`);
-  return modules[0]!;
-}
-function moduleInSlot(
-  modules: readonly LoadedAgentModule[],
-  instanceId: string,
-  route: string,
-  slot: ModuleKind,
-): LoadedAgentModule {
+  if (instanceId === undefined) {
+    const candidates = modules.filter((module) => module.slot === slot);
+    if (candidates.length === 0) throw new Error(`No ${slot} module is configured; ${route} is unavailable`);
+    if (candidates.length > 1)
+      throw new Error(`${route} requires --module because multiple ${slot} modules are configured`);
+    return candidates[0]!;
+  }
   const selected = modules.find((module) => module.instanceId === instanceId && module.slot === slot);
   if (selected !== undefined) return selected;
   const actual = modules.filter((module) => module.instanceId === instanceId).map((module) => module.slot);
@@ -400,9 +360,6 @@ function stringifyJson(value: unknown, spaces?: number): string {
 }
 function isMissing(error: unknown): boolean {
   return error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT";
-}
-function reasonOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 function usage(): string {
   return [

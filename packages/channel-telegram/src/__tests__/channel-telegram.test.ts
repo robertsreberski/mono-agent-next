@@ -155,6 +155,70 @@ describe("telegram channel", () => {
     }));
     expect(sendMessage).toHaveBeenCalledTimes(1);
 
+    const outputBytes = new Uint8Array([4, 5, 6, 7]);
+    const readCurrentRunOutput = vi.fn(async () => ({
+      id: "current-run-output:fixture",
+      kind: "file" as const,
+      name: "transcript.md",
+      mediaType: "text/markdown",
+      sizeBytes: outputBytes.byteLength,
+      data: outputBytes,
+    }));
+    const preparedOutput = await fileTool.prepare({
+      kind: "document",
+      chat_id: "42",
+      output_name: "transcript.md",
+      caption: "Transcript",
+    }, {
+      ...toolContext,
+      callId: "call-3",
+      readCurrentRunOutput,
+    });
+    outputBytes[0] = 99;
+    expect(readCurrentRunOutput).toHaveBeenCalledWith({
+      name: "transcript.md",
+      maxBytes: 10 * 1024 * 1024,
+    });
+    expect(preparedOutput).toMatchObject({
+      conversationId: "telegram:42",
+      text: "Transcript",
+      attachments: [{
+        name: "transcript.md",
+        mediaType: "text/markdown",
+        sizeBytes: 4,
+        data: new Uint8Array([4, 5, 6, 7]),
+      }],
+    });
+    await expect(fileTool.prepare({
+      kind: "document",
+      chat_id: "42",
+      output_name: "../transcript.md",
+    }, {
+      ...toolContext,
+      callId: "call-4",
+      readCurrentRunOutput,
+    })).rejects.toThrow(/safe basename/u);
+    expect(readCurrentRunOutput).toHaveBeenCalledTimes(1);
+    await expect(fileTool.prepare({
+      kind: "document",
+      chat_id: "42",
+      output_name: "transcript.md",
+    }, {
+      ...toolContext,
+      callId: "call-5",
+    })).rejects.toThrow(/unavailable/u);
+    await expect(fileTool.prepare({
+      kind: "document",
+      chat_id: "42",
+      data: Buffer.from("inline").toString("base64"),
+      output_name: "transcript.md",
+      filename: "inline.txt",
+    }, {
+      ...toolContext,
+      callId: "call-6",
+      readCurrentRunOutput,
+    })).rejects.toThrow(/exactly one/u);
+
     await expect(channel.deliver!({
       ...await messageTool.prepare({ chat_id: "99", text: "forbidden" }, toolContext),
       idempotencyKey: "tool-forbidden",
@@ -179,12 +243,12 @@ describe("telegram channel", () => {
       diagnostic: { code: "telegram_destination_forbidden" },
     });
     expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(() => fileTool.prepare({
+    await expect(fileTool.prepare({
       kind: "document",
       chat_id: "42",
       data: "not-base64",
       filename: "../secret",
-    }, toolContext)).toThrow(/base64|filename/u);
+    }, toolContext)).rejects.toThrow(/base64|filename/u);
   });
 
   it("coalesces exact payloads, rejects conflicting keys, and keeps unknown outcomes sticky", async () => {

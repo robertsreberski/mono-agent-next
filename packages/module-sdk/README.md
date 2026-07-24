@@ -181,8 +181,8 @@ There is no generic plugin hook or discovery registry.
 | Declare compatible module metadata | `MODULE_API_VERSION`, `ModuleManifest`, `ModuleSchema` |
 | Implement a runtime | `defineRuntimeModule`, `Runtime`, `RuntimeTurnRequest`, `RuntimeTurnContext`, `RuntimeTurnResult`, `RuntimeTurnError` |
 | Snapshot a typed runtime failure safely | `snapshotRuntimeTurnError`, `RuntimeTurnErrorSnapshot` |
-| Stream text, transient thinking, tool activity, usage, compaction, sessions, and live input | `RuntimeTurnEvent`, `RuntimeUsage`, `RuntimeSession`, `RuntimeLiveInputHandler` |
-| Implement a channel | `defineChannelModule`, `Channel`, `ChannelHost`, `ChannelInboundRequest`, `ChannelReplyEvent`, `ChannelReplySink`, `ChannelCapabilities`, `ChannelSendTool` |
+| Stream text, transient thinking, transient activity, tool activity, usage, compaction, sessions, and live input | `RuntimeTurnEvent`, `RuntimeActivityEvent`, `RuntimeUsage`, `RuntimeSession`, `RuntimeLiveInputHandler` |
+| Implement a channel | `defineChannelModule`, `Channel`, `ChannelHost`, `ChannelInboundRequest`, `ChannelReplyEvent`, `ChannelReplySink`, `ChannelCapabilities`, `ChannelSendTool`, `ChannelSendToolContext`, `ChannelCurrentRunOutputRequest` |
 | Normalize attachments and blocking questions | `NormalizedAttachment`, `AskUserRequest`, `AskUserAnswer` |
 | Implement memory | `defineMemoryModule`, `Memory`, `MemoryRecallRequest`, `MemoryRecallResult`, `MemoryRuntimeCaptureGrant` |
 | Report lifecycle and health | `ModuleInstance`, `ModuleHealth`, `ModuleDiagnostic`, `ModuleCommand` |
@@ -211,7 +211,11 @@ destination before durable delivery admission; explicit destinations still
 pass Core's ordinary validation unchanged. A proactive channel pairs
 `deliver()` with `resolveDeliveryHistory()`, which maps a confirmed transport
 result to its canonical conversation. Channel send tools prepare messages only;
-Core applies the same delivery, receipt, and history contract to them. An
+Core applies the same delivery, receipt, and history contract to them. A host
+may grant `ChannelSendToolContext.readCurrentRunOutput()` for one safe basename
+inside the current run's output root. The adapter receives detached attachment
+bytes under both its requested limit and Core's hard limit; neither model input
+nor the adapter receives filesystem path authority. An
 inbound request may set `completionDelivery` to request that a successful
 non-empty turn be delivered through another selected channel before the inbound
 request reports completion.
@@ -252,6 +256,7 @@ ChannelCompletionDelivery
 ChannelConversationListRequest
 ChannelConversationListResult
 ChannelConversationSummary
+ChannelCurrentRunOutputRequest
 ChannelDeliveryResult
 ChannelHost
 ChannelInboundRequest
@@ -364,6 +369,7 @@ RUNTIME_TOOL_ARTIFACT_PREVIEW_MAX_BYTES
 ReadOwnerPrivateFileOptions
 RouteIdentity
 Runtime
+RuntimeActivityEvent
 RuntimeCapabilities
 RuntimeCompaction
 RuntimeCompactionEvent

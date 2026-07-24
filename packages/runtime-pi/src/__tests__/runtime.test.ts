@@ -84,14 +84,14 @@ function turnContext(
   };
 }
 
-function fauxRuntime(options: { tokensPerSecond?: number; authPath?: string } = {}): {
+function fauxRuntime(options: { tokensPerSecond?: number; authPath?: string; attachments?: boolean } = {}): {
   runtime: Runtime;
   faux: ReturnType<typeof fauxProvider>;
   models: Models;
 } {
   const faux = fauxProvider({
     provider: "faux",
-    models: [{ id: "faux-model", reasoning: true, input: ["text"] }],
+    models: [{ id: "faux-model", reasoning: true, input: options.attachments ? ["text", "image"] : ["text"] }],
     ...(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond }),
   });
   const models = createModels();
@@ -180,6 +180,39 @@ describe("Pi-native runtime module", () => {
         model: "faux:faux-model",
       },
     });
+    await stop(runtime);
+  });
+
+  it("labels normalized attachments with their trusted ids without inventing filesystem paths", async () => {
+    const { runtime, faux } = fauxRuntime({ attachments: true });
+    let providerMessages = "";
+    faux.setResponses([(context) => {
+      providerMessages = JSON.stringify(context.messages);
+      return fauxAssistantMessage([fauxText("attachments visible")]);
+    }]);
+    await start(runtime);
+    await runtime.runTurn(request("inspect", {
+      messages: [{
+        role: "user",
+        content: [{
+          type: "attachment",
+          attachment: {
+            id: "trusted-file", kind: "file", name: "notes.txt", mediaType: "text/plain",
+            sizeBytes: 3, data: new Uint8Array([111, 110, 101]),
+          },
+        }, {
+          type: "attachment",
+          attachment: {
+            id: "trusted-image", kind: "image", name: "scan.png", mediaType: "image/png",
+            sizeBytes: 3, data: new Uint8Array([1, 2, 3]),
+          },
+        }],
+      }],
+    }), turnContext().context);
+    expect(providerMessages).toContain("trusted-file");
+    expect(providerMessages).toContain("trusted-image");
+    expect(providerMessages).toContain("attachment_id=");
+    expect(providerMessages).not.toContain(".mono-agent/data/core/mcp-runs");
     await stop(runtime);
   });
 

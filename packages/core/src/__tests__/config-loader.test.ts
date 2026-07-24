@@ -116,6 +116,36 @@ describe("strict config and module loading", () => {
     });
   });
 
+  it("accepts only unique configured stdio MCP request-context grants", async () => {
+    const project = await fixture({ kind: "runtime", controller: runtimeController(async () => ({})) });
+    const runtime = project.modules[0]!.name;
+    await project.writeMcp({
+      mcpServers: {
+        local: { type: "stdio", command: process.execPath },
+        remote: { type: "http", url: "https://mcp.example.test/service" },
+      },
+    });
+    const write = (requestContextServers: readonly string[]) => project.writeConfig(minimalConfig(runtime, {
+      context: { mcp: { configPath: "./.mcp.json", requestContextServers } },
+    }));
+
+    await write(["local"]);
+    await expect(loadAgentConfig(project.configPath)).resolves.toMatchObject({
+      raw: { context: { mcp: { requestContextServers: ["local"] } } },
+    });
+    for (const [servers, code] of [
+      [["missing"], "reference"],
+      [["remote"], "transport"],
+      [["local", "local"], "duplicate"],
+      [Array.from({ length: 33 }, (_, index) => `server-${index}`), "limit"],
+    ] as const) {
+      await write(servers);
+      await expect(loadAgentConfig(project.configPath)).rejects.toMatchObject({
+        issues: expect.arrayContaining([expect.objectContaining({ code })]),
+      });
+    }
+  });
+
   it("detaches and freezes the exact parsed module config before creation", async () => {
     let retained!: {
       mode: string;

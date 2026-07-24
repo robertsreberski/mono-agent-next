@@ -51,8 +51,12 @@ describe("runCli", () => {
 
     for (const [argv, message] of [
       [["validate", "-c", "/a", "--config", "/b"], "--config may be supplied only once"],
+      [["validate", "-c", "/a", "--json", "--json"], "--json is not valid here"],
+      [["validate", "--config", "--json"], "--config requires a path"],
+      [["validate", "-"], "Unknown option: -"],
       [["config", "schema", "-c", "/a", "--json"], "--json is not valid here"],
       [["config", "explain", "-c", "/a", "routing", "extra"], "Unexpected argument: extra"],
+      [["module", "command", "--config=/a"], "Unknown module command option: --config=/a"],
       [["module", "command", "-c", "/a", "extra"], "Unknown module command option: extra"],
       [["memory", "memory-local:audit", "--name", "memory-local:retry", "-c", "/a"],
         "--name requires one command name"],

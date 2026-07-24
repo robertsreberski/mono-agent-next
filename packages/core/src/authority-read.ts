@@ -34,6 +34,9 @@ export class AuthorityReadError extends Error {
 export interface ReadAuthorityFileOptions {
   readonly maxBytes?: number;
   readonly requireSingleLink?: boolean;
+  readonly signal?: AbortSignal;
+  /** Deterministic race seam for Core security tests. */
+  readonly beforePathIdentityCheck?: () => void | Promise<void>;
 }
 export interface AuthorityFileSnapshot {
   readonly source: LoadedAuthoritySource;
@@ -51,12 +54,13 @@ export async function readAuthorityFile(
   const absolutePath = checkedPath(path);
   const maxBytes = boundedMaxBytes(options.maxBytes ?? DEFAULT_AUTHORITY_MAX_BYTES);
   const requireSingleLink = options.requireSingleLink ?? true;
+  throwIfAborted(options.signal);
   let handle: FileHandle | undefined;
   try {
     handle = await open(absolutePath, noFollowReadFlags());
     const before = await handle.stat({ bigint: true });
     validateRegularFile(absolutePath, before, requireSingleLink);
-    const bytes = await readMaxPlusOne(handle, absolutePath, maxBytes);
+    const bytes = await readMaxPlusOne(handle, absolutePath, maxBytes, options.signal);
     const after = await handle.stat({ bigint: true });
     validateRegularFile(absolutePath, after, requireSingleLink);
     if (!sameSnapshot(before, after) || after.size !== BigInt(bytes.byteLength)) {
@@ -66,7 +70,10 @@ export async function readAuthorityFile(
         "Authority file changed while it was being read",
       );
     }
+    await options.beforePathIdentityCheck?.();
+    throwIfAborted(options.signal);
     await assertPathIdentity(absolutePath, after, requireSingleLink);
+    throwIfAborted(options.signal);
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     return Object.freeze({
       source: Object.freeze({
@@ -80,6 +87,7 @@ export async function readAuthorityFile(
       bytes,
     });
   } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
     if (error instanceof AuthorityReadError) throw error;
     if (hasCode(error, "ENOENT")) {
       throw authorityError("missing", absolutePath, "Authority file does not exist", error);
@@ -108,10 +116,12 @@ async function readMaxPlusOne(
   handle: FileHandle,
   path: string,
   maxBytes: number,
+  signal: AbortSignal | undefined,
 ): Promise<Uint8Array> {
   const chunks: Uint8Array[] = [];
   let total = 0;
   while (total <= maxBytes) {
+    throwIfAborted(signal);
     const requested = Math.min(READ_CHUNK_BYTES, maxBytes + 1 - total);
     const buffer = new Uint8Array(requested);
     const { bytesRead } = await handle.read(buffer, 0, requested, null);
@@ -129,6 +139,12 @@ async function readMaxPlusOne(
     offset += chunk.byteLength;
   }
   return bytes;
+}
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted !== true) return;
+  const error = new Error("Operation aborted");
+  error.name = "AbortError";
+  throw error;
 }
 function validateRegularFile(
   path: string,

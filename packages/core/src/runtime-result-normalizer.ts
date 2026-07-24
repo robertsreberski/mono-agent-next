@@ -56,6 +56,7 @@ const MAX_IDENTIFIER_BYTES = 4_096;
 const MAX_MEDIA_TYPE_BYTES = 255;
 const MAX_FILE_NAME_BYTES = 255;
 const MAX_DIAGNOSTIC_MESSAGE_BYTES = 16 * 1024;
+const MAX_ACTIVITY_BYTES = 16 * 1024;
 const MAX_DIAGNOSTIC_PATH_SEGMENTS = 64;
 const RUNTIME_GRAPH_MAX_DEPTH = 64;
 const MEDIA_TYPE_PATTERN =
@@ -285,6 +286,7 @@ function turnEvent(
     [
       "text-delta",
       "thinking-delta",
+      "activity",
       "tool-call",
       "tool-result",
       "usage",
@@ -297,6 +299,10 @@ function turnEvent(
   if (type === "text-delta" || type === "thinking-delta") {
     assertOwnKeys(input, ["type", "delta"], path);
     return { type, delta: boundedText(input.delta, `${path}.delta`, RUNTIME_RESULT_MAX_TEXT_BYTES, true) };
+  }
+  if (type === "activity") {
+    assertOwnKeys(input, ["type", "text"], path);
+    return { type, text: boundedText(input.text, `${path}.text`, MAX_ACTIVITY_BYTES) };
   }
   const key = type === "tool-call" ? "call"
     : type === "tool-result" ? "result"

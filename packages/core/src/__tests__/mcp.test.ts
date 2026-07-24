@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, expect, it, vi } from "vitest";
@@ -6,10 +6,10 @@ import { afterEach, expect, it, vi } from "vitest";
 import { AgentConfigError, createAgentHost } from "../index.js";
 import {
   BoundedStdioMcpTransport,
+  MCP_REQUEST_CONTEXT_META_KEY,
   bestEffortClose,
   connectProjectMcpTools,
   createCheckedMcpFetch,
-  loadProjectMcpConfig,
   parseProjectMcpConfig,
   resolveMcpToolNames,
 } from "../mcp.js";
@@ -106,6 +106,206 @@ it("loads an ordinary stdio MCP, applies monotonic tool policy, and does not lea
   await host.stop();
 });
 
+it("stages isolated host-owned attachment authority for concurrent selected MCP calls and cleans each run", async () => {
+  const delivered: { readonly name: string; readonly bytes: string }[] = [];
+  let dispatch!: (
+    request: Record<string, unknown>,
+    reply: { emit(event: unknown): void },
+  ) => Promise<unknown>;
+  const project = await createFixtureProject([{
+    kind: "runtime",
+    controller: {
+      create() {
+        return {
+          capabilities: {
+            tools: true, mcp: true, attachments: true, approvals: true,
+            structuredOutput: false, sandbox: false, sessions: false,
+          },
+          async runTurn(request: unknown, context: unknown) {
+            const retainUnsafeOutput = isRecord(request)
+              && request.conversationId === "cleanup-degraded";
+            const tools = isRecord(request) && Array.isArray(request.tools) ? request.tools : [];
+            const probe = tools.find((tool) => isRecord(tool) && tool.name === "context_probe");
+            const send = tools.find((tool) => isRecord(tool) && tool.name === "SendOutput");
+            if (!isRecord(probe) || !isRecord(send)
+              || !isRecord(context) || typeof context.executeTool !== "function") {
+              throw new Error("missing request-context MCP tool");
+            }
+            const inspection = await context.executeTool(
+              { id: "inspect", name: "context_probe", input: {
+                inspectFiles: true, writeOutput: "transcript.md", outputText: "host-owned output",
+                delayMs: 40, progressEveryMs: 10, boundaryProgress: true,
+                ...(retainUnsafeOutput ? { retainUnsafeOutput: true } : {}),
+              } },
+              new AbortController().signal,
+            );
+            const failure = await context.executeTool(
+              { id: "failure", name: "context_probe", input: { fail: true } },
+              new AbortController().signal,
+            );
+            const delivery = await context.executeTool(
+              { id: "send", name: "SendOutput", input: { name: "transcript.md" } },
+              new AbortController().signal,
+            );
+            return completed(JSON.stringify({ inspection, failure, delivery }));
+          },
+        };
+      },
+    },
+  }, {
+    kind: "channel",
+    controller: {
+      create(moduleContext: unknown) {
+        if (!isRecord(moduleContext) || !isRecord(moduleContext.host)
+          || typeof moduleContext.host.dispatch !== "function") throw new Error("missing channel dispatch");
+        dispatch = moduleContext.host.dispatch as typeof dispatch;
+        return {
+          capabilities: {
+            attachments: true, liveInput: false, askUser: false, approvals: false,
+            proactive: true, runtimeControl: false, verbatim: true, cancellation: false,
+          },
+          sendTools: [{
+            name: "SendOutput", description: "Send one current-run output.",
+            inputSchema: { type: "object", additionalProperties: false, required: ["name"],
+              properties: { name: { type: "string" } } },
+            async prepare(input: unknown, context: {
+              readCurrentRunOutput?: (request: { name: string; maxBytes: number }) => Promise<{
+                name: string; data: Uint8Array;
+              }>;
+            }) {
+              if (!isRecord(input) || typeof input.name !== "string"
+                || context.readCurrentRunOutput === undefined) throw new Error("missing current-run output reader");
+              return {
+                conversationId: "destination", text: "",
+                attachments: [await context.readCurrentRunOutput({ name: input.name, maxBytes: 1_000 })],
+              };
+            },
+          }],
+          resolveDeliveryHistory: () => ({ conversationId: "destination" }),
+          async deliver(message: { idempotencyKey: string; attachments?: readonly { name: string; data: Uint8Array }[] }) {
+            const attachment = message.attachments?.[0]!;
+            delivered.push({ name: attachment.name, bytes: new TextDecoder().decode(attachment.data) });
+            return { status: "delivered" as const, idempotencyKey: message.idempotencyKey, messageId: "sent" };
+          },
+        };
+      },
+    },
+  }]);
+  projects.push(project);
+  const runtime = project.modules[0]!.name;
+  const channel = project.modules[1]!.name;
+  await writeFile(join(project.root, "request-context.mjs"), REQUEST_CONTEXT_SERVER_SOURCE);
+  await project.writeMcp({
+    mcpServers: {
+      scoped: {
+        type: "stdio", command: process.execPath, args: ["./request-context.mjs"],
+        env: { ACTIVITY_SECRET: { $env: "ACTIVITY_SECRET" } },
+      },
+    },
+  });
+  await project.writeConfig(minimalConfig(runtime, {
+    context: { mcp: { configPath: "./.mcp.json", requestContextServers: ["scoped"] } },
+    channels: { notify: { $use: channel } },
+    policy: {
+      tools: { default: "deny", allow: ["context_probe", "SendOutput"] },
+      approvals: { default: "allow" },
+      sandbox: { mode: "off" },
+    },
+  }));
+  const activitySecret = "request-context-progress-secret";
+  const host = await createAgentHost(project.configPath, {
+    environment: {
+      PATH: process.env.PATH, HOME: process.env.HOME, ACTIVITY_SECRET: activitySecret,
+    },
+  });
+  try {
+    const submit = (suffix: string) => host.submit({
+      requestId: `request-${suffix}`, conversationId: `conversation-${suffix}`, text: "inspect",
+      attachments: [{
+        id: `voice-${suffix}`, kind: "audio", name: "../Voice note.ogg", mediaType: "audio/ogg",
+        sizeBytes: 3, data: new Uint8Array([1, 2, suffix.charCodeAt(0)]),
+      }],
+    });
+    const responses = await Promise.all([submit("a"), submit("b")]);
+    const observations = responses.map((response) => {
+      const result = JSON.parse(response.text) as {
+        inspection: { content: { text: string }[] };
+        failure: { content: { text: string }[]; isError?: boolean };
+        delivery: { isError?: boolean };
+      };
+      return {
+        response,
+        delivery: result.delivery,
+        failure: result.failure,
+        inspection: JSON.parse(result.inspection.content[0]!.text) as {
+          params: { _meta: Record<string, unknown> };
+          observed: Record<string, unknown>;
+        },
+      };
+    });
+    const contexts = observations.map(({ inspection }) =>
+      inspection.params._meta[MCP_REQUEST_CONTEXT_META_KEY] as ReturnType<typeof requestContext>);
+    expect(contexts.map((context) => context.runId)).toEqual(responses.map((response) => response.runId));
+    expect(contexts.map((context) => context.conversationId)).toEqual(["conversation-a", "conversation-b"]);
+    expect(contexts.map((context) => context.runOutputDir)).toEqual([
+      "[REDACTED_PATH]", "[REDACTED_PATH]",
+    ]);
+    for (const response of responses) {
+      expect(response.text).not.toContain(project.root);
+      expect(response.text).not.toContain(`${project.root}/.mono-agent/`);
+    }
+    expect(delivered).toEqual([
+      { name: "transcript.md", bytes: "host-owned output" },
+      { name: "transcript.md", bytes: "host-owned output" },
+    ]);
+    for (const [{ response, inspection, failure, delivery }, context] of observations.map((entry, index) => [entry, contexts[index]!] as const)) {
+      expect(delivery.isError).not.toBe(true);
+      expect(failure.isError).toBe(true);
+      expect(JSON.stringify(failure)).not.toContain(project.root);
+      expect(JSON.stringify(failure)).not.toContain(activitySecret);
+      expect(context.attachments[0]!.name).toBe("Voice note.ogg");
+      expect(inspection.observed).toMatchObject({
+        bytes: expect.stringMatching(/^0102/u), fileMode: 0o600, outputMode: 0o700,
+        dev: context.attachments[0]!.dev, ino: context.attachments[0]!.ino,
+      });
+      await expect(access(join(
+        project.root, ".mono-agent", "data", "core", "mcp-runs", response.runId,
+      ))).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    const replyEvents: unknown[] = [];
+    await dispatch({
+      requestId: "request-channel", conversationId: "conversation-channel", text: "inspect",
+      sender: { id: "operator" }, receivedAt: new Date().toISOString(),
+      attachments: [{
+        id: "voice-channel", kind: "audio", name: "voice.ogg", mediaType: "audio/ogg",
+        sizeBytes: 1, data: new Uint8Array([3]),
+      }],
+      signal: new AbortController().signal,
+    }, { emit(event) { replyEvents.push(event); } });
+    const activities = replyEvents.filter((event) => isRecord(event) && event.type === "activity");
+    expect(activities).toHaveLength(3);
+    expect(JSON.stringify(activities)).not.toContain(activitySecret);
+    expect(JSON.stringify(activities)).not.toContain(project.root);
+    expect(JSON.stringify(activities)).not.toContain(activitySecret.slice(0, 8));
+    expect(activities.every((event) =>
+      isRecord(event) && typeof event.text === "string"
+      && Buffer.byteLength(event.text, "utf8") <= 16_384
+      && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(event.text))).toBe(true);
+    expect(JSON.stringify(await host.replay("conversation-channel"))).not.toContain("phase 1");
+    const cleanupDegraded = await host.submit({
+      requestId: "request-cleanup-degraded", conversationId: "cleanup-degraded", text: "inspect",
+      attachments: [{
+        id: "voice-degraded", kind: "audio", name: "voice.ogg", mediaType: "audio/ogg",
+        sizeBytes: 1, data: new Uint8Array([4]),
+      }],
+    });
+    expect(cleanupDegraded.status).toBe("completed");
+    expect((await host.health()).status).toBe("degraded");
+  } finally {
+    await host.stop();
+  }
+});
+
 it("fails MCP env validation before starting any module", async () => {
   let created = 0;
   const project = await createFixtureProject([{
@@ -138,15 +338,15 @@ it("fails MCP env validation before starting any module", async () => {
 it("allows HTTPS or literal-loopback HTTP MCP URLs and rejects other plain HTTP hosts", async () => {
   const project = await createFixtureProject([]);
   projects.push(project);
-  const path = await project.writeMcp({
+  const valid = {
     mcpServers: {
       localIpv4: { type: "http", url: "http://127.42.0.1:3210/mcp" },
       localIpv6: { type: "http", url: "http://[::1]:3210/mcp" },
       remoteTls: { type: "http", url: "https://mcp.example.test/service" },
     },
-  });
+  } as const;
 
-  await expect(loadProjectMcpConfig(path, {})).resolves.toMatchObject({
+  expect(parseProjectMcpConfig(valid, {})).toMatchObject({
     mcpServers: {
       localIpv4: { url: "http://127.42.0.1:3210/mcp" },
       localIpv6: { url: "http://[::1]:3210/mcp" },
@@ -159,19 +359,25 @@ it("allows HTTPS or literal-loopback HTTP MCP URLs and rejects other plain HTTP 
     "http://192.0.2.10:3210/mcp",
     "http://mcp.example.test/service",
   ]) {
-    await project.writeMcp({ mcpServers: { unsafe: { type: "http", url } } });
-    await expect(loadProjectMcpConfig(path, {})).rejects.toMatchObject({
-      issues: expect.arrayContaining([
-        expect.objectContaining({ path: "mcpServers.unsafe.url", code: "insecure_http" }),
-      ]),
-    });
+    expect(() => parseProjectMcpConfig({
+      mcpServers: { unsafe: { type: "http", url } },
+    }, {})).toThrow(AgentConfigError);
+    try {
+      parseProjectMcpConfig({ mcpServers: { unsafe: { type: "http", url } } }, {});
+    } catch (error) {
+      expect(error).toMatchObject({
+        issues: expect.arrayContaining([
+          expect.objectContaining({ path: "mcpServers.unsafe.url", code: "insecure_http" }),
+        ]),
+      });
+    }
   }
 });
 
 it("requires explicit env references for secret-bearing MCP env and header values", async () => {
   const project = await createFixtureProject([]);
   projects.push(project);
-  const path = await project.writeMcp({
+  const invalid = {
     mcpServers: {
       worker: {
         type: "stdio",
@@ -190,11 +396,11 @@ it("requires explicit env references for secret-bearing MCP env and header value
         },
       },
     },
-  });
+  } as const;
 
   let error: AgentConfigError | undefined;
   try {
-    await loadProjectMcpConfig(path, {});
+    parseProjectMcpConfig(invalid, {});
   } catch (candidate) {
     if (candidate instanceof AgentConfigError) error = candidate;
   }
@@ -206,7 +412,7 @@ it("requires explicit env references for secret-bearing MCP env and header value
   expect(JSON.stringify(error?.issues)).not.toContain("inline-stdio-secret");
   expect(JSON.stringify(error?.issues)).not.toContain("inline-header-secret");
 
-  await project.writeMcp({
+  const valid = {
     mcpServers: {
       worker: {
         type: "stdio",
@@ -226,11 +432,11 @@ it("requires explicit env references for secret-bearing MCP env and header value
         },
       },
     },
-  });
-  await expect(loadProjectMcpConfig(path, {
+  } as const;
+  expect(parseProjectMcpConfig(valid, {
     MCP_API_TOKEN: "stdio-secret",
     MCP_AUTHORIZATION: "Bearer header-secret",
-  })).resolves.toMatchObject({
+  })).toMatchObject({
     mcpServers: {
       worker: { env: { NODE_ENV: "production", API_TOKEN: { $env: "MCP_API_TOKEN" } } },
       remote: {
@@ -524,6 +730,100 @@ it("applies a hard deadline to MCP tool calls", async () => {
   }
 });
 
+it("grants unspoofable request context only to selected stdio servers and resets idle timeout on progress", async () => {
+  const project = await createFixtureProject([]);
+  projects.push(project);
+  const cancellationMarker = join(project.root, "request-context.cancelled");
+  await writeFile(join(project.root, "request-context.mjs"), REQUEST_CONTEXT_SERVER_SOURCE);
+  const config = parseProjectMcpConfig({
+    mcpServers: {
+      ordinary: { type: "stdio", command: process.execPath, args: ["./request-context.mjs"] },
+      scoped: {
+        type: "stdio", command: process.execPath,
+        args: ["./request-context.mjs", cancellationMarker],
+      },
+    },
+  }, {});
+  const connected = await connectProjectMcpTools(config, {
+    projectRoot: project.root,
+    environment: { PATH: process.env.PATH, HOME: process.env.HOME },
+    requestContextServers: ["scoped"],
+    callTimeoutMs: 150,
+    callTotalTimeoutMs: 300,
+  });
+  try {
+    const scoped = connected.tools.find((tool) => tool.source.kind === "mcp" && tool.source.server === "scoped")!;
+    const ordinary = connected.tools.find((tool) => tool.source.kind === "mcp" && tool.source.server === "ordinary")!;
+    const activities: string[] = [];
+    const firstContext = requestContext("run-a");
+    const secondContext = requestContext("run-b");
+    const [first, second] = await Promise.all([
+      scoped.execute({
+        label: "first", delayMs: 240, progressEveryMs: 60,
+        _meta: { [MCP_REQUEST_CONTEXT_META_KEY]: { conversationId: "spoofed" } },
+      }, { requestContext: firstContext, onActivity: (text) => activities.push(text) }),
+      scoped.execute({ label: "second" }, { requestContext: secondContext }),
+    ]);
+    const firstParams = callParams(first);
+    const secondParams = callParams(second);
+    expect(firstParams._meta?.[MCP_REQUEST_CONTEXT_META_KEY]).toEqual(firstContext);
+    expect(secondParams._meta?.[MCP_REQUEST_CONTEXT_META_KEY]).toEqual(secondContext);
+    expect((firstParams.arguments as Record<string, unknown>)._meta).toEqual({
+      [MCP_REQUEST_CONTEXT_META_KEY]: { conversationId: "spoofed" },
+    });
+    expect(activities).toEqual(["phase 1", "phase 2", "phase 3"]);
+
+    const ordinaryActivities: string[] = [];
+    const ordinaryParams = callParams(await ordinary.execute(
+      { _meta: { [MCP_REQUEST_CONTEXT_META_KEY]: { conversationId: "spoofed" } } },
+      { requestContext: firstContext, onActivity: (text) => ordinaryActivities.push(text) },
+    ));
+    expect(ordinaryParams._meta?.[MCP_REQUEST_CONTEXT_META_KEY]).toBeUndefined();
+    expect(ordinaryActivities).toEqual([]);
+
+    await expect(scoped.execute(
+      { delayMs: 2_000, progressEveryMs: 0.1, progressCount: 300 },
+      { requestContext: firstContext },
+    )).rejects.toThrow(/progress exceeds the per-call event or byte limit/u);
+    await waitForCancellationCount(cancellationMarker, 1);
+
+    await expect(scoped.execute(
+      { delayMs: 2_000, progressEveryMs: 1, progressCount: 1, progressMessageBytes: 270_000 },
+      { requestContext: firstContext },
+    )).rejects.toThrow(/progress exceeds the per-call event or byte limit/u);
+    await waitForCancellationCount(cancellationMarker, 2);
+
+    await expect(scoped.execute(
+      { delayMs: 600, progressEveryMs: 40, progressCount: 12 },
+      { requestContext: firstContext },
+    )).rejects.toMatchObject({ name: "TimeoutError" });
+
+    const controller = new AbortController();
+    const pending = scoped.execute(
+      { delayMs: 1_000, progressEveryMs: 0 },
+      { requestContext: firstContext, signal: controller.signal },
+    );
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  } finally {
+    await connected.close();
+  }
+});
+
+it("rejects request-context grants for missing and HTTP MCP servers before connecting", async () => {
+  const config = parseProjectMcpConfig({
+    mcpServers: {
+      local: { type: "stdio", command: process.execPath },
+      remote: { type: "http", url: "https://mcp.example.test/service" },
+    },
+  }, {});
+  for (const server of ["missing", "remote"]) {
+    await expect(connectProjectMcpTools(config, {
+      projectRoot: process.cwd(), environment: {}, requestContextServers: [server],
+    })).rejects.toThrow(/must be a configured stdio server/u);
+  }
+});
+
 it("checks every MCP HTTP redirect before following it", async () => {
   const calls: string[] = [];
   const sameOriginFetch = createCheckedMcpFetch(
@@ -596,6 +896,156 @@ it("bounds MCP HTTP response bodies even without Content-Length", async () => {
   const sseResponse = await checkedSseFetch("https://mcp.example.test/start");
   await expect(sseResponse.text()).rejects.toThrow(/SSE frame exceeds 1048576 bytes/u);
 });
+
+it("bounds MCP HTTP request bodies and rejects unknown streaming bodies before fetch", async () => {
+  const baseFetch = vi.fn(async () => new Response("ok"));
+  const checkedFetch = createCheckedMcpFetch(
+    new URL("https://mcp.example.test/start"),
+    baseFetch,
+  );
+  await expect(checkedFetch("https://mcp.example.test/start", {
+    method: "POST",
+    body: "x".repeat(1024 * 1024 + 1),
+  })).rejects.toThrow(/request body exceeds 1048576 bytes/u);
+  await expect(checkedFetch("https://mcp.example.test/start", {
+    method: "POST",
+    body: new ReadableStream<Uint8Array>() as never,
+  })).rejects.toThrow(/unsupported streaming request bodies/u);
+  expect(baseFetch).not.toHaveBeenCalled();
+});
+
+function requestContext(runId: string) {
+  const runOutputDir = `/private/core/${runId}/outbound`;
+  const attachmentsRoot = `/private/core/${runId}/attachments`;
+  const attachment = Object.freeze({
+    id: `attachment-${runId}`, name: "voice.ogg", mediaType: "audio/ogg",
+    path: `${attachmentsRoot}/attachment-000.ogg`, dev: "10", ino: "20",
+  });
+  return Object.freeze({
+    schemaVersion: 1 as const, conversationId: `conversation-${runId}`, runId,
+    runOutputDir, attachmentsRoot,
+    allowedAttachmentPaths: Object.freeze([attachment.path]),
+    allowedAttachmentIdentities: Object.freeze([
+      Object.freeze({ path: attachment.path, dev: attachment.dev, ino: attachment.ino }),
+    ]),
+    attachments: Object.freeze([attachment]),
+  });
+}
+
+function callParams(value: unknown): Record<string, unknown> & {
+  readonly arguments: Record<string, unknown>;
+  readonly _meta?: Record<string, unknown>;
+} {
+  const result = value as { readonly content: readonly { readonly text: string }[] };
+  return JSON.parse(result.content[0]!.text) as ReturnType<typeof callParams>;
+}
+
+async function waitForCancellationCount(path: string, count: number): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      if ((await readFile(path, "utf8")).trim().split("\n").length >= count) return;
+    } catch { /* Marker is written asynchronously after client cancellation. */ }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Expected ${String(count)} MCP cancellation notifications`);
+}
+
+const REQUEST_CONTEXT_SERVER_SOURCE = String.raw`
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+let buffer = "";
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  while (buffer.includes("\n")) {
+    const index = buffer.indexOf("\n");
+    const line = buffer.slice(0, index);
+    buffer = buffer.slice(index + 1);
+    if (!line.trim()) continue;
+    const message = JSON.parse(line);
+    if (message.method === "notifications/cancelled") {
+      if (process.argv[2]) writeFileSync(process.argv[2], "cancelled\n", { flag: "a" });
+      continue;
+    }
+    if (message.id === undefined) continue;
+    if (message.method === "initialize") {
+      send({ jsonrpc: "2.0", id: message.id, result: {
+        protocolVersion: message.params.protocolVersion,
+        capabilities: { tools: {} },
+        serverInfo: { name: "request-context-fixture", version: "1.0.0" },
+      } });
+    } else if (message.method === "tools/list") {
+      send({ jsonrpc: "2.0", id: message.id, result: { tools: [{
+        name: "context_probe",
+        description: "Echo request context and optionally report progress",
+        inputSchema: { type: "object", additionalProperties: true },
+      }] } });
+    } else if (message.method === "tools/call") {
+      const delay = Number(message.params.arguments?.delayMs ?? 0);
+      const every = Number(message.params.arguments?.progressEveryMs ?? 0);
+      const count = Number(message.params.arguments?.progressCount ?? 3);
+      const token = message.params._meta?.progressToken;
+      const context = message.params._meta?.["com.mono-agent/request-context"];
+      if (message.params.arguments?.fail === true) {
+        const secret = process.env.ACTIVITY_SECRET ?? "";
+        send({ jsonrpc: "2.0", id: message.id, error: {
+          code: -32000, message: "failed " + secret + " " + context.runOutputDir,
+        } });
+        continue;
+      }
+      if (token !== undefined && every > 0) {
+        const prefix = process.env.ACTIVITY_SECRET ? process.env.ACTIVITY_SECRET + " " : "";
+        const messageBytes = Number(message.params.arguments?.progressMessageBytes ?? 0);
+        for (let phase = 1; phase <= count; phase += 1) {
+          const detail = messageBytes > 0
+            ? "p".repeat(messageBytes)
+            : message.params.arguments?.boundaryProgress === true
+              ? phase === 1
+                ? "\u0000\t" + "x".repeat(16372) + prefix + context.runOutputDir
+                : "\u0000 " + context.runOutputDir + "\n " + prefix + "phase " + phase
+              : prefix + "phase " + phase;
+          setTimeout(() => send({
+            jsonrpc: "2.0", method: "notifications/progress",
+            params: { progressToken: token, progress: phase, total: count, message: detail },
+          }), every * phase);
+        }
+      }
+      setTimeout(() => {
+        let output = message.params;
+        if (typeof message.params.arguments?.writeOutput === "string") {
+          writeFileSync(
+            context.runOutputDir + "/" + message.params.arguments.writeOutput,
+            String(message.params.arguments.outputText ?? ""),
+            { mode: 0o600 },
+          );
+        }
+        if (message.params.arguments?.retainUnsafeOutput === true) {
+          mkdirSync(context.runOutputDir + "/retained");
+          writeFileSync(context.runOutputDir + "/retained/evidence.txt", "retain");
+        }
+        if (message.params.arguments?.inspectFiles === true) {
+          const attachment = context.attachments[0];
+          const file = statSync(attachment.path, { bigint: true });
+          const outputDirectory = statSync(context.runOutputDir, { bigint: true });
+          output = { params: message.params, observed: {
+            bytes: readFileSync(attachment.path).toString("hex"),
+            fileMode: Number(file.mode & 0o777n), outputMode: Number(outputDirectory.mode & 0o777n),
+            dev: String(file.dev), ino: String(file.ino),
+          } };
+        }
+        send({ jsonrpc: "2.0", id: message.id, result: {
+          content: [
+            { type: "text", text: JSON.stringify(output) },
+            ...(context === undefined ? [] : [{ type: "resource", resource: {
+              uri: "file://" + context.runOutputDir, text: context.attachmentsRoot,
+            } }]),
+          ],
+        } });
+      }, delay);
+    }
+  }
+});
+`;
 
 const MCP_SERVER_SOURCE = String.raw`
 let buffer = "";

@@ -38,6 +38,7 @@ export interface ToolResultArtifactSink {
 export interface NormalizeToolResultOptions {
   readonly artifactSink?: ToolResultArtifactSink;
   readonly signal?: AbortSignal;
+  readonly transformString?: (value: string) => string;
 }
 /**
  * A normalized tool envelope without the runtime-owned call id.
@@ -76,7 +77,7 @@ export async function normalizeToolResult(
   throwIfAborted(signal);
   let envelope: NormalizedToolResult;
   try {
-    envelope = normalizeEnvelope(output);
+    envelope = normalizeEnvelope(output, options.transformString ?? ((value) => value));
   } catch (error) {
     if (isAbortError(error)) throw error;
     return boundedFailure(
@@ -140,7 +141,7 @@ export async function normalizeToolResult(
     ],
   };
 }
-function normalizeEnvelope(output: unknown): NormalizedToolResult {
+function normalizeEnvelope(output: unknown, transform: (value: string) => string): NormalizedToolResult {
   const state: JsonNormalizationState = { active: new Set(), items: 0 };
   if (isRecord(output) && Array.isArray(output.content)) {
     if (output.isError !== undefined && typeof output.isError !== "boolean") {
@@ -153,46 +154,48 @@ function normalizeEnvelope(output: unknown): NormalizedToolResult {
     }
     return {
       isError: output.isError === true,
-      content: output.content.map((part) => normalizePart(part, state)),
+      content: output.content.map((part) => normalizePart(part, state, transform)),
     };
   }
   return {
     isError: false,
-    content: [{ type: "json", value: normalizeJsonValue(output, state, 0) }],
+    content: [{ type: "json", value: normalizeJsonValue(output, state, 0, transform) }],
   };
 }
 function normalizePart(
   part: unknown,
   state: JsonNormalizationState,
+  transform: (value: string) => string,
 ): RuntimeToolResultPart {
   if (!isRecord(part) || typeof part.type !== "string") {
-    return { type: "json", value: normalizeJsonValue(part, state, 0) };
+    return { type: "json", value: normalizeJsonValue(part, state, 0, transform) };
   }
   if (part.type === "text") {
     if (typeof part.text !== "string") {
       throw new ToolResultBoundaryError("Tool result text parts require string text.");
     }
-    return { type: "text", text: part.text };
+    return { type: "text", text: transform(part.text) };
   }
   if (part.type === "json") {
     if (!Object.hasOwn(part, "value")) {
       throw new ToolResultBoundaryError("Tool result JSON parts require a value.");
     }
-    return { type: "json", value: normalizeJsonValue(part.value, state, 0) };
+    return { type: "json", value: normalizeJsonValue(part.value, state, 0, transform) };
   }
   if (part.type === "file" || part.type === "image") {
     const mediaType = part.type === "image" ? part.mimeType ?? part.mediaType : part.mediaType;
     if (typeof mediaType !== "string") {
       throw new ToolResultBoundaryError("Tool result file parts require a media type.");
     }
-    const normalizedMediaType = normalizeMediaType(mediaType);
+    const normalizedMediaType = normalizeMediaType(transform(mediaType));
     if (!(typeof part.data === "string" || part.data instanceof Uint8Array)) {
       throw new ToolResultBoundaryError("Tool result file parts require string or byte data.");
     }
     const data = part.data instanceof Uint8Array
       ? copyBoundedFileData(part.data)
-      : part.data;
-    const name = part.name === undefined ? undefined : normalizeFileName(part.name);
+      : transform(part.data);
+    const name = part.name === undefined ? undefined
+      : normalizeFileName(typeof part.name === "string" ? transform(part.name) : part.name);
     return {
       type: "file",
       mediaType: normalizedMediaType,
@@ -203,11 +206,11 @@ function normalizePart(
   if (part.type === "artifact") {
     let ref: ArtifactRef;
     try {
-      ref = parseArtifactRef(part.ref);
+      ref = parseArtifactRef(normalizeJsonValue(part.ref, state, 0, transform));
     } catch {
       throw new ToolResultBoundaryError("Tool result artifact parts require a valid artifact reference.");
     }
-    const preview = part.preview;
+    const preview = typeof part.preview === "string" ? transform(part.preview) : part.preview;
     if (
       preview !== undefined
       && (
@@ -225,14 +228,16 @@ function normalizePart(
       ...(preview === undefined ? {} : { preview }),
     };
   }
-  return { type: "json", value: normalizeJsonValue(part, state, 0) };
+  return { type: "json", value: normalizeJsonValue(part, state, 0, transform) };
 }
 function normalizeJsonValue(
   value: unknown,
   state: JsonNormalizationState,
   depth: number,
+  transform: (value: string) => string,
 ): JsonValue {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "string") return transform(value);
+  if (value === null || typeof value === "boolean") return value;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value === "bigint") return value.toString();
   if (value === undefined) return null;
@@ -257,16 +262,17 @@ function normalizeJsonValue(
   try {
     if (Array.isArray(value)) {
       addJsonItems(state, value.length);
-      return value.map((entry) => normalizeJsonValue(entry, state, depth + 1));
+      return value.map((entry) => normalizeJsonValue(entry, state, depth + 1, transform));
     }
     const entries = Object.entries(value);
     addJsonItems(state, entries.length);
     const normalized: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;
     for (const [key, entry] of entries) {
-      if (UNSAFE_JSON_KEYS.has(key)) {
+      const transformedKey = transform(key);
+      if (UNSAFE_JSON_KEYS.has(transformedKey) || Object.hasOwn(normalized, transformedKey)) {
         throw new ToolResultBoundaryError("Tool result JSON contains an unsafe object key.");
       }
-      normalized[key] = normalizeJsonValue(entry, state, depth + 1);
+      normalized[transformedKey] = normalizeJsonValue(entry, state, depth + 1, transform);
     }
     return normalized;
   } finally {
@@ -324,7 +330,7 @@ function measureEnvelope(
   const previewChunks: Buffer[] = [];
   let previewBytes = 0;
   const previewPayloadLimit = TOOL_RESULT_PREVIEW_MAX_BYTES - 3;
-  for (const chunk of encodeEnvelopeChunks(envelope)) {
+  for (const chunk of encodeJsonChunks(envelope)) {
     throwIfAborted(signal);
     const bytes = Buffer.from(chunk, "utf8");
     sizeBytes += bytes.byteLength;
@@ -357,7 +363,7 @@ function encodeEnvelope(
 ): Uint8Array {
   const encoded = Buffer.allocUnsafe(sizeBytes);
   let offset = 0;
-  for (const chunk of encodeEnvelopeChunks(envelope)) {
+  for (const chunk of encodeJsonChunks(envelope)) {
     throwIfAborted(signal);
     const bytes = Buffer.from(chunk, "utf8");
     bytes.copy(encoded, offset);
@@ -368,85 +374,27 @@ function encodeEnvelope(
   }
   return encoded;
 }
-function* encodeEnvelopeChunks(
-  envelope: NormalizedToolResult,
-): Generator<string, void, undefined> {
-  yield `{"isError":${envelope.isError ? "true" : "false"},"content":[`;
-  for (let index = 0; index < envelope.content.length; index += 1) {
-    if (index > 0) yield ",";
-    const part = envelope.content[index];
-    if (part === undefined) throw new Error("Tool result part disappeared.");
-    yield* encodePartChunks(part);
-  }
-  yield "]}";
-}
-function* encodePartChunks(
-  part: RuntimeToolResultPart,
-): Generator<string, void, undefined> {
-  if (part.type === "text") {
-    yield '{"type":"text","text":';
-    yield* encodeJsonStringChunks(part.text);
-    yield "}";
-    return;
-  }
-  if (part.type === "json") {
-    yield '{"type":"json","value":';
-    yield* encodeJsonValueChunks(part.value);
-    yield "}";
-    return;
-  }
-  if (part.type === "file") {
-    yield '{"type":"file","mediaType":';
-    yield* encodeJsonStringChunks(part.mediaType);
-    yield ',"data":';
-    if (typeof part.data === "string") {
-      yield* encodeJsonStringChunks(part.data);
-    } else {
-      yield* encodeBase64Chunks(part.data);
+function* encodeJsonChunks(value: unknown): Generator<string, void, undefined> {
+  if (value instanceof Uint8Array) {
+    const buffer = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+    yield '"';
+    for (let offset = 0; offset < buffer.byteLength; offset += BINARY_CHUNK_BYTES) {
+      yield buffer.subarray(offset, offset + BINARY_CHUNK_BYTES).toString("base64");
     }
-    if (part.name !== undefined) {
-      yield ',"name":';
-      yield* encodeJsonStringChunks(part.name);
-    }
-    yield "}";
-    return;
-  }
-  yield '{"type":"artifact","ref":';
-  yield* encodeArtifactRefChunks(part.ref);
-  if (part.preview !== undefined) {
-    yield ',"preview":';
-    yield* encodeJsonStringChunks(part.preview);
-  }
-  yield "}";
-}
-function* encodeArtifactRefChunks(
-  ref: ArtifactRef,
-): Generator<string, void, undefined> {
-  yield '{"id":';
-  yield* encodeJsonStringChunks(ref.id);
-  yield ',"sha256":';
-  yield* encodeJsonStringChunks(ref.sha256);
-  yield `,"sizeBytes":${String(ref.sizeBytes)},"mediaType":`;
-  yield* encodeJsonStringChunks(ref.mediaType);
-  if (ref.fileName !== undefined) {
-    yield ',"fileName":';
-    yield* encodeJsonStringChunks(ref.fileName);
-  }
-  yield "}";
-}
-function* encodeJsonValueChunks(
-  value: JsonValue,
-): Generator<string, void, undefined> {
-  if (value === null) {
-    yield "null";
+    yield '"';
     return;
   }
   if (typeof value === "string") {
-    yield* encodeJsonStringChunks(value);
+    yield '"';
+    for (let offset = 0; offset < value.length; offset += JSON_STRING_CHUNK_CHARACTERS) {
+      const encoded = JSON.stringify(value.slice(offset, offset + JSON_STRING_CHUNK_CHARACTERS));
+      yield encoded.slice(1, -1);
+    }
+    yield '"';
     return;
   }
-  if (typeof value === "boolean" || typeof value === "number") {
-    yield String(value);
+  if (value === null || typeof value === "boolean" || typeof value === "number") {
+    yield value === null ? "null" : String(value);
     return;
   }
   if (Array.isArray(value)) {
@@ -455,41 +403,22 @@ function* encodeJsonValueChunks(
       if (index > 0) yield ",";
       const entry = value[index];
       if (entry === undefined) throw new Error("Tool result JSON array changed while encoding.");
-      yield* encodeJsonValueChunks(entry);
+      yield* encodeJsonChunks(entry);
     }
     yield "]";
     return;
   }
+  if (!isRecord(value)) throw new Error("Tool result changed while it was encoded.");
   yield "{";
   let index = 0;
   for (const [key, entry] of Object.entries(value)) {
     if (index > 0) yield ",";
-    yield* encodeJsonStringChunks(key);
+    yield* encodeJsonChunks(key);
     yield ":";
-    yield* encodeJsonValueChunks(entry);
+    yield* encodeJsonChunks(entry);
     index += 1;
   }
   yield "}";
-}
-function* encodeJsonStringChunks(
-  value: string,
-): Generator<string, void, undefined> {
-  yield '"';
-  for (let offset = 0; offset < value.length; offset += JSON_STRING_CHUNK_CHARACTERS) {
-    const encoded = JSON.stringify(value.slice(offset, offset + JSON_STRING_CHUNK_CHARACTERS));
-    yield encoded.slice(1, -1);
-  }
-  yield '"';
-}
-function* encodeBase64Chunks(
-  value: Uint8Array,
-): Generator<string, void, undefined> {
-  const buffer = Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-  yield '"';
-  for (let offset = 0; offset < buffer.byteLength; offset += BINARY_CHUNK_BYTES) {
-    yield buffer.subarray(offset, offset + BINARY_CHUNK_BYTES).toString("base64");
-  }
-  yield '"';
 }
 function boundedPreview(chunks: readonly Buffer[], truncated = true): string {
   const suffix = truncated ? "..." : "";

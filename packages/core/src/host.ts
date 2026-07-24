@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { BigIntStats, Dirent } from "node:fs";
 import { lstat, opendir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   DEFAULT_APPROVAL_TIMEOUT_MS, HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE,
   RUNTIME_SESSION_UNAVAILABLE_CODE, parseApprovalDecision, parseApprovalRequest,
@@ -45,6 +45,7 @@ import {
   connectProjectMcpTools, type ConnectedMcpTools, type CoreRuntimeTool,
 } from "./mcp.js";
 import { decodeAuthorityText, readAuthorityFile } from "./authority-read.js";
+import { createCurrentRunFiles, type CurrentRunFiles } from "./current-run-output.js";
 import { moduleConfigFor } from "./module-loader.js";
 import { nativeToolAllowed, runtimeNativeToolPolicyIssue } from "./native-tool-policy.js";
 import { normalizeToolResult, type ToolResultArtifactSink } from "./tool-result-normalizer.js";
@@ -108,6 +109,7 @@ interface ActiveTurn {
   readonly controller: AbortController;
   readonly transcriptEntries: AgentTranscriptEntry[];
   readonly pendingChannelHistory: Set<string>;
+  currentRunFiles: CurrentRunFiles | undefined;
   runtime?: Runtime;
   route?: RuntimeRoute;
   sessionsSupported?: boolean;
@@ -947,6 +949,9 @@ class AgentHostImplementation implements AgentHost {
         projectRoot: this.config.projectRoot,
         ...(this.config.paths.mcpConfig === undefined ? {} : { configPath: this.config.paths.mcpConfig }),
         environment,
+        ...(this.config.raw.context?.mcp?.requestContextServers === undefined ? {} : {
+          requestContextServers: this.config.raw.context.mcp.requestContextServers,
+        }),
       });
       assertUnambiguousToolPolicy(
         this.config.raw.policy.tools.allow,
@@ -1391,6 +1396,7 @@ class AgentHostImplementation implements AgentHost {
             emittedText = true;
             await reply.emit({ type: "text-delta", delta: event.delta });
           } else if (event.type === "thinking-delta") await reply.emit({ type: "thinking-delta", delta: event.delta });
+          else if (event.type === "activity") await reply.emit({ type: "activity", text: event.text });
           else if (event.type === "usage") {
             await reply.emit({ type: "usage", usage: event.usage });
             if (!emittedCompaction && event.usage.compaction !== undefined) {
@@ -1458,6 +1464,7 @@ class AgentHostImplementation implements AgentHost {
       execute: async (raw, options) => {
         if (options?.callId === undefined) throw new Error("Channel tool call identity is unavailable");
         const callSignal = options.signal === undefined ? signal : AbortSignal.any([signal, options.signal]);
+        const runFiles = active.currentRunFiles;
         const idempotencyKey = `channel-tool:${createHash("sha256")
           .update(`${binding.instanceId}\0${binding.tool.name}\0${input.requestId!}\0${options.callId}`)
           .digest("hex")}`;
@@ -1466,6 +1473,10 @@ class AgentHostImplementation implements AgentHost {
         const prepared = boundedOwnDataRecord(await binding.tool.prepare(raw as JsonValue, {
           requestId: input.requestId!, conversationId: input.conversationId,
           callId: options.callId, signal: callSignal,
+          ...(runFiles === undefined ? {} : {
+            readCurrentRunOutput: ({ name, maxBytes }) =>
+              runFiles.readOutput(name, { maxBytes, signal: callSignal }),
+          }),
         }), `${binding.name} prepared delivery`, true);
         assertOwnKeys(prepared, ["conversationId", "text", "attachments", "replyToMessageId", "metadata"],
           `${binding.name} prepared delivery`);
@@ -1561,6 +1572,7 @@ class AgentHostImplementation implements AgentHost {
           controller,
           transcriptEntries: [],
           pendingChannelHistory: new Set(),
+          currentRunFiles: undefined,
           liveInput: undefined,
           pendingAsk: undefined,
           pendingApproval: undefined,
@@ -1569,6 +1581,12 @@ class AgentHostImplementation implements AgentHost {
         this.#activeTurns.set(input.conversationId, active);
         this.#active += 1;
         try {
+          if ((this.config.raw.context?.mcp?.requestContextServers?.length ?? 0) > 0) {
+            active.currentRunFiles = await createCurrentRunFiles({
+              projectRoot: this.config.projectRoot, runId: active.id,
+              conversationId: input.conversationId, attachments: input.attachments ?? [], signal,
+            });
+          }
           try {
             return await this.#runTurn(input, active, signal, emit, emitAsk, emitApproval);
           } catch (error) {
@@ -1652,6 +1670,11 @@ class AgentHostImplementation implements AgentHost {
             throw failure;
           }
         } finally {
+          try {
+            await active.currentRunFiles?.cleanup();
+          } catch (error) {
+            this.#recordBackgroundFailure(`current-run cleanup: ${errorMessage(error)}`);
+          }
           if (this.#activeTurns.get(input.conversationId) === active) {
             this.#activeTurns.delete(input.conversationId);
           }
@@ -1987,32 +2010,23 @@ class AgentHostImplementation implements AgentHost {
           status: "started",
           startedAt: attemptStartedAt,
         }, signal);
+        const emitRuntimeEvent = async (event: RuntimeTurnEvent): Promise<void> => {
+          const normalizedEvent = normalizeRuntimeTurnEvent(event, eventBoundary, {
+            conversationId: input.conversationId, route: attemptRoute,
+          });
+          if (routeCapabilities.sessions === false && normalizedEvent.type === "session") {
+            const violation = new Error(
+              `${route.runtime}:${route.model} emitted a session while advertising sessions: false`,
+            );
+            eventBoundary.violation = violation;
+            throw violation;
+          }
+          if (normalizedEvent.type === "text-delta" || normalizedEvent.type === "thinking-delta"
+            || normalizedEvent.type === "tool-call" || normalizedEvent.type === "tool-result") observeEffect();
+          await emit(normalizedEvent);
+        };
         const runtimeContext = {
-          emit: async (event: RuntimeTurnEvent) => {
-            const normalizedEvent = normalizeRuntimeTurnEvent(event, eventBoundary, {
-              conversationId: input.conversationId,
-              route: attemptRoute,
-            });
-            if (
-              routeCapabilities.sessions === false
-              && normalizedEvent.type === "session"
-            ) {
-              const violation = new Error(
-                `${route.runtime}:${route.model} emitted a session while advertising sessions: false`,
-              );
-              eventBoundary.violation = violation;
-              throw violation;
-            }
-            if (
-              normalizedEvent.type === "text-delta"
-              || normalizedEvent.type === "thinking-delta"
-              || normalizedEvent.type === "tool-call"
-              || normalizedEvent.type === "tool-result"
-            ) {
-              observeEffect();
-            }
-            await emit(normalizedEvent);
-          },
+          emit: emitRuntimeEvent,
           executeTool: async (call: RuntimeToolCall, toolSignal: AbortSignal) => {
             observeEffect();
             const normalizedCall = normalizeRuntimeToolCall(call);
@@ -2055,6 +2069,10 @@ class AgentHostImplementation implements AgentHost {
               routeCapabilities.artifactResults === true
                 ? stateArtifactSink(this.#stateStore)
                 : undefined,
+              active.currentRunFiles?.requestContext,
+              (text) => emitRuntimeEvent({
+                type: "activity", text: boundedUtf8(this.#redact(text), 16_384),
+              }),
             );
           },
           registerLiveInput: (handler: RuntimeLiveInputHandler) => {
@@ -3664,16 +3682,37 @@ async function executeTool(
   signal: AbortSignal,
   redact: (message: string) => string,
   artifactSink: ToolResultArtifactSink | undefined,
+  requestContext?: CurrentRunFiles["requestContext"],
+  emitActivity?: (text: string) => Promise<void>,
 ): Promise<RuntimeToolResult> {
   const tool = tools.find((candidate) => candidate.name === call.name);
   if (tool === undefined) {
     return { callId: call.id, isError: true, content: [{ type: "text", text: `Tool ${call.name} is not allowed` }] };
   }
+  let activity = Promise.resolve();
+  let activityFailure: { readonly error: unknown } | undefined;
+  const transform = tool.requestContextResult === true && requestContext !== undefined
+    ? requestContextTransformer(requestContext, redact) : undefined;
+  const publicText = transform ?? redact;
   try {
-    const output = await tool.execute(call.input, { signal, callId: call.id });
+    const output = await tool.execute(call.input, {
+      signal, callId: call.id,
+      ...(requestContext === undefined ? {} : { requestContext }),
+      ...(emitActivity === undefined ? {} : {
+        onActivity: (text: string) => {
+          const safe = boundedActivity(publicText(text));
+          activity = activity.then(() => emitActivity(safe)).catch((error: unknown) => {
+            activityFailure ??= { error };
+          });
+        },
+      }),
+    });
+    await activity;
+    if (activityFailure !== undefined) throw activityFailure.error;
     const normalized = await normalizeToolResult(output, {
       signal,
       ...(artifactSink === undefined ? {} : { artifactSink }),
+      ...(transform === undefined ? {} : { transformString: transform }),
     });
     return {
       callId: call.id,
@@ -3681,12 +3720,13 @@ async function executeTool(
       ...(normalized.isError ? { isError: true } : {}),
     };
   } catch (error) {
+    await activity;
     return {
       callId: call.id,
       isError: true,
       content: [{
         type: "text",
-        text: boundedUtf8(redact(errorMessage(error)), 16_384),
+        text: boundedUtf8(publicText(errorMessage(error)), 16_384),
       }],
     };
   }
@@ -3705,6 +3745,24 @@ function boundedUtf8(value: string, maxBytes: number): string {
   let end = Math.max(0, payloadBytes);
   while (end > 0 && (bytes[end] ?? 0) >> 6 === 0b10) end -= 1;
   return `${bytes.subarray(0, end).toString("utf8")}${suffix}`;
+}
+function boundedActivity(value: string): string {
+  const safe = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/gu, " ").replace(/\s+/gu, " ").trim();
+  return boundedUtf8(safe.length === 0 ? "MCP progress" : safe, 16_384);
+}
+function requestContextTransformer(
+  context: CurrentRunFiles["requestContext"],
+  redact: (message: string) => string,
+): (value: string) => string {
+  const paths = [...new Set([
+    dirname(context.runOutputDir), context.runOutputDir, context.attachmentsRoot,
+    ...context.allowedAttachmentPaths,
+    ...context.allowedAttachmentIdentities.map((entry) => entry.path),
+    ...context.attachments.map((entry) => entry.path),
+  ])].sort((left, right) => right.length - left.length);
+  return (value) => redact(paths.reduce(
+    (text, path) => text.replaceAll(path, "[REDACTED_PATH]"), value,
+  ));
 }
 function redactBounded(value: string, secrets: readonly string[], maxBytes: number): string {
   let redacted = utf8Prefix(value, maxBytes);
