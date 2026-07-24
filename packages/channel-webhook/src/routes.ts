@@ -12,6 +12,7 @@ import {
   parseWebhookPath,
   type WebhookMode,
 } from "./config.js";
+import { MAX_WEBHOOK_ROUTE_PROMPT_LENGTH } from "./limits.js";
 
 export const MAX_WEBHOOK_ROUTE_BYTES = 1024 * 1024;
 export const MAX_WEBHOOK_ROUTES = 1_000;
@@ -88,7 +89,7 @@ export async function loadWebhookRoutesFromDirectory(
   if (routes.length === 0) {
     throw new WebhookConfigError(`${directory} must contain at least one enabled Markdown webhook route.`);
   }
-  assertUniqueRoutes(routes);
+  assertRoutesUnique(routes);
   return Object.freeze(routes);
 }
 
@@ -121,8 +122,11 @@ export function parseWebhookRouteMarkdown(
   const path = parseWebhookPath(metadata.path);
   const mode = metadata.mode === undefined ? defaultMode : parseWebhookMode(metadata.mode);
   const prompt = normalized.slice(match[0].length).trim();
-  if (Buffer.byteLength(prompt, "utf8") > MAX_WEBHOOK_ROUTE_BYTES) {
-    throw new WebhookConfigError(`${fileName} prompt exceeds the route byte limit.`);
+  if (
+    prompt.length > MAX_WEBHOOK_ROUTE_PROMPT_LENGTH
+    || Buffer.byteLength(prompt, "utf8") > MAX_WEBHOOK_ROUTE_BYTES
+  ) {
+    throw new WebhookConfigError(`${fileName} prompt exceeds the route prompt limit.`);
   }
   const runtime = optionalString(metadata.runtime, `${fileName} runtime`);
   const model = optionalString(metadata.model, `${fileName} model`);
@@ -161,7 +165,7 @@ export function parseWebhookNotify(
   });
 }
 
-function assertUniqueRoutes(routes: readonly WebhookRoute[]): void {
+export function assertRoutesUnique(routes: readonly WebhookRoute[]): void {
   const names = new Map<string, string>();
   const paths = new Map<string, string>();
   for (const route of routes) {

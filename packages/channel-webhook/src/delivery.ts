@@ -74,8 +74,7 @@ export class WebhookDelivery {
       }
       return prior.promise;
     }
-    if (this.receipts.size >= MAX_DELIVERY_RECEIPTS) {
-      this.capacityExhausted = true;
+    if (!this.reserveReceiptCapacity()) {
       return Promise.resolve(failed(
         key,
         "webhook_delivery_receipt_capacity",
@@ -86,17 +85,36 @@ export class WebhookDelivery {
     const execution = this.send(prepared, signal).then((result) => {
       if (result.status === "delivered" || result.status === "duplicate" || result.status === "unknown") {
         receipt.result = result;
-        if (result.status === "unknown") this.ambiguousOutcome = true;
+        if (result.status === "unknown") {
+          this.ambiguousOutcome = true;
+        } else {
+          this.capacityExhausted = false;
+        }
       } else {
         this.receipts.delete(key);
-        this.capacityExhausted = this.receipts.size >= MAX_DELIVERY_RECEIPTS;
+        this.capacityExhausted = false;
       }
       return result;
     });
     receipt = { fingerprint, promise: execution };
     this.receipts.set(key, receipt);
-    this.capacityExhausted = this.receipts.size >= MAX_DELIVERY_RECEIPTS;
     return execution;
+  }
+
+  private reserveReceiptCapacity(): boolean {
+    if (this.receipts.size < MAX_DELIVERY_RECEIPTS) {
+      this.capacityExhausted = false;
+      return true;
+    }
+    for (const [key, receipt] of this.receipts) {
+      if (receipt.result?.status === "delivered" || receipt.result?.status === "duplicate") {
+        this.receipts.delete(key);
+        this.capacityExhausted = false;
+        return true;
+      }
+    }
+    this.capacityExhausted = true;
+    return false;
   }
 
   private async send(prepared: PreparedWebhookDelivery, signal: AbortSignal): Promise<ChannelDeliveryResult> {

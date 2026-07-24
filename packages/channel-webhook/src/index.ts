@@ -80,11 +80,14 @@ function createWebhookModuleChannel(
     };
     const inbound: ChannelInboundRequest = toChannelInboundRequest(context.instanceId, request);
     const result = await context.host.dispatch(inbound, reply);
-    if (result.status !== "completed") {
+    if (result.status === "cancelled") {
+      throw new WebhookSubmissionError("cancelled");
+    }
+    if (result.status === "rejected") {
       if (result.diagnostics?.some(({ code }) => code === "request_conflict") === true) {
         throw new WebhookSubmissionError("idempotency_conflict");
       }
-      throw new Error("Webhook-dispatched turn did not complete.");
+      throw new WebhookSubmissionError("rejected");
     }
     return { text: result.text ?? replyText };
   };
@@ -244,5 +247,12 @@ function throwIfAborted(signal: AbortSignal): void {
 
 export * from "./config.js";
 export * from "./delivery.js";
-export * from "./routes.js";
+export {
+  MAX_WEBHOOK_ROUTES,
+  MAX_WEBHOOK_ROUTE_BYTES,
+  loadWebhookRoutesFromDirectory,
+  parseWebhookNotify,
+  parseWebhookRouteMarkdown,
+  type WebhookRoute,
+} from "./routes.js";
 export * from "./server.js";
