@@ -437,6 +437,11 @@ function boundedInline(value: string, maxBytes: number): string {
   return `${clipped}…`;
 }
 
+/** @internal Test-only seam; not exported by the package entrypoint. */
+export function boundedInlineForTesting(value: string, maxBytes: number): string {
+  return boundedInline(value, maxBytes);
+}
+
 function throwIfAborted(signal: AbortSignal): void {
   if (!signal.aborted) return;
   throw signal.reason instanceof Error

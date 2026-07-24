@@ -171,11 +171,15 @@ adoption, strict audit, and existing-store admission.
 | `writer-lease.ts` | Exclusive fail-closed writer fence. |
 | `bujo-db.ts` | BuJo v1, FTS5, sqlite-vec, intake metadata, and index operations. |
 | `embeddings.ts` | Bounded no-redirect Ollama `/api/embed` client. |
-| `records.ts` | Record validation, canonical hashing, and lexical scoring. |
+| `records.ts` | Record validation, read reconstruction, canonical hashing, and timestamp projection. |
 | `consolidation.ts` | Bounded projection rendering, crash-safe publication, duplicate reporting, and projection audit. |
 | `commands.ts` | Namespaced maintenance commands and explicit destructive authorization. |
 | `store.ts` | Identity commit, capture/recall/forget, consolidation, audit, backup, rebuild, and retry. |
-| `migration.ts` | Immutable v0 snapshot, digest confirmation, strict copied-root adoption, and bounded evidence. |
+| `store-open.ts` / `store-marker.ts` | Fail-closed store opening and permanent marker lifecycle. |
+| `store-capture.ts` | Runtime-capture and vector intake validation. |
+| `migration.ts` | Immutable snapshot and strict copied-root adoption flows. |
+| `migration-fs.ts` | Descriptor-bound migration filesystem checks and cleanup. |
+| `migration-snapshot-copier.ts` | Bounded source copy and post-copy verification. |
 | `cli.ts` | Standalone snapshot/adoption argument and JSON output contract. |
 | `errors.ts` | Stable fail-closed error codes. |
 | `index.ts` | Memory module definition and curated exports. |

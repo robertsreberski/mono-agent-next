@@ -31,6 +31,7 @@ import {
   MEMORY_LOCAL_INDEX_FILENAME,
   type MemoryEmbeddingProvider,
 } from "../index.js";
+import { boundedInlineForTesting } from "../consolidation.js";
 import { openMemoryLocalForTesting as openMemoryLocal } from "../store.js";
 
 const signal = new AbortController().signal;
@@ -50,6 +51,14 @@ afterEach(async () => {
 });
 
 describe("memory-local deterministic consolidation", () => {
+  it("clips multibyte projection text on the 4096-byte UTF-8 boundary", () => {
+    const rendered = boundedInlineForTesting(`${"a".repeat(4_092)}💾tail`, 4_096);
+
+    expect(rendered.endsWith("…")).toBe(true);
+    expect(rendered).not.toContain("\uFFFD");
+    expect(Buffer.byteLength(rendered, "utf8")).toBeLessThanOrEqual(4_096);
+  });
+
   it("refreshes bounded projections idempotently without canonical, model, or embedding writes", async () => {
     const fixture = await createFixture();
     let modelCalls = 0;
