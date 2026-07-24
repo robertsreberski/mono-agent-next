@@ -63,14 +63,5 @@ export default defineConfig({
     outDir: resolve(root, "dist"),
     emptyOutDir: true,
     target: "es2022",
-    rollupOptions: {
-      output: {
-        manualChunks(id) {
-          if (id.includes("@assistant-ui")) return "assistant-ui";
-          if (id.includes("react")) return "react";
-          return undefined;
-        },
-      },
-    },
   },
 });

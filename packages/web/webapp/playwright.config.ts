@@ -95,7 +95,7 @@ export default defineConfig({
   ],
   webServer: {
     command:
-      "pnpm exec vite --config webapp/vite.config.ts --host 127.0.0.1 --port 4173 --strictPort",
+      "pnpm run build:webapp && pnpm exec vite preview --config webapp/vite.config.ts --host 127.0.0.1 --port 4173 --strictPort",
     cwd: packageRoot,
     url: "http://127.0.0.1:4173/",
     reuseExistingServer: false,
