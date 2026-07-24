@@ -1,10 +1,7 @@
-export type MonoAgentDocsScope = "all" | "docs";
-
 export interface MonoAgentDocsSearchAction {
   readonly action: "search";
   readonly query: string;
   readonly limit?: number;
-  readonly scope?: MonoAgentDocsScope;
 }
 
 export interface MonoAgentDocsReadAction {
@@ -57,7 +54,6 @@ export interface MonoAgentDocsSearchResult {
   readonly corpusDigest: string;
   readonly retrievalMode: "hybrid";
   readonly query: string;
-  readonly scope: MonoAgentDocsScope;
   readonly results: readonly MonoAgentDocsSearchHit[];
   readonly navigation: MonoAgentDocsNavigation;
 }

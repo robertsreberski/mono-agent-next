@@ -39,7 +39,7 @@ pnpm run generate:source-beta-docs
 | `@mono-agent/tui` | 1 | 8 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/tui/README.md) |
 | `@mono-agent/web` | 1 | 36 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/web/README.md) |
 | `create-mono-agent` | 1 | 24 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/create-mono-agent/README.md) |
-| `@mono-agent/docs-mcp` | 1 | 14 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/extras/docs-mcp/README.md) |
+| `@mono-agent/docs-mcp` | 1 | 13 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/extras/docs-mcp/README.md) |
 | `@mono-agent/service-macos` | 1 | 78 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/service-macos/README.md) |
 
 ## Entrypoints and symbols
@@ -1126,7 +1126,6 @@ MonoAgentDocsNavigation
 MonoAgentDocsNavigationAction
 MonoAgentDocsReadAction
 MonoAgentDocsReadResult
-MonoAgentDocsScope
 MonoAgentDocsSearchAction
 MonoAgentDocsSearchHit
 MonoAgentDocsSearchResult

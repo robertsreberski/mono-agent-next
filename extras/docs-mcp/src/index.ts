@@ -8,7 +8,6 @@ export type {
   MonoAgentDocsNavigationAction,
   MonoAgentDocsReadAction,
   MonoAgentDocsReadResult,
-  MonoAgentDocsScope,
   MonoAgentDocsSearchAction,
   MonoAgentDocsSearchHit,
   MonoAgentDocsSearchResult,

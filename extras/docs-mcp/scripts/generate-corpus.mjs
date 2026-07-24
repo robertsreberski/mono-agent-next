@@ -6,6 +6,14 @@ import { fileURLToPath } from "node:url";
 import { embed } from "@yarflam/potion-base-8m";
 import GithubSlugger from "github-slugger";
 
+import {
+  assertUniqueDocumentLocations,
+  findDocumentByLogicalPath,
+  markdownLinks,
+  normalizeRoute,
+  safeDecode,
+} from "../src/markdown-helpers.js";
+
 const MODEL_DIMENSIONS = 256;
 const MODEL_VERSION = "1.0.4";
 const CHUNKER_VERSION = "markdown-blocks-v2";
@@ -29,6 +37,7 @@ for (const source of sources) {
 }
 assertUniqueIds("document", documents);
 assertUniqueIds("chunk", chunks);
+assertUniqueDocumentLocations(documents);
 validateInternalLinks(documents);
 
 const embeddings = [];
@@ -425,38 +434,6 @@ function resolveLink(source, href, maps) {
   return { kind: "resolved", document: target, fragment };
 }
 
-function findDocumentByLogicalPath(path, byPath) {
-  const candidates = [
-    path,
-    `${path}.md`,
-    `${path}.mdx`,
-    posix.join(path, "index.md"),
-    posix.join(path, "index.mdx"),
-  ];
-  return candidates.map((candidate) => byPath.get(candidate)).find(Boolean);
-}
-
-function markdownLinks(markdown) {
-  const links = [];
-  let fenceMarker;
-  for (const line of markdownLines(markdown)) {
-    const fence = /^\s{0,3}(`{3,}|~{3,})/u.exec(line.text)?.[1];
-    if (fenceMarker !== undefined) {
-      if (fence !== undefined && fence[0] === fenceMarker[0] && fence.length >= fenceMarker.length) fenceMarker = undefined;
-      continue;
-    }
-    if (fence !== undefined) {
-      fenceMarker = fence;
-      continue;
-    }
-    const pattern = /(?<!!)\[([^\]]+)\]\(\s*<?([^\s)>]+)>?(?:\s+["'][^"']*["'])?\s*\)/gu;
-    for (const match of line.text.matchAll(pattern)) {
-      links.push({ label: match[1], href: match[2] });
-    }
-  }
-  return links;
-}
-
 function markdownLines(markdown) {
   const lines = [];
   let startOffset = 0;
@@ -490,12 +467,6 @@ function docsRoute(logicalPath) {
 
 function canonicalDocsUrl(logicalPath) {
   return `${DOCS_ORIGIN}${docsRoute(logicalPath)}`;
-}
-
-function normalizeRoute(route) {
-  const decoded = safeDecode(route).replace(/\/{2,}/gu, "/");
-  const withoutIndex = decoded.replace(/\/index(?:\.html)?\/?$/u, "/");
-  return withoutIndex === "/" ? "/" : `/${withoutIndex.replace(/^\/+|\/+$/gu, "")}/`;
 }
 
 function joinedLength(parts, next) {
@@ -535,14 +506,6 @@ function sha256(bytes) {
 
 function toPosixPath(path) {
   return path.split(sep).join("/");
-}
-
-function safeDecode(value) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
 }
 
 function escapeRegExp(value) {

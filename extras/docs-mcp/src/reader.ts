@@ -1,6 +1,13 @@
 import { posix } from "node:path";
 
 import type { DocsCorpus, DocsCorpusChunk, DocsCorpusDocument, DocsCorpusHeading } from "./corpus.js";
+import {
+  balanceFences,
+  findDocumentByLogicalPath,
+  markdownLinks,
+  normalizeRoute,
+  safeDecode,
+} from "./markdown-helpers.js";
 import type {
   MonoAgentDocsErrorCode,
   MonoAgentDocsErrorResult,
@@ -74,13 +81,15 @@ export class MonoAgentDocsReader {
 
   read(target: string): MonoAgentDocsReadResult | MonoAgentDocsErrorResult {
     let resolved: ResolvedTarget;
+    let window: MarkdownWindow;
     try {
       resolved = this.resolveTarget(target);
+      window = markdownWindow(resolved.document, resolved.request);
     } catch (error) {
       if (error instanceof DocsTargetError) return this.errorResult(target, error.code, error.message);
+      if (error instanceof DocsWindowError) return this.errorResult(target, "target_not_found", error.message);
       throw error;
     }
-    const window = markdownWindow(resolved.document, resolved.request);
     const previousTarget = window.truncatedBefore
       ? documentTarget(resolved.document.id, "end", window.startOffset)
       : undefined;
@@ -299,6 +308,13 @@ class DocsTargetError extends Error {
   }
 }
 
+class DocsWindowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DocsWindowError";
+  }
+}
+
 function markdownWindow(document: DocsCorpusDocument, request: WindowRequest): MarkdownWindow {
   const markdown = document.markdown;
   const contentLimit = request.limit - FENCE_BALANCE_RESERVE;
@@ -332,14 +348,20 @@ function markdownWindow(document: DocsCorpusDocument, request: WindowRequest): M
       || (request.mode === "center"
         && (request.startOffset - startOffset) > (endOffset - request.endOffset));
     if (trimFromStart) {
-      startOffset = nextLineStart(markdown, Math.min(endOffset, startOffset + excess));
+      const nextStart = nextLineStart(markdown, Math.min(endOffset, startOffset + excess));
+      startOffset = nextStart >= endOffset
+        ? Math.min(endOffset - 1, startOffset + excess)
+        : nextStart;
     } else {
-      endOffset = previousLineEnd(markdown, Math.max(startOffset, endOffset - excess));
+      const previousEnd = previousLineEnd(markdown, Math.max(startOffset, endOffset - excess));
+      endOffset = previousEnd <= startOffset
+        ? Math.max(startOffset + 1, endOffset - excess)
+        : previousEnd;
     }
     balanced = balanceFences(markdown, startOffset, endOffset).trim();
   }
   if (balanced.length > request.limit || endOffset <= startOffset) {
-    throw new Error(`Documentation window could not fit within its ${request.limit}-character limit.`);
+    throw new DocsWindowError(`Documentation window could not fit within its ${request.limit}-character limit.`);
   }
   return {
     markdown: balanced,
@@ -376,52 +398,6 @@ function previousLineEnd(markdown: string, offset: number): number {
   return newline === -1 ? 0 : newline + 1;
 }
 
-function balanceFences(markdown: string, startOffset: number, endOffset: number): string {
-  const openingAtStart = activeFence(markdown, startOffset);
-  const openingAtEnd = activeFence(markdown, endOffset);
-  const prefix = openingAtStart === undefined ? "" : `${openingAtStart.line}\n`;
-  const suffix = openingAtEnd === undefined ? "" : `\n${openingAtEnd.marker.charAt(0).repeat(openingAtEnd.marker.length)}`;
-  return `${prefix}${markdown.slice(startOffset, endOffset)}${suffix}`;
-}
-
-function activeFence(markdown: string, offset: number): { readonly line: string; readonly marker: string } | undefined {
-  let active: { readonly line: string; readonly marker: string } | undefined;
-  for (const line of markdown.slice(0, offset).split("\n")) {
-    const marker = /^\s{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
-    if (marker === undefined) continue;
-    if (active === undefined) active = { line, marker };
-    else if (marker[0] === active.marker[0] && marker.length >= active.marker.length) active = undefined;
-  }
-  return active;
-}
-
-function markdownLinks(markdown: string): readonly { readonly label: string; readonly href: string }[] {
-  const links: Array<{ readonly label: string; readonly href: string }> = [];
-  let fenceMarker: string | undefined;
-  for (const line of markdown.split("\n")) {
-    const fence = /^\s{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
-    if (fenceMarker !== undefined) {
-      if (fence !== undefined && fence[0] === fenceMarker[0] && fence.length >= fenceMarker.length) fenceMarker = undefined;
-      continue;
-    }
-    if (fence !== undefined) {
-      fenceMarker = fence;
-      continue;
-    }
-    const pattern = /(?<!!)\[([^\]]+)\]\(\s*<?([^\s)>]+)>?(?:\s+["'][^"']*["'])?\s*\)/gu;
-    for (const match of line.matchAll(pattern)) links.push({ label: match[1]!, href: match[2]! });
-  }
-  return links;
-}
-
-function findDocumentByLogicalPath(
-  path: string,
-  documentsByPath: ReadonlyMap<string, DocsCorpusDocument>,
-): DocsCorpusDocument | undefined {
-  const candidates = [path, `${path}.md`, `${path}.mdx`, posix.join(path, "index.md"), posix.join(path, "index.mdx")];
-  return candidates.map((candidate) => documentsByPath.get(candidate)).find((candidate) => candidate !== undefined);
-}
-
 function headingAt(document: DocsCorpusDocument, offset: number): DocsCorpusHeading | undefined {
   return [...document.headings]
     .reverse()
@@ -435,20 +411,6 @@ function canonicalUrl(document: DocsCorpusDocument, anchor?: string): string | u
 
 function documentTarget(documentId: string, direction: "end" | "start", offset: number): string {
   return `mono-agent-docs://document/${documentId}?${direction}=${offset}`;
-}
-
-function normalizeRoute(route: string): string {
-  const decoded = safeDecode(route).replace(/\/{2,}/gu, "/");
-  const withoutIndex = decoded.replace(/\/index(?:\.html)?\/?$/u, "/");
-  return withoutIndex === "/" ? "/" : `/${withoutIndex.replace(/^\/+|\/+$/gu, "")}/`;
-}
-
-function safeDecode(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {
