@@ -31,7 +31,7 @@ pnpm run generate:source-beta-docs
 | `@mono-agent/channel-openai-api` | 1 | 25 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-openai-api/README.md) |
 | `@mono-agent/channel-operator` | 1 | 20 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-operator/README.md) |
 | `@mono-agent/trigger-cron` | 1 | 29 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/trigger-cron/README.md) |
-| `@mono-agent/memory-local` | 1 | 46 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/memory-local/README.md) |
+| `@mono-agent/memory-local` | 1 | 57 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/memory-local/README.md) |
 | `@mono-agent/state-local` | 1 | 26 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/state-local/README.md) |
 | `@mono-agent/exporter-otlp` | 1 | 13 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/exporter-otlp/README.md) |
 | `@mono-agent/sandbox-srt` | 1 | 14 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/sandbox-srt/README.md) |
@@ -40,7 +40,7 @@ pnpm run generate:source-beta-docs
 | `@mono-agent/web` | 1 | 31 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/web/README.md) |
 | `create-mono-agent` | 1 | 24 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/create-mono-agent/README.md) |
 | `@mono-agent/docs-mcp` | 1 | 14 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/extras/docs-mcp/README.md) |
-| `@mono-agent/service-macos` | 1 | 59 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/service-macos/README.md) |
+| `@mono-agent/service-macos` | 1 | 78 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/service-macos/README.md) |
 
 ## Entrypoints and symbols
 
@@ -760,6 +760,7 @@ triggerCronConfigSchema
 ### `@mono-agent/memory-local`
 
 ```text
+AdoptV0MemoryLocalCopyOptions
 DEFAULT_EMBEDDING_BREAKER_FAILURES
 DEFAULT_EMBEDDING_BREAKER_RESET_MS
 DEFAULT_EMBEDDING_TIMEOUT_MS
@@ -776,6 +777,8 @@ MEMORY_LOCAL_DATABASE_FILENAME
 MEMORY_LOCAL_FUTURE_LOG_FILENAME
 MEMORY_LOCAL_INDEX_FILENAME
 MEMORY_LOCAL_MARKER_FILENAME
+MEMORY_LOCAL_V0_ADOPTION_SCHEMA
+MEMORY_LOCAL_V0_SNAPSHOT_SCHEMA
 MEMORY_LOCAL_WRITER_LEASE_FILENAME
 MemoryEmbeddingProvider
 MemoryLocal
@@ -784,6 +787,7 @@ MemoryLocalAuditRequest
 MemoryLocalBackupRequest
 MemoryLocalBackupResult
 MemoryLocalCaptureConfig
+MemoryLocalCliOptions
 MemoryLocalConfig
 MemoryLocalConsolidateRequest
 MemoryLocalConsolidateResult
@@ -799,13 +803,20 @@ MemoryLocalRebuildResult
 MemoryLocalRecallToolConfig
 MemoryLocalRetryRequest
 MemoryLocalRetryResult
+MemoryLocalV0AdoptionResult
+MemoryLocalV0DatabaseEvidence
+MemoryLocalV0SnapshotResult
 OllamaMemoryEmbeddingProvider
 OpenMemoryLocalOptions
+SnapshotV0MemoryLocalRootOptions
+adoptV0MemoryLocalCopy
 default
 memoryLocalJsonSchema
 monoAgentModule
 openMemoryLocal
 parseMemoryLocalConfig
+runMemoryLocalCli
+snapshotV0MemoryLocalRoot
 ```
 
 ## `@mono-agent/state-local`
@@ -1102,7 +1113,6 @@ createMonoAgentDocsMcpServer
 ### `@mono-agent/service-macos`
 
 ```text
-AgentPlanBinding
 ApplyServiceMacosOptions
 CommandResult
 CommandRunOptions
@@ -1113,13 +1123,17 @@ InspectServiceMacosOptions
 LAUNCHCTL_PATH
 LoadedServiceMacosConfig
 MAX_SERVICE_CONFIG_BYTES
+MutateSelectedServiceMacosOptions
+PlanSelectedServiceMacosOptions
 PlanServiceMacosOptions
 PlanServiceMacosRemovalOptions
 ProtectedEnvironment
+ReadServiceMacosLogsOptions
 RecoverServiceMacosOptions
 RemoveServiceMacosOptions
 SERVICE_MACOS_CONFIG_VERSION
 SERVICE_PLAN_SCHEMA_VERSION
+SelectedServiceMacosOptions
 ServiceFileIdentity
 ServiceFileObservation
 ServiceMacosCliOptions
@@ -1127,6 +1141,7 @@ ServiceMacosConfig
 ServiceMacosConfigError
 ServiceMacosDriftError
 ServiceMacosLogsConfig
+ServiceMacosLogsSnapshot
 ServiceMacosMutationDisabledError
 ServiceMacosObservation
 ServiceMacosPlan
@@ -1135,30 +1150,45 @@ ServiceMacosRemovalPlan
 ServiceMacosRemovalPlanEntry
 ServiceMacosRuntimePaths
 ServiceMacosServiceConfig
+ServiceMacosServiceTarget
+ServiceMacosStatus
+ServiceMacosStopPlan
+ServiceMacosStopPlanEntry
 ServiceMacosTarget
 ServicePlanAction
+ServicePlanBinding
 ServiceRemovalAction
 ServiceRestartPolicy
 ServiceRunnerBinding
 ServiceSignal
 ServiceSignalSource
+StopServiceMacosOptions
 applyServiceMacosPlan
 assertRuntimePaths
 defaultRuntime
 fingerprintPlan
 fingerprintRemovalPlan
+fingerprintStopPlan
 inspectServiceMacos
 loadProtectedEnvironment
 loadServiceMacosConfig
 parseEnvironment
 parseServiceMacosConfig
+planRestartServiceMacos
 planServiceMacos
 planServiceMacosRemoval
+planStartServiceMacos
+planStopServiceMacos
 processCommandRunner
+readServiceMacosLogs
 recoverServiceMacosTransactions
 removeServiceMacosPlan
 renderServicePlist
+restartServiceMacos
 runServiceMacosCli
 serviceMacosConfigSchema
 serviceTarget
+startServiceMacos
+statusServiceMacos
+stopServiceMacos
 ```

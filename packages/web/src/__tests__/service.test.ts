@@ -186,8 +186,18 @@ describe("web service lifecycle", () => {
     let updateStarted!: () => void;
     const updateGate = new Promise<void>((resolve) => { releaseUpdate = resolve; });
     const startedGate = new Promise<void>((resolve) => { updateStarted = resolve; });
+    let releaseSettlement!: () => void;
+    let settlementStarted!: () => void;
+    const settlementGate = new Promise<void>((resolve) => { releaseSettlement = resolve; });
+    const settlementStartedGate = new Promise<void>((resolve) => { settlementStarted = resolve; });
+    const finishTurn = store.finishTurn.bind(store);
+    vi.spyOn(store, "finishTurn").mockImplementation(async (...args) => {
+      settlementStarted();
+      await settlementGate;
+      return await finishTurn(...args);
+    });
     const runTurn = vi.fn<WebOperatorGateway["runTurn"]>();
-    const service = new WebService(store, gateway({ runTurn }), { shutdownTimeoutMs: 100 });
+    const service = new WebService(store, gateway({ runTurn }), { shutdownTimeoutMs: 10 });
     const thread = await service.createThread("personal");
 
     const running = service.runTurn(thread.id, { text: "blocked update" }, async () => {
@@ -197,6 +207,9 @@ describe("web service lifecycle", () => {
     await startedGate;
     const cancelling = service.cancel(thread.id);
     releaseUpdate();
+    await settlementStartedGate;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    releaseSettlement();
 
     await expect(cancelling).resolves.toMatchObject({ thread: { status: "cancelled" } });
     await expect(running).resolves.toMatchObject({ thread: { status: "cancelled" } });

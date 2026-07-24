@@ -33,6 +33,21 @@ export {
 } from "./embeddings.js";
 export { MemoryLocalError, type MemoryLocalErrorCode } from "./errors.js";
 export {
+  MEMORY_LOCAL_V0_ADOPTION_SCHEMA,
+  MEMORY_LOCAL_V0_SNAPSHOT_SCHEMA,
+  adoptV0MemoryLocalCopy,
+  snapshotV0MemoryLocalRoot,
+  type AdoptV0MemoryLocalCopyOptions,
+  type MemoryLocalV0AdoptionResult,
+  type MemoryLocalV0DatabaseEvidence,
+  type MemoryLocalV0SnapshotResult,
+  type SnapshotV0MemoryLocalRootOptions,
+} from "./migration.js";
+export {
+  runMemoryLocalCli,
+  type MemoryLocalCliOptions,
+} from "./cli.js";
+export {
   MEMORY_LOCAL_FUTURE_LOG_FILENAME,
   MEMORY_LOCAL_INDEX_FILENAME,
   type MemoryLocalConsolidateResult,

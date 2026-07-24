@@ -306,7 +306,7 @@ it("drains and bounds hostile stdio stderr without surfacing configured secrets"
     cwd: project.root,
     env: { API_TOKEN: secret },
     redactionValues: [secret],
-  }, 1_024, 25);
+  }, 1_024);
   const transportError = new Promise<Error>((resolveError) => {
     transport.onerror = resolveError;
   });

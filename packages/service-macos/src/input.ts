@@ -13,7 +13,7 @@ export async function readServiceInput(
 ): Promise<ServiceInputSnapshot> {
   const before = await lstat(path, { bigint: true });
   assertSafe(path, before, maximumBytes, options);
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = await handle.stat({ bigint: true });
     assertSafe(path, opened, maximumBytes, options);

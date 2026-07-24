@@ -65,6 +65,7 @@ interface ActiveTurn {
   readonly completion: Promise<WebThreadDetail>;
   readonly resolve: (detail: WebThreadDetail) => void;
   readonly reject: (error: unknown) => void;
+  settlement: Promise<void> | undefined;
   settled: boolean;
   forced: boolean;
 }
@@ -203,6 +204,7 @@ export class WebService {
       completion: deferred.promise,
       resolve: deferred.resolve,
       reject: deferred.reject,
+      settlement: undefined,
       settled: false,
       forced: false,
     };
@@ -306,14 +308,22 @@ export class WebService {
     status: "complete" | "failed" | "cancelled" | "interrupted",
     error?: { readonly code: string; readonly message: string },
   ): Promise<void> {
-    if (active.settled) return;
-    active.settled = true;
-    try {
-      await this.store.finishTurn(active.threadId, active.turnId, status, error);
-    } catch (settleError) {
-      active.settled = false;
-      throw settleError;
+    if (active.settlement !== undefined) {
+      await active.settlement;
+      return;
     }
+    active.settled = true;
+    const settlement = (async () => {
+      try {
+        await this.store.finishTurn(active.threadId, active.turnId, status, error);
+      } catch (settleError) {
+        active.settled = false;
+        active.settlement = undefined;
+        throw settleError;
+      }
+    })();
+    active.settlement = settlement;
+    await settlement;
   }
 
   private async forceSettle(

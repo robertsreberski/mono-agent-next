@@ -890,7 +890,10 @@ service-macos has its own desired-state file. It is not mentioned by the agent:
   "configVersion": 1,
   "services": {
     "personal-agent": {
-      "agentConfig": "/Users/example/personal-agent/mono-agent.config.json",
+      "target": {
+        "kind": "agent",
+        "config": "/Users/example/personal-agent/mono-agent.config.json"
+      },
       "startAtLogin": true,
       "restartPolicy": "on-failure",
       "environmentFile": "/Users/example/personal-agent/.env",
@@ -899,12 +902,30 @@ service-macos has its own desired-state file. It is not mentioned by the agent:
         "maxBytes": 10485760,
         "retainFiles": 5
       }
+    },
+    "web-console": {
+      "target": {
+        "kind": "web",
+        "config": "/Users/example/web-console/web.config.json"
+      },
+      "startAtLogin": true,
+      "restartPolicy": "on-failure",
+      "environmentFile": "/Users/example/web-console/.env",
+      "logs": {
+        "directory": "/Users/example/.mono-agent/web-logs",
+        "maxBytes": 10485760,
+        "retainFiles": 5
+      }
     }
   }
 }
 ```
 
-If service-macos is absent, the same agent config runs foreground or under another supervisor. Removing service-macos never changes agent semantics.
+Each service has exactly one strict `target`: `kind: "agent"` loads an agent
+config through Core, while `kind: "web"` loads an independent web-product
+config. service-macos never infers one target from another. If service-macos is
+absent, the same agent and web configs run foreground or under another
+supervisor. Removing service-macos never changes their semantics.
 
 The machine-wide web product likewise owns its listener, browser authentication, storage, and agent discovery:
 

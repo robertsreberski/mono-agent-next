@@ -60,7 +60,7 @@ const v1InternalDependencyClosure = new Map([
   ["@mono-agent/web", ["@mono-agent/operator"]],
   ["create-mono-agent", ["@mono-agent/cli"]],
   ["@mono-agent/docs-mcp", []],
-  ["@mono-agent/service-macos", ["@mono-agent/core"]],
+  ["@mono-agent/service-macos", ["@mono-agent/core", "@mono-agent/web"]],
 ]);
 
 const errors = [];

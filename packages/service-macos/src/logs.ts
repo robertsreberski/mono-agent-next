@@ -1,12 +1,29 @@
-import { constants, type BigIntStats } from "node:fs";
-import { lstat, open } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  constants,
+  fstatSync,
+  ftruncateSync,
+  type BigIntStats,
+} from "node:fs";
+import { lstat, open, type FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { ServiceRunnerActivation } from "./plist.js";
 type ActivationLogs = ServiceRunnerActivation["logs"];
 type ReadinessRecord = { readonly event: "reset" } | {
   readonly event: "started" | "stopped"; readonly serviceMacosProof: string; readonly pid: number;
 };
+interface ServiceLogRotationTestHooks {
+  readonly afterArchiveWrite?: (path: string) => void | Promise<void>;
+}
 export interface ServiceLogBinding { readonly stdout: string; readonly stderr: string }
+export interface ManagedServiceLogSnapshot {
+  readonly exists: boolean;
+  readonly totalBytes: number;
+  readonly returnedBytes: number;
+  readonly truncated: boolean;
+  readonly digest?: string;
+  readonly content: string;
+}
 const READINESS_MAX_BYTES = 4_096;
 export async function bindServiceLogs(logs: ActivationLogs, uid: number): Promise<ServiceLogBinding> {
   await assertDirectory(logs, uid);
@@ -30,24 +47,175 @@ export async function assertServiceLogRetention(logs: ActivationLogs, uid: numbe
     }
   }
 }
+
+export async function preflightServiceLogs(
+  logs: ActivationLogs,
+  uid: number,
+): Promise<void> {
+  await assertDirectory(logs, uid);
+  await assertServiceLogRetention(logs, uid);
+  for (const path of [logs.stdoutPath, logs.stderrPath]) {
+    await inspectOptionalManagedFile(path, logs, uid);
+    for (let index = 0; index < logs.retainFiles; index += 1) {
+      await inspectOptionalManagedFile(
+        `${path}.${String(index)}.mono-agent-log`,
+        logs,
+        uid,
+      );
+    }
+  }
+  const readiness = await readOptionalManagedFile(
+    logs.readinessPath,
+    logs,
+    uid,
+    READINESS_MAX_BYTES,
+  );
+  if (readiness !== undefined && parseReadiness(readiness) === undefined) {
+    throw new Error(`${logs.readinessPath} is not a valid managed readiness proof.`);
+  }
+  await assertDirectory(logs, uid);
+}
+
 export async function resetServiceLogs(logs: ActivationLogs, uid: number): Promise<void> {
   await Promise.all([rotate(logs.stdoutPath, logs, uid, true), rotate(logs.stderrPath, logs, uid, true)]);
   await rewriteReadiness(logs, { event: "reset" }, uid, false);
 }
+
+async function inspectOptionalManagedFile(
+  path: string,
+  logs: ActivationLogs,
+  uid: number,
+): Promise<void> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+  if (handle === undefined) return;
+  try {
+    const opened = await handle.stat({ bigint: true });
+    assertSafe(path, opened, uid);
+    await assertBound(logs, path, opened, uid);
+    const after = await handle.stat({ bigint: true });
+    assertSame(path, opened, after);
+    await assertBound(logs, path, after, uid);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readOptionalManagedFile(
+  path: string,
+  logs: ActivationLogs,
+  uid: number,
+  maximum: number,
+): Promise<Buffer | undefined> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+  if (handle === undefined) return undefined;
+  try {
+    const opened = await handle.stat({ bigint: true });
+    assertSafe(path, opened, uid, maximum);
+    await assertBound(logs, path, opened, uid);
+    const source = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    assertSame(path, opened, after);
+    await assertBound(logs, path, after, uid);
+    if (source.byteLength !== Number(after.size)) {
+      throw new Error(`${path} changed size during preflight.`);
+    }
+    return source;
+  } finally {
+    await handle.close();
+  }
+}
 export async function maintainServiceLogs(
   logs: ActivationLogs, uid: number, binding?: ServiceLogBinding,
 ): Promise<void> {
+  await maintainServiceLogsInternal(logs, uid, binding, {});
+}
+/** @internal Test-only adversarial hook surface; not exported by the package entrypoint. */
+export async function maintainServiceLogsForTesting(
+  logs: ActivationLogs,
+  uid: number,
+  hooks: ServiceLogRotationTestHooks,
+  binding?: ServiceLogBinding,
+): Promise<void> {
+  await maintainServiceLogsInternal(logs, uid, binding, hooks);
+}
+async function maintainServiceLogsInternal(
+  logs: ActivationLogs,
+  uid: number,
+  binding: ServiceLogBinding | undefined,
+  hooks: ServiceLogRotationTestHooks,
+): Promise<void> {
   await Promise.all([
-    rotate(logs.stdoutPath, logs, uid, false, binding?.stdout),
-    rotate(logs.stderrPath, logs, uid, false, binding?.stderr),
+    rotate(logs.stdoutPath, logs, uid, false, binding?.stdout, hooks),
+    rotate(logs.stderrPath, logs, uid, false, binding?.stderr, hooks),
   ]);
+}
+export async function readManagedServiceLog(
+  path: string,
+  uid: number,
+  maxBytes: number,
+): Promise<ManagedServiceLogSnapshot> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    if (isErrno(error, "ENOENT")) {
+      return Object.freeze({
+        exists: false,
+        totalBytes: 0,
+        returnedBytes: 0,
+        truncated: false,
+        content: "",
+      });
+    }
+    throw error;
+  }
+  try {
+    const before = await handle.stat({ bigint: true });
+    assertSafe(path, before, uid);
+    if (before.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(`${path} is too large for bounded log inspection.`);
+    }
+    const returnedBytes = Math.min(Number(before.size), maxBytes);
+    const source = Buffer.alloc(returnedBytes);
+    if (returnedBytes > 0) {
+      await handle.read(source, 0, returnedBytes, Number(before.size) - returnedBytes);
+    }
+    const after = await handle.stat({ bigint: true });
+    assertSame(path, before, after);
+    if (!sameFile(after, await lstat(path, { bigint: true }))) {
+      throw new Error(`${path} changed pathname identity during log inspection.`);
+    }
+    return Object.freeze({
+      exists: true,
+      totalBytes: Number(before.size),
+      returnedBytes,
+      truncated: before.size > BigInt(returnedBytes),
+      digest: createHash("sha256").update(source).digest("hex"),
+      content: source.toString("utf8"),
+    });
+  } finally {
+    await handle.close();
+  }
 }
 export async function readServiceReadiness(
   logs: ActivationLogs, token: string, pid: number, uid: number,
 ): Promise<boolean> {
   await assertDirectory(logs, uid);
   let handle;
-  try { handle = await open(logs.readinessPath, constants.O_RDONLY | constants.O_NOFOLLOW); } catch (error) {
+  try {
+    handle = await open(
+      logs.readinessPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+  } catch (error) {
     if (isErrno(error, "ENOENT")) return false;
     throw error;
   }
@@ -77,10 +245,20 @@ async function rewriteReadiness(
 ): Promise<void> {
   await assertDirectory(logs, uid);
   let handle; let created = false;
-  try { handle = await open(logs.readinessPath, constants.O_RDWR | constants.O_NOFOLLOW); } catch (error) {
+  try {
+    handle = await open(
+      logs.readinessPath,
+      constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
+  } catch (error) {
     if (!isErrno(error, "ENOENT")) throw error;
     if (!create) return;
-    handle = await open(logs.readinessPath, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
+    handle = await open(
+      logs.readinessPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_RDWR
+        | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      0o600,
+    );
     created = true;
   }
   try {
@@ -105,11 +283,18 @@ async function rewriteReadiness(
   } finally { await handle.close(); }
 }
 async function rotate(
-  path: string, logs: ActivationLogs, uid: number, force: boolean, expected?: string,
+  path: string,
+  logs: ActivationLogs,
+  uid: number,
+  force: boolean,
+  expected?: string,
+  hooks: ServiceLogRotationTestHooks = {},
 ): Promise<void> {
   await assertDirectory(logs, uid);
   let handle;
-  try { handle = await open(path, constants.O_RDWR | constants.O_NOFOLLOW); } catch (error) {
+  try {
+    handle = await open(path, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
     if (isErrno(error, "ENOENT") && expected === undefined) return;
     if (isErrno(error, "ENOENT")) throw new Error(`${path} bound live log disappeared.`);
     throw error;
@@ -122,13 +307,19 @@ async function rotate(
     if (before.size === 0n || (!force && before.size <= BigInt(logs.maxBytes))) return;
     const bytes = Number(before.size > BigInt(logs.maxBytes) ? BigInt(logs.maxBytes) : before.size);
     const archive = Buffer.alloc(bytes);
-    await handle.read(archive, 0, bytes, Number(before.size) - bytes);
+    await readExact(handle, archive, Number(before.size) - bytes, path);
     const after = await handle.stat({ bigint: true });
     assertSame(path, before, after);
     await assertBound(logs, path, after, uid);
     await writeArchive(path, archive, logs, uid);
+    await hooks.afterArchiveWrite?.(path);
     await assertBound(logs, path, after, uid);
-    await handle.truncate(0); await handle.sync();
+    // The managed target shares this Node event loop. Keep the final descriptor
+    // stability check and truncate synchronous so its writes cannot interleave.
+    const preTruncate = fstatSync(handle.fd, { bigint: true });
+    assertSame(path, after, preTruncate);
+    ftruncateSync(handle.fd, 0);
+    await handle.sync();
     const final = await handle.stat({ bigint: true });
     if (!sameFile(after, final)) throw new Error(`${path} changed during log rotation.`);
     await assertBound(logs, path, final, uid);
@@ -150,19 +341,55 @@ async function writeArchive(path: string, bytes: Buffer, logs: ActivationLogs, u
   if (selected === undefined) throw new Error("No managed log archive slot is available.");
   await assertDirectory(logs, uid);
   const flags = selected.stats === undefined
-    ? constants.O_CREAT | constants.O_EXCL | constants.O_RDWR | constants.O_NOFOLLOW
-    : constants.O_RDWR | constants.O_NOFOLLOW;
+    ? constants.O_CREAT | constants.O_EXCL | constants.O_RDWR
+      | constants.O_NOFOLLOW | constants.O_NONBLOCK
+    : constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK;
   const handle = await open(selected.path, flags, 0o600);
   try {
     const opened = await handle.stat({ bigint: true }); assertSafe(selected.path, opened, uid);
     if (selected.stats !== undefined && !sameFile(selected.stats, opened)) throw new Error(`${selected.path} changed before archive rotation.`);
     await assertBound(logs, selected.path, opened, uid);
-    await handle.truncate(0); await handle.write(bytes, 0, bytes.length, 0); await handle.sync();
+    await handle.truncate(0); await writeExact(handle, bytes, selected.path); await handle.sync();
     await assertBound(logs, selected.path, await handle.stat({ bigint: true }), uid);
   } finally { await handle.close(); }
 }
+async function readExact(
+  handle: FileHandle,
+  target: Buffer,
+  position: number,
+  path: string,
+): Promise<void> {
+  let offset = 0;
+  while (offset < target.byteLength) {
+    const { bytesRead } = await handle.read(
+      target,
+      offset,
+      target.byteLength - offset,
+      position + offset,
+    );
+    if (bytesRead === 0) throw new Error(`${path} changed during log rotation.`);
+    offset += bytesRead;
+  }
+}
+async function writeExact(
+  handle: FileHandle,
+  source: Buffer,
+  path: string,
+): Promise<void> {
+  let offset = 0;
+  while (offset < source.byteLength) {
+    const { bytesWritten } = await handle.write(
+      source,
+      offset,
+      source.byteLength - offset,
+      offset,
+    );
+    if (bytesWritten === 0) throw new Error(`${path} archive write was incomplete.`);
+    offset += bytesWritten;
+  }
+}
 async function bindFile(logs: ActivationLogs, path: string, uid: number): Promise<string> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stats = await handle.stat({ bigint: true }); assertSafe(path, stats, uid);
     await assertBound(logs, path, stats, uid);

@@ -11,8 +11,15 @@ export interface ServiceMacosTarget {
   readonly stdoutPath: string; readonly stderrPath: string; readonly readinessPath: string;
 }
 export interface ServiceRunnerBinding {
-  readonly agentConfigDigest: string; readonly packageManifestDigest: string;
+  readonly targetKind: ServiceMacosServiceConfig["target"]["kind"];
+  readonly targetConfig: string;
+  readonly targetConfigDigest: string;
+  readonly directDependencyName: "@mono-agent/core" | "@mono-agent/web";
+  readonly directDependencyVersion: string;
+  readonly packageManifestDigest: string;
   readonly lockfilePath: string; readonly lockfileDigest: string;
+  readonly nodePath: string; readonly nodeDigest: string;
+  readonly runnerScriptPath: string; readonly runnerScriptDigest: string;
   readonly logsDirectoryIdentity: string;
   readonly environmentFileDigest?: string;
 }
@@ -55,7 +62,7 @@ export function renderServicePlist(
     runtime.runnerScriptPath,
     "run-service",
     "--config",
-    service.agentConfig,
+    service.target.config,
     "--activation",
     activation.encoded,
     ...(service.environmentFile === undefined ? [] : ["--environment-file", service.environmentFile]),
@@ -76,7 +83,7 @@ export function renderServicePlist(
 ${args.map((argument) => `    <string>${xml(argument)}</string>`).join("\n")}
   </array>
   <key>WorkingDirectory</key>
-  <string>${xml(dirname(service.agentConfig))}</string>
+  <string>${xml(dirname(service.target.config))}</string>
   <key>RunAtLoad</key>
   ${service.startAtLogin ? "<true/>" : "<false/>"}
   <key>KeepAlive</key>
@@ -101,10 +108,18 @@ export function encodeServiceRunnerActivation(
   binding: ServiceRunnerBinding,
 ): EncodedServiceRunnerActivation {
   const runnerBinding: ServiceRunnerBinding = Object.freeze({
-    agentConfigDigest: binding.agentConfigDigest,
+    targetKind: binding.targetKind,
+    targetConfig: binding.targetConfig,
+    targetConfigDigest: binding.targetConfigDigest,
+    directDependencyName: binding.directDependencyName,
+    directDependencyVersion: binding.directDependencyVersion,
     packageManifestDigest: binding.packageManifestDigest,
     lockfilePath: binding.lockfilePath,
     lockfileDigest: binding.lockfileDigest,
+    nodePath: binding.nodePath,
+    nodeDigest: binding.nodeDigest,
+    runnerScriptPath: binding.runnerScriptPath,
+    runnerScriptDigest: binding.runnerScriptDigest,
     logsDirectoryIdentity: binding.logsDirectoryIdentity,
     ...(binding.environmentFileDigest === undefined ? {} : {
       environmentFileDigest: binding.environmentFileDigest,

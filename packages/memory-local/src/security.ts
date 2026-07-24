@@ -42,6 +42,8 @@ export interface PinnedSecureFile {
 export interface BoundSecureDatabaseFile extends PinnedSecureFile {
   /** Stable package-owned pathname supplied to SQLite while the store is open. */
   readonly openPath: string;
+  /** Exact package-owned directory that authorizes this reserved binding. */
+  readonly authorityPath: string;
   /** Existing binding plus exact authority permits validated WAL recovery. */
   readonly recovering: boolean;
 }
@@ -298,6 +300,7 @@ export async function bindSecureDatabaseFile(
     return {
       path,
       openPath: bindingPath,
+      authorityPath,
       recovering: existingBinding !== undefined,
       handle: canonical.handle,
       identity: canonical.identity,

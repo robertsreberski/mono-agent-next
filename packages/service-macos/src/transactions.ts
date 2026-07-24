@@ -45,8 +45,10 @@ interface TransactionGuard {
 }
 const journalFiles = new WeakMap<TransactionJournal, ServiceFileObservation>();
 export interface ServiceMacosTransactionLifecycle {
+  readonly preflight: () => Promise<void>;
   readonly inspectLoaded: () => Promise<boolean>; readonly bootoutRequired: () => Promise<void>;
   readonly bootoutIfPresent: () => Promise<void>; readonly bootstrap: () => Promise<void>;
+  readonly bootstrapRestored: () => Promise<void>;
   readonly proveReady: (readinessToken: string) => Promise<void>; readonly proveInstalledReady: () => Promise<void>;
 }
 export interface ReplaceServicePlistTransaction {
@@ -71,7 +73,7 @@ export async function observeOwnerPrivatePlist(path: string, expectedUid: number
   }
   const maximumLinks = options.allowTwoLinks === true ? 2n : 1n;
   assertOwnerPrivateStats(path, before, expectedUid, maximumLinks);
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = await handle.stat({ bigint: true });
     assertOwnerPrivateStats(path, opened, expectedUid, maximumLinks);
@@ -495,7 +497,7 @@ async function rollbackTransaction(
       throw new ServiceMacosDriftError(`Restored plist identity proof failed for ${target.serviceId}.`);
     }
     if (journal.expectedLoaded) {
-      await lifecycle.bootstrap();
+      await lifecycle.bootstrapRestored();
       await lifecycle.proveInstalledReady();
     }
     const verifiedCanonical = await observeOwnerPrivatePlist(target.plistPath, expectedUid);
@@ -973,7 +975,7 @@ async function readOwnerPrivateBounded(
   ) {
     throw new ServiceMacosDriftError(`${path} must be an owner-private single-linked bounded file.`);
   }
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const opened = await handle.stat({ bigint: true });
     assertSameIdentity(path, before, opened);

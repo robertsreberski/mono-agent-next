@@ -8,8 +8,12 @@ export type ServiceRestartPolicy = "never" | "on-failure" | "always";
 export interface ServiceMacosLogsConfig {
   readonly directory: string; readonly maxBytes: number; readonly retainFiles: number;
 }
+export type ServiceMacosServiceTarget =
+  | { readonly kind: "agent"; readonly config: string }
+  | { readonly kind: "web"; readonly config: string };
 export interface ServiceMacosServiceConfig {
-  readonly agentConfig: string; readonly startAtLogin: boolean; readonly restartPolicy: ServiceRestartPolicy;
+  readonly target: ServiceMacosServiceTarget;
+  readonly startAtLogin: boolean; readonly restartPolicy: ServiceRestartPolicy;
   readonly environmentFile?: string;
   readonly logs: ServiceMacosLogsConfig;
 }
@@ -29,8 +33,21 @@ export class ServiceMacosConfigError extends Error {
   }
 }
 const ROOT_KEYS = new Set(["$schema", "configVersion", "services"]);
-const SERVICE_KEYS = new Set(["agentConfig", "startAtLogin", "restartPolicy", "environmentFile", "logs"]);
+const SERVICE_KEYS = new Set(["target", "startAtLogin", "restartPolicy", "environmentFile", "logs"]);
+const TARGET_KEYS = new Set(["kind", "config"]);
 const LOG_KEYS = new Set(["directory", "maxBytes", "retainFiles"]);
+const BOUNDED_STRING_SCHEMA = Object.freeze({
+  type: "string",
+  minLength: 1,
+  maxLength: 4_096,
+  pattern: "^(?![\\s\\S]*[\\u0000-\\u001f\\u007f])\\S(?:[\\s\\S]*\\S)?$",
+});
+const ABSOLUTE_PATH_SCHEMA = Object.freeze({
+  type: "string",
+  minLength: 1,
+  maxLength: 4_096,
+  pattern: "^/(?![\\s\\S]*[\\u0000-\\u001f\\u007f])(?:[\\s\\S]*\\S)?$",
+});
 export async function loadServiceMacosConfig(path: string): Promise<LoadedServiceMacosConfig> {
   const absolutePath = resolve(path);
   let source: string;
@@ -77,7 +94,7 @@ export const serviceMacosConfigSchema = Object.freeze({
   type: "object",
   additionalProperties: false,
   properties: {
-    $schema: { type: "string" },
+    $schema: BOUNDED_STRING_SCHEMA,
     configVersion: { const: 1 },
     services: {
       type: "object",
@@ -88,22 +105,43 @@ export const serviceMacosConfigSchema = Object.freeze({
           type: "object",
           additionalProperties: false,
           properties: {
-            agentConfig: { type: "string", minLength: 1 },
+            target: {
+              oneOf: [
+                {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    kind: { const: "agent" },
+                    config: ABSOLUTE_PATH_SCHEMA,
+                  },
+                  required: ["kind", "config"],
+                },
+                {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    kind: { const: "web" },
+                    config: ABSOLUTE_PATH_SCHEMA,
+                  },
+                  required: ["kind", "config"],
+                },
+              ],
+            },
             startAtLogin: { type: "boolean" },
             restartPolicy: { enum: ["never", "on-failure", "always"] },
-            environmentFile: { type: "string", minLength: 1 },
+            environmentFile: ABSOLUTE_PATH_SCHEMA,
             logs: {
               type: "object",
               additionalProperties: false,
               properties: {
-                directory: { type: "string", minLength: 1 },
+                directory: ABSOLUTE_PATH_SCHEMA,
                 maxBytes: { type: "integer", minimum: 1, maximum: 1_073_741_824 },
                 retainFiles: { type: "integer", minimum: 1, maximum: 100 },
               },
               required: ["directory"],
             },
           },
-          required: ["agentConfig", "startAtLogin", "restartPolicy", "logs"],
+          required: ["target", "startAtLogin", "restartPolicy", "logs"],
         },
       },
       additionalProperties: false,
@@ -114,7 +152,7 @@ export const serviceMacosConfigSchema = Object.freeze({
 function parseService(value: unknown, id: string): ServiceMacosServiceConfig {
   const input = readRecord(value, `services.${id}`);
   rejectUnknown(input, SERVICE_KEYS, `services.${id}`);
-  const agentConfig = absolutePath(input.agentConfig, `services.${id}.agentConfig`);
+  const target = parseTarget(input.target, id);
   const startAtLogin = boolean(input.startAtLogin, `services.${id}.startAtLogin`);
   const restartPolicy = enumValue(
     input.restartPolicy,
@@ -126,11 +164,20 @@ function parseService(value: unknown, id: string): ServiceMacosServiceConfig {
     : absolutePath(input.environmentFile, `services.${id}.environmentFile`);
   const logs = parseLogs(input.logs, id);
   return Object.freeze({
-    agentConfig,
+    target,
     startAtLogin,
     restartPolicy,
     ...(environmentFile === undefined ? {} : { environmentFile }),
     logs,
+  });
+}
+function parseTarget(value: unknown, id: string): ServiceMacosServiceTarget {
+  const input = readRecord(value, `services.${id}.target`);
+  rejectUnknown(input, TARGET_KEYS, `services.${id}.target`);
+  const kind = enumValue(input.kind, ["agent", "web"] as const, `services.${id}.target.kind`);
+  return Object.freeze({
+    kind,
+    config: absolutePath(input.config, `services.${id}.target.config`),
   });
 }
 function parseLogs(value: unknown, id: string): ServiceMacosLogsConfig {
@@ -167,7 +214,8 @@ function optionalString(value: unknown, field: string, rejectControl: boolean): 
     typeof value !== "string"
     || value.length === 0
     || value !== value.trim()
-    || value.length > 4_096
+    || value.length > 8_192
+    || Array.from(value).length > 4_096
     || (rejectControl && /[\u0000-\u001f\u007f]/u.test(value))
   ) {
     throw new ServiceMacosConfigError(`${field} must be a non-empty bounded string without surrounding whitespace.`);

@@ -3,18 +3,20 @@ import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import {
   chmod,
-  cp,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { load as loadSqliteVec } from "sqlite-vec";
@@ -30,9 +32,16 @@ import {
 import {
   MEMORY_LOCAL_DATABASE_FILENAME,
   MEMORY_LOCAL_MARKER_FILENAME,
+  adoptV0MemoryLocalCopy,
   openMemoryLocal,
+  runMemoryLocalCli,
+  snapshotV0MemoryLocalRoot,
   type MemoryEmbeddingProvider,
 } from "../index.js";
+import {
+  adoptV0MemoryLocalCopyForTesting,
+  snapshotV0MemoryLocalRootForTesting,
+} from "../migration.js";
 
 const fixturePath = fileURLToPath(
   new URL("../../fixtures/v0-final-bujo.json", import.meta.url),
@@ -65,14 +74,35 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     });
     const sourceDigest = await digestTree(source);
 
-    await cp(source, rehearsal, {
-      recursive: true,
-      preserveTimestamps: true,
-      errorOnExist: true,
+    const snapshot = await snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
     });
-    await chmod(rehearsal, 0o700);
+    expect(snapshot).toMatchObject({
+      schema: "mono-agent.memory-local.v0-snapshot.v1",
+      activeGeneration: fixture.generation,
+      sourceMarker: {
+        state: "initialized",
+        storeId: fixture.storeId,
+      },
+      database: { records: 3, ftsIndexed: 3, vectorsIndexed: 3 },
+    });
+    const adoption = await adoptV0MemoryLocalCopy({
+      liveSourceRoot: source,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: snapshot.treeSha256,
+      signal,
+    });
+    expect(adoption).toMatchObject({
+      schema: "mono-agent.memory-local.v0-adoption.v1",
+      sourceStateSha256: snapshot.sourceStateSha256,
+      preAdoptionTreeSha256: snapshot.treeSha256,
+      audit: { status: "healthy", records: 3 },
+    });
     await mkdir(backup, { mode: 0o700 });
-    expect(await digestTree(rehearsal)).toBe(sourceDigest);
 
     const provider = new RehearsalEmbeddingProvider(fixture.embedding.dimensions);
     const config = memoryConfig(fixture.embedding.dimensions);
@@ -175,6 +205,824 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     }
 
     expect(await digestTree(source)).toBe(sourceDigest);
+  }, 30_000);
+
+  it("removes its exact failed target so an unsupported symlink can be fixed and retried", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    await writeFile(join(source, "notes.txt"), "stable source\n", {
+      flag: "wx",
+      mode: 0o600,
+    });
+    await symlink("notes.txt", join(source, "unsafe-link"));
+
+    await expect(snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    })).rejects.toThrow(/unsupported filesystem entry/u);
+    expect(existsSync(rehearsal)).toBe(false);
+
+    await rm(join(source, "unsafe-link"));
+    await expect(snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    })).resolves.toMatchObject({
+      targetRoot: rehearsal,
+      database: { records: 3 },
+    });
+  });
+
+  it.each(["directory", "symlink"] as const)(
+    "does not replace a concurrently created %s target",
+    async (replacementKind) => {
+      const fixture = await readFixture();
+      const testRoot = await createTestRoot();
+      const source = join(testRoot, "v0-source");
+      const rehearsal = join(testRoot, "v1-rehearsal-copy");
+      const replacement = replacementKind === "directory"
+        ? rehearsal
+        : join(testRoot, "operator-target");
+      await seedV0FinalStore(source, fixture);
+
+      await expect(snapshotV0MemoryLocalRootForTesting({
+        sourceRoot: source,
+        targetRoot: rehearsal,
+        signal,
+      }, {
+        async beforeSnapshotTargetCreate() {
+          await mkdir(replacement, { mode: 0o700 });
+          await writeFile(join(replacement, "operator-replacement.txt"), "preserve me\n", {
+            flag: "wx",
+            mode: 0o600,
+          });
+          if (replacementKind === "symlink") {
+            await symlink(replacement, rehearsal);
+          }
+        },
+      })).rejects.toThrow(/must not already exist/u);
+
+      expect(await readFile(join(replacement, "operator-replacement.txt"), "utf8"))
+        .toBe("preserve me\n");
+      if (replacementKind === "symlink") {
+        expect(await realpath(rehearsal)).toBe(replacement);
+      }
+    },
+  );
+
+  it("removes its observed empty target when opening fails before descriptor binding", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      beforeSnapshotTargetOpen() {
+        throw new Error("injected pre-open failure");
+      },
+    })).rejects.toThrow(/injected pre-open failure/u);
+    expect(existsSync(rehearsal)).toBe(false);
+
+    await expect(snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    })).resolves.toMatchObject({
+      targetRoot: rehearsal,
+      database: { records: 3 },
+    });
+  });
+
+  it("reports an already removed creation target when parent durability fails", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      beforeSnapshotTargetOpen() {
+        throw new Error("injected pre-open failure");
+      },
+      beforeSnapshotTargetCleanupParentSync() {
+        throw new Error("injected parent-sync failure");
+      },
+    })).rejects.toThrow(/target was removed.*durability could not be confirmed/u);
+
+    expect(existsSync(rehearsal)).toBe(false);
+  });
+
+  it("rejects a target swap before descriptor binding without deleting either directory", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const displaced = join(testRoot, "displaced-created-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      async beforeSnapshotTargetOpen() {
+        await rename(rehearsal, displaced);
+        await mkdir(rehearsal, { mode: 0o700 });
+        await writeFile(join(rehearsal, "operator-replacement.txt"), "preserve me\n", {
+          flag: "wx",
+          mode: 0o600,
+        });
+      },
+    })).rejects.toThrow(/identity changed during creation/u);
+
+    expect(await readFile(join(rehearsal, "operator-replacement.txt"), "utf8"))
+      .toBe("preserve me\n");
+    expect(existsSync(displaced)).toBe(true);
+  });
+
+  it("restores a replacement moved by a target-creation cleanup race", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const displaced = join(testRoot, "displaced-created-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      beforeSnapshotTargetOpen() {
+        throw new Error("injected pre-open failure");
+      },
+      async beforeSnapshotTargetCleanupRename() {
+        await rename(rehearsal, displaced);
+        await mkdir(rehearsal, { mode: 0o700 });
+        await writeFile(join(rehearsal, "operator-replacement.txt"), "preserve me\n", {
+          flag: "wx",
+          mode: 0o600,
+        });
+      },
+    })).rejects.toThrow(/preserving it as unusable/u);
+
+    expect(await readFile(join(rehearsal, "operator-replacement.txt"), "utf8"))
+      .toBe("preserve me\n");
+    expect(existsSync(displaced)).toBe(true);
+  });
+
+  it("preserves a replacement target and blocks retry when the created root identity changes", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const displaced = join(testRoot, "displaced-created-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      async beforeSnapshotSourceRecheck() {
+        await rename(rehearsal, displaced);
+        await mkdir(rehearsal, { mode: 0o700 });
+        await writeFile(join(rehearsal, "operator-replacement.txt"), "preserve me\n", {
+          flag: "wx",
+          mode: 0o600,
+        });
+        throw new Error("injected post-copy failure");
+      },
+    })).rejects.toThrow(/preserving it as unusable/u);
+
+    expect(await readFile(join(rehearsal, "operator-replacement.txt"), "utf8"))
+      .toBe("preserve me\n");
+    expect(existsSync(displaced)).toBe(true);
+    await expect(snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    })).rejects.toThrow(/must not already exist/u);
+  });
+
+  it("restores a replacement moved by post-copy failure cleanup", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const displaced = join(testRoot, "displaced-created-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      beforeSnapshotSourceRecheck() {
+        throw new Error("injected post-copy failure");
+      },
+      async beforeSnapshotFailureCleanupRename() {
+        await rename(rehearsal, displaced);
+        await mkdir(rehearsal, { mode: 0o700 });
+        await writeFile(join(rehearsal, "operator-replacement.txt"), "preserve me\n", {
+          flag: "wx",
+          mode: 0o600,
+        });
+      },
+    })).rejects.toThrow(/could not be safely removed/u);
+
+    expect(await readFile(join(rehearsal, "operator-replacement.txt"), "utf8"))
+      .toBe("preserve me\n");
+    expect(existsSync(displaced)).toBe(true);
+  });
+
+  it("reports an already removed copied target when parent durability fails", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      beforeSnapshotSourceRecheck() {
+        throw new Error("injected post-copy failure");
+      },
+      beforeSnapshotFailureCleanupParentSync() {
+        throw new Error("injected parent-sync failure");
+      },
+    })).rejects.toThrow(/target was removed.*durability could not be confirmed/u);
+
+    expect(existsSync(rehearsal)).toBe(false);
+  });
+
+  it("rejects an oversized active database before creating a target or running backup", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    const handle = await open(managedDatabasePath(source, fixture), "r+");
+    try {
+      await handle.truncate((64 * 1024 * 1024 * 1024) + 1);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+
+    await expect(snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    })).rejects.toThrow(/bounded tree limits/u);
+    expect(existsSync(rehearsal)).toBe(false);
+  });
+
+  it("rejects an oversized live WAL before creating a target or running backup", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    const handle = await open(`${managedDatabasePath(source, fixture)}-wal`, "wx", 0o600);
+    try {
+      await handle.truncate((64 * 1024 * 1024 * 1024) + 1);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+
+    await expect(snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    })).rejects.toThrow(/bounded tree limits/u);
+    expect(existsSync(rehearsal)).toBe(false);
+  });
+
+  it("rejects an in-place source mutation after the file was copied", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const sourceFile = join(source, "stable-note.txt");
+    await seedV0FinalStore(source, fixture);
+    await writeFile(sourceFile, "alpha\n", { flag: "wx", mode: 0o600 });
+
+    await expect(snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      async beforeSnapshotSourceRecheck() {
+        const handle = await open(sourceFile, "r+");
+        try {
+          await handle.write(Buffer.from("o"), 0, 1, 0);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      },
+    })).rejects.toThrow(/source file changed after it was copied/u);
+    expect(existsSync(rehearsal)).toBe(false);
+  });
+
+  it("syncs every copied directory, including the populated target root", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const nested = join(source, "archive", "2026");
+    await seedV0FinalStore(source, fixture);
+    await mkdir(nested, { recursive: true, mode: 0o700 });
+    await writeFile(join(nested, "note.txt"), "durable\n", {
+      flag: "wx",
+      mode: 0o600,
+    });
+    await writeFile(join(source, "a.txt"), "lowercase\n", { flag: "wx", mode: 0o600 });
+    await writeFile(join(source, "B.txt"), "uppercase\n", { flag: "wx", mode: 0o600 });
+    const synced = new Set<string>();
+
+    await snapshotV0MemoryLocalRootForTesting({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    }, {
+      afterSnapshotDirectorySync(path) {
+        synced.add(path);
+      },
+    });
+
+    expect(synced).toEqual(new Set([
+      rehearsal,
+      join(rehearsal, ".index"),
+      join(rehearsal, ".index", "generations"),
+      join(rehearsal, ".index", "generations", fixture.generation),
+      join(rehearsal, "archive"),
+      join(rehearsal, "archive", "2026"),
+    ]));
+  });
+
+  it("rejects aliases, wrong source provenance, confirmation errors, and target drift", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const otherSource = join(testRoot, "unrelated-v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    await seedV0FinalStore(otherSource, fixture);
+
+    await expect(adoptV0MemoryLocalCopy({
+      liveSourceRoot: source,
+      targetRoot: source,
+      expectedSourceStateSha256: "a".repeat(64),
+      expectedTreeSha256: "a".repeat(64),
+      confirm: "a".repeat(64),
+      signal,
+    })).rejects.toThrow(/must differ/u);
+    await expect(snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: join(source, "nested-copy"),
+      signal,
+    })).rejects.toThrow(/must be disjoint/u);
+
+    const snapshot = await snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    });
+    await expect(adoptV0MemoryLocalCopy({
+      liveSourceRoot: otherSource,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: snapshot.treeSha256,
+      signal,
+    })).rejects.toThrow(/source state/u);
+    expect(existsSync(join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME))).toBe(false);
+
+    await expect(adoptV0MemoryLocalCopy({
+      liveSourceRoot: source,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: "b".repeat(64),
+      signal,
+    })).rejects.toThrow(/matching tree confirmation/u);
+    expect(existsSync(join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME))).toBe(false);
+
+    await writeFile(join(rehearsal, "operator-drift.txt"), "changed\n", { mode: 0o600 });
+    await expect(adoptV0MemoryLocalCopy({
+      liveSourceRoot: source,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: snapshot.treeSha256,
+      signal,
+    })).rejects.toThrow(/snapshot digest/u);
+    expect(existsSync(join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME))).toBe(false);
+  });
+
+  it("online-snapshots a running WAL source without mutating its application state", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "running-v0-source");
+    const rehearsal = join(testRoot, "running-v1-copy");
+    await seedV0FinalStore(source, fixture);
+    const databasePath = managedDatabasePath(source, fixture);
+    const live = new DatabaseSync(databasePath, { allowExtension: true });
+    try {
+      loadSqliteVec(live);
+      live.enableLoadExtension(false);
+      live.exec("PRAGMA journal_mode = WAL; BEGIN IMMEDIATE;");
+      live.prepare("UPDATE memories SET text = ? WHERE id = ?")
+        .run("Committed while the predecessor WAL remains active.", "v0:orchard");
+      live.prepare("UPDATE memories_fts SET text = ? WHERE id = ?")
+        .run("Committed while the predecessor WAL remains active.", "v0:orchard");
+      live.exec("COMMIT");
+      expect(existsSync(`${databasePath}-wal`)).toBe(true);
+      const before = await stat(databasePath);
+      const markerBefore = await readFile(join(source, MEMORY_LOCAL_MARKER_FILENAME));
+      const manifestBefore = await readFile(join(source, ".index", "manifest.json"));
+
+      const snapshot = await snapshotV0MemoryLocalRoot({
+        sourceRoot: source,
+        targetRoot: rehearsal,
+        signal,
+      });
+      expect(snapshot.database.records).toBe(3);
+      expect((live.prepare("SELECT text FROM memories WHERE id = ?").get(
+        "v0:orchard",
+      ) as { text: string }).text).toBe(
+        "Committed while the predecessor WAL remains active.",
+      );
+      const after = await stat(databasePath);
+      expect({ dev: after.dev, ino: after.ino, mode: after.mode & 0o777 })
+        .toEqual({ dev: before.dev, ino: before.ino, mode: before.mode & 0o777 });
+      expect(await readFile(join(source, MEMORY_LOCAL_MARKER_FILENAME))).toEqual(markerBefore);
+      expect(await readFile(join(source, ".index", "manifest.json"))).toEqual(manifestBefore);
+
+      const copied = new DatabaseSync(managedDatabasePath(rehearsal, fixture));
+      try {
+        expect((copied.prepare("SELECT text FROM memories WHERE id = ?").get(
+          "v0:orchard",
+        ) as { text: string }).text).toBe(
+          "Committed while the predecessor WAL remains active.",
+        );
+      } finally {
+        copied.close();
+      }
+      live.exec("BEGIN IMMEDIATE;");
+      live.prepare("UPDATE memories SET text = ? WHERE id = ?")
+        .run("Written only after the point-in-time snapshot.", "v0:orchard");
+      live.prepare("UPDATE memories_fts SET text = ? WHERE id = ?")
+        .run("Written only after the point-in-time snapshot.", "v0:orchard");
+      live.exec("COMMIT");
+      expect((live.prepare("SELECT text FROM memories WHERE id = ?").get(
+        "v0:orchard",
+      ) as { text: string }).text).toBe(
+        "Written only after the point-in-time snapshot.",
+      );
+      await expect(adoptV0MemoryLocalCopy({
+        liveSourceRoot: source,
+        targetRoot: rehearsal,
+        expectedSourceStateSha256: snapshot.sourceStateSha256,
+        expectedTreeSha256: snapshot.treeSha256,
+        confirm: snapshot.treeSha256,
+        signal,
+      })).resolves.toMatchObject({
+        sourceStateSha256: snapshot.sourceStateSha256,
+        audit: { status: "healthy", records: 3 },
+      });
+    } finally {
+      live.close();
+    }
+  });
+
+  it("retains an initializing same-inode marker when strict pre-commit audit fails", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    const databasePath = join(
+      source,
+      ".index",
+      "generations",
+      fixture.generation,
+      MEMORY_LOCAL_DATABASE_FILENAME,
+    );
+    const database = new DatabaseSync(databasePath, { allowExtension: true });
+    try {
+      loadSqliteVec(database);
+      database.enableLoadExtension(false);
+      database.prepare("DELETE FROM memories_fts WHERE id = ?").run("v0:bicycle");
+    } finally {
+      database.close();
+    }
+
+    const snapshot = await snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    });
+    await expect(adoptV0MemoryLocalCopy({
+      liveSourceRoot: source,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: snapshot.treeSha256,
+      signal,
+    })).rejects.toThrow(/strict memory coverage/u);
+    const markerPath = join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME);
+    const before = await stat(markerPath);
+    expect(await readFile(markerPath, "utf8")).toMatch(/^initializing:[0-9a-f-]{36}\n$/u);
+    expect(before.mode & 0o777).toBe(0o600);
+    const after = await stat(markerPath);
+    expect(after.ino).toBe(before.ino);
+  });
+
+  it("fails closed when the adoption database changes before its reserved binding", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const replacementRoot = join(testRoot, "replacement-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    await seedV0FinalStore(replacementRoot, fixture);
+    const snapshot = await snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    });
+    const replacementBytes = await readFile(managedDatabasePath(replacementRoot, fixture));
+    let displaced = "";
+
+    await expect(adoptV0MemoryLocalCopyForTesting({
+      liveSourceRoot: source,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: snapshot.treeSha256,
+      signal,
+    }, {
+      async beforeAdoptionDatabaseBind(path) {
+        displaced = `${path}.operator-original`;
+        await rename(path, displaced);
+        await writeFile(path, replacementBytes, { flag: "wx", mode: 0o600 });
+      },
+    })).rejects.toThrow(/identity changed while binding SQLite/u);
+
+    expect(await readFile(join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME), "utf8"))
+      .toMatch(/^initializing:[0-9a-f-]{36}\n$/u);
+    expect((await stat(displaced)).size).toBeGreaterThan(0);
+  });
+
+  it("rejects a same-inode, same-length copied database mutation before adoption commit", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    const snapshot = await snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    });
+    const databasePath = managedDatabasePath(rehearsal, fixture);
+    const before = await stat(databasePath);
+
+    await expect(adoptV0MemoryLocalCopyForTesting({
+      liveSourceRoot: source,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: snapshot.treeSha256,
+      signal,
+    }, {
+      async beforeAdoptionCommit(path) {
+        expect(path).toBe(databasePath);
+        const bytes = await readFile(path);
+        const offset = bytes.length - 1;
+        const handle = await open(path, "r+");
+        try {
+          await handle.write(
+            Buffer.from([bytes[offset]! ^ 1]),
+            0,
+            1,
+            offset,
+          );
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      },
+    })).rejects.toThrow(/target tree changed after snapshot confirmation/u);
+
+    const after = await stat(databasePath);
+    expect({ dev: after.dev, ino: after.ino, size: after.size }).toEqual({
+      dev: before.dev,
+      ino: before.ino,
+      size: before.size,
+    });
+    expect(await readFile(join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME), "utf8"))
+      .toMatch(/^initializing:[0-9a-f-]{36}\n$/u);
+  });
+
+  it("does not hide an attacker-created binding-authority prefix sibling", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    const snapshot = await snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    });
+
+    await expect(adoptV0MemoryLocalCopyForTesting({
+      liveSourceRoot: source,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: snapshot.treeSha256,
+      signal,
+    }, {
+      async beforeAdoptionCommit(path) {
+        const attacker = join(
+          dirname(path),
+          `.${basename(path)}.sqlite-binding.authority-attacker`,
+        );
+        await mkdir(attacker, { mode: 0o700 });
+        await writeFile(join(attacker, "payload"), "not part of the snapshot\n", {
+          mode: 0o600,
+        });
+      },
+    })).rejects.toThrow(/target tree changed after snapshot confirmation/u);
+    expect(await readFile(join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME), "utf8"))
+      .toMatch(/^initializing:[0-9a-f-]{36}\n$/u);
+  });
+
+  it("rejects writer-lease sidecars that appear before adoption commit", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    const snapshot = await snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    });
+
+    await expect(adoptV0MemoryLocalCopyForTesting({
+      liveSourceRoot: source,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: snapshot.treeSha256,
+      signal,
+    }, {
+      async beforeAdoptionCommit() {
+        await writeFile(
+          join(rehearsal, ".memory-local-writer.sqlite-wal"),
+          "unexpected lease recovery state\n",
+          { mode: 0o600 },
+        );
+      },
+    })).rejects.toThrow(/target tree changed after snapshot confirmation/u);
+    expect(await readFile(join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME), "utf8"))
+      .toMatch(/^initializing:[0-9a-f-]{36}\n$/u);
+  });
+
+  it("rejects invalid Ollama model identities before committing the adoption marker", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const invalidModels = [
+      "ollama:",
+      "ollama: ",
+      `ollama:${"a".repeat(513)}`,
+    ];
+    for (const [index, model] of invalidModels.entries()) {
+      const source = join(testRoot, `invalid-model-source-${String(index)}`);
+      const rehearsal = join(testRoot, `invalid-model-copy-${String(index)}`);
+      await seedV0FinalStore(source, fixture);
+      const database = new DatabaseSync(managedDatabasePath(source, fixture));
+      try {
+        database.prepare("UPDATE memories SET embedding_model = ?").run(model);
+      } finally {
+        database.close();
+      }
+      const snapshot = await snapshotV0MemoryLocalRoot({
+        sourceRoot: source,
+        targetRoot: rehearsal,
+        signal,
+      });
+
+      await expect(adoptV0MemoryLocalCopy({
+        liveSourceRoot: source,
+        targetRoot: rehearsal,
+        expectedSourceStateSha256: snapshot.sourceStateSha256,
+        expectedTreeSha256: snapshot.treeSha256,
+        confirm: snapshot.treeSha256,
+        signal,
+      })).rejects.toThrow(/unsupported vector identity/u);
+      expect(await readFile(join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME), "utf8"))
+        .toMatch(/^initializing:[0-9a-f-]{36}\n$/u);
+    }
+  }, 10_000);
+
+  it("supports a legacy marker-absent source and rejects an in-flight source marker", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const legacySource = join(testRoot, "legacy-v0-source");
+    const legacyTarget = join(testRoot, "legacy-v1-copy");
+    await seedV0FinalStore(legacySource, fixture);
+    await rm(join(legacySource, MEMORY_LOCAL_MARKER_FILENAME));
+
+    await expect(snapshotV0MemoryLocalRoot({
+      sourceRoot: legacySource,
+      targetRoot: legacyTarget,
+      signal,
+    })).resolves.toMatchObject({
+      sourceMarker: { state: "absent" },
+    });
+
+    const inFlightSource = join(testRoot, "in-flight-v0-source");
+    const refusedTarget = join(testRoot, "refused-v1-copy");
+    await seedV0FinalStore(inFlightSource, fixture);
+    await writeFile(
+      join(inFlightSource, MEMORY_LOCAL_MARKER_FILENAME),
+      `initializing:${fixture.storeId}\n`,
+      { flag: "w", mode: 0o600 },
+    );
+    await expect(snapshotV0MemoryLocalRoot({
+      sourceRoot: inFlightSource,
+      targetRoot: refusedTarget,
+      signal,
+    })).rejects.toThrow(/unsafe permanent marker state/u);
+    expect(existsSync(refusedTarget)).toBe(false);
+  });
+
+  it("exposes a bounded standalone CLI contract", async () => {
+    let stderr = "";
+    await expect(runMemoryLocalCli(["snapshot-v0"], {
+      stderr: (value) => { stderr += value; },
+    })).resolves.toBe(2);
+    expect(stderr).toContain("--source-root is required");
+
+    stderr = "";
+    await expect(runMemoryLocalCli([
+      "snapshot-v0",
+      "--source-root",
+      "relative-source",
+      "--target-root",
+      "/absolute-target",
+    ], {
+      stderr: (value) => { stderr += value; },
+    })).resolves.toBe(2);
+    expect(stderr).toContain("--source-root must be an absolute path");
+
+    stderr = "";
+    await expect(runMemoryLocalCli([
+      "snapshot-v0",
+      "--source-root",
+      "/tmp/../noncanonical-source",
+      "--target-root",
+      "/absolute-target",
+    ], {
+      stderr: (value) => { stderr += value; },
+    })).resolves.toBe(2);
+    expect(stderr).toContain("--source-root must be a canonical absolute path");
+
+    stderr = "";
+    await expect(runMemoryLocalCli(["adopt-v0", "--live-source-root", "/a", "--target-root", "/b",
+      "--expected-source-state-sha256", "not-a-digest",
+      "--expected-tree-sha256", "not-a-digest", "--confirm", "not-a-digest"], {
+      stderr: (value) => { stderr += value; },
+    })).resolves.toBe(1);
+    expect(JSON.parse(stderr)).toMatchObject({
+      ok: false,
+      error: { code: "maintenance_failed" },
+    });
+    expect(Buffer.byteLength(stderr)).toBeLessThan(2_048);
   });
 });
 
@@ -372,13 +1220,7 @@ function readWithV0Final(
   readonly vectorFirst: string | undefined;
   readonly unresolved: Readonly<Record<string, string>>;
 } {
-  const managed = join(
-    root,
-    ".index",
-    "generations",
-    fixture.generation,
-    MEMORY_LOCAL_DATABASE_FILENAME,
-  );
+  const managed = managedDatabasePath(root, fixture);
   const databasePath = existsSync(managed)
     ? managed
     : join(root, MEMORY_LOCAL_DATABASE_FILENAME);
@@ -418,6 +1260,16 @@ function readWithV0Final(
   } finally {
     database.close();
   }
+}
+
+function managedDatabasePath(root: string, fixture: V0Fixture): string {
+  return join(
+    root,
+    ".index",
+    "generations",
+    fixture.generation,
+    MEMORY_LOCAL_DATABASE_FILENAME,
+  );
 }
 
 class RehearsalEmbeddingProvider implements MemoryEmbeddingProvider {

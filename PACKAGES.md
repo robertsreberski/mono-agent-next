@@ -80,6 +80,7 @@ flowchart TB
   P_mono_agent_runtime_pi --> P_mono_agent_module_sdk
   P_mono_agent_sandbox_srt --> P_mono_agent_module_sdk
   P_mono_agent_service_macos --> P_mono_agent_core
+  P_mono_agent_service_macos --> P_mono_agent_web
   P_mono_agent_state_local --> P_mono_agent_module_sdk
   P_mono_agent_trigger_cron --> P_mono_agent_module_sdk
   P_mono_agent_tui --> P_mono_agent_operator
@@ -92,7 +93,7 @@ flowchart TB
 | Package | Direct workspace dependencies |
 | --- | --- |
 | `@mono-agent/cli` | `@mono-agent/core` |
-| `@mono-agent/service-macos` | `@mono-agent/core` |
+| `@mono-agent/service-macos` | `@mono-agent/core`, `@mono-agent/web` |
 | `create-mono-agent` | `@mono-agent/cli` |
 | `@mono-agent/operator` | None |
 | `@mono-agent/tui` | `@mono-agent/operator` |
