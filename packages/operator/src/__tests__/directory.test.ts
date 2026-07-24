@@ -234,4 +234,56 @@ describe("operator directory", () => {
   it("exposes one canonical default registry location", () => {
     expect(getDefaultOperatorRegistryDirectory()).toMatch(/[\\/]\.mono-agent[\\/]trace-sources$/);
   });
+
+  it("one foreign-schema file does not hide healthy operators", async () => {
+    const registry = await temporaryRegistry();
+    await writeFile(join(registry, "agent.json"), JSON.stringify(descriptor()), { mode: 0o600 });
+    await chmod(join(registry, "agent.json"), 0o600);
+    // A registry directory is shared ground; another tool's file must be
+    // skipped rather than take every healthy operator down with it.
+    await writeFile(
+      join(registry, "foreign.json"),
+      JSON.stringify({ schema: "some.other.v1", anything: true }),
+      { mode: 0o600 },
+    );
+    await chmod(join(registry, "foreign.json"), 0o600);
+
+    await expect(discoverOperators({ registryDirectories: [registry] }))
+      .resolves.toMatchObject([{ id: "fixture-agent" }]);
+  });
+
+  it("still fails closed on a malformed file that claims our own schema", async () => {
+    const registry = await temporaryRegistry();
+    await writeFile(
+      join(registry, "broken.json"),
+      JSON.stringify({ schema: OPERATOR_REGISTRY_SCHEMA, agent: { id: "" } }),
+      { mode: 0o600 },
+    );
+    await chmod(join(registry, "broken.json"), 0o600);
+
+    await expect(discoverOperators({ registryDirectories: [registry] })).rejects.toThrow();
+  });
+
+  it("rejects unsafe prototype keys in presence details", async () => {
+    const registry = await temporaryRegistry();
+    // The directory copy of the JSON walker used to allow these keys while the
+    // protocol copy rejected them; both now share one definition.
+    await writeFile(join(registry, "presence.json"), JSON.stringify({
+      schema: "mono-agent.state-presence.v1",
+      sourceId: "presence-agent",
+      sourceLabel: "Presence Agent",
+      instanceId: "instance",
+      pid: 314,
+      stateRoot: "/tmp/state",
+      status: "ready",
+      startedAt: "2026-01-02T03:04:05.000Z",
+      heartbeatAt: "2026-01-02T03:04:10.000Z",
+      details: { operatorRegistry: operatorRegistryDetails(), nested: { constructor: "unsafe" } },
+    }), { mode: 0o600 });
+    await chmod(join(registry, "presence.json"), 0o600);
+
+    await expect(discoverOperators({ registryDirectories: [registry] })).rejects.toMatchObject({
+      code: "INVALID_REGISTRY",
+    });
+  });
 });

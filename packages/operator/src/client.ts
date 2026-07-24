@@ -17,6 +17,7 @@ import {
   parseTurnRequest,
 } from "./protocol.js";
 import {
+  OPERATOR_IDENTIFIER_PATTERN,
   OPERATOR_LIMITS,
   OPERATOR_ROUTES,
   type OperatorAskAnswerRequest,
@@ -58,6 +59,7 @@ export interface OperatorStreamOptions {
 export class OperatorClientError extends Error {
   readonly code:
     | "INVALID_ENDPOINT"
+    | "INVALID_VALUE"
     | "REQUEST_TOO_LARGE"
     | "HTTP_ERROR"
     | "INVALID_CONTENT_TYPE"
@@ -116,10 +118,26 @@ function responseContentType(response: Response): string {
   return response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
 }
 
+/**
+ * Release the socket before rejecting. An undici response whose body is never
+ * read or cancelled keeps its connection checked out for the agent's lifetime,
+ * so every early return from a response path has to drain it first.
+ */
+async function discardBody(
+  response: Response,
+  error: OperatorClientError,
+): Promise<never> {
+  await response.body?.cancel().catch(() => undefined);
+  throw error;
+}
+
 async function readBoundedBytes(response: Response, limit: number): Promise<Uint8Array> {
   const declared = response.headers.get("content-length");
   if (declared !== null && /^\d+$/.test(declared) && Number(declared) > limit) {
-    throw new OperatorClientError("RESPONSE_TOO_LARGE", `operator response exceeds ${limit} bytes`);
+    return await discardBody(
+      response,
+      new OperatorClientError("RESPONSE_TOO_LARGE", `operator response exceeds ${limit} bytes`),
+    );
   }
   if (response.body === null) throw new OperatorClientError("INVALID_JSON", "operator response has no body");
   const reader = response.body.getReader();
@@ -148,9 +166,32 @@ async function readBoundedBytes(response: Response, limit: number): Promise<Uint
   return joined;
 }
 
+/**
+ * Conversation routes interpolate this id, and `encodeURIComponent` does not
+ * encode dots, so an unvalidated `..` would silently retarget the request at a
+ * sibling route. Reject it here, before any route string exists.
+ */
+function conversationRoute(
+  conversationId: string,
+  route: (conversationId: string) => string,
+): string {
+  if (
+    typeof conversationId !== "string"
+    || conversationId.length === 0
+    || conversationId.length > OPERATOR_LIMITS.identifierCharacters
+    || !OPERATOR_IDENTIFIER_PATTERN.test(conversationId)
+  ) {
+    throw new OperatorClientError("INVALID_VALUE", "operator conversationId is not a valid identifier");
+  }
+  return route(conversationId);
+}
+
 async function readBoundedJson(response: Response, limit: number): Promise<unknown> {
   if (responseContentType(response) !== "application/json") {
-    throw new OperatorClientError("INVALID_CONTENT_TYPE", "operator response must use application/json");
+    return await discardBody(
+      response,
+      new OperatorClientError("INVALID_CONTENT_TYPE", "operator response must use application/json"),
+    );
   }
   const bytes = await readBoundedBytes(response, limit);
   try {
@@ -263,26 +304,26 @@ export class OperatorClient {
   }
 
   async getPendingAsk(conversationId: string, signal?: AbortSignal): Promise<OperatorAskSnapshot> {
-    return await this.#json(OPERATOR_ROUTES.ask(conversationId), { method: "GET", headers: this.#headers() }, parseAskSnapshot, signal) as OperatorAskSnapshot;
+    return await this.#json(conversationRoute(conversationId, OPERATOR_ROUTES.ask), { method: "GET", headers: this.#headers() }, parseAskSnapshot, signal) as OperatorAskSnapshot;
   }
 
   async answerAsk(conversationId: string, request: OperatorAskAnswerRequest, signal?: AbortSignal): Promise<OperatorAskAnswerResponse> {
     const parsed = parseAskAnswerRequest(request);
-    return await this.#json(OPERATOR_ROUTES.ask(conversationId), { method: "POST", headers: this.#headers(true), body: requestBody(parsed, this.limits.askAnswerRequestBytes) }, parseAskAnswerResponse, signal, [409]) as OperatorAskAnswerResponse;
+    return await this.#json(conversationRoute(conversationId, OPERATOR_ROUTES.ask), { method: "POST", headers: this.#headers(true), body: requestBody(parsed, this.limits.askAnswerRequestBytes) }, parseAskAnswerResponse, signal, [409]) as OperatorAskAnswerResponse;
   }
 
   async cancelConversation(conversationId: string, request: OperatorCancelRequest = {}, signal?: AbortSignal): Promise<OperatorCancelResponse> {
     const parsed = parseCancelRequest(request);
-    return await this.#json(OPERATOR_ROUTES.cancel(conversationId), { method: "POST", headers: this.#headers(true), body: requestBody(parsed, this.limits.requestBytes) }, parseCancelResponse, signal, [409, 501]) as OperatorCancelResponse;
+    return await this.#json(conversationRoute(conversationId, OPERATOR_ROUTES.cancel), { method: "POST", headers: this.#headers(true), body: requestBody(parsed, this.limits.requestBytes) }, parseCancelResponse, signal, [409, 501]) as OperatorCancelResponse;
   }
 
   async offerLiveInput(conversationId: string, request: OperatorLiveInputRequest, signal?: AbortSignal): Promise<OperatorLiveInputResponse> {
     const parsed = parseLiveInputRequest(request);
-    return await this.#json(OPERATOR_ROUTES.liveInput(conversationId), { method: "POST", headers: this.#headers(true), body: requestBody(parsed, this.limits.requestBytes) }, parseLiveInputResponse, signal, [409, 501]) as OperatorLiveInputResponse;
+    return await this.#json(conversationRoute(conversationId, OPERATOR_ROUTES.liveInput), { method: "POST", headers: this.#headers(true), body: requestBody(parsed, this.limits.requestBytes) }, parseLiveInputResponse, signal, [409, 501]) as OperatorLiveInputResponse;
   }
 
   async getReplay(conversationId: string, signal?: AbortSignal): Promise<OperatorReplayResponse> {
-    return await this.#json(OPERATOR_ROUTES.replay(conversationId), { method: "GET", headers: this.#headers() }, parseReplayResponse, signal) as OperatorReplayResponse;
+    return await this.#json(conversationRoute(conversationId, OPERATOR_ROUTES.replay), { method: "GET", headers: this.#headers() }, parseReplayResponse, signal) as OperatorReplayResponse;
   }
 
   async getConfig(signal?: AbortSignal): Promise<OperatorConfigView> {

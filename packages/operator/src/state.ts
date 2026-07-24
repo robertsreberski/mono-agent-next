@@ -24,6 +24,12 @@ export interface OperatorConversationState {
   readonly thoughtText: string;
   readonly activities: readonly OperatorActivity[];
   readonly pendingAsk?: OperatorAsk;
+  /**
+   * Sticky for the turn, including before any usage frame arrives. A
+   * compaction can be reported with no token counts to attach it to, and that
+   * must not be lost when the counts show up later.
+   */
+  readonly compacted?: boolean;
   readonly usage?: OperatorUsage;
   readonly capabilities?: OperatorCapabilities;
   readonly finalMessage?: OperatorMessage & { role: "assistant" };
@@ -109,15 +115,21 @@ export function reduceOperatorFrame(state: OperatorConversationState, frame: Ope
       return { ...state, activities: [...state.activities, { type: frame.type, result: frame.result }] };
     case "compaction":
       requireTurn(state, frame);
+      // Never fabricate 0/0 tokens here. Before any usage frame there are no
+      // counts to report, and inventing zeroes renders as a real measurement
+      // of "0 input / 0 output tokens".
       return {
         ...state,
         activities: [...state.activities, { type: frame.type, compaction: frame.compaction }],
-        usage: mergeUsage(state.usage, {
-          inputTokens: state.usage?.inputTokens ?? 0,
-          outputTokens: state.usage?.outputTokens ?? 0,
-          compacted: frame.compaction.compacted,
-          sessionEvicted: false,
-        }),
+        compacted: state.compacted === true || frame.compaction.compacted,
+        ...(state.usage === undefined
+          ? {}
+          : {
+              usage: {
+                ...state.usage,
+                compacted: state.usage.compacted || frame.compaction.compacted,
+              },
+            }),
       };
     case "ask_user":
       requireTurn(state, frame);
@@ -127,7 +139,7 @@ export function reduceOperatorFrame(state: OperatorConversationState, frame: Ope
       return { ...state, capabilities: frame.capabilities };
     case "usage":
       requireTurn(state, frame);
-      return { ...state, usage: mergeUsage(state.usage, frame.usage) };
+      return { ...state, usage: mergeUsage(state.usage, frame.usage, state.compacted === true) };
     case "completed":
       requireTurn(state, frame);
       {
@@ -159,6 +171,7 @@ export function reduceOperatorFrame(state: OperatorConversationState, frame: Ope
 function mergeUsage(
   previous: OperatorUsage | undefined,
   next: OperatorUsage,
+  stickyCompacted = false,
 ): OperatorUsage {
   return {
     inputTokens: next.inputTokens,
@@ -173,7 +186,7 @@ function mergeUsage(
       : previous?.contextUsed === undefined
         ? {}
         : { contextUsed: previous.contextUsed }),
-    compacted: previous?.compacted === true || next.compacted,
+    compacted: previous?.compacted === true || next.compacted || stickyCompacted,
     sessionEvicted: previous?.sessionEvicted === true || next.sessionEvicted,
   };
 }
