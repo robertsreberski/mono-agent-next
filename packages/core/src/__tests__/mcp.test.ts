@@ -19,6 +19,7 @@ import {
   minimalConfig,
   type FixtureProject,
 } from "./fixture.js";
+import { MemoryStateStore } from "./durable-state-fixture.js";
 
 const projects: FixtureProject[] = [];
 
@@ -108,6 +109,15 @@ it("loads an ordinary stdio MCP, applies monotonic tool policy, and does not lea
 
 it("stages isolated host-owned attachment authority for concurrent selected MCP calls and cleans each run", async () => {
   const delivered: { readonly name: string; readonly bytes: string }[] = [];
+  const boundarySecret = "Z9_BOUNDARY_LEAK_PREFIX_secret-tail";
+  const boundaryPrefix = boundarySecret.slice(0, 10);
+  const toolArtifacts: Uint8Array[] = [];
+  const state = new MemoryStateStore();
+  state.onArtifact = (request) => {
+    if (request.mediaType === "application/vnd.mono-agent.tool-result+json") {
+      toolArtifacts.push(new Uint8Array(request.data));
+    }
+  };
   let dispatch!: (
     request: Record<string, unknown>,
     reply: { emit(event: unknown): void },
@@ -119,11 +129,13 @@ it("stages isolated host-owned attachment authority for concurrent selected MCP 
         return {
           capabilities: {
             tools: true, mcp: true, attachments: true, approvals: true,
-            structuredOutput: false, sandbox: false, sessions: false,
+            structuredOutput: false, sandbox: false, sessions: false, artifactResults: true,
           },
           async runTurn(request: unknown, context: unknown) {
             const retainUnsafeOutput = isRecord(request)
               && request.conversationId === "cleanup-degraded";
+            const probeBoundary = isRecord(request)
+              && request.conversationId === "conversation-a";
             const tools = isRecord(request) && Array.isArray(request.tools) ? request.tools : [];
             const probe = tools.find((tool) => isRecord(tool) && tool.name === "context_probe");
             const send = tools.find((tool) => isRecord(tool) && tool.name === "SendOutput");
@@ -143,11 +155,17 @@ it("stages isolated host-owned attachment authority for concurrent selected MCP 
               { id: "failure", name: "context_probe", input: { fail: true } },
               new AbortController().signal,
             );
+            const boundary = probeBoundary
+              ? await context.executeTool(
+                  { id: "boundary", name: "context_probe", input: { boundaryRedaction: true } },
+                  new AbortController().signal,
+                )
+              : undefined;
             const delivery = await context.executeTool(
               { id: "send", name: "SendOutput", input: { name: "transcript.md" } },
               new AbortController().signal,
             );
-            return completed(JSON.stringify({ inspection, failure, delivery }));
+            return completed(JSON.stringify({ inspection, failure, boundary, delivery }));
           },
         };
       },
@@ -190,22 +208,30 @@ it("stages isolated host-owned attachment authority for concurrent selected MCP 
         };
       },
     },
+  }, {
+    kind: "state",
+    controller: { create: () => state },
   }]);
   projects.push(project);
   const runtime = project.modules[0]!.name;
   const channel = project.modules[1]!.name;
+  const statePackage = project.modules[2]!.name;
   await writeFile(join(project.root, "request-context.mjs"), REQUEST_CONTEXT_SERVER_SOURCE);
   await project.writeMcp({
     mcpServers: {
       scoped: {
         type: "stdio", command: process.execPath, args: ["./request-context.mjs"],
-        env: { ACTIVITY_SECRET: { $env: "ACTIVITY_SECRET" } },
+        env: {
+          ACTIVITY_SECRET: { $env: "ACTIVITY_SECRET" },
+          BOUNDARY_SECRET: { $env: "BOUNDARY_SECRET" },
+        },
       },
     },
   });
   await project.writeConfig(minimalConfig(runtime, {
     context: { mcp: { configPath: "./.mcp.json", requestContextServers: ["scoped"] } },
     channels: { notify: { $use: channel } },
+    state: { $use: statePackage },
     policy: {
       tools: { default: "deny", allow: ["context_probe", "SendOutput"] },
       approvals: { default: "allow" },
@@ -215,14 +241,15 @@ it("stages isolated host-owned attachment authority for concurrent selected MCP 
   const activitySecret = "request-context-progress-secret";
   const host = await createAgentHost(project.configPath, {
     environment: {
-      PATH: process.env.PATH, HOME: process.env.HOME, ACTIVITY_SECRET: activitySecret,
+      PATH: process.env.PATH, HOME: process.env.HOME,
+      ACTIVITY_SECRET: activitySecret, BOUNDARY_SECRET: boundarySecret,
     },
   });
   try {
     const submit = (suffix: string) => host.submit({
       requestId: `request-${suffix}`, conversationId: `conversation-${suffix}`, text: "inspect",
       attachments: [{
-        id: `voice-${suffix}`, kind: "audio", name: "../Voice note.ogg", mediaType: "audio/ogg",
+        id: `voice-${suffix}`, kind: "audio", name: "Voice note.ogg", mediaType: "audio/ogg",
         sizeBytes: 3, data: new Uint8Array([1, 2, suffix.charCodeAt(0)]),
       }],
     });
@@ -231,10 +258,12 @@ it("stages isolated host-owned attachment authority for concurrent selected MCP 
       const result = JSON.parse(response.text) as {
         inspection: { content: { text: string }[] };
         failure: { content: { text: string }[]; isError?: boolean };
+        boundary?: { content: unknown[]; isError?: boolean };
         delivery: { isError?: boolean };
       };
       return {
         response,
+        boundary: result.boundary,
         delivery: result.delivery,
         failure: result.failure,
         inspection: JSON.parse(result.inspection.content[0]!.text) as {
@@ -253,7 +282,15 @@ it("stages isolated host-owned attachment authority for concurrent selected MCP 
     for (const response of responses) {
       expect(response.text).not.toContain(project.root);
       expect(response.text).not.toContain(`${project.root}/.mono-agent/`);
+      expect(response.text).not.toContain(boundarySecret);
+      expect(response.text).not.toContain(boundaryPrefix);
     }
+    expect(observations[0]!.boundary?.isError).not.toBe(true);
+    expect(toolArtifacts).toHaveLength(1);
+    const durableToolResult = Buffer.from(toolArtifacts[0]!).toString("utf8");
+    expect(durableToolResult).toContain("[REDACTED]");
+    expect(durableToolResult).not.toContain(boundarySecret);
+    expect(durableToolResult).not.toContain(boundaryPrefix);
     expect(delivered).toEqual([
       { name: "transcript.md", bytes: "host-owned output" },
       { name: "transcript.md", bytes: "host-owned output" },
@@ -263,6 +300,8 @@ it("stages isolated host-owned attachment authority for concurrent selected MCP 
       expect(failure.isError).toBe(true);
       expect(JSON.stringify(failure)).not.toContain(project.root);
       expect(JSON.stringify(failure)).not.toContain(activitySecret);
+      expect(JSON.stringify(failure)).not.toContain(boundarySecret);
+      expect(JSON.stringify(failure)).not.toContain(boundaryPrefix);
       expect(context.attachments[0]!.name).toBe("Voice note.ogg");
       expect(inspection.observed).toMatchObject({
         bytes: expect.stringMatching(/^0102/u), fileMode: 0o600, outputMode: 0o700,
@@ -285,6 +324,8 @@ it("stages isolated host-owned attachment authority for concurrent selected MCP 
     const activities = replyEvents.filter((event) => isRecord(event) && event.type === "activity");
     expect(activities).toHaveLength(3);
     expect(JSON.stringify(activities)).not.toContain(activitySecret);
+    expect(JSON.stringify(activities)).not.toContain(boundarySecret);
+    expect(JSON.stringify(activities)).not.toContain(boundaryPrefix);
     expect(JSON.stringify(activities)).not.toContain(project.root);
     expect(JSON.stringify(activities)).not.toContain(activitySecret.slice(0, 8));
     expect(activities.every((event) =>
@@ -987,14 +1028,17 @@ process.stdin.on("data", (chunk) => {
       const token = message.params._meta?.progressToken;
       const context = message.params._meta?.["com.mono-agent/request-context"];
       if (message.params.arguments?.fail === true) {
-        const secret = process.env.ACTIVITY_SECRET ?? "";
+        const secret = [process.env.ACTIVITY_SECRET, process.env.BOUNDARY_SECRET]
+          .filter(Boolean).join(" ");
         send({ jsonrpc: "2.0", id: message.id, error: {
           code: -32000, message: "failed " + secret + " " + context.runOutputDir,
         } });
         continue;
       }
       if (token !== undefined && every > 0) {
-        const prefix = process.env.ACTIVITY_SECRET ? process.env.ACTIVITY_SECRET + " " : "";
+        const secrets = [process.env.ACTIVITY_SECRET, process.env.BOUNDARY_SECRET]
+          .filter(Boolean).join(" ");
+        const prefix = secrets ? secrets + " " : "";
         const messageBytes = Number(message.params.arguments?.progressMessageBytes ?? 0);
         for (let phase = 1; phase <= count; phase += 1) {
           const detail = messageBytes > 0
@@ -1011,6 +1055,15 @@ process.stdin.on("data", (chunk) => {
         }
       }
       setTimeout(() => {
+        if (message.params.arguments?.boundaryRedaction === true) {
+          send({ jsonrpc: "2.0", id: message.id, result: {
+            content: [{
+              type: "text",
+              text: "x".repeat(999_990) + (process.env.BOUNDARY_SECRET ?? ""),
+            }],
+          } });
+          return;
+        }
         let output = message.params;
         if (typeof message.params.arguments?.writeOutput === "string") {
           writeFileSync(

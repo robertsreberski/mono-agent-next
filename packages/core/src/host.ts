@@ -3765,20 +3765,20 @@ function requestContextTransformer(
   ));
 }
 function redactBounded(value: string, secrets: readonly string[], maxBytes: number): string {
-  let redacted = utf8Prefix(value, maxBytes);
-  if (secrets.length === 0) return redacted;
+  let redacted = value;
+  if (secrets.length === 0) return utf8Prefix(redacted, maxBytes);
   const minimum = Math.min(...secrets.map((secret) => Buffer.byteLength(secret, "utf8")));
   const separator = ["*", "#", "~", "^", "|", "_", "!", "?", "%", "+", "=", "\u0001", "\u0002"]
     .find((candidate) => Buffer.byteLength(candidate, "utf8") <= minimum
-      && !redacted.includes(candidate)
+      && !value.includes(candidate)
       && secrets.every((secret) => !secret.includes(candidate)));
   if (separator === undefined) return "";
   for (const secret of secrets) redacted = redacted.replaceAll(secret, separator);
   if (secrets.every((secret) => Buffer.byteLength(secret, "utf8") >= 10)) {
     const marked = redacted.replaceAll(separator, "[REDACTED]");
-    if (secrets.every((secret) => !marked.includes(secret))) return marked;
+    if (secrets.every((secret) => !marked.includes(secret))) return utf8Prefix(marked, maxBytes);
   }
-  return redacted;
+  return utf8Prefix(redacted, maxBytes);
 }
 function utf8Prefix(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
