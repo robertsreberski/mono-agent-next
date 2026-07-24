@@ -19,6 +19,7 @@ import {
   type Usage,
 } from "@earendil-works/pi-ai";
 import {
+  AGENT_INTERACTION_LIMITS,
   parseApprovalDecision,
   parseApprovalRequest,
   RUNTIME_SESSION_UNAVAILABLE_CODE,
@@ -98,6 +99,10 @@ const EMPTY_USAGE: Usage = {
   totalTokens: 0,
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
+const APPROVAL_CALL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u;
+const APPROVAL_CALL_ID_ALIAS_PREFIX = "pi-call-";
+const APPROVAL_CALL_ID_DOMAIN = "runtime-pi:approval-call-id:v1\0";
+const APPROVAL_CALL_ID_ESCAPE_DOMAIN = "runtime-pi:approval-call-id:escaped:v1\0";
 
 const NODE_REPL_APPROVAL_PREVIEW_MAX_BYTES = 1_024;
 const NATIVE_APPROVAL_PREVIEW_MAX_BYTES = 1_024;
@@ -459,6 +464,25 @@ function combinedToolSignal(
     : AbortSignal.any([turnSignal, signal]);
 }
 
+function approvalCallId(toolCallId: string): string {
+  const isValid =
+    toolCallId.length > 0
+    && toolCallId.length <= AGENT_INTERACTION_LIMITS.identifierCharacters
+    && APPROVAL_CALL_ID_PATTERN.test(toolCallId);
+  if (isValid && !toolCallId.startsWith(APPROVAL_CALL_ID_ALIAS_PREFIX)) {
+    return toolCallId;
+  }
+  // Pi keeps provider item identity in opaque call ids; approval metadata uses
+  // the stricter transport-neutral identifier grammar. The alias namespace is
+  // reserved so an otherwise-valid provider id cannot collide with an alias.
+  const prefix = isValid ? `${APPROVAL_CALL_ID_ALIAS_PREFIX}escaped-` : APPROVAL_CALL_ID_ALIAS_PREFIX;
+  const domain = isValid ? APPROVAL_CALL_ID_ESCAPE_DOMAIN : APPROVAL_CALL_ID_DOMAIN;
+  return `${prefix}${createHash("sha256")
+    .update(domain, "utf8")
+    .update(Buffer.from(toolCallId, "utf16le"))
+    .digest("hex")}`;
+}
+
 async function requireNativeApproval(
   context: RuntimeTurnContext,
   descriptor: RuntimeNativeToolDescriptor,
@@ -476,7 +500,7 @@ async function requireNativeApproval(
   }
   const approval = parseApprovalRequest({
     interactionId: randomUUID(),
-    callId: toolCallId,
+    callId: approvalCallId(toolCallId),
     toolId: descriptor.id,
     displayName: descriptor.displayName,
     effects: descriptor.effects,

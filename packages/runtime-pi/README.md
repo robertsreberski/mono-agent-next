@@ -133,6 +133,14 @@ from the workdir or agent workspace. The legacy zero-based Read `offset` is
 translated to Pi's one-based offset, and predecessor-compatible negative
 offsets are clamped to zero; an explicit `start_line` below one or a conflict
 after offset normalization fails before approval.
+Provider-native tool-call IDs remain unchanged for Pi execution, session
+continuation, and tool-result correlation. When an opaque provider ID does not
+fit the transport-neutral approval identifier grammar, the approval request
+uses a domain-separated SHA-256 alias for that call while Core still binds the
+decision through its unique interaction id and exact advertised authority. The
+alias prefix is reserved; a provider ID already in that namespace is escaped
+into a disjoint domain so it cannot be confused with a generated opaque-ID
+alias.
 Read snapshots are capped at 16 MiB before materialization. Images retain Pi's
 resize behavior and are additionally capped at 4.5 MiB of encoded payload
 before the result reaches provider context or runtime recording; an oversized
