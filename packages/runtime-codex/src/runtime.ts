@@ -36,6 +36,12 @@ import {
 
 type RuntimeState = "created" | "running" | "draining" | "stopped";
 
+interface ActiveTurnAttempt {
+  client?: JsonRpcProcess;
+  readonly settled: Promise<void>;
+  cancel(): void;
+}
+
 export class RuntimeCodexError extends RuntimeTurnError {
   constructor(
     code: string,
@@ -104,12 +110,7 @@ function prompt(messages: readonly TurnMessage[], resumed: boolean): string {
     .join("\n\n");
 }
 
-function session(
-  instanceId: string,
-  id: string,
-  conversationId: string,
-  model: string,
-): RuntimeSession {
+function session(instanceId: string, id: string, conversationId: string, model: string): RuntimeSession {
   return {
     id,
     conversationId,
@@ -119,10 +120,7 @@ function session(
   };
 }
 
-function assertSessionLinkage(
-  request: RuntimeTurnRequest,
-  instanceId: string,
-): void {
+function assertSessionLinkage(request: RuntimeTurnRequest, instanceId: string): void {
   if (request.session === undefined) return;
   if (request.session.route?.runtimeInstanceId !== instanceId) {
     throw new RuntimeCodexError(
@@ -186,10 +184,7 @@ function resultTurnId(value: unknown): string | undefined {
   return typeof turn.id === "string" ? turn.id : undefined;
 }
 
-function isMissingCodexSession(
-  error: unknown,
-  threadId: string,
-): boolean {
+function isMissingCodexSession(error: unknown, threadId: string): boolean {
   if (!(error instanceof JsonRpcRequestError)) return false;
   return error.rpcMessage === `no rollout found for thread id ${threadId}`
     || error.rpcMessage === `thread not found: ${threadId}`;
@@ -201,10 +196,7 @@ function notificationMatches(params: Record<string, unknown>, threadId: string, 
     || record(params.turn).id === turnId;
 }
 
-async function abortable<T>(
-  operation: () => Promise<T>,
-  signal: AbortSignal,
-): Promise<T> {
+async function abortable<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) throw cancellationError(signal);
   return new Promise<T>((resolve, reject) => {
     const onAbort = (): void => reject(cancellationError(signal));
@@ -217,10 +209,7 @@ async function abortable<T>(
   });
 }
 
-function emitIsolated(
-  context: RuntimeTurnContext,
-  event: Parameters<RuntimeTurnContext["emit"]>[0],
-): void {
+function emitIsolated(context: RuntimeTurnContext, event: Parameters<RuntimeTurnContext["emit"]>[0]): void {
   try {
     void Promise.resolve(context.emit(event)).catch(() => undefined);
   } catch {
@@ -230,9 +219,7 @@ function emitIsolated(
 
 export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime {
   let state: RuntimeState = "created";
-  const active = new Map<JsonRpcProcess, {
-    cancel(): void; readonly settled: Promise<void>;
-  }>();
+  const active = new Set<ActiveTurnAttempt>();
   let codexHome: string | undefined;
   let startMcpServers: readonly EffectiveCodexMcpServer[] | undefined;
 
@@ -243,11 +230,8 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
     CODEX_HOME: home,
   });
 
-  const newClient = (
-    processDirectory: string,
-    home: string,
-    mcpServers: readonly EffectiveCodexMcpServer[],
-  ): JsonRpcProcess => new JsonRpcProcess({
+  const newClient = (processDirectory: string, home: string,
+    mcpServers: readonly EffectiveCodexMcpServer[]): JsonRpcProcess => new JsonRpcProcess({
     command: options.config.binary,
     args: codexAppServerArguments(mcpServers),
     cwd: processDirectory,
@@ -307,10 +291,13 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
     async stop(_context: ModuleStopContext) {
       if (state === "stopped") return;
       state = "draining";
-      const turns = [...active.entries()];
-      for (const [, turn] of turns) turn.cancel();
+      const turns = [...active];
+      for (const turn of turns) turn.cancel();
       await Promise.allSettled(turns.flatMap(
-        ([client, turn]) => [client.close(), turn.settled],
+        (turn) => [
+          ...(turn.client === undefined ? [] : [turn.client.close()]),
+          turn.settled,
+        ],
       ));
       active.clear();
       state = "stopped";
@@ -344,8 +331,22 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
       assertSessionLinkage(request, options.instanceId);
       if (request.signal.aborted) return { status: "cancelled" };
 
+      const stopController = new AbortController();
+      const turnSignal = AbortSignal.any([request.signal, stopController.signal]);
+      let resolveSettled!: () => void;
+      const attempt: ActiveTurnAttempt = {
+        cancel() { stopController.abort(); },
+        settled: new Promise<void>((resolve) => { resolveSettled = resolve; }),
+      };
+      const settleAttempt = (): void => {
+        active.delete(attempt);
+        resolveSettled();
+      };
+      active.add(attempt);
+
       const preparedHome = codexHome;
       if (preparedHome === undefined || startMcpServers === undefined) {
+        settleAttempt();
         throw new RuntimeCodexError(
           "RUNTIME_NOT_RUNNING",
           "runtime-codex has no preflighted process home",
@@ -363,7 +364,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           cwd: processDirectory.directory,
           env: processEnvironment(preparedHome),
           timeoutMs: Math.min(options.config.requestTimeoutMs, 15_000),
-          signal: request.signal,
+          signal: turnSignal,
           ...(options.spawnProcess === undefined
             ? {}
             : { spawnProcess: options.spawnProcess }),
@@ -371,6 +372,8 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         });
       } catch (error) {
         await processDirectory?.cleanup().catch(() => undefined);
+        settleAttempt();
+        if (turnSignal.aborted) return { status: "cancelled" };
         throw new RuntimeCodexError(
           "PROVIDER_FAILED",
           "runtime-codex could not preflight its isolated provider process",
@@ -381,6 +384,11 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           },
         );
       }
+      if (turnSignal.aborted) {
+        await processDirectory.cleanup().catch(() => undefined);
+        settleAttempt();
+        return { status: "cancelled" };
+      }
       let client: JsonRpcProcess;
       try {
         client = newClient(
@@ -390,6 +398,8 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         );
       } catch (error) {
         await processDirectory.cleanup().catch(() => undefined);
+        settleAttempt();
+        if (turnSignal.aborted) return { status: "cancelled" };
         throw new RuntimeCodexError(
           "PROVIDER_FAILED",
           redact(error, options.config.auth?.apiKey),
@@ -400,10 +410,11 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           },
         );
       }
+      attempt.client = client;
       const clientRequest = async (method: string, params: unknown): Promise<unknown> =>
-        abortable(async () => client.request(method, params), request.signal);
+        abortable(async () => client.request(method, params), turnSignal);
       const clientNotify = async (method: string, params: unknown): Promise<void> =>
-        abortable(async () => client.notify(method, params), request.signal);
+        abortable(async () => client.notify(method, params), turnSignal);
       let threadId: string | undefined;
       let turnId: string | undefined;
       let turnStartPending = false;
@@ -469,7 +480,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           return handleCodexServerRequest(
             message,
             context,
-            request.signal,
+            turnSignal,
             threadId,
             turnId,
             approvalEvidence,
@@ -479,7 +490,6 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         },
       );
 
-      let stopRequested = false;
       let cancellationSettled = false;
       const settleCancellation = (): void => {
         if (cancellationSettled) return;
@@ -492,18 +502,8 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         settleCancellation();
         void client.close().catch(() => undefined);
       };
-      let resolveSettled!: () => void;
-      const settled = new Promise<void>(
-        (resolve) => { resolveSettled = resolve; },
-      );
-      active.set(client, {
-        cancel() {
-          stopRequested = true;
-          settleCancellation();
-        },
-        settled,
-      });
-      request.signal.addEventListener("abort", onAbort, { once: true });
+      turnSignal.addEventListener("abort", onAbort, { once: true });
+      if (turnSignal.aborted) onAbort();
 
       let unregisterLiveInput: (() => void) | undefined;
       try {
@@ -557,7 +557,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
 
         if (context.registerLiveInput !== undefined) {
           unregisterLiveInput = context.registerLiveInput(async (input) => {
-            if (threadId === undefined || turnId === undefined || request.signal.aborted) return "requeue";
+            if (threadId === undefined || turnId === undefined || turnSignal.aborted) return "requeue";
             try {
               await abortable(
                 async () => client.request("turn/steer", {
@@ -565,7 +565,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
                   expectedTurnId: turnId,
                   input: [{ type: "text", text: input.text }],
                 }),
-                request.signal,
+                turnSignal,
               );
               return "applied";
             } catch {
@@ -593,7 +593,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           turnStartPending = false;
           resolveTurnIdentity();
         }
-        if (request.signal.aborted) onAbort();
+        if (turnSignal.aborted) onAbort();
         const completed = await terminal;
         const linkedSession = session(
           options.instanceId,
@@ -601,7 +601,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           request.conversationId,
           request.model,
         );
-        if (request.signal.aborted || completed.method === "cancelled") {
+        if (turnSignal.aborted || completed.method === "cancelled") {
           return { status: "cancelled", session: linkedSession };
         }
         const turn = nestedRecord(completed.params, "turn");
@@ -639,7 +639,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           metadata: { provider: "codex", model: request.model, nativeTurnId: turnId } as JsonObject,
         };
       } catch (error) {
-        if (request.signal.aborted || stopRequested) {
+        if (turnSignal.aborted) {
           return {
             status: "cancelled",
             ...(threadId === undefined
@@ -677,7 +677,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         } catch {
           // Cleanup is best effort and must not replace the turn result.
         }
-        request.signal.removeEventListener("abort", onAbort);
+        turnSignal.removeEventListener("abort", onAbort);
         try {
           unregisterServerRequests();
         } catch {
@@ -690,8 +690,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         }
         await client.close().catch(() => undefined);
         await processDirectory.cleanup().catch(() => undefined);
-        active.delete(client);
-        resolveSettled();
+        settleAttempt();
       }
     },
   };

@@ -104,6 +104,7 @@ class FakeCommandProcess extends EventEmitter implements ProcessLike {
   readonly stdout = new PassThrough();
   readonly stderr = new PassThrough();
   readonly stdin: Writable;
+  readonly killSignals: (NodeJS.Signals | undefined)[] = [];
   #closed = false;
 
   constructor(
@@ -111,11 +112,16 @@ class FakeCommandProcess extends EventEmitter implements ProcessLike {
       readonly stdout?: string;
       readonly stderr?: string;
       readonly code?: number;
+      readonly hang?: boolean;
     } = {},
   ) {
     super();
     this.stdin = new Writable({
       final: (callback) => {
+        if (this.output.hang === true) {
+          callback();
+          return;
+        }
         queueMicrotask(() => {
           if (this.#closed) return;
           this.#closed = true;
@@ -129,6 +135,7 @@ class FakeCommandProcess extends EventEmitter implements ProcessLike {
   }
 
   kill(signal?: NodeJS.Signals): boolean {
+    this.killSignals.push(signal);
     if (this.#closed) return false;
     this.#closed = true;
     queueMicrotask(() => this.emit("close", null, signal ?? "SIGTERM"));
@@ -613,6 +620,60 @@ describe("runtime-codex", () => {
     await expect(lstat(String(turnLaunch?.[2].cwd))).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("settles a turn stopped during provider preflight without starting it", async () => {
+    const blockedPreflight = new FakeCommandProcess({ hang: true });
+    const baseLaunch = runtimeLaunch([]);
+    let blockVersion = false;
+    const launch = vi.fn<SpawnProcess>((command, args, options) => {
+      if (blockVersion && args[0] === "--version") return blockedPreflight;
+      return baseLaunch(command, args, options);
+    });
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("stop-preflight"),
+      spawnProcess: launch,
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    blockVersion = true;
+    const pending = runtime.runTurn({
+      turnId: "turn",
+      conversationId: "conversation",
+      model: "gpt-5.6-codex",
+      messages: [{ role: "user", content: [{ type: "text", text: "wait" }] }],
+      tools: [],
+      signal: new AbortController().signal,
+    }, {
+      emit() {},
+      async executeTool(call) { return { callId: call.id, content: [] }; },
+    });
+    await vi.waitFor(() => {
+      expect(launch.mock.calls.filter((call) =>
+        call[1][0] === "--version")).toHaveLength(2);
+    });
+    const preflightLaunch = [...launch.mock.calls].reverse().find((call) =>
+      call[1][0] === "--version");
+
+    await runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+    expect(blockedPreflight.killSignals).toContain("SIGKILL");
+    expect(launch.mock.calls.filter((call) =>
+      call[1][0] === "app-server")).toHaveLength(1);
+    expect(runtime.health?.({
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      status: "unknown",
+      details: { state: "stopped", activeTurns: 0 },
+    });
+    await expect(lstat(String(preflightLaunch?.[2].cwd))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(pending).resolves.toEqual({ status: "cancelled" });
   });
 
   it("steers live input into the active turn", async () => {
