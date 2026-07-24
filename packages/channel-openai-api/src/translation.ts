@@ -153,9 +153,75 @@ function decodedBase64Size(value: string): number {
   return (value.length / 4) * 3 - padding;
 }
 
-function extension(mediaType: string): string { return mediaType === "image/png" ? "png" : mediaType === "image/gif" ? "gif" : mediaType === "image/webp" ? "webp" : "jpg"; }
-function isRole(value: unknown): value is "system" | "user" | "assistant" | "tool" { return value === "system" || value === "user" || value === "assistant" || value === "tool"; }
-function identifier(value: unknown, label: string): string { if (typeof value !== "string" || value.length === 0 || value.length > 256 || /[\u0000-\u001f\u007f]/u.test(value)) throw new OpenAiRequestError("invalid_identifier", `${label} must be a bounded non-empty string.`); return value; }
-function record(value: unknown, label: string): Record<string, unknown> { if (typeof value !== "object" || value === null || Array.isArray(value)) throw new OpenAiRequestError("invalid_request", `${label} must be an object.`); const prototype = Object.getPrototypeOf(value) as unknown; if (prototype !== Object.prototype && prototype !== null) throw new OpenAiRequestError("invalid_request", `${label} must be a plain object.`); return value as Record<string, unknown>; }
-function jsonObject(value: unknown, label: string): JsonObject { const result = record(value, label); assertJson(result, label, 0); return result as JsonObject; }
-function assertJson(value: unknown, label: string, depth: number): asserts value is JsonValue { if (depth > 20) throw new OpenAiRequestError("invalid_metadata", `${label} exceeds maximum depth.`); if (value === null || typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value))) return; if (Array.isArray(value)) { if (value.length > 10_000) throw new OpenAiRequestError("invalid_metadata", `${label} is too large.`); value.forEach((entry, index) => assertJson(entry, `${label}[${index}]`, depth + 1)); return; } if (typeof value === "object") { for (const [key, entry] of Object.entries(value)) { if (key === "__proto__" || key === "constructor" || key === "prototype") throw new OpenAiRequestError("invalid_metadata", `${label} contains an unsafe key.`); assertJson(entry, `${label}.${key}`, depth + 1); } return; } throw new OpenAiRequestError("invalid_metadata", `${label} must be JSON.`); }
+function extension(mediaType: string): string {
+  if (mediaType === "image/png") return "png";
+  if (mediaType === "image/gif") return "gif";
+  if (mediaType === "image/webp") return "webp";
+  return "jpg";
+}
+
+function isRole(value: unknown): value is "system" | "user" | "assistant" | "tool" {
+  return value === "system" || value === "user" || value === "assistant" || value === "tool";
+}
+
+function identifier(value: unknown, label: string): string {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > 256
+    || /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new OpenAiRequestError("invalid_identifier", `${label} must be a bounded non-empty string.`);
+  }
+  return value;
+}
+
+function record(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new OpenAiRequestError("invalid_request", `${label} must be an object.`);
+  }
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new OpenAiRequestError("invalid_request", `${label} must be a plain object.`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function jsonObject(value: unknown, label: string): JsonObject {
+  const result = record(value, label);
+  assertJson(result, label, 0);
+  return result as JsonObject;
+}
+
+function assertJson(value: unknown, label: string, depth: number): asserts value is JsonValue {
+  if (depth > 20) {
+    throw new OpenAiRequestError("invalid_metadata", `${label} exceeds maximum depth.`);
+  }
+  if (
+    value === null
+    || typeof value === "string"
+    || typeof value === "boolean"
+    || (typeof value === "number" && Number.isFinite(value))
+  ) {
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 10_000) {
+      throw new OpenAiRequestError("invalid_metadata", `${label} is too large.`);
+    }
+    value.forEach((entry, index) => {
+      assertJson(entry, `${label}[${index}]`, depth + 1);
+    });
+    return;
+  }
+  if (typeof value === "object") {
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === "__proto__" || key === "constructor" || key === "prototype") {
+        throw new OpenAiRequestError("invalid_metadata", `${label} contains an unsafe key.`);
+      }
+      assertJson(entry, `${label}.${key}`, depth + 1);
+    }
+    return;
+  }
+  throw new OpenAiRequestError("invalid_metadata", `${label} must be JSON.`);
+}
