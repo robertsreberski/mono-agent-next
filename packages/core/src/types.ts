@@ -143,6 +143,18 @@ export interface GenericModuleDefinition {
   create(context: unknown): unknown | Promise<unknown>;
 }
 
+/**
+ * One configured `{ runtime, id }` route. The pair is the atomic identity: the
+ * same model id reached through two runtimes is two routes, never one.
+ */
+export interface AgentModelRoute {
+  readonly runtime: string;
+  readonly id: string;
+  readonly label?: string;
+  readonly efforts?: readonly string[];
+  readonly contextWindow?: number;
+}
+
 export interface LoadedAgentConfig {
   readonly configPath: string;
   readonly configDirectory: string;
@@ -155,6 +167,8 @@ export interface LoadedAgentConfig {
   };
   readonly mcp: ProjectMcpConfig;
   readonly modules: readonly LoadedAgentModule[];
+  /** Configured routes in declaration order, enriched by each runtime validator. */
+  readonly modelCatalog: readonly AgentModelRoute[];
 }
 
 export interface AgentLoadOptions {

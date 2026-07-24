@@ -60,7 +60,7 @@ Registry directories and entries must be current-user-owned and inaccessible
 to group/other users. Symlinked directories or files, multi-link files,
 malformed descriptors, and registry identities that change while opening or
 reading fail closed. At startup and immediately before each discovered turn,
-the TUI binds `/v2/info` to the selected agent id, PID, and process start time.
+the TUI binds `/v1/info` to the selected agent id, PID, and process start time.
 
 ## Turn behavior and controls
 

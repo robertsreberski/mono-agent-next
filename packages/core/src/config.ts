@@ -22,6 +22,7 @@ import { normalizeRuntimeModelValidation } from "./runtime-result-normalizer.js"
 import type {
   AgentConfig,
   AgentLoadOptions,
+  AgentModelRoute,
   AgentValidationResult,
   LoadedAgentConfig,
   LoadedAgentModule,
@@ -115,9 +116,9 @@ export async function loadAgentConfig(
   if (referenceIssues.length > 0) {
     throw new AgentConfigError(`Selected module references are invalid: ${absoluteConfigPath}`, referenceIssues);
   }
-  const routeIssues = validateRuntimeRoutes(raw, modules);
-  if (routeIssues.length > 0) {
-    throw new AgentConfigError(`Configured runtime routes are invalid: ${absoluteConfigPath}`, routeIssues);
+  const routes = validateRuntimeRoutes(raw, modules);
+  if (routes.issues.length > 0) {
+    throw new AgentConfigError(`Configured runtime routes are invalid: ${absoluteConfigPath}`, routes.issues);
   }
   const loaded: LoadedAgentConfig = deepFreeze({
     configPath: absoluteConfigPath,
@@ -131,16 +132,22 @@ export async function loadAgentConfig(
     },
     mcp: projectMcp.config,
     modules,
+    modelCatalog: routes.catalog,
   });
   validatedConfigs.add(loaded);
   environments.set(loaded, environment);
   return loaded;
 }
+interface ValidatedRuntimeRoutes {
+  readonly issues: readonly AgentConfigIssue[];
+  readonly catalog: readonly AgentModelRoute[];
+}
 function validateRuntimeRoutes(
   config: AgentConfig,
   modules: readonly LoadedAgentModule[],
-): readonly AgentConfigIssue[] {
+): ValidatedRuntimeRoutes {
   const issues: AgentConfigIssue[] = [];
+  const catalog: AgentModelRoute[] = [];
   const seen = new Set<string>();
   const routes = [config.routing.primary, ...config.routing.fallbacks];
   for (const [index, route] of routes.entries()) {
@@ -148,11 +155,18 @@ function validateRuntimeRoutes(
     const key = `${route.runtime}\0${route.model}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const entry: AgentModelRoute = { runtime: route.runtime, id: route.model };
     const loaded = modules.find((module) =>
       module.slot === "runtime" && module.instanceId === route.runtime);
-    if (loaded === undefined) continue;
+    if (loaded === undefined) {
+      catalog.push(entry);
+      continue;
+    }
     const definition = loaded.definition as RuntimeModuleDefinition;
-    if (definition.validateModel === undefined) continue;
+    if (definition.validateModel === undefined) {
+      catalog.push(entry);
+      continue;
+    }
     let validation: RuntimeModelValidation;
     try {
       const rawValidation = definition.validateModel({
@@ -195,9 +209,11 @@ function validateRuntimeRoutes(
         message: `${loaded.packageName} ${nativeToolIssue}`,
         code: "native_tool_policy",
       });
+      continue;
     }
+    catalog.push({ ...entry, ...validation.model });
   }
-  return issues;
+  return { issues, catalog };
 }
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   return typeof value === "object"

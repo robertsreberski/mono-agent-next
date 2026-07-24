@@ -78,20 +78,20 @@ describe("standalone TUI", () => {
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
       requested.push(url);
-      if (url.endsWith("/v2/info")) return json(VALID_OPERATOR_INFO);
-      if (url.endsWith("/v2/config")) {
+      if (url.endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v1/config")) {
         return json({ revision: "config-r1", generatedAt: now, value: { safe: true }, redacted: true });
       }
-      if (url.endsWith("/v2/health")) {
+      if (url.endsWith("/v1/health")) {
         return json({ status: "healthy", checkedAt: now, details: [{ id: "core", status: "healthy" }] });
       }
-      if (url.endsWith("/v2/conversations/asset-conversation/replay")) {
+      if (url.endsWith("/v1/conversations/asset-conversation/replay")) {
         return json({
           conversationId: "asset-conversation",
           messages: [{ id: "assistant-1", role: "assistant", text: "previous", createdAt: now }],
         });
       }
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v1/turns")) {
         turnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(frames.map(serializeOperatorFrame).join(""), {
           headers: { "content-type": "application/x-ndjson" },
@@ -132,9 +132,9 @@ describe("standalone TUI", () => {
         },
       });
       expect(requested).toEqual(expect.arrayContaining([
-        "http://127.0.0.1:4321/operator/v2/config",
-        "http://127.0.0.1:4321/operator/v2/health",
-        "http://127.0.0.1:4321/operator/v2/conversations/asset-conversation/replay",
+        "http://127.0.0.1:4321/operator/v1/config",
+        "http://127.0.0.1:4321/operator/v1/health",
+        "http://127.0.0.1:4321/operator/v1/conversations/asset-conversation/replay",
       ]));
     } finally {
       await handle.stop();
@@ -155,8 +155,8 @@ describe("standalone TUI", () => {
         authorization,
         ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
       });
-      if (url.endsWith("/v2/info")) return json(VALID_OPERATOR_INFO);
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v1/turns")) {
         return new Response(delayedFixtureStream(), {
           status: 200,
           headers: { "content-type": "application/x-ndjson" },
@@ -188,7 +188,7 @@ describe("standalone TUI", () => {
       expect(output).toContain("completed");
     });
 
-    const turn = requests.find((request) => request.url.endsWith("/v2/turns"));
+    const turn = requests.find((request) => request.url.endsWith("/v1/turns"));
     expect(turn).toMatchObject({
       method: "POST",
       authorization: "Bearer owner-secret",
@@ -269,7 +269,7 @@ describe("standalone TUI", () => {
     const encoder = new TextEncoder();
     const fetchImpl: typeof fetch = async (input) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) {
+      if (url.endsWith("/v1/info")) {
         return json({
           ...VALID_OPERATOR_INFO,
           agent: {
@@ -278,7 +278,7 @@ describe("standalone TUI", () => {
           },
         });
       }
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v1/turns")) {
         return new Response(new ReadableStream({
           start(controller) {
             frames.forEach((frame, index) => {
@@ -322,8 +322,8 @@ describe("standalone TUI", () => {
     let cancelBody: unknown;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) return json(VALID_OPERATOR_INFO);
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v1/turns")) {
         return new Response(new ReadableStream({
           start(controller) {
             streamController = controller;
@@ -341,7 +341,7 @@ describe("standalone TUI", () => {
           },
         }), { headers: { "content-type": "application/x-ndjson" } });
       }
-      if (url.endsWith("/v2/conversations/cancel-conversation/cancel")) {
+      if (url.endsWith("/v1/conversations/cancel-conversation/cancel")) {
         cancelBody = JSON.parse(String(init?.body));
         streamController?.enqueue(encoder.encode(serializeOperatorFrame({
           type: "error",
@@ -391,8 +391,8 @@ describe("standalone TUI", () => {
     ];
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) return json(infoWithoutModels);
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v1/info")) return json(infoWithoutModels);
+      if (url.endsWith("/v1/turns")) {
         turnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(frames.map(serializeOperatorFrame).join(""), {
           headers: { "content-type": "application/x-ndjson" },
@@ -428,8 +428,8 @@ describe("standalone TUI", () => {
     let answerBody: unknown;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) return json(VALID_OPERATOR_INFO);
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v1/turns")) {
         return new Response(new ReadableStream({
           start(controller) {
             streamController = controller;
@@ -439,7 +439,7 @@ describe("standalone TUI", () => {
           },
         }), { headers: { "content-type": "application/x-ndjson" } });
       }
-      if (url.endsWith("/v2/conversations/fixture-conversation/ask")) {
+      if (url.endsWith("/v1/conversations/fixture-conversation/ask")) {
         answerBody = JSON.parse(String(init?.body));
         streamController?.enqueue(encoder.encode(serializeOperatorFrame(
           MULTI_QUESTION_ASK_USER_TURN_FRAMES.at(-1)!,
@@ -494,8 +494,8 @@ describe("standalone TUI", () => {
     ];
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) return json(VALID_OPERATOR_INFO);
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v1/turns")) {
         turnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(frames.map(serializeOperatorFrame).join(""), {
           headers: { "content-type": "application/x-ndjson" },
@@ -569,14 +569,14 @@ describe("standalone TUI", () => {
       let turnRequests = 0;
       const fetchImpl: typeof fetch = async (input) => {
         const url = String(input);
-        if (url.endsWith("/v2/info")) {
+        if (url.endsWith("/v1/info")) {
           infoRequests += 1;
           return json(infoRequests === 1 ? VALID_OPERATOR_INFO : {
             ...VALID_OPERATOR_INFO,
             process: { ...VALID_OPERATOR_INFO.process, startedAt: "2026-01-02T03:04:08.000Z" },
           });
         }
-        if (url.endsWith("/v2/turns")) {
+        if (url.endsWith("/v1/turns")) {
           turnRequests += 1;
           throw new Error("turn must not start after identity mismatch");
         }

@@ -1,5 +1,5 @@
 import { OperatorProtocolError, parseTurnRequest } from "./protocol.js";
-import type { OperatorInfo } from "./types.js";
+import type { OperatorInfo, OperatorModel } from "./types.js";
 
 export interface OperatorRuntimeOverrideIntent {
   readonly runtime?: string;
@@ -69,19 +69,28 @@ export function evaluateOperatorRuntimeOverride(
 
   if (!hasAuthoredOverride) return { allowed: true, intent: parsed };
 
-  let selectedModel = parsed.model === undefined ? undefined : info.models?.find((model) => model.id === parsed.model);
+  // `{ runtime, id }` is one atomic route. Resolving either half against the
+  // other's default would accept a model the named runtime cannot serve.
+  const authoredRuntime = parsed.runtime ?? info.defaults?.runtime;
+  const findRoute = (id: string): OperatorModel | undefined =>
+    info.models?.find((model) =>
+      model.id === id && (authoredRuntime === undefined || model.runtime === authoredRuntime));
+
+  let selectedModel = parsed.model === undefined ? undefined : findRoute(parsed.model);
   if (parsed.model !== undefined && info.models !== undefined && selectedModel === undefined) {
     return {
       allowed: false,
       reason: "unknown_model",
-      message: `Model ${JSON.stringify(parsed.model)} is not advertised by this agent.`,
+      message: authoredRuntime === undefined
+        ? `Model ${JSON.stringify(parsed.model)} is not advertised by this agent.`
+        : `Model ${JSON.stringify(parsed.model)} is not advertised for runtime ${JSON.stringify(authoredRuntime)}.`,
     };
   }
 
   if (parsed.effort !== undefined) {
     const effectiveModelId = parsed.model ?? info.defaults?.model;
     if (selectedModel === undefined && effectiveModelId !== undefined) {
-      selectedModel = info.models?.find((model) => model.id === effectiveModelId);
+      selectedModel = findRoute(effectiveModelId);
     }
     if (selectedModel?.efforts !== undefined && !selectedModel.efforts.includes(parsed.effort)) {
       return {

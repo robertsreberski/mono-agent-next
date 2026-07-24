@@ -855,14 +855,18 @@ function validateIdentityGrant(value: OperatorIdentityGrant): OperatorIdentityGr
 
 function validGrantModels(value: unknown): value is readonly OperatorModel[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > 1_000) return false;
-  const ids = new Set<string>();
+  // `{ runtime, id }` is the atomic route, so the same model id served by two
+  // runtimes is two distinct entries rather than a duplicate.
+  const routes = new Set<string>();
   return value.every((candidate) => {
     if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
     const model = candidate as Record<string, unknown>;
     if (Object.keys(model).some((field) =>
-      !["id", "label", "efforts", "contextWindow"].includes(field))) return false;
-    if (!validGrantText(model.id, 256) || ids.has(model.id)) return false;
-    ids.add(model.id);
+      !["runtime", "id", "label", "efforts", "contextWindow"].includes(field))) return false;
+    if (!validGrantText(model.runtime, 256) || !validGrantText(model.id, 256)) return false;
+    const route = `${model.runtime}\0${model.id}`;
+    if (routes.has(route)) return false;
+    routes.add(route);
     if (model.label !== undefined && !validGrantText(model.label, 1_024)) return false;
     if (model.contextWindow !== undefined
       && (!Number.isSafeInteger(model.contextWindow) || Number(model.contextWindow) < 1)) return false;

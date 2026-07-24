@@ -96,7 +96,7 @@ await handle.waitUntilExit();
 
 1. `startMonoAgentTui` creates the shared `OperatorClient`, directly or from
    a shared-directory selection.
-2. Discovered connections bind registry id, PID, and start time to `/v2/info`
+2. Discovered connections bind registry id, PID, and start time to `/v1/info`
    at startup and immediately before every turn.
 3. A submitted prompt calls `OperatorClient.streamTurn`.
 4. Every normalized frame passes through `reduceOperatorFrame`; the renderer

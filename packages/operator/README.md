@@ -24,11 +24,16 @@ web renderers. It provides the only first-party wire decoder, trusted-loopback
 client, owner-private discovery reader, deterministic conversation reducer,
 available-action rules, and golden fixtures.
 
-The current wire identity is `mono-agent.operator.v2`, its discovery schema is
-`mono-agent.operator-registry.v2`, and its routes live exclusively under
-`/v2`. Version 2 adds bounded tool-call, tool-result, and compaction frames.
-Servers do not serve legacy `/v1` routes, so a strict v1 client fails before
-dispatch and can never receive frame types it does not understand.
+The wire identity is `mono-agent.operator.v1`, its discovery schema is
+`mono-agent.operator-registry.v1`, and its routes live exclusively under `/v1`.
+This is the single prerelease contract: there is no second generation to
+negotiate, and any other version namespace fails closed before dispatch.
+
+A model route is the atomic pair `{ runtime, id }`. The same model id reached
+through two runtimes is two routes, so an override naming one half is never
+resolved against the other half's default. Each route may also advertise an
+exact `label`, the exact `efforts` it accepts, and its `contextWindow`; an
+absent field means "not advertised" and is never guessed.
 
 ## Install / Usage
 
@@ -74,9 +79,9 @@ constructed and is never returned as directory state.
 1. The owning state/discovery lifecycle publishes an owner-private descriptor
    containing the literal loopback endpoint; `channel-operator` serves that
    endpoint and does not own registry persistence.
-2. A product discovers and selects a v2 entry, then `OperatorClient` validates
-   the endpoint, rejects redirects, submits bounded JSON to `/v2`, and decodes
-   bounded v2 NDJSON.
+2. A product discovers and selects a registry entry, then `OperatorClient`
+   validates the endpoint, rejects redirects, submits bounded JSON to `/v1`,
+   and decodes bounded NDJSON.
 3. Every turn starts with `accepted`, carries only validated frames, and ends
    with exactly one `completed` or `error`; stopping iteration aborts the request.
 4. The reducer retains bounded structured status, tool-call, tool-result, and

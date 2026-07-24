@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-agent-core";
 import {
   clampThinkingLevel,
+  getSupportedThinkingLevels,
   type AssistantMessage,
   type ImageContent,
   type Model,
@@ -62,6 +63,8 @@ import {
 } from "./model.js";
 import {
   createRuntimePiModelRegistry,
+  piThinkingLevel,
+  publicEffortLevel,
   RuntimePiModelDiscoveryError,
   type RuntimePiModelRegistry,
 } from "./models.js";
@@ -816,13 +819,28 @@ function assistantTurnMessage(message: AssistantMessage): TurnMessage {
   };
 }
 
-function thinkingLevel(effort: string | undefined, model: Model<string>): { level: ThinkingLevel; clamped: boolean } {
-  const requested = effort === undefined || effort === "none" ? "off" : effort;
+/**
+ * Resolve one authored effort against this exact model. An effort the model
+ * cannot serve fails closed: silently clamping it would run the turn at a
+ * reasoning level the operator did not choose and could not see.
+ */
+function thinkingLevel(effort: string | undefined, model: Model<string>): ThinkingLevel {
+  const requested = piThinkingLevel(effort ?? "none");
   if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(requested)) {
     throw new TypeError(`runtime-pi effort is unsupported: ${JSON.stringify(effort)}`);
   }
-  const level = clampThinkingLevel(model, requested as ThinkingLevel) as ThinkingLevel;
-  return { level, clamped: level !== requested };
+  const supported = getSupportedThinkingLevels(model);
+  if (!supported.includes(requested as ThinkingLevel)) {
+    if (effort === undefined) {
+      // No effort was authored, so fall back to whatever this model does support.
+      return clampThinkingLevel(model, requested as ThinkingLevel) as ThinkingLevel;
+    }
+    throw new TypeError(
+      `runtime-pi model ${model.provider}:${model.id} does not support effort `
+      + `${JSON.stringify(effort)}; it accepts ${supported.map(publicEffortLevel).join(", ")}`,
+    );
+  }
+  return requested as ThinkingLevel;
 }
 
 function exactCapabilities(attachments: boolean): RuntimeCapabilities {
@@ -1162,7 +1180,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
               session: attempt.session,
               models: registry.models,
               model,
-              thinkingLevel: effort.level,
+              thinkingLevel: effort,
               ...(authoredSystemPrompt === undefined ? {} : { systemPrompt: authoredSystemPrompt }),
               tools: responseSchema === undefined ? [
                 ...piTools(
@@ -1314,16 +1332,6 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
             });
 
             try {
-              if (effort.clamped) {
-                await context.emit({
-                  type: "diagnostic",
-                  diagnostic: diagnostic(
-                    "runtime-pi.effort-clamped",
-                    "warning",
-                    `Requested effort ${JSON.stringify(request.options?.effort)} was clamped to ${effort.level}`,
-                  ),
-                });
-              }
               if (request.signal.aborted) return { completed: false, value: { status: "cancelled" } };
               const result = await harness.prompt(
                 prompt.text,

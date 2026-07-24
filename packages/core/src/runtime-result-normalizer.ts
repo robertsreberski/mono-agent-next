@@ -11,6 +11,7 @@ import {
   type RouteIdentity,
   type RuntimeCapabilities,
   type RuntimeCompaction,
+  type RuntimeModelDescriptor,
   type RuntimeModelValidation,
   type RuntimeNativeToolDescriptor,
   type RuntimeSession,
@@ -53,6 +54,8 @@ export const RUNTIME_TOOL_CALL_MAX_BYTES = 512 * 1024;
 export const RUNTIME_CAPABILITIES_MAX_BYTES = 1024;
 
 const MAX_IDENTIFIER_BYTES = 4_096;
+const MAX_MODEL_LABEL_BYTES = 256;
+const MAX_MODEL_EFFORTS = 16;
 const MAX_MEDIA_TYPE_BYTES = 255;
 const MAX_FILE_NAME_BYTES = 255;
 const MAX_DIAGNOSTIC_MESSAGE_BYTES = 16 * 1024;
@@ -236,11 +239,13 @@ export function normalizeRuntimeModelValidation(
   const input = shape(
     runtimeSnapshot(value, path, RUNTIME_MODEL_VALIDATION_MAX_BYTES).value,
     path,
-    ["supported", "capabilities", "nativeTools", "diagnostics"],
+    ["supported", "capabilities", "nativeTools", "model", "diagnostics"],
   );
   if (typeof input.supported !== "boolean") fail(`${path}.supported`, "must be boolean");
   const capabilities = optional(input.capabilities, (capabilities) =>
     runtimeCapabilities(capabilities, `${path}.capabilities`));
+  const model = optional(input.model, (model) =>
+    modelDescriptor(model, `${path}.model`));
   const nativeTools = optional(input.nativeTools, (nativeTools) =>
     denseOwnDataArray(
       nativeTools,
@@ -259,8 +264,29 @@ export function normalizeRuntimeModelValidation(
     supported: input.supported,
     capabilities,
     nativeTools,
+    model,
     diagnostics,
   }) as RuntimeModelValidation;
+}
+
+function modelDescriptor(value: unknown, path: string): RuntimeModelDescriptor {
+  const input = shape(value, path, ["label", "efforts", "contextWindow"]);
+  const label = optional(input.label, (label) =>
+    boundedText(label, `${path}.label`, MAX_MODEL_LABEL_BYTES));
+  const efforts = optional(input.efforts, (efforts) => {
+    const levels = denseOwnDataArray(efforts, `${path}.efforts`, MAX_MODEL_EFFORTS)
+      .map((level, index) =>
+        boundedText(level, `${path}.efforts[${String(index)}]`, MAX_IDENTIFIER_BYTES));
+    if (levels.length === 0) fail(`${path}.efforts`, "must not be empty when advertised");
+    if (new Set(levels).size !== levels.length) fail(`${path}.efforts`, "must not repeat a level");
+    return levels;
+  });
+  const contextWindow = optional(input.contextWindow, (tokens) => {
+    const window = nonNegativeInteger(tokens, `${path}.contextWindow`);
+    if (window === 0) fail(`${path}.contextWindow`, "must be positive when advertised");
+    return window;
+  });
+  return compact({ label, efforts, contextWindow }) as RuntimeModelDescriptor;
 }
 
 /** Descriptor-safe parser for host health, lifecycle, and module diagnostics. */

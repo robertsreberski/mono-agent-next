@@ -27,6 +27,13 @@ describe("runtime-pi module import", () => {
     });
     expect(validation).toEqual({
       supported: true,
+      // The catalog descriptor is read from Pi's generated model list on the
+      // pure path: no credentials, no network, no created instance.
+      model: {
+        label: "GPT-5",
+        efforts: ["minimal", "low", "medium", "high"],
+        contextWindow: 400_000,
+      },
       nativeTools: [{
         id: "NodeRepl",
         displayName: "Node REPL",
@@ -84,6 +91,12 @@ describe("runtime-pi module import", () => {
       }],
     });
     expect(validation).not.toBeInstanceOf(Promise);
+    // An unknown model stays supported (Core and the runtime remain the final
+    // validators) but advertises no descriptor rather than a guessed one.
+    expect(module.monoAgentModule.validateModel?.({
+      model: "openai:not-a-real-model",
+      config,
+    })).not.toHaveProperty("model");
     expect(module.monoAgentModule.validateModel?.({
       model: "openai/gpt-5",
       config,

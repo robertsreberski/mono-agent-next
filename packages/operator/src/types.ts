@@ -1,17 +1,28 @@
-export const OPERATOR_PROTOCOL = "mono-agent.operator.v2" as const;
-export const OPERATOR_REGISTRY_SCHEMA = "mono-agent.operator-registry.v2" as const;
-export const OPERATOR_REGISTRY_DETAILS_SCHEMA = "mono-agent.operator-registry-details.v2" as const;
+export const OPERATOR_PROTOCOL = "mono-agent.operator.v1" as const;
+export const OPERATOR_REGISTRY_SCHEMA = "mono-agent.operator-registry.v1" as const;
+export const OPERATOR_REGISTRY_DETAILS_SCHEMA = "mono-agent.operator-registry-details.v1" as const;
 
+/**
+ * Every protocol identifier. The leading-character class rejects `.` and `..`,
+ * which matters because `encodeURIComponent` does not encode dots: an
+ * unvalidated `..` conversation id would silently retarget a request path.
+ */
+export const OPERATOR_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u;
+
+/**
+ * Conversation routes interpolate the id, so callers must reject ids that fail
+ * `OPERATOR_IDENTIFIER_PATTERN` before building one.
+ */
 export const OPERATOR_ROUTES = Object.freeze({
-  info: "/v2/info",
-  turns: "/v2/turns",
-  config: "/v2/config",
-  health: "/v2/health",
-  conversations: "/v2/conversations",
-  ask: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/ask`,
-  cancel: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/cancel`,
-  liveInput: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/live-input`,
-  replay: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/replay`,
+  info: "/v1/info",
+  turns: "/v1/turns",
+  config: "/v1/config",
+  health: "/v1/health",
+  conversations: "/v1/conversations",
+  ask: (conversationId: string) => `/v1/conversations/${encodeURIComponent(conversationId)}/ask`,
+  cancel: (conversationId: string) => `/v1/conversations/${encodeURIComponent(conversationId)}/cancel`,
+  liveInput: (conversationId: string) => `/v1/conversations/${encodeURIComponent(conversationId)}/live-input`,
+  replay: (conversationId: string) => `/v1/conversations/${encodeURIComponent(conversationId)}/replay`,
 });
 
 export const OPERATOR_LIMITS = Object.freeze({
@@ -83,9 +94,16 @@ export interface OperatorCapabilities {
   health: boolean;
 }
 
+/**
+ * One advertised model route. `{ runtime, id }` is the atomic identity: the
+ * same model id reached through two runtimes is two routes, and an override
+ * naming only one half of the pair is never resolved against the other.
+ */
 export interface OperatorModel {
+  runtime: string;
   id: string;
   label?: string;
+  /** Exact accepted effort levels. Absent means effort is not selectable here. */
   efforts?: readonly string[];
   contextWindow?: number;
 }

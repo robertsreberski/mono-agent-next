@@ -17,25 +17,25 @@ import {
 import { MALFORMED_OPERATOR_FRAMES, VALID_OPERATOR_INFO, VALID_TURN_FRAMES, VALID_TURN_REQUEST } from "../testing.js";
 
 describe("operator protocol", () => {
-  it("uses an explicit v2 identity, discovery boundary, and route namespace", () => {
-    expect(OPERATOR_PROTOCOL).toBe("mono-agent.operator.v2");
-    expect(OPERATOR_REGISTRY_SCHEMA).toBe("mono-agent.operator-registry.v2");
-    expect(OPERATOR_REGISTRY_DETAILS_SCHEMA).toBe("mono-agent.operator-registry-details.v2");
+  it("uses one explicit protocol identity, discovery boundary, and route namespace", () => {
+    expect(OPERATOR_PROTOCOL).toBe("mono-agent.operator.v1");
+    expect(OPERATOR_REGISTRY_SCHEMA).toBe("mono-agent.operator-registry.v1");
+    expect(OPERATOR_REGISTRY_DETAILS_SCHEMA).toBe("mono-agent.operator-registry-details.v1");
     expect([
       OPERATOR_ROUTES.info,
       OPERATOR_ROUTES.turns,
       OPERATOR_ROUTES.config,
       OPERATOR_ROUTES.health,
       OPERATOR_ROUTES.conversations,
-    ].every((route) => route.startsWith("/v2/"))).toBe(true);
-    expect(OPERATOR_ROUTES.ask("conversation")).toBe("/v2/conversations/conversation/ask");
-    expect(OPERATOR_ROUTES.cancel("conversation")).toBe("/v2/conversations/conversation/cancel");
-    expect(OPERATOR_ROUTES.liveInput("conversation")).toBe("/v2/conversations/conversation/live-input");
-    expect(OPERATOR_ROUTES.replay("conversation")).toBe("/v2/conversations/conversation/replay");
-    expect(() => parseOperatorInfo({
-      ...VALID_OPERATOR_INFO,
-      protocol: "mono-agent.operator.v1",
-    })).toThrow("must equal mono-agent.operator.v2");
+    ].every((route) => route.startsWith("/v1/"))).toBe(true);
+    expect(OPERATOR_ROUTES.ask("conversation")).toBe("/v1/conversations/conversation/ask");
+    expect(OPERATOR_ROUTES.cancel("conversation")).toBe("/v1/conversations/conversation/cancel");
+    expect(OPERATOR_ROUTES.liveInput("conversation")).toBe("/v1/conversations/conversation/live-input");
+    expect(OPERATOR_ROUTES.replay("conversation")).toBe("/v1/conversations/conversation/replay");
+    for (const foreign of ["mono-agent.operator.v2", "some.other.protocol.v1"]) {
+      expect(() => parseOperatorInfo({ ...VALID_OPERATOR_INFO, protocol: foreign }))
+        .toThrow("must equal mono-agent.operator.v1");
+    }
   });
 
   it("round-trips the golden info, request, and frames", () => {

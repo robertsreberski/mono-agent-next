@@ -1,4 +1,5 @@
 import {
+  OPERATOR_IDENTIFIER_PATTERN,
   OPERATOR_LIMITS,
   OPERATOR_PROTOCOL,
   OPERATOR_REGISTRY_SCHEMA,
@@ -86,7 +87,7 @@ function contractText(value: unknown, path: string, maximumBytes: number): strin
 
 function identifier(value: unknown, path: string): string {
   const parsed = text(value, path, { max: OPERATOR_LIMITS.identifierCharacters });
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/.test(parsed)) {
+  if (!OPERATOR_IDENTIFIER_PATTERN.test(parsed)) {
     fail(path, "contains unsupported characters");
   }
   return parsed;
@@ -380,8 +381,9 @@ export function parseOperatorCapabilities(value: unknown, path = "capabilities")
 
 function model(value: unknown, path: string): OperatorModel {
   const input = record(value, path);
-  keys(input, ["id", "label", "efforts", "contextWindow"], path);
+  keys(input, ["runtime", "id", "label", "efforts", "contextWindow"], path);
   return {
+    runtime: identifier(input.runtime, `${path}.runtime`),
     id: identifier(input.id, `${path}.id`),
     ...(input.label === undefined ? {} : { label: text(input.label, `${path}.label`, { max: 1_024 }) }),
     ...(input.efforts === undefined ? {} : { efforts: array(input.efforts, `${path}.efforts`, (item, itemPath) => identifier(item, itemPath), 50) }),

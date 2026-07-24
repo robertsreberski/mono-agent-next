@@ -6,6 +6,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseRuntimePiConfig } from "../config.js";
 import {
   createRuntimePiModelRegistry,
+  piThinkingLevel,
+  publicEffortLevel,
+  runtimePiModelDescriptor,
   RuntimePiModelDiscoveryError,
 } from "../models.js";
 import { isCheckedTransientProviderFailure } from "../runtime.js";
@@ -79,6 +82,34 @@ describe("runtime-pi model registry", () => {
       approvals: true,
       sandbox: false,
     });
+  });
+
+  it("describes a configured local route from config alone, without network access", () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("no network"));
+    const config = parseRuntimePiConfig({
+      localProviders: [{
+        id: "fixture",
+        baseUrl: "http://127.0.0.1:1/v1",
+        models: [{ id: "vision", name: "Fixture Vision", contextWindow: 64_000 }],
+      }],
+    });
+
+    expect(runtimePiModelDescriptor(config, "fixture:vision")).toMatchObject({
+      label: "Fixture Vision",
+      contextWindow: 64_000,
+    });
+    // A route the config never declares is not describable, and is reported as
+    // absent rather than guessed from a same-named model on another provider.
+    expect(runtimePiModelDescriptor(config, "fixture:undeclared")).toBeUndefined();
+    expect(fetch).not.toHaveBeenCalled();
+    fetch.mockRestore();
+  });
+
+  it("maps Pi's off level onto the public none effort in both directions", () => {
+    expect(publicEffortLevel("off")).toBe("none");
+    expect(publicEffortLevel("high")).toBe("high");
+    expect(piThinkingLevel("none")).toBe("off");
+    expect(piThinkingLevel("high")).toBe("high");
   });
 
   it("discovers an omitted local model list through Pi's provider refresh hook", async () => {
