@@ -1,3 +1,10 @@
+import packageManifest from "../package.json" with { type: "json" };
+
+import {
+  assertNpmPackageName,
+  normalizeNpmName,
+} from "./npm-name.ts";
+
 export const PROJECT_TEMPLATES = ["minimal", "personal", "multi-runtime"] as const;
 
 export type ProjectTemplate = (typeof PROJECT_TEMPLATES)[number];
@@ -20,7 +27,7 @@ export interface RenderedProjectFile {
   mode: number;
 }
 
-const DEFAULT_VERSION = "0.15.0";
+const DEFAULT_VERSION = packageManifest.version;
 const CORE_DEPENDENCIES = [
   "@mono-agent/cli",
   "@mono-agent/core",
@@ -61,7 +68,7 @@ const TEMPLATE_ENVIRONMENT_NAMES: Readonly<Record<ProjectTemplate, readonly stri
 };
 
 export function renderProject(options: ProjectTemplateOptions): readonly RenderedProjectFile[] {
-  validatePackageName(options.projectName);
+  assertNpmPackageName(options.projectName);
   const template = options.template ?? "minimal";
   if (!isProjectTemplate(template)) throw new TypeError(`Unknown project template: ${String(template)}`);
 
@@ -682,13 +689,6 @@ function assertSafeRenderedFiles(files: readonly RenderedProjectFile[]): void {
   }
 }
 
-function validatePackageName(value: string): void {
-  if (value.length > 214
-    || !/^(?:@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*|[a-z0-9][a-z0-9._-]*)$/u.test(value)) {
-    throw new TypeError(`Invalid npm package name: ${JSON.stringify(value)}`);
-  }
-}
-
 function validateDisplayName(value: string): void {
   if (value.trim().length === 0
     || value.length > 128
@@ -717,11 +717,7 @@ function titleCase(value: string): string {
 }
 
 function agentIdFor(projectName: string): string {
-  return projectName
-    .toLowerCase()
-    .replace(/^@/u, "")
-    .replace(/[^a-z0-9._-]+/gu, "-")
-    .replace(/^[._-]+|[._-]+$/gu, "");
+  return normalizeNpmName(projectName, { stripLeadingAt: true });
 }
 
 function compareText(left: string, right: string): number {

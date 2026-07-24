@@ -1,20 +1,33 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
+  lstat,
   mkdtemp,
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ScaffoldError, scaffoldAgent } from "../scaffold.js";
+import packageManifest from "../../package.json" with { type: "json" };
+import {
+  packageManagerInvocationForTesting,
+  ScaffoldError,
+  scaffoldAgent,
+} from "../scaffold.js";
+import {
+  acquireScaffoldLock,
+  releaseScaffoldLock,
+} from "../scaffold-lock.js";
 import {
   PROJECT_TEMPLATES,
   renderMinimalProject,
@@ -136,7 +149,13 @@ describe("project templates", () => {
     expect([...selections].sort()).toEqual(
       dependencies.filter((name) => !["@mono-agent/cli", "@mono-agent/core", "@mono-agent/module-sdk"].includes(name)),
     );
-    expect(new Set(Object.values(record(manifest.dependencies)))).toEqual(new Set(["0.15.0"]));
+    expect(new Set(Object.values(record(manifest.dependencies))))
+      .toEqual(new Set([packageManifest.version]));
+    expect(record(
+      parseJson(files, ".mono-agent/mono-agent.config.schema.json"),
+    ).$id).toBe(
+      `https://mono-agent.dev/schemas/${packageManifest.version}/scaffold-${template}.json`,
+    );
     expect(files.get("AGENTS.md")).toContain("Never print, persist, or summarize credential values.");
     expect(parseJson(files, ".mono-agent/mono-agent.config.schema.json")).toMatchObject({
       $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -383,6 +402,161 @@ describe("scaffoldAgent", () => {
     expect(installer).toHaveBeenCalledTimes(1);
   });
 
+  it("reclaims a SIGKILL-stale scaffold lock and stage", async () => {
+    const root = await makeTemporaryDirectory();
+    const targetName = "crash-agent";
+    const child = await crashScaffoldOwner(root, targetName);
+    expect(child).toMatchObject({ code: null, signal: "SIGKILL", stderr: "" });
+
+    const leaked = await readdir(root);
+    expect(leaked).toContain(`.${targetName}.mono-agent-scaffold.lock`);
+    expect(leaked).toContainEqual(
+      expect.stringMatching(new RegExp(`^\\.${targetName}\\.mono-agent-stage-`, "u")),
+    );
+
+    await expect(scaffoldAgent({
+      targetDirectory: join(root, targetName),
+    })).resolves.toMatchObject({
+      directory: join(root, targetName),
+      installed: false,
+    });
+
+    const recovered = await readdir(root);
+    expect(recovered).toContain(targetName);
+    expect(recovered).not.toContain(`.${targetName}.mono-agent-scaffold.lock`);
+    const recoveredStages = recovered.filter((entry) =>
+      entry.startsWith(`.${targetName}.mono-agent-stage-`)
+      && entry.includes(".recovered-"));
+    expect(recoveredStages).toHaveLength(1);
+    await expect(readFile(join(root, recoveredStages[0]!, "partial"), "utf8"))
+      .resolves.toBe("partial\n");
+  }, 20_000);
+
+  it("fails closed on a substituted stale stage without touching its referent", async () => {
+    const root = await makeTemporaryDirectory();
+    const targetName = "substituted-agent";
+    const child = await crashScaffoldOwner(root, targetName);
+    expect(child).toMatchObject({ code: null, signal: "SIGKILL", stderr: "" });
+    const stageName = (await readdir(root)).find((entry) =>
+      entry.startsWith(`.${targetName}.mono-agent-stage-`));
+    if (stageName === undefined) throw new Error("Missing crashed scaffold stage");
+    const stagePath = join(root, stageName);
+    const external = join(root, "external");
+    await mkdir(external, { mode: 0o700 });
+    await writeFile(join(external, "sentinel"), "keep\n", { mode: 0o600 });
+    await rm(stagePath, { recursive: true, force: true });
+    await symlink(external, stagePath, "dir");
+
+    const lockPath = join(root, `.${targetName}.mono-agent-scaffold.lock`);
+    await expect(scaffoldAgent({
+      targetDirectory: join(root, targetName),
+    })).rejects.toThrow(new RegExp(`real directory.*lock: ${escapePattern(lockPath)}`, "u"));
+    await expect(readFile(join(external, "sentinel"), "utf8")).resolves.toBe("keep\n");
+  }, 20_000);
+
+  it("fails closed when an installer substitutes the live scaffold stage", async () => {
+    const root = await makeTemporaryDirectory();
+    const target = join(root, "stage-swap-agent");
+    let substitutedStage = "";
+
+    await expect(scaffoldAgent({
+      targetDirectory: target,
+      install: true,
+      installer: async (_packageManager, stagePath) => {
+        const original = `${stagePath}.original-${randomUUID()}`;
+        await rename(stagePath, original);
+        await mkdir(stagePath, { mode: 0o700 });
+        await writeFile(join(stagePath, "sentinel"), "attacker-owned\n", {
+          mode: 0o600,
+        });
+        substitutedStage = stagePath;
+      },
+    })).rejects.toThrow("Scaffold stage changed identity");
+
+    await expect(lstat(target)).rejects.toThrow();
+    await expect(readFile(join(substitutedStage, "sentinel"), "utf8"))
+      .resolves.toBe("attacker-owned\n");
+  });
+
+  it("fails closed when an installer replaces the pinned scaffold lock", async () => {
+    const root = await makeTemporaryDirectory();
+    const targetName = "lock-swap-agent";
+    const target = join(root, targetName);
+    const lockPath = join(root, `.${targetName}.mono-agent-scaffold.lock`);
+    let replacementWritten = false;
+    let replacementBlockedCode: unknown;
+    let failure: unknown;
+
+    try {
+      await scaffoldAgent({
+        targetDirectory: target,
+        install: true,
+        installer: async () => {
+          try {
+            // Linux may immediately reuse an unpinned inode after this unlink.
+            await unlink(lockPath);
+            await writeFile(lockPath, "replacement\n", { mode: 0o600 });
+            replacementWritten = true;
+          } catch (error) {
+            replacementBlockedCode = codeOf(error);
+            throw error;
+          }
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(Error);
+    await expect(lstat(target)).rejects.toThrow();
+    if (replacementWritten) {
+      expect((failure as Error).message).toContain(
+        "Scaffold lock changed identity",
+      );
+      await expect(readFile(lockPath, "utf8")).resolves.toBe("replacement\n");
+    } else {
+      expect(["EACCES", "EBUSY", "EPERM"]).toContain(replacementBlockedCode);
+      await expect(lstat(lockPath)).rejects.toThrow();
+    }
+  });
+
+  it("closes the pinned scaffold-lock handle on release", async () => {
+    const root = await makeTemporaryDirectory();
+    const lock = await acquireScaffoldLock(root, "released-agent");
+
+    await releaseScaffoldLock(lock);
+
+    await expect(lock.handle.stat()).rejects.toMatchObject({ code: "EBADF" });
+    await expect(lstat(lock.path)).rejects.toThrow();
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "preserves a replacement and closes the pinned handle when release fails",
+    async () => {
+      const root = await makeTemporaryDirectory();
+      const lock = await acquireScaffoldLock(root, "release-swap-agent");
+      const held = await lock.handle.stat();
+      expect({
+        device: held.dev,
+        inode: held.ino,
+      }).toEqual(lock.identity);
+      await unlink(lock.path);
+      await writeFile(lock.path, "replacement\n", { mode: 0o600 });
+      const replacement = await lstat(lock.path);
+      expect({
+        device: replacement.dev,
+        inode: replacement.ino,
+      }).not.toEqual(lock.identity);
+
+      await expect(releaseScaffoldLock(lock)).rejects.toThrow(
+        "scaffold lock changed identity",
+      );
+
+      await expect(lock.handle.stat()).rejects.toMatchObject({ code: "EBADF" });
+      await expect(readFile(lock.path, "utf8")).resolves.toBe("replacement\n");
+    },
+  );
+
   it("never invokes a package manager without the explicit install flag", async () => {
     const root = await makeTemporaryDirectory();
     const installer = vi.fn(async () => undefined);
@@ -400,6 +574,77 @@ describe("scaffoldAgent", () => {
     expect(installer).toHaveBeenCalledOnce();
     expect(installer).toHaveBeenCalledWith("npm", expect.stringContaining(".installed-agent.mono-agent-stage-"));
   });
+
+  it("runs Windows package-manager shims through cmd without enabling spawn's shell", () => {
+    expect(packageManagerInvocationForTesting("npm", "win32")).toEqual({
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", "npm.cmd install"],
+    });
+    expect(packageManagerInvocationForTesting("pnpm", "win32")).toEqual({
+      command: "cmd.exe",
+      args: ["/d", "/s", "/c", "pnpm.cmd install"],
+    });
+    expect(packageManagerInvocationForTesting("npm", "linux")).toEqual({
+      command: "npm",
+      args: ["install"],
+    });
+    expect(packageManagerInvocationForTesting("pnpm", "darwin")).toEqual({
+      command: "pnpm",
+      args: ["install"],
+    });
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "exercises real install spawn success, nonzero exit, and signal termination",
+    async () => {
+      const root = await makeTemporaryDirectory();
+      const bin = join(root, "bin");
+      const stub = join(bin, "pnpm");
+      await mkdir(bin, { mode: 0o700 });
+      const previousPath = process.env.PATH;
+      process.env.PATH = `${bin}${delimiter}${previousPath ?? ""}`;
+      try {
+        await writePackageManagerStub(stub, [
+          'import { writeFileSync } from "node:fs";',
+          'if (process.argv[2] !== "install") process.exit(64);',
+          'writeFileSync("install-spawn-success", "ok\\n");',
+        ]);
+        const success = join(root, "spawn-success");
+        await expect(scaffoldAgent({
+          targetDirectory: success,
+          install: true,
+          packageManager: "pnpm",
+        })).resolves.toMatchObject({ installed: true, packageManager: "pnpm" });
+        await expect(readFile(join(success, "install-spawn-success"), "utf8"))
+          .resolves.toBe("ok\n");
+
+        await writePackageManagerStub(stub, [
+          'if (process.argv[2] !== "install") process.exit(64);',
+          "process.exit(23);",
+        ]);
+        await expect(scaffoldAgent({
+          targetDirectory: join(root, "spawn-nonzero"),
+          install: true,
+          packageManager: "pnpm",
+        })).rejects.toThrow("pnpm install exited with code 23");
+
+        await writePackageManagerStub(stub, [
+          'if (process.argv[2] !== "install") process.exit(64);',
+          'process.kill(process.pid, "SIGTERM");',
+          "setTimeout(() => process.exit(99), 1_000);",
+        ]);
+        await expect(scaffoldAgent({
+          targetDirectory: join(root, "spawn-signal"),
+          install: true,
+          packageManager: "pnpm",
+        })).rejects.toThrow("pnpm install was terminated by SIGTERM");
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH;
+        else process.env.PATH = previousPath;
+      }
+    },
+    20_000,
+  );
 
   it("rolls back every staged file when explicit installation fails", async () => {
     const root = await makeTemporaryDirectory();
@@ -452,4 +697,71 @@ async function makeTemporaryDirectory(): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), "create-mono-agent-test-"));
   temporaryDirectories.push(path);
   return path;
+}
+
+async function crashScaffoldOwner(
+  parent: string,
+  targetName: string,
+): Promise<{
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly stderr: string;
+}> {
+  const moduleUrl = new URL("../scaffold-lock.ts", import.meta.url).href;
+  return runChild([
+    `import { acquireScaffoldLock, createScaffoldStage } from ${JSON.stringify(moduleUrl)};`,
+    'import { writeFile } from "node:fs/promises";',
+    'import { join } from "node:path";',
+    `const lock = await acquireScaffoldLock(${JSON.stringify(parent)}, ${JSON.stringify(targetName)});`,
+    "const stage = await createScaffoldStage(lock);",
+    'await writeFile(join(stage.path, "partial"), "partial\\n", { mode: 0o600 });',
+    'process.kill(process.pid, "SIGKILL");',
+  ].join("\n"));
+}
+
+async function writePackageManagerStub(
+  path: string,
+  lines: readonly string[],
+): Promise<void> {
+  await writeFile(
+    path,
+    `#!/usr/bin/env node\n${lines.join("\n")}\n`,
+    { mode: 0o700 },
+  );
+}
+
+async function runChild(source: string): Promise<{
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly stderr: string;
+}> {
+  const child = spawn(
+    process.execPath,
+    ["--experimental-strip-types", "--input-type=module", "--eval", source],
+    {
+      env: { ...process.env, NODE_NO_WARNINGS: "1" },
+      stdio: ["ignore", "ignore", "pipe"],
+    },
+  );
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+  return new Promise((resolvePromise, rejectPromise) => {
+    child.once("error", rejectPromise);
+    child.once("exit", (code, signal) => {
+      resolvePromise({ code, signal, stderr });
+    });
+  });
+}
+
+function escapePattern(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function codeOf(error: unknown): unknown {
+  return typeof error === "object" && error !== null
+    ? Reflect.get(error, "code")
+    : undefined;
 }

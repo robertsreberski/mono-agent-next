@@ -42,6 +42,21 @@ describe("runCreateMonoAgentCli", () => {
     expect(JSON.parse(await readFile(join(root, "my-agent", "package.json"), "utf8")).name).toBe("my-agent");
   });
 
+  it.each(["init", "setup"])(
+    "treats %s as a create target instead of a mono-agent subcommand",
+    async (targetName) => {
+      const root = await makeTemporaryDirectory();
+      await expect(runCreateMonoAgentCli([targetName], {
+        cwd: root,
+        stdout: () => undefined,
+        stderr: () => undefined,
+      }, { invocationName: "create-mono-agent" })).resolves.toBe(0);
+      expect(JSON.parse(
+        await readFile(join(root, targetName, "package.json"), "utf8"),
+      ).name).toBe(targetName);
+    },
+  );
+
   it("selects personal and multi-runtime templates explicitly", async () => {
     const root = await makeTemporaryDirectory();
     for (const template of ["personal", "multi-runtime"] as const) {
