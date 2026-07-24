@@ -10,6 +10,7 @@ describe("website CI contract", () => {
     expect([...document.errors, ...document.warnings]).toEqual([]);
     const workflow = document.toJS({ mapAsMap: false });
     const website = workflow.jobs.website;
+    const webConsoleVisual = workflow.jobs["web-console-visual"];
     const verify = workflow.jobs.verify;
 
     expect(website).toEqual({
@@ -36,6 +37,22 @@ describe("website CI contract", () => {
       ],
     });
 
+    expect(webConsoleVisual).toEqual({
+      name: "Web console visual contract (Playwright 1.61.1)",
+      "runs-on": "ubuntu-latest",
+      "timeout-minutes": 20,
+      container: { image: "mcr.microsoft.com/playwright:v1.61.1-noble" },
+      steps: [
+        { name: "Checkout", uses: "actions/checkout@v4" },
+        { name: "Enable Corepack", run: "corepack enable" },
+        { name: "Install dependencies", run: "pnpm install --frozen-lockfile" },
+        {
+          name: "Check deterministic console screenshots",
+          run: "pnpm --filter @mono-agent/web run test:visual",
+        },
+      ],
+    });
+
     expect(verify.steps[0]).toEqual({
       name: "Checkout",
       uses: "actions/checkout@v4",
@@ -50,13 +67,14 @@ describe("website CI contract", () => {
     expect(verifyRuns.some((run) => run.includes("pnpm run scripts:test"))).toBe(true);
 
     const verdict = workflow.jobs.verdict;
-    expect(verdict.needs).toEqual(["verify", "website"]);
+    expect(verdict.needs).toEqual(["verify", "website", "web-console-visual"]);
     expect(verdict.steps[0].env).toEqual({
       VERIFY_RESULT: "${{ needs.verify.result }}",
       WEBSITE_RESULT: "${{ needs.website.result }}",
+      WEB_CONSOLE_VISUAL_RESULT: "${{ needs.web-console-visual.result }}",
     });
     expect(verdict.steps[0].run).toContain(
-      '[[ "$VERIFY_RESULT" != "success" || "$WEBSITE_RESULT" != "success" ]]',
+      '[[ "$VERIFY_RESULT" != "success" || "$WEBSITE_RESULT" != "success" || "$WEB_CONSOLE_VISUAL_RESULT" != "success" ]]',
     );
   });
 });
