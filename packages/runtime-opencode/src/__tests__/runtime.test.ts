@@ -101,6 +101,7 @@ class FakeOpenCodeApi {
   readonly requests: CapturedRequest[] = [];
   readonly sessions = new Map<string, readonly unknown[]>();
   readonly prompts: CapturedRequest[] = [];
+  abortFailure?: Error;
   #nextSession = 1;
   #nextStream = 1;
   #streams = new Map<number, ReadableStreamDefaultController<Uint8Array>>();
@@ -191,6 +192,7 @@ class FakeOpenCodeApi {
         return new Response(null, { status: 204 });
       }
       if (method === "POST" && action === "abort") {
+        if (this.abortFailure !== undefined) throw this.abortFailure;
         return Response.json(true);
       }
     }
@@ -315,7 +317,14 @@ function context(events: RuntimeTurnEvent[] = []) {
   };
 }
 
-function harness(api: FakeOpenCodeApi, autoClose = true) {
+function harness(
+  api: FakeOpenCodeApi,
+  autoClose = true,
+  configOverride: Record<string, unknown> = {},
+  runtimeOverride: {
+    readonly removeIsolation?: (root: string) => Promise<void>;
+  } = {},
+) {
   const invocations: {
     readonly command: string;
     readonly args: readonly string[];
@@ -341,12 +350,16 @@ function harness(api: FakeOpenCodeApi, autoClose = true) {
     return child;
   });
   const runtime = createRuntimeOpenCode({
-    config: parseRuntimeOpenCodeConfig({ timeoutMs: 5_000 }),
+    config: parseRuntimeOpenCodeConfig({
+      timeoutMs: 5_000,
+      ...configOverride,
+    }),
     instanceId: "opencode-runtime",
     workspaceDirectory: process.cwd(),
     spawnProcess,
     fetch: api.fetch,
     terminationGraceMs: 500,
+    ...runtimeOverride,
   });
   return {
     runtime,
@@ -467,6 +480,53 @@ describe("runtime-opencode", () => {
     expect(runtime.health?.({
       signal: new AbortController().signal,
     })).toMatchObject({ details: { state: "created" } });
+  });
+
+  it("preserves the classified startup failure when isolation cleanup rejects", async () => {
+    let removalCalls = 0;
+    const runtime = createRuntimeOpenCode({
+      config: parseRuntimeOpenCodeConfig({ timeoutMs: 2_000 }),
+      instanceId: "opencode-runtime",
+      workspaceDirectory: process.cwd(),
+      terminationGraceMs: 500,
+      spawnProcess(_command, args) {
+        const child = new FakeProcess();
+        if (args[0] === "--version") {
+          child.complete(`${OPEN_CODE_SECURE_SERVER_VERSION}\n`);
+        } else {
+          queueMicrotask(() => {
+            child.stdout.write(
+              "opencode server listening on http://0.0.0.0:1234\n",
+            );
+          });
+        }
+        return child;
+      },
+      async removeIsolation(root) {
+        removalCalls += 1;
+        if (removalCalls === 1) throw new Error("cleanup failed");
+        await rm(root, { recursive: true, force: true });
+      },
+    });
+
+    await expect(runtime.start?.({
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({
+      code: "START_FAILED",
+      message: expect.stringContaining("loopback HTTP endpoint"),
+    });
+    expect(runtime.health?.({
+      signal: new AbortController().signal,
+    })).toMatchObject({ details: { state: "draining" } });
+
+    await runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "startup-failed",
+    });
+    expect(removalCalls).toBe(2);
+    expect(runtime.health?.({
+      signal: new AbortController().signal,
+    })).toMatchObject({ details: { state: "stopped" } });
   });
 
   it("publishes only bounded accessor-free redacted process causes", async () => {
@@ -637,6 +697,86 @@ describe("runtime-opencode", () => {
       reason: "shutdown",
     });
     expect(serverChild()?.signals).toEqual(["SIGTERM"]);
+  });
+
+  it("reaches stopped with a classified error when isolation cleanup rejects", async () => {
+    const api = new FakeOpenCodeApi();
+    let isolationRoot: string | undefined;
+    let removalCalls = 0;
+    const { runtime } = harness(api, true, {}, {
+      async removeIsolation(root) {
+        isolationRoot = root;
+        removalCalls += 1;
+        if (removalCalls === 1) {
+          throw new Error("filesystem cleanup rejected");
+        }
+        await rm(root, { recursive: true, force: true });
+      },
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    try {
+      await expect(runtime.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      })).rejects.toMatchObject({
+        name: "RuntimeOpenCodeError",
+        code: "ISOLATION_CLEANUP_FAILED",
+        message: "filesystem cleanup rejected",
+      });
+      expect(runtime.health?.({
+        signal: new AbortController().signal,
+      })).toMatchObject({ details: { state: "stopped" } });
+      await expect(runtime.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      })).resolves.toBeUndefined();
+      expect(removalCalls).toBe(2);
+    } finally {
+      if (isolationRoot !== undefined) {
+        await rm(isolationRoot, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("waits for active turns until the drain deadline", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-24T20:00:00.000Z"));
+      const api = new FakeOpenCodeApi();
+      const { runtime } = harness(api);
+      await runtime.start?.({ signal: new AbortController().signal });
+      const turn = runtime.runTurn(request("draining"), context());
+      await vi.waitFor(() => expect(api.prompts).toHaveLength(1));
+      const draining = Promise.resolve(runtime.drain?.({
+        signal: new AbortController().signal,
+        deadline: new Date(Date.now() + 1_000).toISOString(),
+      }));
+      const rejected = expect(draining).rejects.toMatchObject({
+        code: "DRAIN_TIMEOUT",
+      });
+      let settled = false;
+      void draining.then(
+        () => { settled = true; },
+        () => { settled = true; },
+      );
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+
+      api.assistant("session-1", "after drain", "drain");
+      await expect(turn).resolves.toMatchObject({
+        status: "completed",
+        message: { content: [{ type: "text", text: "after drain" }] },
+      });
+      await runtime.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects wrong session linkage before any per-turn server request", async () => {
@@ -825,6 +965,98 @@ describe("runtime-opencode", () => {
     });
   });
 
+  it("rejects an SSE frame over maxLineBytes", async () => {
+    const api = new FakeOpenCodeApi();
+    const { runtime } = harness(api, true, { maxLineBytes: 1_024 });
+    await runtime.start?.({ signal: new AbortController().signal });
+    const turn = runtime.runTurn(request("oversized-sse"), context());
+    await vi.waitFor(() => expect(api.prompts).toHaveLength(1));
+
+    api.emit("oversized.event", { padding: "x".repeat(2_048) });
+
+    await expect(turn).rejects.toMatchObject({
+      name: "RuntimeOpenCodeError",
+      code: "SSE_FAILED",
+      message: expect.stringContaining("exceeds 1024 bytes"),
+    });
+    expect(
+      api.requests.filter(
+        (entry) => entry.path === "/session/session-1/abort",
+      ),
+    ).toHaveLength(1);
+    await runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+  });
+
+  it("classifies a turn timeout as TURN_TIMEOUT", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = new FakeOpenCodeApi();
+      const { runtime } = harness(api, true, { timeoutMs: 1_000 });
+      await runtime.start?.({ signal: new AbortController().signal });
+      const turn = runtime.runTurn(request("timeout"), context());
+      const rejected = expect(turn).rejects.toMatchObject({
+        name: "RuntimeOpenCodeError",
+        code: "TURN_TIMEOUT",
+      });
+      await vi.waitFor(() => expect(api.prompts).toHaveLength(1));
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await rejected;
+      expect(
+        api.requests.filter(
+          (entry) => entry.path === "/session/session-1/abort",
+        ),
+      ).toHaveLength(1);
+      await runtime.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("preserves TURN_TIMEOUT when session abort cleanup also fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const api = new FakeOpenCodeApi();
+      api.abortFailure = new Error("abort cleanup failed");
+      const { runtime, serverChild } = harness(
+        api,
+        true,
+        { timeoutMs: 1_000 },
+      );
+      await runtime.start?.({ signal: new AbortController().signal });
+      const turn = runtime.runTurn(request("timeout-with-cleanup-failure"), context());
+      const rejected = expect(turn).rejects.toMatchObject({
+        name: "RuntimeOpenCodeError",
+        code: "TURN_TIMEOUT",
+      });
+      await vi.waitFor(() => expect(api.prompts).toHaveLength(1));
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      await rejected;
+      expect(runtime.health?.({
+        signal: new AbortController().signal,
+      })).toMatchObject({
+        status: "degraded",
+        details: { state: "draining", activeTurns: 0 },
+      });
+      expect(serverChild()?.signals[0]).toBe("SIGTERM");
+      await runtime.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("quarantines synchronously on native tools, aborts siblings, and rejects new turns before process exit", async () => {
     const api = new FakeOpenCodeApi();
     const { runtime, serverChild } = harness(api, false);
@@ -850,7 +1082,7 @@ describe("runtime-opencode", () => {
       expect(runtime.health?.({
         signal: new AbortController().signal,
       })).toMatchObject({
-        status: "degraded",
+        status: "unhealthy",
         details: {
           state: "draining",
           quarantineCode: "NATIVE_TOOL_PROTOCOL_VIOLATION",
@@ -860,7 +1092,7 @@ describe("runtime-opencode", () => {
     expect(serverChild()?.closed).toBe(false);
     expect(serverChild()?.signals[0]).toBe("SIGTERM");
     await expect(runtime.runTurn(request("later"), context())).rejects.toMatchObject({
-      code: "RUNTIME_NOT_RUNNING",
+      code: "NATIVE_TOOL_PROTOCOL_VIOLATION",
     });
     await expect(first).rejects.toMatchObject({
       code: "NATIVE_TOOL_PROTOCOL_VIOLATION",
@@ -924,7 +1156,7 @@ describe("runtime-opencode", () => {
     expect(runtime.health?.({
       signal: new AbortController().signal,
     })).toMatchObject({
-      status: "degraded",
+      status: "unhealthy",
       details: {
         state: "draining",
         quarantineCode: "NATIVE_TOOL_PROTOCOL_VIOLATION",
@@ -932,6 +1164,48 @@ describe("runtime-opencode", () => {
     });
     expect(serverChild()?.signals[0]).toBe("SIGTERM");
     serverChild()?.closeNow("SIGTERM");
+    await runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+  });
+
+  it("quarantines on a post-running server crash", async () => {
+    const api = new FakeOpenCodeApi();
+    const { runtime, serverChild } = harness(api, false);
+    await runtime.start?.({ signal: new AbortController().signal });
+    const turn = runtime.runTurn(request("before-crash"), context());
+    await vi.waitFor(() => expect(api.prompts).toHaveLength(1));
+    api.assistant("session-1", "completed", "before-crash");
+    await expect(turn).resolves.toMatchObject({
+      status: "completed",
+      message: { content: [{ type: "text", text: "completed" }] },
+    });
+
+    serverChild()?.closeNow(null, 1);
+
+    await vi.waitFor(() => {
+      expect(runtime.health?.({
+        signal: new AbortController().signal,
+      })).toMatchObject({
+        status: "unhealthy",
+        details: {
+          state: "draining",
+          quarantineCode: "SERVER_EXITED",
+        },
+      });
+    });
+    expect(runtime.diagnostics?.({
+      signal: new AbortController().signal,
+      verbose: false,
+    })).toContainEqual(expect.objectContaining({
+      severity: "error",
+      message: expect.stringContaining("SERVER_EXITED"),
+    }));
+    await expect(runtime.runTurn(
+      request("after-crash"),
+      context(),
+    )).rejects.toMatchObject({ code: "SERVER_EXITED" });
     await runtime.stop?.({
       signal: new AbortController().signal,
       reason: "shutdown",

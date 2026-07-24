@@ -54,6 +54,11 @@ import {
   type OpenCodeEventSubscription,
   type OpenCodeServerEvent,
 } from "./server.js";
+import {
+  extractVersion,
+  parseStableVersion,
+  versionAtLeast,
+} from "./version.js";
 
 type RuntimeState = "created" | "starting" | "running" | "draining" | "stopped";
 const SAFE_CAUSE_MESSAGE_CHARS = 4_096;
@@ -75,6 +80,27 @@ interface PartState {
   text: string;
   emitted: string;
   readonly messageId: string;
+}
+
+interface TurnResources {
+  sessionId?: string;
+  releaseSession?: () => void;
+  subscription?: OpenCodeEventSubscription;
+  promptDispatchAttempted: boolean;
+  completedSafely: boolean;
+}
+
+interface TurnStreamState {
+  assistantMessageId?: string;
+  completedAssistantMessageId?: string;
+  providerFailure?: string;
+  usage?: RuntimeUsage;
+  readonly parts: Map<string, PartState>;
+  readonly partOrder: string[];
+  readonly completion: Promise<void>;
+  isSettled(): boolean;
+  complete(): void;
+  fail(error: unknown): void;
 }
 
 function ownDataValue(value: unknown, key: PropertyKey): unknown {
@@ -140,6 +166,7 @@ export interface CreateRuntimeOpenCodeOptions {
   readonly spawnProcess?: SpawnProcess;
   readonly fetch?: typeof globalThis.fetch;
   readonly terminationGraceMs?: number;
+  readonly removeIsolation?: (root: string) => Promise<void>;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -196,24 +223,6 @@ function safeCause(
   }
   delete snapshot.stack;
   return Object.freeze(snapshot);
-}
-
-function parseVersion(value: string): [number, number, number] | undefined {
-  const match = /(?:^|\s|v)(\d+)\.(\d+)\.(\d+)(?:\s|$)/u.exec(value);
-  return match === null
-    ? undefined
-    : [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-function atLeast(
-  actual: readonly [number, number, number],
-  minimum: readonly [number, number, number],
-): boolean {
-  for (let index = 0; index < 3; index += 1) {
-    if ((actual[index] ?? 0) > (minimum[index] ?? 0)) return true;
-    if ((actual[index] ?? 0) < (minimum[index] ?? 0)) return false;
-  }
-  return true;
 }
 
 function textOf(message: TurnMessage): string {
@@ -375,6 +384,495 @@ function nativeToolViolation(): RuntimeOpenCodeError {
   );
 }
 
+function validateTurnRequest(
+  request: RuntimeTurnRequest,
+  instanceId: string,
+): void {
+  if (!isRuntimeOpenCodeModel(request.model)) {
+    throw new RuntimeOpenCodeError(
+      "MODEL_INVALID",
+      "OpenCode model must use provider/model",
+      { retryability: "not-retryable" },
+    );
+  }
+  if (request.tools.length > 0) {
+    throw new RuntimeOpenCodeError(
+      "TOOLS_UNSUPPORTED",
+      "runtime-opencode does not expose Core tools",
+      { retryability: "not-retryable" },
+    );
+  }
+  if (request.options?.responseSchema !== undefined) {
+    throw new RuntimeOpenCodeError(
+      "STRUCTURED_OUTPUT_UNSUPPORTED",
+      "runtime-opencode does not support response schemas",
+      { retryability: "not-retryable" },
+    );
+  }
+  const sessionRoute = request.session?.route;
+  if (
+    request.session !== undefined
+    && sessionRoute?.runtimeInstanceId !== instanceId
+  ) {
+    throw new RuntimeOpenCodeError(
+      "SESSION_INVALID",
+      "OpenCode session belongs to another runtime instance",
+      { retryability: "not-retryable" },
+    );
+  }
+  if (
+    request.session !== undefined
+    && sessionRoute?.model !== request.model
+  ) {
+    throw new RuntimeOpenCodeError(
+      "SESSION_INVALID",
+      "OpenCode session belongs to another model route",
+      { retryability: "not-retryable" },
+    );
+  }
+  if (
+    request.session !== undefined
+    && request.session.conversationId !== request.conversationId
+  ) {
+    throw new RuntimeOpenCodeError(
+      "SESSION_INVALID",
+      "OpenCode session belongs to another conversation",
+      { retryability: "not-retryable" },
+    );
+  }
+}
+
+function cancelledTurnResult(
+  request: RuntimeTurnRequest,
+  sessionId: string | undefined,
+  instanceId: string,
+): RuntimeTurnResult {
+  return {
+    status: "cancelled",
+    ...(sessionId === undefined ? {} : {
+      session: linkedSession(
+        instanceId,
+        sessionId,
+        request.conversationId,
+        request.model,
+      ),
+    }),
+  };
+}
+
+function createTurnStreamState(): TurnStreamState {
+  let settled = false;
+  let resolveCompletion!: () => void;
+  let rejectCompletion!: (error: unknown) => void;
+  const completion = new Promise<void>((resolve, reject) => {
+    resolveCompletion = resolve;
+    rejectCompletion = reject;
+  });
+  void completion.catch(() => undefined);
+  return {
+    parts: new Map<string, PartState>(),
+    partOrder: [],
+    completion,
+    isSettled: () => settled,
+    complete() {
+      if (settled) return;
+      settled = true;
+      resolveCompletion();
+    },
+    fail(error) {
+      if (settled) return;
+      settled = true;
+      rejectCompletion(error);
+    },
+  };
+}
+
+async function emitRemaining(
+  stream: TurnStreamState,
+  context: RuntimeTurnContext,
+): Promise<void> {
+  for (const id of stream.partOrder) {
+    const part = stream.parts.get(id);
+    if (
+      part === undefined
+      || part.messageId !== stream.assistantMessageId
+      || !part.text.startsWith(part.emitted)
+    ) continue;
+    const delta = part.text.slice(part.emitted.length);
+    if (delta === "") continue;
+    part.emitted += delta;
+    await context.emit({
+      type: part.type === "text" ? "text-delta" : "thinking-delta",
+      delta,
+    });
+  }
+}
+
+async function handleTurnEvent(
+  event: OpenCodeServerEvent,
+  options: {
+    readonly sessionId: string;
+    readonly stream: TurnStreamState;
+    readonly context: RuntimeTurnContext;
+    readonly quarantine: (failure: RuntimeOpenCodeError) => RuntimeOpenCodeError;
+    readonly secrets: () => readonly string[];
+  },
+): Promise<void> {
+  const { stream } = options;
+  const observedSessionId = eventSessionId(event);
+  const part = record(event.properties.part);
+  const nativeActivity = (
+    event.type === "message.part.updated" && part.type === "tool"
+  ) || event.type === "permission.asked";
+  if (
+    nativeActivity
+    && (observedSessionId === undefined || observedSessionId === options.sessionId)
+  ) {
+    const failure = options.quarantine(nativeToolViolation());
+    stream.fail(failure);
+    throw failure;
+  }
+  if (
+    observedSessionId !== undefined
+    && observedSessionId !== options.sessionId
+  ) return;
+
+  if (event.type === "message.updated") {
+    const info = record(event.properties.info);
+    if (info.role !== "assistant") return;
+    if (typeof info.id === "string") stream.assistantMessageId = info.id;
+    if (record(info.time).completed === undefined) return;
+    if (stream.assistantMessageId !== undefined) {
+      stream.completedAssistantMessageId = stream.assistantMessageId;
+    }
+    if (info.error !== undefined) {
+      stream.providerFailure = redact(
+        providerErrorMessage(info.error),
+        options.secrets(),
+      );
+    }
+    const finalUsage = usageOf(info.tokens);
+    if (finalUsage !== undefined) stream.usage = finalUsage;
+    await emitRemaining(stream, options.context);
+    if (finalUsage !== undefined) {
+      await options.context.emit({ type: "usage", usage: finalUsage });
+    }
+    return;
+  }
+  if (event.type === "message.part.updated") {
+    if (part.type === "step-finish") {
+      const stepUsage = usageOf(part.tokens);
+      if (stepUsage !== undefined) stream.usage = stepUsage;
+      return;
+    }
+    if (
+      (part.type !== "text" && part.type !== "reasoning")
+      || typeof part.id !== "string"
+      || typeof part.messageID !== "string"
+    ) return;
+    const existing = stream.parts.get(part.id);
+    if (existing === undefined) {
+      stream.parts.set(part.id, {
+        type: part.type,
+        text: typeof part.text === "string" ? part.text : "",
+        emitted: "",
+        messageId: part.messageID,
+      });
+      stream.partOrder.push(part.id);
+    } else if (typeof part.text === "string") {
+      existing.text = part.text;
+    }
+    return;
+  }
+  if (event.type === "message.part.delta") {
+    if (
+      typeof event.properties.partID !== "string"
+      || event.properties.field !== "text"
+      || typeof event.properties.delta !== "string"
+    ) return;
+    const current = stream.parts.get(event.properties.partID);
+    if (
+      current === undefined
+      || current.messageId !== stream.assistantMessageId
+    ) return;
+    current.text += event.properties.delta;
+    current.emitted += event.properties.delta;
+    await options.context.emit({
+      type: current.type === "text" ? "text-delta" : "thinking-delta",
+      delta: event.properties.delta,
+    });
+    return;
+  }
+  if (event.type === "session.error") {
+    stream.providerFailure = redact(
+      providerErrorMessage(event.properties.error),
+      options.secrets(),
+    );
+    await options.context.emit({
+      type: "diagnostic",
+      diagnostic: diagnostic(
+        "runtime-opencode.provider",
+        "error",
+        stream.providerFailure,
+      ),
+    });
+    return;
+  }
+  if (event.type === "session.status") {
+    const status = record(event.properties.status);
+    if (
+      status.type === "idle"
+      && (
+        stream.providerFailure !== undefined
+        || (
+          stream.completedAssistantMessageId !== undefined
+          && stream.completedAssistantMessageId === stream.assistantMessageId
+        )
+      )
+    ) stream.complete();
+  }
+}
+
+async function prepareTurnSession(options: {
+  readonly client: OpenCodeServerClient;
+  readonly agentName: string;
+  readonly request: RuntimeTurnRequest;
+  readonly signal: AbortSignal;
+  readonly operation: ActiveOperation;
+  readonly resources: TurnResources;
+  readonly acquireSession: (
+    sessionId: string,
+    signal: AbortSignal,
+  ) => Promise<() => void>;
+  readonly context: RuntimeTurnContext;
+  readonly instanceId: string;
+}): Promise<string> {
+  if (options.resources.sessionId === undefined) {
+    const created = await options.client.createSession(
+      options.agentName,
+      options.request.model,
+      options.signal,
+    );
+    options.resources.sessionId = created.id;
+    options.operation.sessionId = created.id;
+    options.resources.releaseSession = await options.acquireSession(
+      created.id,
+      options.signal,
+    );
+    await options.context.emit({
+      type: "session",
+      session: linkedSession(
+        options.instanceId,
+        created.id,
+        options.request.conversationId,
+        options.request.model,
+      ),
+    });
+    return created.id;
+  }
+  const sessionId = options.resources.sessionId;
+  options.operation.sessionId = sessionId;
+  options.resources.releaseSession = await options.acquireSession(
+    sessionId,
+    options.signal,
+  );
+  await options.client.secureSession(sessionId, options.signal);
+  return sessionId;
+}
+
+function classifyTurnFailure(
+  error: unknown,
+  options: {
+    readonly request: RuntimeTurnRequest;
+    readonly sessionId: string | undefined;
+    readonly instanceId: string;
+    readonly turnSignal: AbortSignal;
+    readonly timeoutSignal: AbortSignal;
+    readonly combinedSignal: AbortSignal;
+    readonly quarantineFailure: RuntimeOpenCodeError | undefined;
+    readonly secrets: readonly string[];
+  },
+): RuntimeTurnResult {
+  if (options.turnSignal.reason instanceof RuntimeOpenCodeError) {
+    throw options.turnSignal.reason;
+  }
+  if (error instanceof RuntimeOpenCodeError) throw error;
+  if (options.request.signal.aborted) {
+    return cancelledTurnResult(
+      options.request,
+      options.sessionId,
+      options.instanceId,
+    );
+  }
+  if (options.timeoutSignal.aborted) {
+    throw new RuntimeOpenCodeError(
+      "TURN_TIMEOUT",
+      redact(abortReason(options.timeoutSignal), options.secrets),
+      {
+        retryability: "unknown",
+        sideEffects: "unknown",
+        cause: safeCause(error, options.secrets),
+      },
+    );
+  }
+  if (
+    error instanceof OpenCodeServerHttpError
+    && error.status === 404
+    && options.request.session !== undefined
+  ) {
+    throw new RuntimeOpenCodeError(
+      RUNTIME_SESSION_UNAVAILABLE_CODE,
+      "OpenCode session no longer exists",
+      {
+        retryability: "not-retryable",
+        sideEffects: "none",
+        cause: safeCause(error, options.secrets),
+      },
+    );
+  }
+  if (options.quarantineFailure !== undefined) {
+    throw options.quarantineFailure;
+  }
+  if (options.combinedSignal.aborted) {
+    return cancelledTurnResult(
+      options.request,
+      options.sessionId,
+      options.instanceId,
+    );
+  }
+  throw new RuntimeOpenCodeError(
+    "PROVIDER_FAILED",
+    redact(error, options.secrets),
+    {
+      retryability: "unknown",
+      sideEffects: "unknown",
+      cause: safeCause(error, options.secrets),
+    },
+  );
+}
+
+async function cleanupTurn(options: {
+  readonly resources: TurnResources;
+  readonly client: OpenCodeServerClient;
+  readonly turnController: AbortController;
+  readonly operation: ActiveOperation;
+  readonly active: Set<ActiveOperation>;
+  readonly settleActive: () => void;
+  readonly timeoutMs: number;
+  readonly quarantineFailure: () => RuntimeOpenCodeError | undefined;
+  readonly secrets: () => readonly string[];
+  readonly degrade: () => void;
+}): Promise<RuntimeOpenCodeError | undefined> {
+  let cleanupFailure: RuntimeOpenCodeError | undefined;
+  try {
+    if (options.resources.subscription !== undefined) {
+      try {
+        options.resources.subscription.close(
+          new DOMException("Turn settled", "AbortError"),
+        );
+        await waitBounded(
+          options.resources.subscription.done.catch(() => undefined),
+          Math.min(options.timeoutMs, 10_000),
+          "OpenCode event subscription did not close",
+        );
+      } catch (error) {
+        cleanupFailure = new RuntimeOpenCodeError(
+          "SSE_SHUTDOWN_FAILED",
+          redact(error, options.secrets()),
+          {
+            retryability: "not-retryable",
+            sideEffects: "unknown",
+            cause: safeCause(error, options.secrets()),
+          },
+        );
+        options.degrade();
+      }
+    }
+    if (
+      options.resources.sessionId !== undefined
+      && options.resources.promptDispatchAttempted
+      && !options.resources.completedSafely
+      && options.quarantineFailure() === undefined
+    ) {
+      try {
+        await options.client.abortSession(options.resources.sessionId);
+      } catch (error) {
+        cleanupFailure ??= new RuntimeOpenCodeError(
+          "SESSION_ABORT_FAILED",
+          redact(error, options.secrets()),
+          {
+            retryability: "not-retryable",
+            sideEffects: "unknown",
+            cause: safeCause(error, options.secrets()),
+          },
+        );
+        options.degrade();
+      }
+    }
+  } finally {
+    options.resources.releaseSession?.();
+    options.turnController.abort();
+    options.active.delete(options.operation);
+    options.settleActive();
+  }
+  return options.quarantineFailure() === undefined
+    ? cleanupFailure
+    : undefined;
+}
+
+async function drainActiveOperations(
+  operations: readonly ActiveOperation[],
+  context: ModuleDrainContext,
+  secrets: readonly string[],
+): Promise<void> {
+  const deadlineController = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  if (context.deadline !== undefined) {
+    const deadline = Date.parse(context.deadline);
+    if (!Number.isFinite(deadline)) {
+      throw new RuntimeOpenCodeError(
+        "DRAIN_DEADLINE_INVALID",
+        "runtime-opencode received an invalid drain deadline",
+        { retryability: "not-retryable", sideEffects: "none" },
+      );
+    }
+    const timeout = (): void => {
+      const error = new Error("OpenCode drain deadline reached");
+      error.name = "TimeoutError";
+      deadlineController.abort(error);
+    };
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) timeout();
+    else {
+      timer = setTimeout(timeout, remaining);
+      timer.unref?.();
+    }
+  }
+  const signal = context.deadline === undefined
+    ? context.signal
+    : AbortSignal.any([context.signal, deadlineController.signal]);
+  try {
+    await waitAbortable(
+      Promise.all(operations.map((operation) => operation.settled)).then(
+        () => undefined,
+      ),
+      signal,
+    );
+  } catch (error) {
+    throw new RuntimeOpenCodeError(
+      deadlineController.signal.aborted ? "DRAIN_TIMEOUT" : "DRAIN_ABORTED",
+      redact(error, secrets),
+      {
+        retryability: "not-retryable",
+        sideEffects: "unknown",
+        cause: safeCause(error, secrets),
+      },
+    );
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Runtime {
   let state: RuntimeState = "created";
   let version: string | undefined;
@@ -387,6 +885,8 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
   let quarantineFailure: RuntimeOpenCodeError | undefined;
   const active = new Set<ActiveOperation>();
   const sessionTails = new Map<string, Promise<void>>();
+  const removeIsolation = options.removeIsolation
+    ?? ((root: string) => rm(root, { recursive: true, force: true }));
 
   const configuredSecrets = Object.values(options.config.environment);
   const secrets = (): readonly string[] => [
@@ -492,12 +992,12 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           ...processOptions(signal, versionEnvironment),
           args: ["--version"],
         });
-        const actual = parseVersion(output);
-        const minimum = parseVersion(options.config.minimumVersion);
+        const actual = extractVersion(output);
+        const minimum = parseStableVersion(options.config.minimumVersion);
         if (
           actual === undefined
           || minimum === undefined
-          || !atLeast(actual, minimum)
+          || !versionAtLeast(actual, minimum)
         ) {
           throw new RuntimeOpenCodeError(
             "VERSION_UNSUPPORTED",
@@ -525,7 +1025,14 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
         );
         localServer = await startOpenCodeServerProcess({
           ...processOptions(signal, environment),
-          args: ["serve", "--hostname", "127.0.0.1", "--port", "0", "--pure"],
+          args: [
+            "serve",
+            "--hostname",
+            "127.0.0.1",
+            "--port",
+            "0",
+            ...(options.config.pure ? ["--pure"] : []),
+          ],
           ...(options.terminationGraceMs === undefined ? {} : {
             terminationGraceMs: options.terminationGraceMs,
           }),
@@ -542,10 +1049,10 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
         });
         client = localClient;
         const healthVersion = await localClient.health(signal);
-        const healthTuple = parseVersion(healthVersion);
+        const healthTuple = extractVersion(healthVersion);
         if (
           healthTuple === undefined
-          || !atLeast(healthTuple, minimum)
+          || !versionAtLeast(healthTuple, minimum)
           || healthVersion !== actual.join(".")
         ) {
           throw new RuntimeOpenCodeError(
@@ -571,6 +1078,7 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           ));
         });
       } catch (error) {
+        let isolationCleanupFailed = false;
         if (error instanceof OpenCodeProcessTerminationError) {
           terminationFailure ??= error;
         }
@@ -585,24 +1093,30 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           }
         }
         if (localIsolation !== undefined && terminationFailure === undefined) {
-          await rm(localIsolation.root, { recursive: true, force: true });
-          if (isolation === localIsolation) isolation = undefined;
+          try {
+            await removeIsolation(localIsolation.root);
+            if (isolation === localIsolation) isolation = undefined;
+          } catch {
+            isolationCleanupFailed = true;
+          }
         }
         server = undefined;
         client = undefined;
-        if (error instanceof OpenCodeProcessTerminationError) {
+        if (terminationFailure !== undefined) {
           state = "draining";
           throw new RuntimeOpenCodeError(
             "PROCESS_TERMINATION_FAILED",
-            redact(error, secrets()),
+            redact(terminationFailure, secrets()),
             {
               retryability: "not-retryable",
               sideEffects: "none",
-              cause: safeCause(error, secrets()),
+              cause: safeCause(terminationFailure, secrets()),
             },
           );
         }
-        if (state === "starting") state = "created";
+        if (state === "starting") {
+          state = isolationCleanupFailed ? "draining" : "created";
+        }
         if (error instanceof RuntimeOpenCodeError) throw error;
         throw new RuntimeOpenCodeError(
           "START_FAILED",
@@ -619,12 +1133,14 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
       }
     },
 
-    async drain(_context: ModuleDrainContext) {
-      if (state !== "stopped") state = "draining";
+    async drain(context: ModuleDrainContext) {
+      if (state === "stopped") return;
+      state = "draining";
+      await drainActiveOperations([...active], context, secrets());
     },
 
     async stop(_context: ModuleStopContext) {
-      if (state === "stopped") return;
+      if (state === "stopped" && isolation === undefined) return;
       state = "draining";
       const operations = [...active];
       const stopReason = new DOMException("Runtime stopped", "AbortError");
@@ -652,9 +1168,22 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
             : new OpenCodeProcessTerminationError(redact(error, secrets()));
         }
       }
+      let isolationFailure: RuntimeOpenCodeError | undefined;
       if (terminationFailure === undefined && isolation !== undefined) {
-        await rm(isolation.root, { recursive: true, force: true });
-        isolation = undefined;
+        try {
+          await removeIsolation(isolation.root);
+          isolation = undefined;
+        } catch (error) {
+          isolationFailure = new RuntimeOpenCodeError(
+            "ISOLATION_CLEANUP_FAILED",
+            redact(error, secrets()),
+            {
+              retryability: "not-retryable",
+              sideEffects: "unknown",
+              cause: safeCause(error, secrets()),
+            },
+          );
+        }
       }
       if (terminationFailure !== undefined) {
         state = "draining";
@@ -681,15 +1210,20 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
         );
       }
       state = "stopped";
+      if (isolationFailure !== undefined) throw isolationFailure;
     },
 
     health(_context: ModuleHealthContext): ModuleHealth {
+      const unhealthy = quarantineFailure !== undefined
+        || terminationFailure !== undefined;
       return {
-        status: state === "running"
-          ? "healthy"
-          : state === "draining"
-            ? "degraded"
-            : "unknown",
+        status: unhealthy
+          ? "unhealthy"
+          : state === "running"
+            ? "healthy"
+            : state === "draining"
+              ? "degraded"
+              : "unknown",
         checkedAt: new Date().toISOString(),
         summary: `runtime-opencode is ${state}`,
         details: {
@@ -704,14 +1238,18 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
     },
 
     diagnostics(_context: ModuleDiagnosticsContext): readonly ModuleDiagnostic[] {
+      const lifecycleFailure = quarantineFailure !== undefined
+        || terminationFailure !== undefined;
       return [
         diagnostic(
           "runtime-opencode.lifecycle",
-          quarantineFailure === undefined ? "info" : "error",
+          lifecycleFailure ? "error" : "info",
           `Runtime state: ${state}`
           + (version === undefined ? "" : ` (${version})`)
           + (quarantineFailure === undefined
-            ? ""
+            ? terminationFailure === undefined
+              ? ""
+              : "; process termination failed"
             : `; quarantined by ${quarantineFailure.code}`),
         ),
       ];
@@ -729,6 +1267,7 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
       request: RuntimeTurnRequest,
       context: RuntimeTurnContext,
     ): Promise<RuntimeTurnResult> {
+      if (quarantineFailure !== undefined) throw quarantineFailure;
       if (state !== "running" || client === undefined || agentName === undefined) {
         throw new RuntimeOpenCodeError(
           "RUNTIME_NOT_RUNNING",
@@ -736,58 +1275,7 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           { retryability: "not-retryable" },
         );
       }
-      if (!isRuntimeOpenCodeModel(request.model)) {
-        throw new RuntimeOpenCodeError(
-          "MODEL_INVALID",
-          "OpenCode model must use provider/model",
-          { retryability: "not-retryable" },
-        );
-      }
-      if (request.tools.length > 0) {
-        throw new RuntimeOpenCodeError(
-          "TOOLS_UNSUPPORTED",
-          "runtime-opencode does not expose Core tools",
-          { retryability: "not-retryable" },
-        );
-      }
-      if (request.options?.responseSchema !== undefined) {
-        throw new RuntimeOpenCodeError(
-          "STRUCTURED_OUTPUT_UNSUPPORTED",
-          "runtime-opencode does not support response schemas",
-          { retryability: "not-retryable" },
-        );
-      }
-      const sessionRoute = request.session?.route;
-      if (
-        request.session !== undefined
-        && sessionRoute?.runtimeInstanceId !== options.instanceId
-      ) {
-        throw new RuntimeOpenCodeError(
-          "SESSION_INVALID",
-          "OpenCode session belongs to another runtime instance",
-          { retryability: "not-retryable" },
-        );
-      }
-      if (
-        request.session !== undefined
-        && sessionRoute?.model !== request.model
-      ) {
-        throw new RuntimeOpenCodeError(
-          "SESSION_INVALID",
-          "OpenCode session belongs to another model route",
-          { retryability: "not-retryable" },
-        );
-      }
-      if (
-        request.session !== undefined
-        && request.session.conversationId !== request.conversationId
-      ) {
-        throw new RuntimeOpenCodeError(
-          "SESSION_INVALID",
-          "OpenCode session belongs to another conversation",
-          { retryability: "not-retryable" },
-        );
-      }
+      validateTurnRequest(request, options.instanceId);
       if (request.signal.aborted) return { status: "cancelled" };
 
       const turnController = new AbortController();
@@ -815,191 +1303,41 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
       active.add(operation);
 
       const localClient = client;
-      let sessionId = request.session?.id;
-      let releaseSession: (() => void) | undefined;
-      let subscription: OpenCodeEventSubscription | undefined;
-      let output = "";
-      let usage: RuntimeUsage | undefined;
-      let providerFailure: string | undefined;
-      let assistantMessageId: string | undefined;
-      let completedAssistantMessageId: string | undefined;
-      let promptDispatchAttempted = false;
-      let turnCompletedSafely = false;
-      let completionSettled = false;
-      let resolveCompletion!: () => void;
-      let rejectCompletion!: (error: unknown) => void;
-      const completion = new Promise<void>((resolve, reject) => {
-        resolveCompletion = resolve;
-        rejectCompletion = reject;
-      });
-      const parts = new Map<string, PartState>();
-      const partOrder: string[] = [];
-
-      const complete = (): void => {
-        if (completionSettled) return;
-        completionSettled = true;
-        resolveCompletion();
+      const resources: TurnResources = {
+        ...(request.session === undefined ? {} : {
+          sessionId: request.session.id,
+        }),
+        promptDispatchAttempted: false,
+        completedSafely: false,
       };
-      const fail = (error: unknown): void => {
-        if (completionSettled) return;
-        completionSettled = true;
-        rejectCompletion(error);
-      };
-      const emitRemaining = async (): Promise<void> => {
-        for (const id of partOrder) {
-          const part = parts.get(id);
-          if (part === undefined || part.messageId !== assistantMessageId) continue;
-          if (!part.text.startsWith(part.emitted)) continue;
-          const delta = part.text.slice(part.emitted.length);
-          if (delta === "") continue;
-          part.emitted += delta;
-          if (part.type === "text") {
-            await context.emit({ type: "text-delta", delta });
-          } else {
-            await context.emit({ type: "thinking-delta", delta });
-          }
-        }
-      };
-      const onEvent = async (event: OpenCodeServerEvent): Promise<void> => {
-        const observedSessionId = eventSessionId(event);
-        const part = record(event.properties.part);
-        const isNativeToolPart = event.type === "message.part.updated"
-          && part.type === "tool";
-        const isNativePermission = event.type === "permission.asked";
-        const nativeActivityApplies = observedSessionId === undefined
-          || observedSessionId === sessionId;
-        if ((isNativeToolPart || isNativePermission) && nativeActivityApplies) {
-          const failure = quarantine(nativeToolViolation());
-          fail(failure);
-          throw failure;
-        }
-        if (
-          observedSessionId !== undefined
-          && observedSessionId !== sessionId
-        ) return;
-
-        if (event.type === "message.updated") {
-          const info = record(event.properties.info);
-          if (info.role !== "assistant") return;
-          if (typeof info.id === "string") assistantMessageId = info.id;
-          const time = record(info.time);
-          if (time.completed === undefined) return;
-          completedAssistantMessageId = assistantMessageId;
-          if (info.error !== undefined) {
-            providerFailure = redact(providerErrorMessage(info.error), secrets());
-          }
-          const finalUsage = usageOf(info.tokens);
-          if (finalUsage !== undefined) {
-            usage = finalUsage;
-          }
-          await emitRemaining();
-          if (finalUsage !== undefined) {
-            await context.emit({ type: "usage", usage: finalUsage });
-          }
-          return;
-        }
-        if (event.type === "message.part.updated") {
-          if (part.type === "step-finish") {
-            const stepUsage = usageOf(part.tokens);
-            if (stepUsage !== undefined) usage = stepUsage;
-            return;
-          }
-          if (
-            (part.type !== "text" && part.type !== "reasoning")
-            || typeof part.id !== "string"
-            || typeof part.messageID !== "string"
-          ) return;
-          const existing = parts.get(part.id);
-          if (existing === undefined) {
-            parts.set(part.id, {
-              type: part.type,
-              text: typeof part.text === "string" ? part.text : "",
-              emitted: "",
-              messageId: part.messageID,
-            });
-            partOrder.push(part.id);
-          } else if (typeof part.text === "string") {
-            existing.text = part.text;
-          }
-          return;
-        }
-        if (event.type === "message.part.delta") {
-          if (
-            typeof event.properties.partID !== "string"
-            || event.properties.field !== "text"
-            || typeof event.properties.delta !== "string"
-          ) return;
-          const current = parts.get(event.properties.partID);
-          if (current === undefined || current.messageId !== assistantMessageId) return;
-          const delta = event.properties.delta;
-          current.text += delta;
-          current.emitted += delta;
-          if (current.type === "text") {
-            output += delta;
-            await context.emit({ type: "text-delta", delta });
-          } else {
-            await context.emit({ type: "thinking-delta", delta });
-          }
-          return;
-        }
-        if (event.type === "session.error") {
-          providerFailure = redact(
-            providerErrorMessage(event.properties.error),
-            secrets(),
-          );
-          await context.emit({
-            type: "diagnostic",
-            diagnostic: diagnostic(
-              "runtime-opencode.provider",
-              "error",
-              providerFailure,
-            ),
-          });
-          return;
-        }
-        if (event.type === "session.status") {
-          const status = record(event.properties.status);
-          if (
-            status.type === "idle"
-            && (
-              providerFailure !== undefined
-              || (
-                completedAssistantMessageId !== undefined
-                && completedAssistantMessageId === assistantMessageId
-              )
-            )
-          ) complete();
-        }
-      };
+      const stream = createTurnStreamState();
+      let primaryFailure: unknown;
 
       try {
-        if (sessionId === undefined) {
-          const created = await localClient.createSession(
-            agentName,
-            request.model,
-            signal,
-          );
-          sessionId = created.id;
-          operation.sessionId = sessionId;
-          releaseSession = await acquireSession(sessionId, signal);
-          await context.emit({
-            type: "session",
-            session: linkedSession(
-              options.instanceId,
-              sessionId,
-              request.conversationId,
-              request.model,
-            ),
-          });
-        } else {
-          operation.sessionId = sessionId;
-          releaseSession = await acquireSession(sessionId, signal);
-          await localClient.secureSession(sessionId, signal);
-        }
-
-        subscription = localClient.subscribe(signal, onEvent);
+        const sessionId = await prepareTurnSession({
+          client: localClient,
+          agentName,
+          request,
+          signal,
+          operation,
+          resources,
+          acquireSession,
+          context,
+          instanceId: options.instanceId,
+        });
+        resources.subscription = localClient.subscribe(
+          signal,
+          (event) => handleTurnEvent(event, {
+            sessionId,
+            stream,
+            context,
+            quarantine,
+            secrets,
+          }),
+        );
+        const subscription = resources.subscription;
         void subscription.done.catch((error: unknown) => {
-          if (completionSettled || signal.aborted) return;
+          if (stream.isSettled() || signal.aborted) return;
           const failure = error instanceof RuntimeOpenCodeError
             ? error
             : new RuntimeOpenCodeError(
@@ -1007,16 +1345,18 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
                 redact(error, secrets()),
                 {
                   retryability: "unknown",
-                  sideEffects: promptDispatchAttempted ? "unknown" : "none",
+                  sideEffects: resources.promptDispatchAttempted
+                    ? "unknown"
+                    : "none",
                   cause: safeCause(error, secrets()),
                 },
               );
           turnController.abort(failure);
-          fail(failure);
+          stream.fail(failure);
         });
         await subscription.connected;
         if (signal.aborted) throw abortReason(signal);
-        promptDispatchAttempted = true;
+        resources.promptDispatchAttempted = true;
         await localClient.promptAsync(sessionId, {
           model: request.model,
           text: prompt(request.messages, request.session !== undefined),
@@ -1025,21 +1365,21 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
             variant: request.options.effort,
           }),
         }, signal);
-        await waitAbortable(completion, signal);
-        if (providerFailure !== undefined) {
+        await waitAbortable(stream.completion, signal);
+        if (stream.providerFailure !== undefined) {
           throw new RuntimeOpenCodeError(
             "PROVIDER_FAILED",
-            providerFailure,
+            stream.providerFailure,
             { retryability: "unknown", sideEffects: "unknown" },
           );
         }
-        await emitRemaining();
-        output = partOrder
-          .map((id) => parts.get(id))
+        await emitRemaining(stream, context);
+        const output = stream.partOrder
+          .map((id) => stream.parts.get(id))
           .filter((part): part is PartState => (
             part !== undefined
             && part.type === "text"
-            && part.messageId === assistantMessageId
+            && part.messageId === stream.assistantMessageId
           ))
           .map((part) => part.text)
           .join("");
@@ -1049,14 +1389,14 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           request.conversationId,
           request.model,
         );
-        turnCompletedSafely = true;
+        resources.completedSafely = true;
         return {
           status: "completed",
           message: {
             role: "assistant",
             content: [{ type: "text", text: output }],
           },
-          ...(usage === undefined ? {} : { usage }),
+          ...(stream.usage === undefined ? {} : { usage: stream.usage }),
           session: linked,
           metadata: {
             provider: "opencode",
@@ -1065,126 +1405,39 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
           } as JsonObject,
         };
       } catch (error) {
-        if (turnController.signal.reason instanceof RuntimeOpenCodeError) {
-          throw turnController.signal.reason;
+        try {
+          return classifyTurnFailure(error, {
+            request,
+            sessionId: resources.sessionId,
+            instanceId: options.instanceId,
+            turnSignal: turnController.signal,
+            timeoutSignal: timeoutController.signal,
+            combinedSignal: signal,
+            quarantineFailure,
+            secrets: secrets(),
+          });
+        } catch (classifiedFailure) {
+          primaryFailure = classifiedFailure;
+          throw classifiedFailure;
         }
-        if (error instanceof RuntimeOpenCodeError) throw error;
-        if (request.signal.aborted) {
-          return {
-            status: "cancelled",
-            ...(sessionId === undefined ? {} : {
-              session: linkedSession(
-                options.instanceId,
-                sessionId,
-                request.conversationId,
-                request.model,
-              ),
-            }),
-          };
-        }
-        if (timeoutController.signal.aborted) {
-          throw new RuntimeOpenCodeError(
-            "TURN_TIMEOUT",
-            redact(abortReason(timeoutController.signal), secrets()),
-            {
-              retryability: "unknown",
-              sideEffects: "unknown",
-              cause: safeCause(error, secrets()),
-            },
-          );
-        }
-        if (
-          error instanceof OpenCodeServerHttpError
-          && error.status === 404
-          && request.session !== undefined
-        ) {
-          throw new RuntimeOpenCodeError(
-            RUNTIME_SESSION_UNAVAILABLE_CODE,
-            "OpenCode session no longer exists",
-            {
-              retryability: "not-retryable",
-              sideEffects: "none",
-              cause: safeCause(error, secrets()),
-            },
-          );
-        }
-        if (quarantineFailure !== undefined) {
-          throw quarantineFailure;
-        }
-        if (signal.aborted) {
-          return {
-            status: "cancelled",
-            ...(sessionId === undefined ? {} : {
-              session: linkedSession(
-                options.instanceId,
-                sessionId,
-                request.conversationId,
-                request.model,
-              ),
-            }),
-          };
-        }
-        throw new RuntimeOpenCodeError(
-          "PROVIDER_FAILED",
-          redact(error, secrets()),
-          {
-            retryability: "unknown",
-            sideEffects: "unknown",
-            cause: safeCause(error, secrets()),
-          },
-        );
       } finally {
         clearTimeout(timeout);
-        let cleanupFailure: RuntimeOpenCodeError | undefined;
-        if (subscription !== undefined) {
-          subscription.close(new DOMException("Turn settled", "AbortError"));
-          try {
-            await waitBounded(
-              subscription.done.catch(() => undefined),
-              Math.min(options.config.timeoutMs, 10_000),
-              "OpenCode event subscription did not close",
-            );
-          } catch (error) {
-            cleanupFailure = new RuntimeOpenCodeError(
-              "SSE_SHUTDOWN_FAILED",
-              redact(error, secrets()),
-              {
-                retryability: "not-retryable",
-                sideEffects: "unknown",
-                cause: safeCause(error, secrets()),
-              },
-            );
+        const cleanupFailure = await cleanupTurn({
+          resources,
+          client: localClient,
+          turnController,
+          operation,
+          active,
+          settleActive,
+          timeoutMs: options.config.timeoutMs,
+          quarantineFailure: () => quarantineFailure,
+          secrets,
+          degrade() {
             state = "draining";
             beginServerClose();
-          }
-        }
-        if (
-          sessionId !== undefined
-          && promptDispatchAttempted
-          && !turnCompletedSafely
-          && quarantineFailure === undefined
-        ) {
-          try {
-            await localClient.abortSession(sessionId);
-          } catch (error) {
-            cleanupFailure ??= new RuntimeOpenCodeError(
-              "SESSION_ABORT_FAILED",
-              redact(error, secrets()),
-              {
-                retryability: "not-retryable",
-                sideEffects: "unknown",
-                cause: safeCause(error, secrets()),
-              },
-            );
-            state = "draining";
-            beginServerClose();
-          }
-        }
-        releaseSession?.();
-        turnController.abort();
-        active.delete(operation);
-        settleActive();
-        if (cleanupFailure !== undefined && quarantineFailure === undefined) {
+          },
+        });
+        if (cleanupFailure !== undefined && primaryFailure === undefined) {
           throw cleanupFailure;
         }
       }
