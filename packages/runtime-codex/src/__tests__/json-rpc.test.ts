@@ -114,4 +114,18 @@ describe("JsonRpcProcess server requests", () => {
       "Codex app-server exceeded the 16-request server queue limit",
     ]);
   });
+
+  it("fails closed on stdout line overflow", async () => {
+    const child = new FakeRpcChild();
+    const rpc = client(child);
+    const pending = rpc.request("initialize", {});
+    await vi.waitFor(() => expect(child.writes).toHaveLength(1));
+
+    child.stdout.write("x".repeat(64_001));
+
+    await expect(pending).rejects.toThrow(
+      "Codex app-server output exceeds the configured line limit",
+    );
+    await vi.waitFor(() => expect(child.killed).toBe(true));
+  });
 });
