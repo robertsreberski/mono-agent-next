@@ -20,7 +20,20 @@ function QuoteBlock({ text }: QuoteMessagePartProps) {
 }
 
 function MarkdownText() {
-  return <MarkdownTextPrimitive className="markdown" data-aui-quote-selectable />;
+  const consoleState = useConsole();
+  const operatorMessageId = useAuiState(
+    (state) => state.message.metadata.custom?.operatorMessageId,
+  );
+  const canQuote =
+    consoleState.selectedAgent?.capabilities.quotes === true
+    && typeof operatorMessageId === "string"
+    && operatorMessageId.length > 0;
+  return (
+    <MarkdownTextPrimitive
+      className="markdown"
+      data-aui-quote-selectable={canQuote ? true : "false"}
+    />
+  );
 }
 
 function EmptyPart({ status }: EmptyMessagePartProps) {
@@ -270,12 +283,11 @@ function Composer() {
   const canAttach =
     !isRunning
     && consoleState.selectedAgent?.capabilities.attachments === true;
-  const model = consoleState.selectedAgent?.models?.find((candidate) =>
-    candidate.id === consoleState.model
+  const models = consoleState.selectedAgent?.models;
+  const model = models?.find((candidate) =>
+    candidate.id === (consoleState.model || consoleState.selectedAgent?.defaults?.model)
   );
-  const effortOptions = model?.efforts ?? (
-    consoleState.selectedAgent?.defaults?.effort ? [consoleState.selectedAgent.defaults.effort] : []
-  );
+  const effortOptions = model?.efforts;
   return (
     <div className="composer-area">
       <AskUser />
@@ -329,20 +341,39 @@ function Composer() {
                   placeholder="runtime"
                   aria-label="Runtime override"
                 />
-                <select
-                  value={consoleState.model}
-                  onChange={(event) => {
-                    consoleState.setModel(event.target.value);
-                    consoleState.setEffort("");
-                  }}
-                  aria-label="Model"
-                >
-                  <option value="">Default model</option>
-                  {consoleState.selectedAgent.models?.map((option) => (
-                    <option key={option.id} value={option.id}>{option.label ?? option.id}</option>
-                  ))}
-                </select>
-                {effortOptions.length > 0 && (
+                {models === undefined ? (
+                  <input
+                    value={consoleState.model}
+                    onChange={(event) => {
+                      consoleState.setModel(event.target.value);
+                      consoleState.setEffort("");
+                    }}
+                    placeholder="model"
+                    aria-label="Model override"
+                  />
+                ) : (
+                  <select
+                    value={consoleState.model}
+                    onChange={(event) => {
+                      consoleState.setModel(event.target.value);
+                      consoleState.setEffort("");
+                    }}
+                    aria-label="Model"
+                  >
+                    <option value="">Default model</option>
+                    {models.map((option) => (
+                      <option key={option.id} value={option.id}>{option.label ?? option.id}</option>
+                    ))}
+                  </select>
+                )}
+                {effortOptions === undefined ? (
+                  <input
+                    value={consoleState.effort}
+                    onChange={(event) => consoleState.setEffort(event.target.value)}
+                    placeholder="effort"
+                    aria-label="Reasoning effort override"
+                  />
+                ) : (
                   <select
                     value={consoleState.effort}
                     onChange={(event) => consoleState.setEffort(event.target.value)}

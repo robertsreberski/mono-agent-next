@@ -176,12 +176,11 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
           )
           .map(async (conversation) => {
             const replay = await client.getReplay(conversation.id);
-            const triggerKind = triggerKindFromConversationId(conversation.id);
             return {
               agentId: entry.id,
               conversationId: conversation.id,
               ...(conversation.title === undefined ? {} : { title: conversation.title }),
-              ...(triggerKind === undefined ? {} : { triggerKind }),
+              ...(conversation.triggerKind === undefined ? {} : { triggerKind: conversation.triggerKind }),
               updatedAt: conversation.updatedAt,
               messages: replay.messages,
             };
@@ -284,9 +283,4 @@ function conversationKey(agentId: string, conversationId: string): string {
 function capabilityRecord(capabilities: DiscoveredOperator["capabilities"]): Readonly<Record<string, boolean>> {
   if (capabilities === undefined) return {};
   return Object.freeze(Object.fromEntries(Object.entries(capabilities).map(([name, enabled]) => [name, enabled])));
-}
-
-function triggerKindFromConversationId(conversationId: string): "cron" | "webhook" | undefined {
-  const match = /^(?:trigger|proactive):(cron|webhook):/u.exec(conversationId);
-  return match?.[1] as "cron" | "webhook" | undefined;
 }

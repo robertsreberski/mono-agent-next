@@ -670,7 +670,14 @@ describe("operator HTTP channel", () => {
       answerAsk,
       offerLiveInput,
       async listConversations() {
-        return { conversations: [{ conversationId: "conversation-controls", title: "Controls", updatedAt: now }] };
+        return {
+          conversations: [{
+            conversationId: "conversation-controls",
+            title: "Controls",
+            updatedAt: now,
+            metadata: { triggerKind: "webhook" },
+          }],
+        };
       },
       readReplay,
       async readConfig() { return { runtime: "pi", token: "[redacted]" }; },
@@ -718,8 +725,15 @@ describe("operator HTTP channel", () => {
 
     await expect(client.getInfo()).resolves.toMatchObject({
       capabilities: { liveInput: true, askUser: true, proactive: true, configView: true, replay: true },
+      models: [{ id: "openai:test" }, { id: "openai:fallback" }],
     });
-    await expect(client.getConversations()).resolves.toMatchObject({ conversations: [{ id: "conversation-controls", title: "Controls" }] });
+    await expect(client.getConversations()).resolves.toMatchObject({
+      conversations: [{
+        id: "conversation-controls",
+        title: "Controls",
+        triggerKind: "webhook",
+      }],
+    });
     await expect(client.getReplay("conversation-controls")).resolves.toMatchObject({ conversationId: "conversation-controls", messages: [{ id: "message-1", text: "remembered" }] });
     expect(readReplay).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "conversation-controls", limit: 10_000 }));
     await expect(client.getConfig()).resolves.toMatchObject({ value: { runtime: "pi", token: "[redacted]" }, redacted: true });
@@ -1215,6 +1229,7 @@ function identity(id: string, label: string): OperatorIdentityGrant {
     agent: { id, label },
     process: { pid: process.pid },
     defaults: { runtime: "pi", model: "openai:test", effort: "medium" },
+    models: [{ id: "openai:test" }, { id: "openai:fallback" }],
     configPath: "/config/mono-agent.config.json",
     projectRoot: "/project",
   };

@@ -319,6 +319,7 @@ export interface OperatorConversationSummary {
   title?: string;
   updatedAt: string;
   activeTurnId?: string;
+  triggerKind?: "cron" | "webhook";
 }
 
 export interface OperatorConversationList {

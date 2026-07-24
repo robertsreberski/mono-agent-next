@@ -65,12 +65,14 @@ Core/runtime remains authoritative for model and effort validation. Closing the
 client stream aborts the exact dispatch; explicit cancel, drain, and stop use
 the same request signal.
 
-The first runnable channel slice advertises cancellation, runtime overrides,
-and health. It reports attachments, quotes, live input, AskUser, proactive
-delivery, config view, and replay as unsupported. Those protocol fields exist
-in `@mono-agent/operator` so later channel implementations can add them without
-a second renderer-specific wire format; an unsupported capability must remain
-false and must not be simulated by a product.
+The current channel advertises only controls backed by Core host methods:
+cancellation, runtime overrides, attachments, replay-verified quotes, live
+input, AskUser, proactive delivery, redacted config, replay, and health. Its
+info response also exposes model hints derived only from strictly validated
+configured routes. Conversation summaries retain explicit whitelisted
+`cron`/`webhook` provenance from delivery metadata; renderers do not infer it
+from conversation ids. An unsupported capability remains false and is not
+simulated by a product.
 
 ## Protocol bounds and request security
 

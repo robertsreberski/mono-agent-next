@@ -9,15 +9,22 @@ import { ConsoleProvider } from "./console";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+// Node 26 exposes disabled Web Storage globals unless a persistence file is
+// configured. Install isolated browser storage for this jsdom contract test.
+Object.defineProperties(window, {
+  localStorage: { configurable: true, value: memoryStorage() },
+  sessionStorage: { configurable: true, value: memoryStorage() },
+});
+
 afterEach(() => {
   document.body.textContent = "";
-  localStorage.clear();
-  sessionStorage.clear();
+  window.localStorage.clear();
+  window.sessionStorage.clear();
 });
 
 describe("browser console shell", () => {
   it("starts locked and keeps bearer authentication scoped to the browser session", async () => {
-    sessionStorage.clear();
+    window.sessionStorage.clear();
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
@@ -28,7 +35,31 @@ describe("browser console shell", () => {
     expect(host.textContent).toContain("Connect to your agents");
     const token = host.querySelector<HTMLInputElement>('input[type="password"]');
     expect(token?.getAttribute("autocomplete")).toBe("current-password");
-    expect(localStorage.getItem("mono-agent-web-token")).toBeNull();
+    expect(window.localStorage.getItem("mono-agent-web-token")).toBeNull();
     await act(async () => root.unmount());
   });
 });
+
+function memoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear() {
+      values.clear();
+    },
+    getItem(key) {
+      return values.get(key) ?? null;
+    },
+    key(index) {
+      return [...values.keys()][index] ?? null;
+    },
+    removeItem(key) {
+      values.delete(key);
+    },
+    setItem(key, value) {
+      values.set(key, String(value));
+    },
+  };
+}

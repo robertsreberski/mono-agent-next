@@ -63,8 +63,9 @@ prevents strict v1 clients from receiving v2 structured-activity frames.
 
 Agent identity and defaults are not authored in channel config. Core must grant
 the declared `operator.identity.v1` capability with the agent id/label, process
-pid, runtime/model defaults, config path, and project root. Module creation
-fails if that grant is absent or malformed.
+pid, runtime/model defaults, models from the strictly validated configured
+routes, config path, and project root. Module creation fails if that grant is
+absent or malformed.
 
 ## Architecture
 
@@ -79,7 +80,10 @@ fails if that grant is absent or malformed.
    Compaction and session-eviction also merge into sticky usage flags without
    erasing the latest token counts; the terminal frame carries the
    authoritative result.
-5. Capability-gated routes project Core conversation listing, replay, redacted config, health, live input, and AskUser answers without package-local state substitutes.
+5. Capability-gated routes project Core conversation listing, replay, redacted
+   config, health, live input, and AskUser answers without package-local state
+   substitutes. Conversation listing exposes only explicit whitelisted
+   `cron`/`webhook` provenance retained in Core conversation metadata.
 6. Client disconnect, explicit cancellation, drain, and stop abort the exact dispatch signal; an empty proactive destination is canonicalized to the stable adapter-owned `operator:new-conversation` operation before Core's durable admission, then opens a Core conversation behind Core/state restart-safe delivery authority plus a bounded fingerprint-aware live-instance guard. Conflicting keys fail, ambiguous opens remain unknown, and exhausted guard capacity fails closed.
 
 ### Package structure

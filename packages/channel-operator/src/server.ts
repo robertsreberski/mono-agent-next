@@ -43,6 +43,7 @@ import {
   type OperatorConfigView,
   type OperatorLiveInputResponse,
   type OperatorMessage,
+  type OperatorModel,
   type OperatorToolCall,
   type OperatorToolResult,
   type OperatorUsage,
@@ -97,6 +98,7 @@ export interface OperatorIdentityGrant {
   readonly agent: { readonly id: string; readonly label: string };
   readonly process: { readonly pid: number };
   readonly defaults: { readonly runtime: string; readonly model: string; readonly effort?: string };
+  readonly models?: readonly OperatorModel[];
   readonly configPath: string;
   readonly projectRoot: string;
 }
@@ -584,11 +586,13 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
     const body: OperatorConversationList = {
       conversations: result.conversations.map((conversation) => {
         const activeTurnId = [...(activeByConversation.get(conversation.conversationId) ?? [])][0]?.turnId;
+        const triggerKind = operatorTriggerKind(conversation.metadata);
         return {
           id: conversation.conversationId,
           ...(conversation.title === undefined ? {} : { title: conversation.title }),
           updatedAt: conversation.updatedAt,
           ...(activeTurnId === undefined ? {} : { activeTurnId }),
+          ...(triggerKind === undefined ? {} : { triggerKind }),
         };
       }),
     };
@@ -698,6 +702,7 @@ function operatorInfo(
     },
     capabilities: operatorCapabilities(host),
     defaults: identity.defaults,
+    ...(identity.models === undefined ? {} : { models: identity.models }),
   });
 }
 
@@ -839,10 +844,36 @@ function validateIdentityGrant(value: OperatorIdentityGrant): OperatorIdentityGr
     || !validGrantText(value.defaults?.runtime, 256)
     || !validGrantText(value.defaults.model, 256)
     || (value.defaults.effort !== undefined && !validGrantText(value.defaults.effort, 256))
+    || (value.models !== undefined && !validGrantModels(value.models))
     || !validGrantText(value.configPath, 4_096)
     || !validGrantText(value.projectRoot, 4_096)
   ) throw new TypeError("createOperatorChannel requires a valid operator.identity.v1 host grant.");
   return value;
+}
+
+function validGrantModels(value: unknown): value is readonly OperatorModel[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 1_000) return false;
+  const ids = new Set<string>();
+  return value.every((candidate) => {
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
+    const model = candidate as Record<string, unknown>;
+    if (Object.keys(model).some((field) =>
+      !["id", "label", "efforts", "contextWindow"].includes(field))) return false;
+    if (!validGrantText(model.id, 256) || ids.has(model.id)) return false;
+    ids.add(model.id);
+    if (model.label !== undefined && !validGrantText(model.label, 1_024)) return false;
+    if (model.contextWindow !== undefined
+      && (!Number.isSafeInteger(model.contextWindow) || Number(model.contextWindow) < 1)) return false;
+    if (model.efforts !== undefined) {
+      if (!Array.isArray(model.efforts) || model.efforts.length > 50) return false;
+      const efforts = new Set<string>();
+      for (const effort of model.efforts) {
+        if (!validGrantText(effort, 256) || efforts.has(effort)) return false;
+        efforts.add(effort);
+      }
+    }
+    return true;
+  });
 }
 
 function validGrantText(value: unknown, maximum: number): value is string {
@@ -851,6 +882,11 @@ function validGrantText(value: unknown, maximum: number): value is string {
     && value.length <= maximum
     && value === value.trim()
     && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function operatorTriggerKind(metadata: JsonObject | undefined): "cron" | "webhook" | undefined {
+  const kind = metadata?.triggerKind;
+  return kind === "cron" || kind === "webhook" ? kind : undefined;
 }
 
 function toChannelAttachment(attachment: NonNullable<OperatorTurnRequest["input"]["attachments"]>[number]): ChannelAttachment {

@@ -37,6 +37,9 @@ export function convertMessage(message: Message): ThreadMessageLike {
         ...(message.activities === undefined ? {} : { activities: message.activities }),
         ...(message.telemetry === undefined ? {} : { telemetry: message.telemetry }),
         ...(message.error === undefined ? {} : { error: message.error }),
+        ...(message.operatorMessageId === undefined
+          ? {}
+          : { operatorMessageId: message.operatorMessageId }),
       },
     },
   };
@@ -52,7 +55,11 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
       .map((part) => part.text)
       .join("\n")
       .trim();
-    const quote = quoteFromMetadata(message.metadata?.custom?.quote);
+    const quote = resolveOperatorQuote(
+      message.metadata?.custom?.quote,
+      consoleState.detail?.messages ?? [],
+      consoleState.selectedAgent?.capabilities.quotes === true,
+    );
     if (!text && consoleState.pendingFiles.length === 0) return;
     await consoleState.send({
       text,
@@ -129,7 +136,12 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
   return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>;
 }
 
-function quoteFromMetadata(value: unknown): Quote | undefined {
+export function resolveOperatorQuote(
+  value: unknown,
+  messages: readonly Message[],
+  enabled: boolean,
+): Quote | undefined {
+  if (!enabled) return undefined;
   if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
   const quote = value as Partial<QuoteInfo>;
   if (
@@ -140,5 +152,11 @@ function quoteFromMetadata(value: unknown): Quote | undefined {
   ) {
     return undefined;
   }
-  return { conversationId: "", messageId: quote.messageId, text: quote.text };
+  const source = messages.find((message) => message.id === quote.messageId);
+  if (source?.operatorMessageId === undefined) return undefined;
+  return {
+    conversationId: "",
+    messageId: source.operatorMessageId,
+    text: source.text,
+  };
 }

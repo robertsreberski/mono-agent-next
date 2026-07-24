@@ -126,6 +126,7 @@ describe("complete agent plane", () => {
               agent: { id: "fixture-agent", label: "Fixture Agent" },
               process: { pid: process.pid },
               defaults: { runtime: "main", model: "fixture:model" },
+              models: [{ id: "fixture:model" }],
             });
             return {
               capabilities: {
@@ -332,6 +333,7 @@ describe("complete agent plane", () => {
     const state = new MemoryStateStore();
     let providerTurns = 0;
     let sends = 0;
+    let delivered: unknown;
     let dispatch: ((request: Record<string, unknown>, reply: {
       emit(event: unknown): Promise<void>;
     }) => Promise<Record<string, unknown>>) | undefined;
@@ -373,6 +375,7 @@ describe("complete agent plane", () => {
             resolveDeliveryHistory: () => ({ conversationId: "telegram:42" }),
             async deliver(message: { idempotencyKey: string }) {
               sends += 1;
+              delivered = message;
               return {
                 status: "delivered",
                 idempotencyKey: message.idempotencyKey,
@@ -401,7 +404,10 @@ describe("complete agent plane", () => {
       attachments: [],
       receivedAt: "2026-07-23T10:00:00.000Z",
       completionDelivery: { channel: "notify", destination: "telegram:42" },
-      metadata: { webhook: { route: "triage", bodySha256: rawHash(raw) } },
+      metadata: {
+        triggerKind: "webhook",
+        webhook: { route: "triage", bodySha256: rawHash(raw) },
+      },
       signal: new AbortController().signal,
     });
     const reply = { async emit() {} };
@@ -412,6 +418,12 @@ describe("complete agent plane", () => {
     });
     expect(providerTurns).toBe(1);
     expect(sends).toBe(1);
+    expect(delivered).toMatchObject({
+      metadata: {
+        triggerKind: "webhook",
+        sourceConversationId: "webhook:triage:webhook-stable-request",
+      },
+    });
     expect((await first.replay("telegram:42")).messages).toEqual([
       expect.objectContaining({
         role: "assistant",
@@ -508,7 +520,7 @@ describe("complete agent plane", () => {
                     prompt: "prepare update",
                     createdAt: new Date().toISOString(),
                     deliveryChannel: "notify",
-                    metadata: { destination: "" },
+                    metadata: { destination: "", triggerKind: "cron" },
                   }, new AbortController().signal);
                 },
               }],
@@ -537,6 +549,10 @@ describe("complete agent plane", () => {
         conversationId: "telegram:42",
         text: "scheduled answer",
         idempotencyKey: "daily:2026-07-22",
+        metadata: expect.objectContaining({
+          triggerKind: "cron",
+          sourceConversationId: "trigger:cron:daily:2026-07-22",
+        }),
       }),
     ]);
     await host.stop();

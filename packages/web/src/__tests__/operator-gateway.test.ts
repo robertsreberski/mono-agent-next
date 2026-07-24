@@ -38,7 +38,7 @@ describe("web operator gateway", () => {
       }
       if (url.endsWith("/v2/conversations")) {
         return new Response(JSON.stringify({ conversations: [
-          { id: "proactive:one", title: "Update", updatedAt: now },
+          { id: "proactive:one", title: "Update", updatedAt: now, triggerKind: "cron" },
           { id: "trigger:cron:morning", title: "Morning", updatedAt: now },
           { id: "web:ordinary", updatedAt: now },
         ] }), { headers: { "content-type": "application/json" } });
@@ -66,13 +66,13 @@ describe("web operator gateway", () => {
       agentId: "personal",
       conversationId: "proactive:one",
       title: "Update",
+      triggerKind: "cron",
       updatedAt: now,
       messages: [{ id: "m-1", role: "assistant", text: "Done", createdAt: now }],
     }, {
       agentId: "personal",
       conversationId: "trigger:cron:morning",
       title: "Morning",
-      triggerKind: "cron",
       updatedAt: now,
       messages: [{ id: "m-2", role: "assistant", text: "Good morning", createdAt: now }],
     }]);

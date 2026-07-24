@@ -1468,7 +1468,10 @@ function cronMetadata(
       ? { channel: job.notify }
       : { channel: job.notify.channel, destination: job.notify.destination };
   }
-  const metadata: Record<string, JsonValue> = { cron: Object.freeze(cron) };
+  const metadata: Record<string, JsonValue> = {
+    triggerKind: "cron",
+    cron: Object.freeze(cron),
+  };
   if (job.effort !== undefined) metadata.effort = job.effort;
   if (typeof job.notify === "string") metadata.destination = "";
   if (typeof job.notify === "object") metadata.destination = job.notify.destination;

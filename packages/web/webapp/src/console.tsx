@@ -80,9 +80,9 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   const [detail, setDetail] = useState<ThreadDetail>();
   const [selectedAgentId, setSelectedAgentId] = useState<string>();
   const [selectedThreadId, setSelectedThreadId] = useState<string>();
-  const [showOffline, setShowOfflineState] = useState(localStorage.getItem(OFFLINE_KEY) === "true");
-  const [showArchived, setShowArchivedState] = useState(localStorage.getItem(ARCHIVE_KEY) === "true");
-  const [railExpanded, setRailExpandedState] = useState(localStorage.getItem(RAIL_KEY) !== "collapsed");
+  const [showOffline, setShowOfflineState] = useState(window.localStorage.getItem(OFFLINE_KEY) === "true");
+  const [showArchived, setShowArchivedState] = useState(window.localStorage.getItem(ARCHIVE_KEY) === "true");
+  const [railExpanded, setRailExpandedState] = useState(window.localStorage.getItem(RAIL_KEY) !== "collapsed");
   const [pendingFiles, setPendingFiles] = useState<readonly File[]>([]);
   const [runtime, setRuntime] = useState("");
   const [model, setModel] = useState("");
@@ -358,15 +358,15 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   }, [detail?.thread, load, pendingFiles]);
 
   const setShowOffline = useCallback((value: boolean) => {
-    localStorage.setItem(OFFLINE_KEY, String(value));
+    window.localStorage.setItem(OFFLINE_KEY, String(value));
     setShowOfflineState(value);
   }, []);
   const setShowArchived = useCallback((value: boolean) => {
-    localStorage.setItem(ARCHIVE_KEY, String(value));
+    window.localStorage.setItem(ARCHIVE_KEY, String(value));
     setShowArchivedState(value);
   }, []);
   const setRailExpanded = useCallback((value: boolean) => {
-    localStorage.setItem(RAIL_KEY, value ? "expanded" : "collapsed");
+    window.localStorage.setItem(RAIL_KEY, value ? "expanded" : "collapsed");
     setRailExpandedState(value);
   }, []);
   const addFiles = useCallback((files: FileList | readonly File[]) => {

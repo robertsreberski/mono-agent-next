@@ -91,6 +91,7 @@ describe("trigger-cron lifecycle", () => {
       model: "provider:model",
       deliveryChannel: "telegram",
       metadata: {
+        triggerKind: "cron",
         effort: "high",
         destination: "telegram:42",
         cron: {
@@ -146,7 +147,7 @@ describe("trigger-cron lifecycle", () => {
     await trigger.invoke("heartbeat", "2026-07-23T08:01:00.000Z");
     expect(host.events[0]).toMatchObject({
       deliveryChannel: "telegram",
-      metadata: { destination: "", effort: "high" },
+      metadata: { destination: "", effort: "high", triggerKind: "cron" },
     });
     await trigger.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
   });

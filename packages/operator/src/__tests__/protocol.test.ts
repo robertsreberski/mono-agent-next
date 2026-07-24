@@ -8,6 +8,7 @@ import {
   OPERATOR_ROUTES,
   OperatorProtocolError,
   parseAskAnswerRequest,
+  parseConversationList,
   parseOperatorFrame,
   parseOperatorInfo,
   parseTurnRequest,
@@ -43,6 +44,24 @@ describe("operator protocol", () => {
     for (const frame of VALID_TURN_FRAMES) {
       expect(parseOperatorFrame(JSON.parse(serializeOperatorFrame(frame)))).toEqual(frame);
     }
+  });
+
+  it("preserves only explicit whitelisted trigger provenance in conversation summaries", () => {
+    const updatedAt = "2026-07-24T00:00:00.000Z";
+    expect(parseConversationList({
+      conversations: [
+        { id: "proactive:opaque", updatedAt, triggerKind: "cron" },
+        { id: "trigger:cron:name-is-not-provenance", updatedAt },
+      ],
+    })).toEqual({
+      conversations: [
+        { id: "proactive:opaque", updatedAt, triggerKind: "cron" },
+        { id: "trigger:cron:name-is-not-provenance", updatedAt },
+      ],
+    });
+    expect(() => parseConversationList({
+      conversations: [{ id: "proactive:opaque", updatedAt, triggerKind: "email" }],
+    })).toThrow("triggerKind");
   });
 
   it("rejects malformed and unknown frames", () => {

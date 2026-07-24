@@ -98,13 +98,24 @@ The browser-facing API is versioned separately from the agent operator wire:
 | --- | --- |
 | `GET /healthz` | Unauthenticated process health after authority validation. |
 | `GET /api/v1/bootstrap` | Authenticated discovered-agent and conversation summary. |
+| `GET /api/v1/events` | Authenticated revisioned invalidation stream. |
 | `POST /api/v1/threads` | Create a source-bound conversation for a live agent. |
 | `GET /api/v1/threads/:id` | Read durable messages and current turn state. |
+| `PATCH /api/v1/threads/:id` | Rename, archive, or restore one conversation. |
+| `DELETE /api/v1/threads/:id` | Delete one archived conversation or dismiss one proactive import. |
 | `POST /api/v1/threads/:id/turns` | Start a text turn and stream web-owned state snapshots as NDJSON. |
 | `POST /api/v1/threads/:id/cancel` | Explicitly cancel that conversation's active turn. |
+| `POST /api/v1/threads/:id/live-input` | Steer a web-owned active turn when advertised. |
+| `POST /api/v1/threads/:id/ask` | Submit one canonical structured AskUser answer. |
+| `GET /api/v1/threads/:id/replay` | Read authoritative replay for supported views and quotes. |
+| `PATCH /api/v1/agents/:id` | Persist whether an agent stays visible while offline. |
+| `GET /api/v1/agents/:id/config` | Read the endpoint's redacted config view. |
+| `GET /api/v1/agents/:id/health` | Read bounded endpoint/Core health. |
 
 The browser stream contains web thread projections, not raw operator frames.
-The embedded UI is dependency-free and intentionally small.
+The embedded React/assistant-ui client is built and packed as an installable
+PWA. It keeps its bearer token in `sessionStorage`; service-worker precaching
+excludes API and health responses.
 
 ## Durable state and turn ownership
 
@@ -132,22 +143,23 @@ For a coherent backup, stop the product and copy `state.json` together with
 `.mono-agent-web-state`, preserving their modes. Restore those exact regular
 files into an empty `0700` data directory before starting. There is no remote
 reset or delete-all endpoint and no automatic retention policy in schema
-version 1.
+version 3. A valid schema version 1 or 2 file is copied field-for-field into
+version 3 and durably committed before reads are served.
 
 ## Current scope
 
-This first runnable web slice provides owner-private registry discovery,
-source-bound durable conversations, text turns, streamed assistant text,
-model/effort overrides, explicit cancellation, and browser-disconnect survival.
-The currently paired operator channel supports cancellation and runtime
-overrides; Core and the selected runtime make the final override decision.
+The runnable web product provides owner-private registry discovery, durable
+source-bound conversations, streamed turns, bounded uploads, replay-verified
+assistant-ui quotes, structured AskUser forms, live input, runtime/model/effort
+overrides, cancellation, response/proactive notifications, archived
+conversation management, and pinned offline agents. Core advertises model
+choices only from strictly validated configured routes. Explicit `cron` or
+`webhook` provenance is retained through delivery metadata and rendered on the
+new proactive conversation; it is never guessed from a conversation id.
 
-Uploads, quotes, structured AskUser browser forms, live-input UI, proactive
-browser notifications, archived/pinned conversation management, replay/config
-views, remote reset, multi-user accounts, PWA behavior, OS service management,
-and TLS are not included in this slice. Their presence in the shared protocol
-does not make them product features, and this documentation does not imply
-completion of later runtime, state, trigger, or migration verticals.
+Remote reset, multi-user accounts, TLS termination, and OS service management
+remain outside this product. The foreground binary is independently supervised
+from every agent.
 
 ## Related
 

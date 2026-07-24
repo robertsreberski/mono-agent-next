@@ -613,12 +613,15 @@ export function parseAskAnswerResponse(value: unknown): OperatorAskAnswerRespons
 
 function conversationSummary(value: unknown, path: string): OperatorConversationSummary {
   const input = record(value, path);
-  keys(input, ["id", "title", "updatedAt", "activeTurnId"], path);
+  keys(input, ["id", "title", "updatedAt", "activeTurnId", "triggerKind"], path);
   return {
     id: identifier(input.id, `${path}.id`),
     ...(input.title === undefined ? {} : { title: text(input.title, `${path}.title`, { max: 4_096 }) }),
     updatedAt: timestamp(input.updatedAt, `${path}.updatedAt`),
     ...(input.activeTurnId === undefined ? {} : { activeTurnId: identifier(input.activeTurnId, `${path}.activeTurnId`) }),
+    ...(input.triggerKind === undefined
+      ? {}
+      : { triggerKind: oneOf(input.triggerKind, ["cron", "webhook"] as const, `${path}.triggerKind`) }),
   };
 }
 

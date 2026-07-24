@@ -22,13 +22,13 @@ export class ApiError extends Error {
 }
 
 export function readToken(): string {
-  return sessionStorage.getItem(TOKEN_KEY) ?? "";
+  return window.sessionStorage.getItem(TOKEN_KEY) ?? "";
 }
 
 export function saveToken(token: string): void {
   const clean = token.trim();
-  if (clean) sessionStorage.setItem(TOKEN_KEY, clean);
-  else sessionStorage.removeItem(TOKEN_KEY);
+  if (clean) window.sessionStorage.setItem(TOKEN_KEY, clean);
+  else window.sessionStorage.removeItem(TOKEN_KEY);
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {

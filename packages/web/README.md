@@ -32,8 +32,8 @@ Catalog responsibility: Runs the standalone authenticated browser product with o
   replay, redacted config, and health through capability-gated shared client APIs.
 - Keep a service-owned turn running and durably settling when its browser stream
   disconnects or reloads.
-- Serve a small dependency-free browser UI with opt-in proactive notifications
-  from the same process.
+- Serve a React/assistant-ui PWA with opt-in proactive and response-arrival
+  notifications from the same process.
 
 ## Install / Usage
 
@@ -135,13 +135,14 @@ against reads and writes until close/reopen, preventing a stale in-memory
 snapshot from overwriting the visible commit. Turns left `running` by an
 unclean stop become explicitly `interrupted` on the next exclusive open.
 
-State schema version 2 adds optional content-free per-turn telemetry to
-assistant messages. On first exclusive open, a valid version 1 state is copied
-field-for-field into version 2 and atomically committed before serving reads;
-unknown or corrupt versions remain untouched. Usage stores safe non-negative
-integer counters only. Compaction and provider-session eviction flags are
-sticky within the turn so a later usage snapshot cannot erase an earlier
-event.
+State schema version 3 adds revisioned invalidation, pinned agents, archived
+threads, explicit trigger provenance, and structured activity to the version 2
+telemetry state. On first exclusive open, valid version 1 or version 2 state is
+copied field-for-field into version 3 and atomically committed before serving
+reads; unknown or corrupt versions remain untouched. Usage stores safe
+non-negative integer counters only. Compaction and provider-session eviction
+flags are sticky within the turn so a later usage snapshot cannot erase an
+earlier event.
 
 State has no automatic retention or bulk purge. Deleting an
 ordinary thread atomically removes its local messages. Deleting an imported
@@ -219,8 +220,10 @@ webConfigJsonSchema
 The browser API is:
 
 - `GET /api/v1/bootstrap`
+- `GET /api/v1/events` (authenticated invalidation SSE)
 - `POST /api/v1/threads`
 - `GET /api/v1/threads/:id`
+- `PATCH /api/v1/threads/:id`
 - `DELETE /api/v1/threads/:id`
 - `POST /api/v1/threads/:id/turns` (web-state NDJSON)
 - `POST /api/v1/threads/:id/cancel`
@@ -229,17 +232,23 @@ The browser API is:
 - `GET /api/v1/threads/:id/replay`
 - `GET /api/v1/agents/:id/config`
 - `GET /api/v1/agents/:id/health`
+- `PATCH /api/v1/agents/:id`
 
 Browser uploads use the operator protocol's bounded inline data URL contract.
 Web accepts files up to 512 KiB each and enforces the shared 1 MiB encoded
 request bound across attachments, text, quotes, and runtime-instance, model,
 and effort overrides. The AskUser endpoint separately accepts the canonical
-bounded answer shape up to 8 MiB after JSON escaping. Browser controls embed the shared
-`availableOperatorActions` implementation and derive eligibility from the
-selected thread plus authoritative endpoint capabilities.
-Quotes are shown only for messages carrying an authoritative agent transcript
-message id and only when the selected endpoint advertises quote support.
-The replay view exposes the same Quote action for replay-backed message ids.
+bounded answer shape up to 8 MiB after JSON escaping. The server gateway uses
+the shared `availableOperatorActions` implementation for operator actions; the
+browser derives visible eligibility from the selected thread plus authoritative
+endpoint capabilities.
+Quotes are selectable only for messages carrying an authoritative agent
+transcript message id and only when the selected endpoint advertises quote
+support. The browser maps its local rendered id back to that transcript id and
+submits the complete authoritative message text for replay verification.
+Model choices come only from Core's strictly validated primary/fallback routes;
+when an endpoint omits an effort allowlist, the runtime remains the final
+validator for a bounded free-form effort.
 
 ## Dependency Boundary
 
@@ -253,10 +262,11 @@ agent-contracts, v0 config, or observability.
 - Agent lifecycle, agent config, runtime/provider behavior, or channel modules.
 - Operator wire decoding, capability negotiation, or action eligibility.
 - OS service installation or supervision.
-- Multi-user accounts, PWA/TLS termination, or service management.
+- Multi-user accounts, TLS termination, or service management.
 - Arbitrary-size file storage or a second upload transport outside the shared
   operator protocol.
-- Automatic data deletion, remote reset, release, deployment, or migration.
+- Automatic data deletion, remote reset, release, deployment, or migration
+  from another product's conversation state.
 
 ## Related Documentation
 
@@ -276,6 +286,6 @@ pnpm --filter @mono-agent/web test
 Focused tests cover strict secret resolution, body bounds, bearer auth,
 cross-origin rejection, real shared-client turn streaming, cancellation,
 AskUser/live-input routing, uploads/quotes, proactive import and dismissal,
-browser view routes, v1-to-v2 migration, telemetry rendering and restart
+browser view routes, v1/v2-to-v3 migration, telemetry rendering and restart
 persistence, deletion, exclusive ownership,
 atomic recovery, corruption preservation, modes, and symlink rejection.
