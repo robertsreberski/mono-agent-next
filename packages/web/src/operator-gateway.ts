@@ -163,14 +163,21 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
       await active.client.cancelConversation(conversationId, { reason: "Cancelled by web operator." });
     },
 
-    async discoverProactiveConversations() {
+    // Defaulting to "nothing is known" keeps an omitted filter correct rather
+    // than throwing inside the per-entry `allSettled`, which would silently
+    // report zero proactive conversations.
+    async discoverProactiveConversations(isKnown = () => false) {
       const candidates = (await entries()).filter((entry) => !entry.stale);
       const settled = await Promise.allSettled(candidates.map(async (entry) => {
         const { client, info } = await verifiedConnection(entry.id);
         if (!info.capabilities.proactive || !info.capabilities.replay) return [];
         const listed = await client.getConversations();
         return await Promise.all(listed.conversations
-          .filter((conversation) => conversation.triggerKind !== undefined)
+          // Replay is one round trip per conversation. Skipping the ones the
+          // product already imported or dismissed keeps a refresh from
+          // serializing K replays against the operator on every SSE delta.
+          .filter((conversation) =>
+            conversation.triggerKind !== undefined && !isKnown(entry.id, conversation.id))
           .map(async (conversation) => {
             const replay = await client.getReplay(conversation.id);
             return {

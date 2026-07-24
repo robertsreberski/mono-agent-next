@@ -28,11 +28,11 @@ describe("check-apache-provenance", () => {
     expect(result).toMatchObject({
       exitCode: 0,
       issues: [],
-      trackedFileCount: 35,
-      manifestFileCount: 35,
+      trackedFileCount: 36,
+      manifestFileCount: 36,
     });
     expect(renderApacheProvenanceReport(result)).toContain(
-      "35 tracked files have exact hashes and reviewed authority",
+      "36 tracked files have exact hashes and reviewed authority",
     );
   });
 

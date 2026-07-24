@@ -25,10 +25,14 @@ const OFFLINE_KEY = "mono-agent-web-show-offline";
 const ARCHIVE_KEY = "mono-agent-web-show-archived";
 const RAIL_KEY = "mono-agent-web-agent-rail";
 
+/** Live-update health, distinct from whether the selected agent is online. */
+export type ConsoleConnection = "connecting" | "live" | "reconnecting" | "offline";
+
 interface ConsoleState {
   readonly authenticated: boolean;
   readonly loading: boolean;
   readonly refreshing: boolean;
+  readonly connection: ConsoleConnection;
   readonly error?: string;
   readonly bootstrap?: Bootstrap;
   readonly detail?: ThreadDetail;
@@ -75,6 +79,9 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   const [authenticated, setAuthenticated] = useState(readToken().length > 0);
   const [loading, setLoading] = useState(readToken().length > 0);
   const [refreshing, setRefreshing] = useState(false);
+  const [connection, setConnection] = useState<ConsoleConnection>(
+    () => navigator.onLine === false ? "offline" : "connecting",
+  );
   const [error, setError] = useState<string>();
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [detail, setDetail] = useState<ThreadDetail>();
@@ -141,9 +148,14 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
       if (selection.threadId === undefined) browserUrl.searchParams.delete("thread");
       else browserUrl.searchParams.set("thread", selection.threadId);
       history.replaceState(null, "", browserUrl);
-      setRuntime(next.agents.find((agent) => agent.id === selection.agentId)?.defaults?.runtime ?? "");
-      setModel((current) => current || next.agents.find((agent) => agent.id === selection.agentId)?.defaults?.model || "");
-      setEffort((current) => current || next.agents.find((agent) => agent.id === selection.agentId)?.defaults?.effort || "");
+      // Refreshes fire on every debounced SSE event, including deltas from a
+      // turn in another thread. Resetting runtime unconditionally silently
+      // discarded a typed override before send; preserve it like model and
+      // effort already do.
+      const defaults = next.agents.find((agent) => agent.id === selection.agentId)?.defaults;
+      setRuntime((current) => current || defaults?.runtime || "");
+      setModel((current) => current || defaults?.model || "");
+      setEffort((current) => current || defaults?.effort || "");
       setError(undefined);
     } catch (loadError) {
       if (loadError instanceof ApiError && loadError.status === 401) {
@@ -159,6 +171,17 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
       setRefreshing(false);
     }
   }, [chooseSelection]);
+
+  useEffect(() => {
+    const offline = () => setConnection("offline");
+    const online = () => setConnection((current) => current === "offline" ? "reconnecting" : current);
+    window.addEventListener("offline", offline);
+    window.addEventListener("online", online);
+    return () => {
+      window.removeEventListener("offline", offline);
+      window.removeEventListener("online", online);
+    };
+  }, []);
 
   useEffect(() => {
     if (!authenticated) return;
@@ -183,6 +206,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
           await subscribeEvents(
             bootstrapRef.current?.revision,
             (event) => {
+              setConnection("live");
               if (event.type === "ready") return;
               if (bootstrapRef.current !== undefined) {
                 bootstrapRef.current = { ...bootstrapRef.current, revision: event.revision };
@@ -193,6 +217,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
           );
         } catch (streamError) {
           if (controller.signal.aborted) return;
+          setConnection(navigator.onLine === false ? "offline" : "reconnecting");
           if (streamError instanceof ApiError && streamError.status === 401) {
             saveToken("");
             setAuthenticated(false);
@@ -404,6 +429,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     authenticated,
     loading,
     refreshing,
+    connection,
     ...(error === undefined ? {} : { error }),
     ...(bootstrap === undefined ? {} : { bootstrap }),
     ...(detail === undefined ? {} : { detail }),
@@ -443,7 +469,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     setModel,
     setEffort,
   }), [
-    authenticated, loading, refreshing, error, bootstrap, detail, selectedAgentId,
+    authenticated, loading, refreshing, connection, error, bootstrap, detail, selectedAgentId,
     selectedThreadId, selectedAgent, selectedThread, visibleAgents, visibleThreads,
     hiddenOfflineCount, showOffline, showArchived, railExpanded, pendingFiles,
     runtime, model, effort, login, logout, load, selectAgent, selectThread,

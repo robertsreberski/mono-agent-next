@@ -6,11 +6,11 @@ import { lstat, open, readdir } from "node:fs/promises";
 import { normalizeOperatorEndpoint, OperatorClient, type OperatorClientOptions } from "./client.js";
 import { parseRegistryDescriptor } from "./protocol.js";
 import { OPERATOR_REGISTRY_DETAILS_SCHEMA, OPERATOR_REGISTRY_SCHEMA, type DiscoveredOperator, type OperatorRegistryDescriptor } from "./types.js";
+import { createOperatorValidators, type UnknownRecord } from "./validation.js";
 
 const DEFAULT_STALE_AFTER_MS = 45_000;
 const MAX_REGISTRY_FILE_BYTES = 1_048_576;
 const STATE_PRESENCE_SCHEMA = "mono-agent.state-presence.v1";
-type UnknownRecord = Record<string, unknown>;
 
 interface StatePresenceEnvelope {
   readonly status: "starting" | "ready" | "degraded" | "stopping" | "stopped";
@@ -74,22 +74,18 @@ function invalidDescriptor(sourcePath: string, cause: unknown): OperatorDirector
   );
 }
 
-function strictRecord(value: unknown, path: string): UnknownRecord {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return invalid(path, "must be a plain object");
-  }
-  const prototype = Object.getPrototypeOf(value) as unknown;
-  if (prototype !== Object.prototype && prototype !== null) {
-    return invalid(path, "must be a plain object");
-  }
-  return value as UnknownRecord;
-}
+const {
+  record: strictRecord,
+  keys: strictKeys,
+  jsonValue: validateJson,
+  timestamp: strictTimestamp,
+} = createOperatorValidators(invalid);
 
-function strictKeys(value: UnknownRecord, allowed: readonly string[], path: string): void {
-  const unexpected = Object.keys(value).filter((key) => !allowed.includes(key));
-  if (unexpected.length > 0) invalid(path, `contains unknown field ${JSON.stringify(unexpected[0])}`);
-}
-
+/**
+ * Descriptor strings are shown to operators and embedded in paths, so they
+ * stay narrower than the protocol's `text`: non-empty, trimmed, and free of
+ * control characters.
+ */
 function strictText(value: unknown, path: string, maximum: number): string {
   if (
     typeof value !== "string"
@@ -102,42 +98,11 @@ function strictText(value: unknown, path: string, maximum: number): string {
   return value;
 }
 
-function strictTimestamp(value: unknown, path: string): string {
-  const parsed = strictText(value, path, 64);
-  if (
-    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(parsed)
-    || !Number.isFinite(Date.parse(parsed))
-    || new Date(parsed).toISOString() !== parsed
-  ) {
-    return invalid(path, "must be a canonical UTC timestamp");
-  }
-  return parsed;
-}
-
 function strictPid(value: unknown, path: string): number {
   if (!Number.isSafeInteger(value) || (value as number) < 1) {
     return invalid(path, "must be a positive safe integer");
   }
   return value as number;
-}
-
-function validateJson(value: unknown, path: string, depth = 0): void {
-  if (depth > 16) invalid(path, "exceeds the maximum nesting depth");
-  if (value === null || typeof value === "string" || typeof value === "boolean") return;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) invalid(path, "must contain only finite JSON numbers");
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (let index = 0; index < value.length; index += 1) {
-      validateJson(value[index], `${path}[${index}]`, depth + 1);
-    }
-    return;
-  }
-  const record = strictRecord(value, path);
-  for (const [key, nested] of Object.entries(record)) {
-    validateJson(nested, `${path}.${key}`, depth + 1);
-  }
 }
 
 function parseStatePresenceEnvelope(value: unknown): StatePresenceEnvelope {
@@ -212,15 +177,18 @@ function parseStatePresenceOperatorDescriptor(value: unknown): OperatorRegistryD
   });
 }
 
+/**
+ * A registry directory is shared ground: other tools legitimately write their
+ * own files there. Skip a descriptor whose top-level schema is not one we own
+ * so a foreign file cannot hide every healthy operator, while a file that does
+ * claim one of our schemas still fails closed when it is malformed.
+ */
 function parseDiscoveryDescriptor(value: unknown): OperatorRegistryDescriptor | undefined {
-  if (
-    typeof value === "object"
-    && value !== null
-    && !Array.isArray(value)
-    && (value as { schema?: unknown }).schema === STATE_PRESENCE_SCHEMA
-  ) {
-    return parseStatePresenceOperatorDescriptor(value);
-  }
+  const schema = typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as { schema?: unknown }).schema
+    : undefined;
+  if (schema === STATE_PRESENCE_SCHEMA) return parseStatePresenceOperatorDescriptor(value);
+  if (schema !== OPERATOR_REGISTRY_SCHEMA) return undefined;
   return parseRegistryDescriptor(value);
 }
 

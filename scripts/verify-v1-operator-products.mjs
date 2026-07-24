@@ -311,7 +311,7 @@ async function main() {
     const terminal = new SmokeTerminal();
     let tuiInfoRequests = 0;
     const tuiFetch = async (input, init) => {
-      if (String(input).endsWith("/v2/info")) {
+      if (String(input).endsWith("/v1/info")) {
         tuiInfoRequests += 1;
         assert.equal(new Headers(init?.headers).get("authorization"), `Bearer ${OPERATOR_TOKEN}`);
       }

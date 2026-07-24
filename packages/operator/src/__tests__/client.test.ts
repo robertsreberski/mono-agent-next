@@ -176,3 +176,60 @@ describe("OperatorClient", () => {
     await expect(collect(mismatchClient.streamTurn(VALID_TURN_REQUEST))).rejects.toThrow("turnId does not match");
   });
 });
+
+describe("operator client response hygiene", () => {
+  function cancellableResponse(
+    body: string,
+    headers: Record<string, string>,
+    onCancel: () => void,
+  ): Response {
+    return new Response(byteStream([body], 0, onCancel), { status: 200, headers });
+  }
+
+  it("drains the response body on JSON error paths", async () => {
+    // An undici response whose body is neither read nor cancelled keeps its
+    // socket checked out, so both early rejections must release it first.
+    let cancelledContentType = false;
+    const wrongType = new OperatorClient({
+      endpoint: "http://127.0.0.1:4321",
+      fetch: async () => cancellableResponse(
+        "not json",
+        { "content-type": "text/plain" },
+        () => { cancelledContentType = true; },
+      ),
+    });
+    await expect(wrongType.getInfo()).rejects.toMatchObject({ code: "INVALID_CONTENT_TYPE" });
+    expect(cancelledContentType).toBe(true);
+
+    let cancelledOversize = false;
+    const oversize = new OperatorClient({
+      endpoint: "http://127.0.0.1:4321",
+      limits: { jsonResponseBytes: 16 },
+      fetch: async () => cancellableResponse(
+        JSON.stringify({ padding: "x".repeat(1_024) }),
+        { "content-type": "application/json", "content-length": "1048" },
+        () => { cancelledOversize = true; },
+      ),
+    });
+    await expect(oversize.getInfo()).rejects.toMatchObject({ code: "RESPONSE_TOO_LARGE" });
+    expect(cancelledOversize).toBe(true);
+  });
+
+  it("rejects path-traversal conversation ids", async () => {
+    const fetch = vi.fn();
+    const client = new OperatorClient({ endpoint: "http://127.0.0.1:4321", fetch });
+    const traversals = ["..", ".", "../secret", ""];
+
+    for (const conversationId of traversals) {
+      await expect(client.getReplay(conversationId)).rejects.toMatchObject({ code: "INVALID_VALUE" });
+      await expect(client.cancelConversation(conversationId)).rejects.toMatchObject({ code: "INVALID_VALUE" });
+      await expect(client.getPendingAsk(conversationId)).rejects.toMatchObject({ code: "INVALID_VALUE" });
+      await expect(client.answerAsk(conversationId, { interactionId: "i", answers: { q: ["a"] } }))
+        .rejects.toMatchObject({ code: "INVALID_VALUE" });
+      await expect(client.offerLiveInput(conversationId, { id: "live-1", text: "steer", receivedAt: "2026-01-02T03:04:05.000Z" }))
+        .rejects.toMatchObject({ code: "INVALID_VALUE" });
+    }
+    // No request may reach the wire: the guard runs before the route exists.
+    expect(fetch).not.toHaveBeenCalled();
+  });
+});

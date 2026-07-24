@@ -65,6 +65,72 @@ describe("strict config and module loading", () => {
     expect(Object.isFrozen(loaded.mcp)).toBe(true);
   });
 
+  it("publishes one catalog entry per configured route, keyed by runtime and model", async () => {
+    const alpha = `@fixture/runtime-${randomUUID().toLowerCase()}`;
+    const beta = `@fixture/runtime-${randomUUID().toLowerCase()}`;
+    const describing = (label: string) => ({
+      validateModel(request: unknown) {
+        const { model } = request as { model: string };
+        return {
+          supported: true,
+          model: { label: `${label} ${model}`, efforts: ["none", "high"], contextWindow: 200_000 },
+        };
+      },
+      create: () => ({}),
+    });
+    const project = await createFixtureProject([
+      { name: alpha, kind: "runtime", controller: describing("Alpha") },
+      { name: beta, kind: "runtime", controller: describing("Beta") },
+    ]);
+    projects.push(project);
+    await project.writeConfig({
+      ...minimalConfig(alpha),
+      runtimes: { main: { $use: alpha }, other: { $use: beta } },
+      routing: {
+        primary: { runtime: "main", model: "shared:model" },
+        fallbacks: [
+          // The same model id on a second runtime is a second route, not a
+          // duplicate; a repeat of the exact pair collapses to one entry.
+          { runtime: "other", model: "shared:model" },
+          { runtime: "main", model: "shared:model" },
+        ],
+      },
+    });
+
+    const loaded = await loadAgentConfig(project.configPath);
+
+    expect(loaded.modelCatalog).toEqual([
+      {
+        runtime: "main",
+        id: "shared:model",
+        label: "Alpha shared:model",
+        efforts: ["none", "high"],
+        contextWindow: 200_000,
+      },
+      {
+        runtime: "other",
+        id: "shared:model",
+        label: "Beta shared:model",
+        efforts: ["none", "high"],
+        contextWindow: 200_000,
+      },
+    ]);
+  });
+
+  it("keeps a route in the catalog without inventing metadata the runtime never advertised", async () => {
+    const runtime = `@fixture/runtime-${randomUUID().toLowerCase()}`;
+    const project = await fixture({
+      name: runtime,
+      kind: "runtime",
+      controller: { validateModel: () => ({ supported: true }), create: () => ({}) },
+    });
+    await project.writeConfig(minimalConfig(runtime));
+
+    const loaded = await loadAgentConfig(project.configPath);
+
+    expect(loaded.modelCatalog).toEqual([{ runtime: "main", id: "fixture:model" }]);
+  });
+
   it("returns an opaque immutable snapshot of the exact validated config and MCP bytes", async () => {
     const project = await fixture({ kind: "runtime", controller: runtimeController(async () => ({})) });
     const runtime = project.modules[0]!.name;

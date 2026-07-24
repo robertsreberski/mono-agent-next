@@ -22,7 +22,7 @@ export class OperatorIdentityBindingError extends Error {
 }
 
 /**
- * Bind a freshly fetched `/v2/info` response to the selected owner-private
+ * Bind a freshly fetched `/v1/info` response to the selected owner-private
  * discovery descriptor. Labels are presentation metadata and intentionally do
  * not participate in process identity.
  */

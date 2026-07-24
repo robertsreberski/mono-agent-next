@@ -1202,10 +1202,6 @@ class AgentHostImplementation implements AgentHost {
       }));
     }
     if (module.slot === "channel" && declaresHostCapability(module, "operator.identity.v1")) {
-      const configuredModels = [...new Set([
-        this.config.raw.routing.primary,
-        ...this.config.raw.routing.fallbacks,
-      ].map((route) => route.model))].map((model) => Object.freeze({ id: model }));
       capabilityValues.set("operator.identity.v1", Object.freeze({
         agent: Object.freeze({ id: this.config.raw.agent.id, label: this.config.raw.agent.name }),
         process: Object.freeze({ pid: process.pid }),
@@ -1214,7 +1210,7 @@ class AgentHostImplementation implements AgentHost {
           model: this.config.raw.routing.primary.model,
           ...(this.config.raw.routing.effort === undefined ? {} : { effort: this.config.raw.routing.effort }),
         }),
-        models: Object.freeze(configuredModels),
+        models: this.config.modelCatalog,
         configPath: this.config.configPath,
         projectRoot: this.config.projectRoot,
       }));

@@ -62,6 +62,7 @@ import {
 } from "./model.js";
 import {
   createRuntimePiModelRegistry,
+  piThinkingLevel,
   RuntimePiModelDiscoveryError,
   type RuntimePiModelRegistry,
 } from "./models.js";
@@ -816,8 +817,23 @@ function assistantTurnMessage(message: AssistantMessage): TurnMessage {
   };
 }
 
-function thinkingLevel(effort: string | undefined, model: Model<string>): { level: ThinkingLevel; clamped: boolean } {
-  const requested = effort === undefined || effort === "none" ? "off" : effort;
+/**
+ * Resolve one authored effort against this exact model.
+ *
+ * An effort outside the public vocabulary fails closed, because nothing
+ * upstream can have validated a level that does not exist. A level that exists
+ * but this model cannot serve is clamped and reported as a diagnostic:
+ * `routing.effort` is one default spanning every configured route, so a
+ * fallback whose model reasons differently from the primary must still serve
+ * rather than fail. A per-turn override, where a human picks a level for one
+ * known route, is rejected against the advertised catalog at the operator
+ * boundary instead — the layer that knows which route was chosen.
+ */
+function thinkingLevel(
+  effort: string | undefined,
+  model: Model<string>,
+): { readonly level: ThinkingLevel; readonly clamped: boolean } {
+  const requested = piThinkingLevel(effort ?? "none");
   if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(requested)) {
     throw new TypeError(`runtime-pi effort is unsupported: ${JSON.stringify(effort)}`);
   }

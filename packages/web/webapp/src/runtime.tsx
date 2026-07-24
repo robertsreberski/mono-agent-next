@@ -21,11 +21,67 @@ function status(message: Message): ThreadMessageLike["status"] {
   return { type: "incomplete", reason: "other", error: "Agent run was interrupted." };
 }
 
+/**
+ * Project operator activities onto assistant-ui's own part vocabulary so the
+ * transcript is rendered by registered part components rather than a bespoke
+ * feed read out of message metadata. A tool result is merged into the part its
+ * call created, which is what assistant-ui expects and what lets a renderer
+ * show one disclosure per invocation instead of two unrelated rows.
+ */
+type MessagePart = Exclude<ThreadMessageLike["content"], string>[number];
+type ToolCallPart = Extract<MessagePart, { readonly type: "tool-call" }>;
+
+function activityParts(message: Message): readonly MessagePart[] {
+  const parts: MessagePart[] = [];
+  const toolCallIndexById = new Map<string, number>();
+  for (const activity of message.activities ?? []) {
+    if (activity.type === "activity") {
+      parts.push({ type: "reasoning", text: activity.text });
+      continue;
+    }
+    if (activity.type === "tool_call") {
+      const call: ToolCallPart = {
+        type: "tool-call",
+        toolCallId: activity.call.id,
+        toolName: activity.call.name,
+        args: (activity.call.inputOmitted
+          ? {}
+          : activity.call.input ?? {}) as NonNullable<ToolCallPart["args"]>,
+        argsText: activity.call.inputOmitted ? "" : JSON.stringify(activity.call.input ?? {}),
+      };
+      toolCallIndexById.set(activity.call.id, parts.length);
+      parts.push(call);
+      continue;
+    }
+    if (activity.type === "tool_result") {
+      const index = toolCallIndexById.get(activity.result.callId);
+      const existing = index === undefined ? undefined : parts[index];
+      if (index !== undefined && existing?.type === "tool-call") {
+        parts[index] = {
+          ...existing,
+          result: activity.result,
+          ...(activity.result.isError === undefined ? {} : { isError: activity.result.isError }),
+        };
+        continue;
+      }
+      // A result whose call never arrived still has to be visible rather than
+      // dropped, so it renders as its own orphaned entry.
+      parts.push({ type: "data", name: "operator-orphan-result", data: activity.result });
+      continue;
+    }
+    parts.push({ type: "data", name: "operator-compaction", data: activity.compaction });
+  }
+  return parts;
+}
+
 export function convertMessage(message: Message): ThreadMessageLike {
   return {
     id: message.id,
     role: message.role,
-    content: [{ type: "text", text: message.text }],
+    content: [
+      ...(message.role === "assistant" ? activityParts(message) : []),
+      { type: "text", text: message.text },
+    ],
     createdAt: new Date(message.createdAt),
     ...(message.role === "assistant" ? { status: status(message) } : {}),
     metadata: {
@@ -73,7 +129,22 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
     isRunning && consoleState.selectedAgent?.capabilities.liveInput === true
       ? {
           items: [],
-          enqueue: (message) => { onNew(message); },
+          // `onNew` reaches `api.liveInput`, which rejects with 409
+          // `live_input_unavailable` when the turn settles between the composer
+          // accepting the steer and the request landing. Dropping the promise
+          // turned that ordinary race into an unhandled rejection, and the
+          // operator saw nothing at all.
+          enqueue: (message) => {
+            void onNew(message).catch((error: unknown) => {
+              window.dispatchEvent(new CustomEvent("mono-agent:notice", {
+                detail: {
+                  message: error instanceof Error && error.message.trim()
+                    ? error.message
+                    : "Live input could not be delivered.",
+                },
+              }));
+            });
+          },
           steer: () => undefined,
           remove: () => undefined,
           clear: () => undefined,

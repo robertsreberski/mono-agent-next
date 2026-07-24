@@ -43,11 +43,59 @@ describe("evaluateOperatorRuntimeOverride", () => {
     expect(evaluateOperatorRuntimeOverride(VALID_OPERATOR_INFO, { model: "missing:model" })).toEqual({
       allowed: false,
       reason: "unknown_model",
-      message: 'Model "missing:model" is not advertised by this agent.',
+      message: 'Model "missing:model" is not advertised for runtime "pi".',
     });
     expect(evaluateOperatorRuntimeOverride(VALID_OPERATOR_INFO, { model: "fixture:model" })).toEqual({
       allowed: true,
       intent: { model: "fixture:model" },
+    });
+  });
+
+  it("rejects a model advertised only for a different runtime", () => {
+    const twoRuntimes = info({
+      defaults: { runtime: "pi", model: "shared:model" },
+      models: [
+        { runtime: "pi", id: "shared:model", efforts: ["low"] },
+        { runtime: "claude", id: "claude-only:model", efforts: ["high"] },
+      ],
+    });
+    expect(evaluateOperatorRuntimeOverride(twoRuntimes, {
+      runtime: "pi",
+      model: "claude-only:model",
+    })).toEqual({
+      allowed: false,
+      reason: "unknown_model",
+      message: 'Model "claude-only:model" is not advertised for runtime "pi".',
+    });
+    expect(evaluateOperatorRuntimeOverride(twoRuntimes, {
+      runtime: "claude",
+      model: "claude-only:model",
+    })).toEqual({
+      allowed: true,
+      intent: { runtime: "claude", model: "claude-only:model" },
+    });
+  });
+
+  it("resolves effort against the route's own runtime, not a same-id twin", () => {
+    const sharedId = info({
+      defaults: { runtime: "pi", model: "shared:model" },
+      models: [
+        { runtime: "pi", id: "shared:model", efforts: ["low"] },
+        { runtime: "claude", id: "shared:model", efforts: ["high"] },
+      ],
+    });
+    expect(evaluateOperatorRuntimeOverride(sharedId, {
+      runtime: "claude",
+      model: "shared:model",
+      effort: "low",
+    })).toMatchObject({ allowed: false, reason: "unsupported_effort" });
+    expect(evaluateOperatorRuntimeOverride(sharedId, {
+      runtime: "claude",
+      model: "shared:model",
+      effort: "high",
+    })).toEqual({
+      allowed: true,
+      intent: { runtime: "claude", model: "shared:model", effort: "high" },
     });
   });
 
@@ -78,7 +126,7 @@ describe("evaluateOperatorRuntimeOverride", () => {
       intent: { runtime: "custom-runtime", model: "custom:model", effort: "custom-effort" },
     });
 
-    const withoutEfforts = info({ models: [{ id: "fixture:model" }] });
+    const withoutEfforts = info({ models: [{ runtime: "pi", id: "fixture:model" }] });
     expect(evaluateOperatorRuntimeOverride(withoutEfforts, { model: "fixture:model", effort: "custom-effort" })).toEqual({
       allowed: true,
       intent: { model: "fixture:model", effort: "custom-effort" },

@@ -54,10 +54,10 @@ Every route requires bearer authentication.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /v2/info` | Protocol, agent/process identity, and explicit capability flags. |
-| `GET /v2/health` | Bounded channel health for the current process. |
-| `POST /v2/turns` | Start one text turn and receive `application/x-ndjson`. |
-| `POST /v2/conversations/:id/cancel` | Cancel active turns for that exact conversation. |
+| `GET /v1/info` | Protocol, agent/process identity, and explicit capability flags. |
+| `GET /v1/health` | Bounded channel health for the current process. |
+| `POST /v1/turns` | Start one text turn and receive `application/x-ndjson`. |
+| `POST /v1/conversations/:id/cancel` | Cancel active turns for that exact conversation. |
 
 A turn begins with `accepted`, can emit assistant `delta` and `activity`
 frames, and ends with exactly one `completed` or `error` frame. The selected
@@ -97,7 +97,7 @@ authentication are both mandatory; the channel deliberately has no
 
 `channel-operator` returns its actual endpoint after `start()`, but it does not
 write a registry. The owning state/discovery lifecycle may publish an
-owner-private `mono-agent.operator-registry.v2` descriptor containing agent id,
+owner-private `mono-agent.operator-registry.v1` descriptor containing agent id,
 label, endpoint, token environment name, process id/start time, heartbeat, and
 capabilities. `@mono-agent/operator` rejects unsafe directory modes, symlinks,
 multi-link files, wrong ownership, and malformed descriptors. It marks stale

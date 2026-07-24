@@ -38,7 +38,7 @@
     },
     {
       "path": "packages/module-sdk/README.md",
-      "sha256": "f6f0a92e70087d13b1263753aa97f5b029710120af16bb428a8237d552f8b371",
+      "sha256": "34a5e9c425191e730f74c7c7c2976dfbbc92e9204938b1cc15022f267572c498",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -135,7 +135,7 @@
     },
     {
       "path": "packages/module-sdk/src/index.ts",
-      "sha256": "51cb57d9d637973f0f01d0903d1a41d41b99f7318851c6b63900cec5da988d91",
+      "sha256": "87d87902a78c8a5679b54bba4c0289a305548d7ab3bf6ef62fd5070bc7b04867",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -221,7 +221,7 @@
     },
     {
       "path": "packages/operator/README.md",
-      "sha256": "5e837e4993f3054c28d7b1b6a1fddb58db951d2a154f52b47a371ef5d27d176f",
+      "sha256": "0d1f362a89d2ffb6254e984f74f2a993d0eb3234933806d4d482593c62530b0c",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -246,7 +246,7 @@
     },
     {
       "path": "packages/operator/src/__tests__/client.test.ts",
-      "sha256": "2d95039cd5439019c19d60a7662846c0bc2dba8f5d1201c93122c8e33db1deca",
+      "sha256": "673b6c70fee89459d408f08e67dcb9cbb725e80d61d6857547bf8f58714c7685",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -258,7 +258,7 @@
     },
     {
       "path": "packages/operator/src/__tests__/directory.test.ts",
-      "sha256": "5cb0f3b7611458dff37dfc15d3004e7bf6ddbbe43f6b0b1bac18a87eab41e396",
+      "sha256": "7bc4e5695404f5da5095078c41c58bcf710aa5ad3ec19fcfb42eb4c2da804bb1",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -282,7 +282,7 @@
     },
     {
       "path": "packages/operator/src/__tests__/overrides.test.ts",
-      "sha256": "b211e32ff065e05b1049401be004357f345347babde6128e752a2e22f3d42821",
+      "sha256": "54f54997cb0156aaac3765fc84f5ab405508f1e9c2917e5b8449a37ccfa733ee",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -294,7 +294,7 @@
     },
     {
       "path": "packages/operator/src/__tests__/protocol.test.ts",
-      "sha256": "dfc82710fbe55a1ea64b3618e442323d5b20f2f7d0937c760125bb463600d886",
+      "sha256": "c65d8cd172c7a6b37326e978234391a375e766f1adb6c4ea298a6be62338e8c2",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -306,7 +306,7 @@
     },
     {
       "path": "packages/operator/src/__tests__/state.test.ts",
-      "sha256": "30b559cc0e487f8460b3bd72bbf504509c18e60992ab51e3881415defcbdd88b",
+      "sha256": "792edaa3c316ca9398d22e6fd7909bc3dbdee24a00c98f02f7aa2eb72aeb0e4f",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -318,7 +318,7 @@
     },
     {
       "path": "packages/operator/src/client.ts",
-      "sha256": "f463f65a642b2232da5006a5e5751b33caf6c0e5c0fbd23bdb06a5dc6c82ecc5",
+      "sha256": "d294f87f3405c2fa598775d7d3d38d915238952301c10b1ca70cd837e3a83952",
       "origin": {
         "classification": "predecessor-authorized-adaptation",
         "repository": "mono-agent-predecessor",
@@ -337,7 +337,7 @@
     },
     {
       "path": "packages/operator/src/directory.ts",
-      "sha256": "871b831e0a1855cbc896b976d5f901313b6bff983441f0daba25ad2f7d7e3d24",
+      "sha256": "5e045feb1c14710256f94486a18b4fdba035c21eac8a19650f7f1c48b8a92b19",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -349,7 +349,7 @@
     },
     {
       "path": "packages/operator/src/identity.ts",
-      "sha256": "ac72d1ccb8fb16df38b05082e7ea239c585db3eda5f93c0dc81f9a2a73760895",
+      "sha256": "b68b13549b5f72a7a2fa7d50a546a6bc48321adfc88b9a886bc8362a2fc9e36c",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -373,7 +373,7 @@
     },
     {
       "path": "packages/operator/src/overrides.ts",
-      "sha256": "19a192330a4b31d9e03d0b053bf4022a96b35579b82c79ab2123caf9fdf9ff0a",
+      "sha256": "c1f0b29b43c13a0878811c395432c5ad74222bef718a30f1406c9c7175d74e86",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -385,7 +385,7 @@
     },
     {
       "path": "packages/operator/src/protocol.ts",
-      "sha256": "3aa9c452e278a873200154ce21cf19adc2adfe926131d49c41b5f9d7d49a9a9b",
+      "sha256": "c18a1dd46f8f9b4335d8a99e2595c763a4a963cd6221a41e9e42041e8f450cf7",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -397,7 +397,7 @@
     },
     {
       "path": "packages/operator/src/state.ts",
-      "sha256": "cfba36de51ea0e198c5f223b9a5c5eba2d7e8ed2f7a3de1c24f6af6e0f77f7ba",
+      "sha256": "65f437519bc649735389eb5752f0c29da6a2f235ede68b18837fbdf181dc0314",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -409,7 +409,7 @@
     },
     {
       "path": "packages/operator/src/testing.ts",
-      "sha256": "16f53f232271e9c5c20899c31c85f8feb551c7c6af780e13a49b9be62f8d785f",
+      "sha256": "b936c3096672f7abe45d4f031f8c62c6679400e97039ea157f6678bf85ea4b3a",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -421,12 +421,24 @@
     },
     {
       "path": "packages/operator/src/types.ts",
-      "sha256": "5797c8a61878bed2ee4c762b3b8f99a507ad2bde2065cd1814a66dd12dd042f0",
+      "sha256": "8cbfe8fa2c6c0ff5dd71611d630b7a0ea3a33e590ce7b2d3f107958a62150629",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
         "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/operator/src/types.ts"
+      },
+      "copyrightHolder": "Robert Sreberski",
+      "authorityBasis": "robert-sreberski-original-apache-2.0"
+    },
+    {
+      "path": "packages/operator/src/validation.ts",
+      "sha256": "e53dcd70aee9ebf2e0f3d17ea6fd45f15b1c54d69a466b782d6b306d7cd51173",
+      "origin": {
+        "classification": "successor-original",
+        "repository": "mono-agent-next",
+        "commit": "32a22130d87535816dca8bc46c4c9d51c6e11553",
+        "path": "packages/operator/src/validation.ts"
       },
       "copyrightHolder": "Robert Sreberski",
       "authorityBasis": "robert-sreberski-original-apache-2.0"

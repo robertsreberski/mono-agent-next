@@ -506,19 +506,7 @@ async function loadState(directory: string): Promise<StoredWebState> {
   }
   const version = recordValue(raw)?.schemaVersion;
   if (version === 1 || version === 2) {
-    validateLegacyState(raw, version);
-    const legacy = raw as LegacyStoredWebStateV1 | LegacyStoredWebStateV2;
-    const migrated: MutableState = {
-      schemaVersion: 3,
-      revision: 1,
-      pinnedAgentIds: [],
-      threads: legacy.threads.map((thread) => ({
-        ...clone(thread),
-        titleManual: true,
-      })),
-      messages: clone([...legacy.messages]),
-    };
-    validateState(migrated);
+    const migrated = migrateLegacyState(raw, version);
     await writeStateAtomic(directory, migrated);
     return freezeState(migrated);
   }
@@ -710,10 +698,15 @@ function validateState(raw: unknown): asserts raw is StoredWebState {
   }
 }
 
-function validateLegacyState(
+/**
+ * Build and validate the migrated V3 state exactly once. This was previously
+ * constructed twice with a different `revision` (0 here, 1 at the call site),
+ * so the shape the validator approved was not the shape that got written.
+ */
+function migrateLegacyState(
   raw: unknown,
   version: 1 | 2,
-): asserts raw is LegacyStoredWebStateV1 | LegacyStoredWebStateV2 {
+): MutableState {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) invalidState();
   const value = raw as Record<string, unknown>;
   if (
@@ -722,20 +715,18 @@ function validateLegacyState(
     || !Array.isArray(value.messages)
     || Object.keys(value).some((field) => !["schemaVersion", "threads", "messages"].includes(field))
   ) invalidState();
-  const migrated = {
-    schemaVersion: 3,
-    revision: 0,
-    pinnedAgentIds: [],
-    threads: (value.threads as unknown[]).map((thread) => {
-      const record = recordValue(thread);
-      if (!record) invalidState();
-      return { ...record, titleManual: true };
-    }),
-    messages: value.messages,
-  };
-  validateState(migrated);
   if (version === 1 && (value.messages as unknown[]).some((message) =>
     recordValue(message)?.telemetry !== undefined)) invalidState();
+  const legacy = raw as LegacyStoredWebStateV1 | LegacyStoredWebStateV2;
+  const migrated: MutableState = {
+    schemaVersion: 3,
+    revision: 1,
+    pinnedAgentIds: [],
+    threads: legacy.threads.map((thread) => ({ ...clone(thread), titleManual: true })),
+    messages: clone([...legacy.messages]),
+  };
+  validateState(migrated);
+  return migrated;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {

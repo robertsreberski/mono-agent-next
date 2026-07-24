@@ -669,8 +669,10 @@ async function serveWebAsset(
     asset = await readStaticAsset(staticDirectory, index);
   }
   if (asset === undefined) throw new WebProductError("not_found", "Not found.", 404);
+  // VitePWA emits the worker as `sw.js`. Naming `service-worker.js` here meant
+  // the real worker fell through to `no-cache` and could be served stale.
   const cacheControl = asset.path.endsWith(`${sep}index.html`)
-    || asset.path.endsWith(`${sep}service-worker.js`)
+    || asset.path.endsWith(`${sep}sw.js`)
     || asset.path.endsWith(`${sep}manifest.webmanifest`)
     ? "no-store"
     : decoded.startsWith("/assets/")

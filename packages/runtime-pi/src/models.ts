@@ -5,6 +5,7 @@ import {
   lazyApi,
   type CredentialStore,
   type Model,
+  type ModelThinkingLevel,
   type Models,
   type MutableModels,
   type Provider,
@@ -98,6 +99,49 @@ export interface RuntimePiModelRegistry {
   readonly configuredSecrets: readonly string[];
   resolve(reference: string, signal?: AbortSignal): Promise<Model<string>>;
   capabilities(reference: string, signal?: AbortSignal): Promise<RuntimePiModelCapabilities>;
+}
+
+/**
+ * Pi names "no reasoning" `off`; the public effort vocabulary names it `none`.
+ * Every other level shares its name, so this is the only translation needed in
+ * either direction.
+ */
+export const publicEffortLevel = (level: ModelThinkingLevel): string =>
+  level === "off" ? "none" : level;
+
+export const piThinkingLevel = (effort: string): string => effort === "none" ? "off" : effort;
+
+let builtinCatalog: Models | undefined;
+
+/**
+ * Resolve one configured route to its catalog metadata without credentials,
+ * network access, or a created instance. Local providers are described from
+ * their own config; every other provider is read from Pi's generated catalog.
+ * Absent means the route is not statically describable — never a guess.
+ */
+export function runtimePiModelDescriptor(
+  config: RuntimePiConfig,
+  reference: string,
+): { label?: string; efforts?: readonly string[]; contextWindow?: number } | undefined {
+  const { provider, model: modelId } = parsePiModelReference(reference);
+  const local = config.localProviders.find((candidate) => candidate.id === provider);
+  let model: Model<string> | undefined;
+  if (local !== undefined) {
+    const declared = local.models?.find((candidate) => candidate.id === modelId);
+    model = declared === undefined
+      ? undefined
+      : piModel(local.id, openAiCompatibleBaseUrl(local.baseUrl), declared);
+  } else {
+    builtinCatalog ??= builtinModels();
+    model = builtinCatalog.getModel(provider, modelId) as Model<string> | undefined;
+  }
+  if (model === undefined) return undefined;
+  const efforts = getSupportedThinkingLevels(model).map(publicEffortLevel);
+  return {
+    ...(model.name === undefined || model.name === model.id ? {} : { label: model.name }),
+    ...(efforts.length === 0 ? {} : { efforts }),
+    ...(model.contextWindow > 0 ? { contextWindow: model.contextWindow } : {}),
+  };
 }
 
 function openAiCompatibleBaseUrl(authored: string): string {

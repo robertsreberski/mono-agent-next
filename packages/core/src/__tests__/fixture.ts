@@ -11,6 +11,8 @@ const REGISTRY_KEY = "__monoAgentCoreFixtureRegistry";
 
 export interface FixtureController {
   parse?(input: unknown): unknown;
+  /** Definition-level pure route validator, mirrored onto the generated entry. */
+  validateModel?(request: unknown): unknown;
   create(context: unknown): unknown | Promise<unknown>;
 }
 
@@ -115,6 +117,9 @@ export const monoAgentModule = {
     jsonSchema: ${JSON.stringify(schema)},
     parse(input) { return controller.parse ? controller.parse(input) : input; },
   },
+  ...(controller.validateModel === undefined
+    ? {}
+    : { validateModel(request) { return controller.validateModel(request); } }),
   create(context) { return controller.create(context); },
 };
 `;

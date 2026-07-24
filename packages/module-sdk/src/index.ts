@@ -905,12 +905,31 @@ export interface RuntimeModelValidationRequest {
   /** Parsed module config supplied without granting host capabilities. */
   readonly config: unknown;
 }
+/**
+ * Exact, runtime-verified description of one `{ runtime, model }` route, used
+ * to publish operator catalogs. Every field is optional because a runtime may
+ * only know some of it; an absent field means "not advertised" and renderers
+ * must not guess a value for it.
+ */
+export interface RuntimeModelDescriptor {
+  /** Human-facing name. Absent means renderers show the raw model id. */
+  readonly label?: string;
+  /**
+   * The exact effort levels this model accepts, in presentation order. Absent
+   * means effort is not selectable on this route; empty is not permitted.
+   */
+  readonly efforts?: readonly string[];
+  /** Advertised context window in tokens. */
+  readonly contextWindow?: number;
+}
 export interface RuntimeModelValidation {
   readonly supported: boolean;
   /** Effective capabilities for this exact model route. */
   readonly capabilities?: RuntimeCapabilities;
   /** Native tools available on this exact model route. */
   readonly nativeTools?: readonly RuntimeNativeToolDescriptor[];
+  /** Catalog metadata for this exact model route. */
+  readonly model?: RuntimeModelDescriptor;
   readonly diagnostics?: readonly ModuleDiagnostic[];
 }
 export interface RuntimeModelPreflightRequest { readonly model: string; readonly signal: AbortSignal; }
@@ -918,6 +937,7 @@ export interface RuntimeModelPreflightResult {
   readonly supported: boolean;
   readonly capabilities?: RuntimeCapabilities;
   readonly nativeTools?: readonly RuntimeNativeToolDescriptor[];
+  readonly model?: RuntimeModelDescriptor;
   readonly diagnostics?: readonly ModuleDiagnostic[];
 }
 export interface RuntimeCapabilities {

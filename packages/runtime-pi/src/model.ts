@@ -7,6 +7,7 @@ import type {
 
 import { runtimePiCodingNativeTools } from "./coding-tool-descriptors.js";
 import { parsePiModelReference, parseRuntimePiConfig } from "./config.js";
+import { runtimePiModelDescriptor } from "./models.js";
 
 export const runtimePiNodeReplTool: RuntimeNativeToolDescriptor = Object.freeze({
   id: "NodeRepl",
@@ -57,7 +58,7 @@ function diagnostic(message: string): ModuleDiagnostic {
 export function validateRuntimePiModel(
   request: RuntimeModelValidationRequest,
 ): RuntimeModelValidation {
-  parseRuntimePiConfig(request.config);
+  const config = parseRuntimePiConfig(request.config);
   try {
     parsePiModelReference(request.model);
   } catch (error) {
@@ -68,8 +69,10 @@ export function validateRuntimePiModel(
       ],
     };
   }
+  const model = runtimePiModelDescriptor(config, request.model);
   return {
     supported: true,
     nativeTools: runtimePiNativeTools,
+    ...(model === undefined ? {} : { model }),
   };
 }
