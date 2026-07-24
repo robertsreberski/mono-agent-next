@@ -552,6 +552,69 @@ describe("runtime-codex", () => {
     });
   });
 
+  it("settles an active turn and its cleanup before stop completes", async () => {
+    const child = new FakeCodexProcess((request, process) => {
+      if (request.method === "turn/start") {
+        process.send({
+          id: request.id,
+          result: { turn: { id: "turn-stopped" } },
+        });
+        return true;
+      }
+      if (request.method === "turn/interrupt") {
+        process.send({ id: request.id, result: {} });
+        return true;
+      }
+      return false;
+    });
+    const launch = runtimeLaunch([child]);
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("stop-active"),
+      spawnProcess: launch,
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    const pending = runtime.runTurn({
+      turnId: "turn",
+      conversationId: "conversation",
+      model: "gpt-5.6-codex",
+      messages: [{ role: "user", content: [{ type: "text", text: "wait" }] }],
+      tools: [],
+      signal: new AbortController().signal,
+    }, {
+      emit() {},
+      async executeTool(call) { return { callId: call.id, content: [] }; },
+    });
+    await vi.waitFor(() => {
+      expect(child.requests.some((request) =>
+        request.method === "turn/start")).toBe(true);
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const turnLaunch = [...launch.mock.calls].reverse().find((call) =>
+      call[1][0] === "app-server");
+
+    const stopping = runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+    await expect(pending).resolves.toMatchObject({
+      status: "cancelled",
+      session: { id: "thread-1" },
+    });
+    await expect(stopping).resolves.toBeUndefined();
+    expect(runtime.health?.({
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      status: "unknown",
+      details: { state: "stopped", activeTurns: 0 },
+    });
+    await expect(lstat(String(turnLaunch?.[2].cwd))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("steers live input into the active turn", async () => {
     const child = new FakeCodexProcess((request, process) => {
       if (request.method === "turn/start") {
@@ -861,6 +924,51 @@ describe("runtime-codex", () => {
       })).resolves.toMatchObject({
         status: "completed",
         message: { content: [{ type: "text", text: "hello" }] },
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("maps an early transport failure without an unhandled terminal rejection", async () => {
+    const child = new FakeCodexProcess((request, process) => {
+      if (request.method !== "turn/start") return false;
+      queueMicrotask(() => {
+        process.emit("error", new Error("provider exploded"));
+      });
+      return true;
+    });
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("early-transport-failure"),
+      spawnProcess: runtimeLaunch([child]),
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await expect(runtime.runTurn({
+        turnId: "turn",
+        conversationId: "conversation",
+        model: "gpt-5.6-codex",
+        messages: [{ role: "user", content: [{ type: "text", text: "fail" }] }],
+        tools: [],
+        signal: new AbortController().signal,
+      }, {
+        emit() {},
+        async executeTool(call) { return { callId: call.id, content: [] }; },
+      })).rejects.toMatchObject({
+        name: "RuntimeCodexError",
+        code: "PROVIDER_FAILED",
+        sideEffects: "none",
+        message: "provider exploded",
       });
       await new Promise<void>((resolve) => setImmediate(resolve));
       expect(unhandled).toEqual([]);

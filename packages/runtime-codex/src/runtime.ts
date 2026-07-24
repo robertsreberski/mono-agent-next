@@ -1,7 +1,4 @@
-import {
-  RUNTIME_SESSION_UNAVAILABLE_CODE,
-  RuntimeTurnError,
-} from "@mono-agent/module-sdk";
+import { RUNTIME_SESSION_UNAVAILABLE_CODE, RuntimeTurnError } from "@mono-agent/module-sdk";
 import type {
   JsonObject,
   ModuleDiagnostic,
@@ -21,29 +18,12 @@ import type {
   TurnMessage,
 } from "@mono-agent/module-sdk";
 
-import {
-  captureApprovalEvidence,
-  handleCodexServerRequest,
-  type CodexItemEvidence,
-} from "./approvals.js";
+import { captureApprovalEvidence, handleCodexServerRequest, type CodexItemEvidence } from "./approvals.js";
 import type { RuntimeCodexConfig } from "./config.js";
-import {
-  approvalPolicy,
-  containedCodexConfig,
-  type EffectiveCodexMcpServer,
-} from "./containment.js";
+import { approvalPolicy, containedCodexConfig, type EffectiveCodexMcpServer } from "./containment.js";
 import { codexProcessEnvironment } from "./environment.js";
-import {
-  JsonRpcProcess,
-  JsonRpcRequestError,
-  type JsonRpcMessage,
-  type SpawnProcess,
-} from "./json-rpc.js";
-import {
-  isRuntimeCodexModel,
-  runtimeCodexCapabilities,
-  validateRuntimeCodexModel,
-} from "./model.js";
+import { JsonRpcProcess, JsonRpcRequestError, type JsonRpcMessage, type SpawnProcess } from "./json-rpc.js";
+import { isRuntimeCodexModel, runtimeCodexCapabilities, validateRuntimeCodexModel } from "./model.js";
 import {
   assertFrozenAppServerMcpConfig,
   cancellationError,
@@ -250,7 +230,9 @@ function emitIsolated(
 
 export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime {
   let state: RuntimeState = "created";
-  const active = new Set<JsonRpcProcess>();
+  const active = new Map<JsonRpcProcess, {
+    cancel(): void; readonly settled: Promise<void>;
+  }>();
   let codexHome: string | undefined;
   let startMcpServers: readonly EffectiveCodexMcpServer[] | undefined;
 
@@ -325,7 +307,11 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
     async stop(_context: ModuleStopContext) {
       if (state === "stopped") return;
       state = "draining";
-      await Promise.allSettled([...active].map(async (client) => client.close()));
+      const turns = [...active.entries()];
+      for (const [, turn] of turns) turn.cancel();
+      await Promise.allSettled(turns.flatMap(
+        ([client, turn]) => [client.close(), turn.settled],
+      ));
       active.clear();
       state = "stopped";
     },
@@ -414,7 +400,6 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           },
         );
       }
-      active.add(client);
       const clientRequest = async (method: string, params: unknown): Promise<unknown> =>
         abortable(async () => client.request(method, params), request.signal);
       const clientNotify = async (method: string, params: unknown): Promise<void> =>
@@ -441,6 +426,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         terminalResolve = resolve;
         terminalReject = reject;
       });
+      void terminal.catch(() => undefined);
       const unsubscribe = client.subscribe((message) => {
         if (message.method === undefined || threadId === undefined) return;
         const params = record(message.params);
@@ -493,12 +479,30 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         },
       );
 
-      const onAbort = (): void => {
+      let stopRequested = false;
+      let cancellationSettled = false;
+      const settleCancellation = (): void => {
+        if (cancellationSettled) return;
+        cancellationSettled = true;
         resolveTurnIdentity();
         if (threadId !== undefined && turnId !== undefined) void client.request("turn/interrupt", { threadId, turnId }).catch(() => undefined);
-        void client.close().catch(() => undefined);
         terminalResolve({ method: "cancelled" });
       };
+      const onAbort = (): void => {
+        settleCancellation();
+        void client.close().catch(() => undefined);
+      };
+      let resolveSettled!: () => void;
+      const settled = new Promise<void>(
+        (resolve) => { resolveSettled = resolve; },
+      );
+      active.set(client, {
+        cancel() {
+          stopRequested = true;
+          settleCancellation();
+        },
+        settled,
+      });
       request.signal.addEventListener("abort", onAbort, { once: true });
 
       let unregisterLiveInput: (() => void) | undefined;
@@ -635,7 +639,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           metadata: { provider: "codex", model: request.model, nativeTurnId: turnId } as JsonObject,
         };
       } catch (error) {
-        if (request.signal.aborted) {
+        if (request.signal.aborted || stopRequested) {
           return {
             status: "cancelled",
             ...(threadId === undefined
@@ -685,8 +689,9 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           // Cleanup is best effort and must not replace the turn result.
         }
         await client.close().catch(() => undefined);
-        active.delete(client);
         await processDirectory.cleanup().catch(() => undefined);
+        active.delete(client);
+        resolveSettled();
       }
     },
   };
