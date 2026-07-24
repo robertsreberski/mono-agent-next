@@ -34,6 +34,7 @@
     "build": "pnpm run build:webapp && tsc -p tsconfig.build.json",
     "build:webapp": "vite build --config webapp/vite.config.ts",
     "dev:webapp": "vite --config webapp/vite.config.ts",
+    "test:visual": "pnpm --filter @mono-agent/operator run build && tsc -p webapp/e2e/tsconfig.json --noEmit && playwright test --config webapp/playwright.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p webapp/tsconfig.json --noEmit",
     "test": "pnpm run build:webapp && vitest run"
   },
@@ -43,6 +44,7 @@
   "devDependencies": {
     "@assistant-ui/react": "0.14.27",
     "@assistant-ui/react-markdown": "0.14.6",
+    "@playwright/test": "1.61.1",
     "@types/react": "19.1.17",
     "@types/react-dom": "19.1.11",
     "@vitejs/plugin-react": "4.7.0",

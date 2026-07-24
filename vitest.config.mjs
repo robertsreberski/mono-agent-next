@@ -20,6 +20,7 @@ export default defineConfig({
       "**/.quests-wt/**",
       "**/.ultrawork/**",
       "**/.worklab-tmp/**",
+      "**/webapp/e2e/**",
     ],
   },
 });

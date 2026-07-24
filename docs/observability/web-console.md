@@ -117,6 +117,16 @@ The embedded React/assistant-ui client is built and packed as an installable
 PWA. It keeps its bearer token in `sessionStorage`; service-worker precaching
 excludes API and health responses.
 
+The console keeps a compact agent rail, searchable conversation navigation,
+and a focused chat column on desktop; the first two surfaces become
+keyboard-contained drawers on narrow screens. assistant-ui owns thread,
+message, quote, composer, and selection behavior. Structured progress,
+tool-call/result, and compaction events are grouped into one **Activity**
+disclosure that stays open while a response is running and collapses when the
+turn settles. Exact context telemetry and capability-gated model, effort, and
+advanced runtime overrides stay in compact controls instead of occupying the
+transcript.
+
 ## Durable state and turn ownership
 
 The web service, not the browser response, owns an upstream turn. Closing or

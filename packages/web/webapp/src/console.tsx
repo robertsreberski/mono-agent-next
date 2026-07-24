@@ -82,7 +82,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   const [selectedThreadId, setSelectedThreadId] = useState<string>();
   const [showOffline, setShowOfflineState] = useState(window.localStorage.getItem(OFFLINE_KEY) === "true");
   const [showArchived, setShowArchivedState] = useState(window.localStorage.getItem(ARCHIVE_KEY) === "true");
-  const [railExpanded, setRailExpandedState] = useState(window.localStorage.getItem(RAIL_KEY) !== "collapsed");
+  const [railExpanded, setRailExpandedState] = useState(window.localStorage.getItem(RAIL_KEY) === "expanded");
   const [pendingFiles, setPendingFiles] = useState<readonly File[]>([]);
   const [runtime, setRuntime] = useState("");
   const [model, setModel] = useState("");

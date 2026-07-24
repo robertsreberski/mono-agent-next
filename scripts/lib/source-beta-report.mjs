@@ -1042,6 +1042,7 @@ export function classifySourcePath(path) {
     if (/\.test\.(?:ts|tsx)$/u.test(path)) return "test";
     return "production";
   }
+  if (path.startsWith("packages/web/webapp/e2e/")) return "test";
   if (path === "packages/web/webapp/public/notification-sw.js") return "production";
   if (path === "packages/web/webapp/vite.config.ts") return "tooling";
 

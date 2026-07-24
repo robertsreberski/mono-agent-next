@@ -33,8 +33,9 @@ Catalog responsibility: Runs the standalone authenticated browser product with o
   replay, redacted config, and health through capability-gated shared client APIs.
 - Keep a service-owned turn running and durably settling when its browser stream
   disconnects or reloads.
-- Serve a React/assistant-ui PWA with opt-in proactive and response-arrival
-  notifications from the same process.
+- Serve a compact, responsive React/assistant-ui PWA with grouped structured
+  Activity, native thread/message/quote/composer behavior, and opt-in proactive
+  and response-arrival notifications from the same process.
 
 ## Install / Usage
 
@@ -108,6 +109,12 @@ marked proactive replay -> durable import/tombstone -> notification hint -> brow
 
 Web never parses the agent wire or implements a second action reducer. Its
 browser stream contains web-owned thread snapshots, not raw operator frames.
+The browser keeps agents, searchable conversations, and chat as a compact
+three-surface desktop shell, then presents agent and conversation navigation
+as keyboard-contained drawers on narrow screens. Running structured activity
+stays visible; terminal activity collapses into a manually reopenable
+disclosure. Exact context telemetry and capability-gated run overrides remain
+available through compact controls.
 
 ### Package structure
 

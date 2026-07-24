@@ -29,8 +29,7 @@ v1 config id is `operator`.
         "token": {
           "$env": "MONO_AGENT_OPERATOR_TOKEN"
         }
-      },
-      "label": "Personal Agent"
+      }
     }
   }
 }
@@ -41,12 +40,15 @@ v1 config id is `operator`.
 | `listen.host` | string | `127.0.0.1` | Loopback address. Non-loopback addresses are rejected rather than enabled by an override. |
 | `listen.port` | integer | `0` | `0` asks the operating system for an ephemeral port. |
 | `auth.token` | `{$env}` secret | required | Bearer token resolved by Core before module validation. Literal source-config secrets are rejected by the schema boundary. |
-| `label` | string | agent instance id | Optional human-readable label, capped at 128 printable characters. |
 
 The resolved bearer must be a non-whitespace value from 32 through 4,096 bytes.
 Put it in the selected environment source and expose only its variable name in
 an owner-private discovery descriptor. Neither the channel nor the descriptor
 persists the secret.
+
+The endpoint label comes from `agent.name` through Core's
+`operator.identity.v1` capability; the channel does not accept a second
+channel-local label.
 
 ## Current endpoints
 

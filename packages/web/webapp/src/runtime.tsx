@@ -6,10 +6,18 @@ import {
   type ThreadMessageLike,
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
+import type {
+  OperatorActivity,
+  OperatorJsonValue,
+  OperatorToolResult,
+} from "@mono-agent/operator";
 import { type ReactNode, useCallback, useMemo } from "react";
 
 import { useConsole } from "./console";
 import type { Message, Quote } from "./types";
+
+type MessageContentPart = Exclude<ThreadMessageLike["content"], string>[number];
+type JsonObject = { readonly [key: string]: OperatorJsonValue };
 
 function status(message: Message): ThreadMessageLike["status"] {
   if (message.status === "running") return { type: "running" };
@@ -22,10 +30,14 @@ function status(message: Message): ThreadMessageLike["status"] {
 }
 
 export function convertMessage(message: Message): ThreadMessageLike {
+  const content = [
+    ...(message.role === "assistant" ? convertOperatorActivities(message.activities ?? []) : []),
+    ...(message.text.length > 0 ? [{ type: "text" as const, text: message.text }] : []),
+  ];
   return {
     id: message.id,
     role: message.role,
-    content: [{ type: "text", text: message.text }],
+    content,
     createdAt: new Date(message.createdAt),
     ...(message.role === "assistant" ? { status: status(message) } : {}),
     metadata: {
@@ -43,6 +55,72 @@ export function convertMessage(message: Message): ThreadMessageLike {
       },
     },
   };
+}
+
+/**
+ * Promote durable operator activity into assistant-ui's native part model.
+ * Calls own their matching result regardless of adjacency; unmatched results
+ * remain visible as named data parts instead of being silently discarded.
+ */
+export function convertOperatorActivities(
+  activities: readonly OperatorActivity[],
+): readonly MessageContentPart[] {
+  const results = new Map<string, OperatorToolResult>();
+  for (const activity of activities) {
+    if (activity.type === "tool_result") results.set(activity.result.callId, activity.result);
+  }
+
+  return activities.flatMap<MessageContentPart>((activity) => {
+    switch (activity.type) {
+      case "activity":
+        return [{ type: "reasoning", text: activity.text }];
+      case "compaction":
+        return [{
+          type: "data-operator-compaction",
+          data: {
+            compacted: activity.compaction.compacted,
+            ...(activity.compaction.tokensBefore === undefined
+              ? {}
+              : { tokensBefore: activity.compaction.tokensBefore }),
+            ...(activity.compaction.tokensAfter === undefined
+              ? {}
+              : { tokensAfter: activity.compaction.tokensAfter }),
+            ...(activity.compaction.summaryTokens === undefined
+              ? {}
+              : { summaryTokens: activity.compaction.summaryTokens }),
+          },
+        }];
+      case "tool_call": {
+        const result = results.get(activity.call.id);
+        return [{
+          type: "tool-call",
+          toolCallId: activity.call.id,
+          toolName: activity.call.name,
+          args: activity.call.inputOmitted
+            ? { omitted: true, message: "Input omitted by policy" }
+            : jsonObject(activity.call.input),
+          argsText: activity.call.inputOmitted
+            ? "{\"omitted\":true}"
+            : jsonText(activity.call.input),
+          ...(result === undefined ? {} : {
+            result: toolResult(result),
+            isError: result.isError === true,
+          }),
+        }];
+      }
+      case "tool_result":
+        return activities.some(
+          (candidate) =>
+            candidate.type === "tool_call"
+            && candidate.call.id === activity.result.callId,
+        )
+          ? []
+          : [{
+              type: "data-operator-result",
+              data: toolResult(activity.result),
+            }];
+    }
+  });
 }
 
 export function WebRuntimeProvider({ children }: { readonly children: ReactNode }) {
@@ -69,8 +147,10 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
     }, quote);
   }, [consoleState]);
   const isRunning = consoleState.detail?.thread.status === "running";
+  const canLiveInput = consoleState.selectedAgent?.capabilities.liveInput === true;
+  const canCancel = consoleState.selectedAgent?.capabilities.cancellation === true;
   const queue = useMemo<ExternalThreadQueueAdapter | undefined>(() => (
-    isRunning && consoleState.selectedAgent?.capabilities.liveInput === true
+    isRunning && canLiveInput
       ? {
           items: [],
           enqueue: (message) => { onNew(message); },
@@ -79,7 +159,7 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
           clear: () => undefined,
         }
       : undefined
-  ), [consoleState.selectedAgent?.capabilities.liveInput, isRunning, onNew]);
+  ), [canLiveInput, isRunning, onNew]);
   const threadList = useMemo(() => ({
     threadId: consoleState.selectedThreadId,
     isLoading: consoleState.loading,
@@ -108,11 +188,13 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
     onRename: consoleState.renameThread,
     onArchive: async (threadId: string) => { await consoleState.archiveThread(threadId, true); },
     onUnarchive: async (threadId: string) => { await consoleState.archiveThread(threadId, false); },
+    onDelete: async (threadId: string) => { await consoleState.deleteThread(threadId); },
   }), [
     consoleState.archiveThread,
     consoleState.bootstrap?.threads,
     consoleState.createThread,
     consoleState.loading,
+    consoleState.deleteThread,
     consoleState.renameThread,
     consoleState.selectThread,
     consoleState.selectedAgentId,
@@ -126,14 +208,50 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
     isSendDisabled:
       consoleState.selectedThread === undefined
       || consoleState.selectedThread.archivedAt !== undefined
-      || consoleState.selectedAgent?.online !== true,
+      || consoleState.selectedAgent?.online !== true
+      || (isRunning && !canLiveInput),
     onNew,
-    onCancel: consoleState.cancel,
+    onCancel: canCancel ? consoleState.cancel : undefined,
     queue,
     unstable_capabilities: { copy: true },
     adapters: { threadList },
   });
   return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>;
+}
+
+function jsonObject(value: OperatorJsonValue | undefined): JsonObject {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return value as JsonObject;
+  }
+  return value === undefined ? {} : { value };
+}
+
+function jsonText(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {}, null, 2);
+  } catch {
+    return "{}";
+  }
+}
+
+function toolResult(result: OperatorToolResult): {
+  readonly callId: string;
+  readonly content?: readonly unknown[];
+  readonly contentOmitted: boolean;
+  readonly isError: boolean;
+} {
+  return {
+    callId: result.callId,
+    contentOmitted: result.contentOmitted,
+    isError: result.isError === true,
+    ...(result.contentOmitted || result.content === undefined
+      ? {}
+      : {
+          content: result.content.map((part) =>
+            part.type === "text" ? part.text : part.value
+          ),
+        }),
+  };
 }
 
 export function resolveOperatorQuote(

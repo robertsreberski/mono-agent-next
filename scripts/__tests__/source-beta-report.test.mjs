@@ -72,6 +72,8 @@ describe("source-beta production budgets", () => {
     expect(classifySourcePath("packages/web/webapp/src/App.tsx")).toBe("production");
     expect(classifySourcePath("packages/web/webapp/public/notification-sw.js")).toBe("production");
     expect(classifySourcePath("packages/web/webapp/src/browser.test.tsx")).toBe("test");
+    expect(classifySourcePath("packages/web/webapp/e2e/console.visual.spec.ts")).toBe("test");
+    expect(classifySourcePath("packages/web/webapp/e2e/fixtures/console-fixtures.ts")).toBe("test");
     expect(classifySourcePath("packages/web/webapp/vite.config.ts")).toBe("tooling");
     expect(classifySourcePath("website/astro.config.mjs")).toBe("production");
     expect(classifySourcePath("packages/tui/vitest.config.ts")).toBe("test");
