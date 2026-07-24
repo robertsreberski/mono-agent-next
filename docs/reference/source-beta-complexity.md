@@ -17,30 +17,30 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `6d3366fb7d9fc08f92bac43aadc3d6a8674d98d25294cf9a6120528c8383aeff`
+Source manifest digest: `c4c56956ab640f9f717e6086a3481548d737c2967b16e40d1ead38c705efd909`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 206 | 83133 |
-| Tests | 138 | 64859 |
-| Repository and product tooling | 63 | 22986 |
+| Production | 207 | 83343 |
+| Tests | 138 | 65192 |
+| Repository and product tooling | 63 | 22966 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **407** | **170978** |
+| **Total executable source** | **408** | **171501** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 403.6 lines.
+Average production file size is 402.6 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 83133 | 130000 | within limit |
+| repository-production | 83343 | 130000 | within limit |
 | kernel-production | 15296 | 15500 | within limit |
 
 ## Largest package ownership surfaces
@@ -67,7 +67,7 @@ The complete package table is retained in the generated report model exposed by
 | First-party dependency edges | 22 |
 | First-party dependency cycles | 0 |
 | Public code entrypoints | 28 |
-| Public named exports | 988 |
+| Public named exports | 987 |
 | Distinct scaffold config paths | 104 |
 
 The first-party package graph is acyclic.

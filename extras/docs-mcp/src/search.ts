@@ -58,19 +58,12 @@ export class MonoAgentDocsSearchIndex {
     if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
       throw new Error(`Documentation search limit must be an integer between 1 and ${MAX_LIMIT}.`);
     }
-    const scope = input.scope ?? "all";
-    if (scope !== "all" && scope !== "docs") {
-      throw new Error("Documentation search scope must be all or docs.");
-    }
-
     const [queryEmbedding] = await embed(query);
     if (queryEmbedding === undefined || queryEmbedding.length !== this.#corpus.manifest.model.dimensions) {
       throw new Error(`Documentation query embedding must have ${this.#corpus.manifest.model.dimensions} dimensions.`);
     }
     const candidateIndexes = this.#corpus.chunks
-      .map((chunk, index) => ({ chunk, index }))
-      .filter(({ chunk }) => scope === "all" || chunk.source === scope)
-      .map(({ index }) => index);
+      .map((_chunk, index) => index);
 
     const semanticRanking = candidateIndexes
       .map((index) => ({ index, score: dotProduct(queryEmbedding, this.#corpus.embeddings[index]!) }))
@@ -127,7 +120,6 @@ export class MonoAgentDocsSearchIndex {
       corpusDigest: this.#corpus.manifest.corpusDigest,
       retrievalMode: "hybrid",
       query,
-      scope,
       results,
       navigation: {
         guidance: results.length === 0

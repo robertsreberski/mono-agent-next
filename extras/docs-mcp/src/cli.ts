@@ -25,7 +25,6 @@ async function main(): Promise<void> {
     const index = await loadDefaultDocsSearchIndex();
     const result = await index.search({
       query: "How do I configure fallback models?",
-      scope: "docs",
       limit: 3,
     });
     if (result.results.length === 0) {

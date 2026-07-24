@@ -6,6 +6,16 @@ import { fileURLToPath } from "node:url";
 import { embed } from "@yarflam/potion-base-8m";
 import GithubSlugger from "github-slugger";
 
+import {
+  assertUniqueDocumentLocations,
+  closesMarkdownFence,
+  findDocumentByLogicalPath,
+  markdownLinks,
+  normalizeRoute,
+  parseMarkdownFence,
+  safeDecode,
+} from "../src/markdown-helpers.js";
+
 const MODEL_DIMENSIONS = 256;
 const MODEL_VERSION = "1.0.4";
 const CHUNKER_VERSION = "markdown-blocks-v2";
@@ -15,9 +25,10 @@ const DOCS_ORIGIN = "https://mono-agent-docs.vercel.app";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(packageRoot, "../..");
-const outputDirectory = join(packageRoot, "dist", "corpus");
+const buildPaths = parseBuildPaths(process.argv.slice(2));
+const outputDirectory = buildPaths.outputDirectory;
 
-const sources = await collectSources();
+const sources = await collectSources(buildPaths.docsRoot);
 const sourceHash = createHash("sha256");
 const documents = [];
 const chunks = [];
@@ -29,6 +40,7 @@ for (const source of sources) {
 }
 assertUniqueIds("document", documents);
 assertUniqueIds("chunk", chunks);
+assertUniqueDocumentLocations(documents);
 validateInternalLinks(documents);
 
 const embeddings = [];
@@ -100,8 +112,7 @@ process.stderr.write(
   `Generated ${documents.length} documents and ${chunks.length} mono-agent documentation chunks (${manifest.corpusDigest.slice(0, 12)}).\n`,
 );
 
-async function collectSources() {
-  const docsRoot = join(repositoryRoot, "docs");
+async function collectSources(docsRoot) {
   const docsFiles = (await walkMarkdown(docsRoot))
     .filter((path) => {
       const firstSegment = relative(docsRoot, path).split(sep)[0];
@@ -122,6 +133,24 @@ async function collectSources() {
     });
   }
   return records;
+}
+
+function parseBuildPaths(args) {
+  const result = {
+    docsRoot: join(repositoryRoot, "docs"),
+    outputDirectory: join(packageRoot, "dist", "corpus"),
+  };
+  for (let index = 0; index < args.length; index += 2) {
+    const flag = args[index];
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("Usage: generate-corpus.mjs [--docs-root <path>] [--output-directory <path>]");
+    }
+    if (flag === "--docs-root") result.docsRoot = resolve(value);
+    else if (flag === "--output-directory") result.outputDirectory = resolve(value);
+    else throw new Error(`Unknown generate-corpus option ${flag}.`);
+  }
+  return result;
 }
 
 async function walkMarkdown(root) {
@@ -172,9 +201,9 @@ function parseDocument(source) {
   };
 
   for (const line of markdownLines(markdown)) {
-    const fence = /^\s{0,3}(`{3,}|~{3,})/u.exec(line.text)?.[1];
+    const fence = parseMarkdownFence(line.text);
     if (fenceMarker !== undefined) {
-      if (fence !== undefined && fence[0] === fenceMarker[0] && fence.length >= fenceMarker.length) {
+      if (fence !== undefined && closesMarkdownFence(fence, fenceMarker)) {
         flushBlock(line.endOffset, "fence");
         fenceMarker = undefined;
       }
@@ -182,7 +211,7 @@ function parseDocument(source) {
     }
     if (fence !== undefined) {
       flushBlock(line.startOffset);
-      fenceMarker = fence;
+      fenceMarker = fence.marker;
       blockStart = line.startOffset;
       blockHeadingPath = [...headingPath];
       blockAnchor = currentAnchor;
@@ -276,11 +305,13 @@ function chunkDocument(document, blocks) {
 function splitOversizedBlock(block) {
   if (block.text.length <= MAX_CHUNK_CHARACTERS) return [block];
   const lines = block.text.split("\n");
-  const openingFence = /^\s{0,3}(`{3,}|~{3,})/u.exec(lines[0] ?? "")?.[1];
+  const openingFence = parseMarkdownFence(lines[0] ?? "");
   const closingLine = openingFence === undefined ? undefined : lines.at(-1);
-  const closesFence = openingFence !== undefined && closingLine !== undefined
-    && new RegExp(`^\\s{0,3}${escapeRegExp(openingFence[0])}{${openingFence.length},}\\s*$`, "u").test(closingLine);
-  if (openingFence !== undefined && closesFence) {
+  const closingFence = closingLine === undefined ? undefined : parseMarkdownFence(closingLine);
+  const hasClosingFence = openingFence !== undefined
+    && closingFence !== undefined
+    && closesMarkdownFence(closingFence, openingFence.marker);
+  if (openingFence !== undefined && hasClosingFence) {
     const openingLine = lines[0];
     const bodyStart = block.startOffset + openingLine.length + 1;
     const body = lines.slice(1, -1).join("\n");
@@ -425,38 +456,6 @@ function resolveLink(source, href, maps) {
   return { kind: "resolved", document: target, fragment };
 }
 
-function findDocumentByLogicalPath(path, byPath) {
-  const candidates = [
-    path,
-    `${path}.md`,
-    `${path}.mdx`,
-    posix.join(path, "index.md"),
-    posix.join(path, "index.mdx"),
-  ];
-  return candidates.map((candidate) => byPath.get(candidate)).find(Boolean);
-}
-
-function markdownLinks(markdown) {
-  const links = [];
-  let fenceMarker;
-  for (const line of markdownLines(markdown)) {
-    const fence = /^\s{0,3}(`{3,}|~{3,})/u.exec(line.text)?.[1];
-    if (fenceMarker !== undefined) {
-      if (fence !== undefined && fence[0] === fenceMarker[0] && fence.length >= fenceMarker.length) fenceMarker = undefined;
-      continue;
-    }
-    if (fence !== undefined) {
-      fenceMarker = fence;
-      continue;
-    }
-    const pattern = /(?<!!)\[([^\]]+)\]\(\s*<?([^\s)>]+)>?(?:\s+["'][^"']*["'])?\s*\)/gu;
-    for (const match of line.text.matchAll(pattern)) {
-      links.push({ label: match[1], href: match[2] });
-    }
-  }
-  return links;
-}
-
 function markdownLines(markdown) {
   const lines = [];
   let startOffset = 0;
@@ -490,12 +489,6 @@ function docsRoute(logicalPath) {
 
 function canonicalDocsUrl(logicalPath) {
   return `${DOCS_ORIGIN}${docsRoute(logicalPath)}`;
-}
-
-function normalizeRoute(route) {
-  const decoded = safeDecode(route).replace(/\/{2,}/gu, "/");
-  const withoutIndex = decoded.replace(/\/index(?:\.html)?\/?$/u, "/");
-  return withoutIndex === "/" ? "/" : `/${withoutIndex.replace(/^\/+|\/+$/gu, "")}/`;
 }
 
 function joinedLength(parts, next) {
@@ -535,16 +528,4 @@ function sha256(bytes) {
 
 function toPosixPath(path) {
   return path.split(sep).join("/");
-}
-
-function safeDecode(value) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

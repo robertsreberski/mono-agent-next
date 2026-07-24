@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -12,6 +12,9 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { loadDocsCorpus } from "../corpus.js";
+import type { DocsCorpus, DocsCorpusChunk, DocsCorpusDocument } from "../corpus.js";
+import { assertUniqueDocumentLocations, markdownLinks } from "../markdown-helpers.js";
+import { MONO_AGENT_DOCS_CHUNK_URI_PREFIX, MonoAgentDocsReader } from "../reader.js";
 import { MonoAgentDocsSearchIndex } from "../search.js";
 import { createMonoAgentDocsMcpServer, MONO_AGENT_DOCS_TOOL_NAME } from "../server.js";
 import type { MonoAgentDocsReadResult, MonoAgentDocsSearchResult } from "../types.js";
@@ -62,9 +65,140 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     await expect(loadDocsCorpus(copy)).rejects.toThrow(/checksum mismatch/u);
   });
 
+  it("rejects every corrupt-corpus integrity class with its specific diagnostic", async () => {
+    const cases: readonly {
+      readonly label: string;
+      readonly mutate: (copy: string) => Promise<string>;
+    }[] = [
+      {
+        label: "non-finite-embedding",
+        mutate: async (copy) => {
+          const path = join(copy, "embeddings.f32");
+          const bytes = Buffer.from(await readFile(path));
+          bytes.writeFloatLE(Number.NaN, 0);
+          await writeFile(path, bytes);
+          await refreshManifestDigests(copy);
+          return "Documentation embedding 0:0 is not finite.";
+        },
+      },
+      {
+        label: "embedding-byte-length",
+        mutate: async (copy) => {
+          const path = join(copy, "embeddings.f32");
+          const bytes = await readFile(path);
+          await writeFile(path, bytes.subarray(0, bytes.length - Float32Array.BYTES_PER_ELEMENT));
+          await refreshManifestDigests(copy);
+          return `Documentation embedding byte length mismatch: expected ${bytes.length}, received ${bytes.length - Float32Array.BYTES_PER_ELEMENT}.`;
+        },
+      },
+      {
+        label: "chunk-provenance",
+        mutate: async (copy) => {
+          const path = join(copy, "chunks.json");
+          const chunks = JSON.parse(await readFile(path, "utf8")) as Array<{ id: string; path: string }>;
+          chunks[0]!.path = `${chunks[0]!.path}.invalid`;
+          await writeFile(path, `${JSON.stringify(chunks)}\n`, "utf8");
+          await refreshManifestDigests(copy);
+          return `Documentation chunk ${chunks[0]!.id} has invalid document provenance.`;
+        },
+      },
+      {
+        label: "duplicate-route",
+        mutate: async (copy) => {
+          const path = join(copy, "documents.json");
+          const documents = JSON.parse(await readFile(path, "utf8")) as Array<{ route?: string }>;
+          const routed = documents.filter((document): document is { route: string } => document.route !== undefined);
+          routed[1]!.route = routed[0]!.route;
+          await writeFile(path, `${JSON.stringify(documents)}\n`, "utf8");
+          await refreshManifestDigests(copy);
+          return `Documentation corpus contains duplicate document route ${routed[0]!.route}.`;
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const copy = await copyCorpus(testCase.label);
+      const expectedMessage = await testCase.mutate(copy);
+      await expect(loadDocsCorpus(copy), testCase.label).rejects.toThrow(expectedMessage);
+    }
+  });
+
+  it("rejects duplicate document paths before corpus artifacts are generated", () => {
+    expect(() => assertUniqueDocumentLocations([
+      { path: "docs/foo.md", route: "/foo/" },
+      { path: "docs/foo.md", route: "/other/" },
+    ])).toThrow("Documentation corpus contains duplicate document path docs/foo.md.");
+  });
+
+  it("fails the generator entrypoint before writes when documentation routes collide", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mono-agent-docs-route-collision-"));
+    temporaryDirectories.push(root);
+    const docsRoot = join(root, "docs");
+    const outputDirectory = join(root, "output");
+    await mkdir(join(docsRoot, "foo"), { recursive: true });
+    await Promise.all([
+      writeFile(join(docsRoot, "foo.md"), "# Foo\n", "utf8"),
+      writeFile(join(docsRoot, "foo", "index.md"), "# Foo index\n", "utf8"),
+    ]);
+
+    await expect(execFileAsync(process.execPath, [
+      join(packageRoot, "scripts", "generate-corpus.mjs"),
+      "--docs-root",
+      docsRoot,
+      "--output-directory",
+      outputDirectory,
+    ], { cwd: packageRoot })).rejects.toMatchObject({
+      stderr: expect.stringContaining("Documentation corpus contains duplicate document route /foo/."),
+    });
+    await expect(access(outputDirectory)).rejects.toThrow();
+  });
+
+  it("keeps fence-like lines with trailing content inside code across runtime and corpus parsing", async () => {
+    expect(markdownLinks([
+      "```md",
+      "```still-code",
+      "[hidden](docs/hidden.md)",
+      "```",
+      "[visible](docs/visible.md)",
+    ].join("\n"))).toEqual([
+      { label: "visible", href: "docs/visible.md" },
+    ]);
+
+    const root = await mkdtemp(join(tmpdir(), "mono-agent-docs-fence-parser-"));
+    temporaryDirectories.push(root);
+    const docsRoot = join(root, "docs");
+    const outputDirectory = join(root, "output");
+    await mkdir(docsRoot, { recursive: true });
+    await writeFile(join(docsRoot, "fixture.md"), [
+      "# Fixture",
+      "```md",
+      "```still-code",
+      "## Hidden heading",
+      "[hidden](docs/hidden.md)",
+      "```",
+      "## Visible heading",
+    ].join("\n"), "utf8");
+
+    await execFileAsync(process.execPath, [
+      join(packageRoot, "scripts", "generate-corpus.mjs"),
+      "--docs-root",
+      docsRoot,
+      "--output-directory",
+      outputDirectory,
+    ], { cwd: packageRoot });
+    const documents = JSON.parse(await readFile(join(outputDirectory, "documents.json"), "utf8")) as Array<{
+      headings: Array<{ text: string }>;
+    }>;
+    const chunks = JSON.parse(await readFile(join(outputDirectory, "chunks.json"), "utf8")) as Array<{
+      headingPath: string[];
+    }>;
+    expect(documents[0]?.headings.map((heading) => heading.text)).toEqual(["Fixture", "Visible heading"]);
+    expect(chunks.every((chunk) => !chunk.headingPath.includes("Hidden heading"))).toBe(true);
+  });
+
   it("finds paraphrased concepts and exact identifiers as expanded, section-deduplicated excerpts", async () => {
     const index = new MonoAgentDocsSearchIndex(await loadDocsCorpus(corpusDir));
-    const exact = await index.search({ query: "routing fallbacks", scope: "docs", limit: 5 });
+    const exact = await index.search({ query: "routing fallbacks", limit: 5 });
     expect(exact.schema).toBe("mono-agent.docs.v2");
     expect(exact.results).toHaveLength(5);
     expect(exact.results.every((result) => result.source === "docs")).toBe(true);
@@ -75,7 +209,7 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     const semantic = await index.search({ query: "How can my agent answer people through Telegram?", limit: 5 });
     expect(semantic.results.some((result) => /telegram/iu.test(`${result.title} ${result.headingPath.join(" ")} ${result.markdown}`))).toBe(true);
 
-    const docsOnly = await index.search({ query: "permanent first-run memory marker", scope: "docs", limit: 8 });
+    const docsOnly = await index.search({ query: "permanent first-run memory marker", limit: 8 });
     expect(docsOnly.results.every((result) => result.source === "docs")).toBe(true);
     expect(docsOnly.results.some((result) => result.path.includes("memory"))).toBe(true);
     const sections = docsOnly.results.map((result) => `${result.path}:${result.canonicalUrl?.split("#")[1] ?? "overview"}`);
@@ -89,7 +223,7 @@ describe.sequential("@mono-agent/docs-mcp", () => {
 
   it("reads chunk, path, link, and exact non-overlapping continuation targets", async () => {
     const index = new MonoAgentDocsSearchIndex(await loadDocsCorpus(corpusDir));
-    const search = await index.search({ query: "channel-operator protocol", scope: "docs", limit: 3 });
+    const search = await index.search({ query: "channel-operator protocol", limit: 3 });
     const expanded = index.read(search.results[0]!.readTarget);
     expect("error" in expanded).toBe(false);
     if ("error" in expanded) throw new Error(expanded.error.message);
@@ -133,6 +267,106 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     expect(second.navigation.nextActions.some((action) => action.arguments.action === "read")).toBe(true);
   });
 
+  it("read returns a structured error for every unsupported and not-found target class", async () => {
+    const corpus = await loadDocsCorpus(corpusDir);
+    const index = new MonoAgentDocsSearchIndex(corpus);
+    const document = corpus.documents[0]!;
+    const cases = [
+      { target: "x".repeat(2_001), code: "unsupported_target" },
+      { target: "ftp://example.com/docs", code: "unsupported_target" },
+      { target: "mono-agent-docs://chunk/not-a-digest", code: "unsupported_target" },
+      {
+        target: `mono-agent-docs://document/${document.id}?start=${document.markdown.length + 1}`,
+        code: "target_not_found",
+      },
+      { target: "docs/does-not-exist.md", code: "target_not_found" },
+      { target: "/does-not-exist/", code: "target_not_found" },
+      { target: `${document.path}#does-not-exist`, code: "target_not_found" },
+    ] as const;
+
+    for (const testCase of cases) {
+      const result = index.read(testCase.target);
+      expect("error" in result, testCase.target).toBe(true);
+      if (!("error" in result)) throw new Error(`Expected ${testCase.target} to fail.`);
+      expect(result.error.code, testCase.target).toBe(testCase.code);
+      expect(result.navigation.nextActions.length, testCase.target).toBeGreaterThan(0);
+    }
+  });
+
+  it("keeps truncated and pathological read windows code-fence balanced", () => {
+    const closedMarkdown = [
+      "# Fixture",
+      "",
+      "## Long code",
+      "",
+      "```ts",
+      "const value = 1;\n".repeat(1_200),
+      "```",
+      "",
+      "Tail.",
+    ].join("\n");
+    const closed = corpusFixture(closedMarkdown, closedMarkdown.indexOf("const value") + 8_000);
+    const closedReader = new MonoAgentDocsReader(closed.corpus);
+    const closedResult = closedReader.read(`${MONO_AGENT_DOCS_CHUNK_URI_PREFIX}${closed.chunk.id}`);
+    expect("error" in closedResult).toBe(false);
+    if ("error" in closedResult) throw new Error(closedResult.error.message);
+    expect(fenceMarkers(closedResult.markdown)).toHaveLength(2);
+
+    const pathologicalFence = "`".repeat(1_500);
+    const pathologicalMarkdown = [
+      "# Fixture",
+      "",
+      "## Unclosed code",
+      "",
+      pathologicalFence,
+      "x".repeat(15_000),
+    ].join("\n");
+    const pathological = corpusFixture(pathologicalMarkdown, pathologicalMarkdown.indexOf("x") + 7_000);
+    const pathologicalReader = new MonoAgentDocsReader(pathological.corpus);
+    const pathologicalResult = pathologicalReader.read(
+      `${MONO_AGENT_DOCS_CHUNK_URI_PREFIX}${pathological.chunk.id}`,
+    );
+    expect("error" in pathologicalResult).toBe(false);
+    if ("error" in pathologicalResult) throw new Error(pathologicalResult.error.message);
+    expect(pathologicalResult.markdown.length).toBeLessThanOrEqual(10_000);
+    expect(fenceMarkers(pathologicalResult.markdown)).toEqual(["```", "```"]);
+
+    const pathologicalSearchHit = pathologicalReader.searchHit(pathological.chunk, 1);
+    expect(pathologicalSearchHit.markdown.length).toBeLessThanOrEqual(3_000);
+    expect(fenceMarkers(pathologicalSearchHit.markdown)).toEqual(["```", "```"]);
+  });
+
+  it("keeps shorter legal delimiters and links inside a clipped outer fence", () => {
+    const markdown = [
+      "# Fixture",
+      "",
+      "## Nested delimiters",
+      "",
+      "````md",
+      "a".repeat(7_000),
+      "```",
+      "[hidden](fixture.md)",
+      "```",
+      "b".repeat(7_000),
+      "````",
+    ].join("\n");
+    const nested = corpusFixture(markdown, markdown.indexOf("[hidden]"));
+    const reader = new MonoAgentDocsReader(nested.corpus);
+    const read = reader.read(`${MONO_AGENT_DOCS_CHUNK_URI_PREFIX}${nested.chunk.id}`);
+    expect("error" in read).toBe(false);
+    if ("error" in read) throw new Error(read.error.message);
+    expect(fenceMarkers(read.markdown)).toEqual(["~~~", "```", "```", "~~~"]);
+    expect(read.markdown).toContain("\n```\n[hidden](fixture.md)\n```\n");
+    expect(markdownLinks(read.markdown)).toEqual([]);
+    expect(read.internalLinks).toEqual([]);
+
+    const searchHit = reader.searchHit(nested.chunk, 1);
+    expect(fenceMarkers(searchHit.markdown)).toEqual(["~~~", "```", "```", "~~~"]);
+    expect(searchHit.markdown).toContain("\n```\n[hidden](fixture.md)\n```\n");
+    expect(markdownLinks(searchHit.markdown)).toEqual([]);
+    expect(searchHit.internalLinks).toEqual([]);
+  });
+
   it("publishes only mono_agent_docs and gives MCP clients explicit search-to-read guidance", async () => {
     const server = createMonoAgentDocsMcpServer();
     const client = new Client({ name: "docs-mcp-test", version: "0.1.0" }, { capabilities: {} });
@@ -157,12 +391,14 @@ describe.sequential("@mono-agent/docs-mcp", () => {
           target: expect.any(Object),
         },
       });
+      expect(docsTool?.inputSchema.properties).not.toHaveProperty("scope");
 
       const response = await client.callTool({
         name: MONO_AGENT_DOCS_TOOL_NAME,
-        arguments: { action: "search", query: "channel-operator protocol", scope: "docs", limit: 3 },
+        arguments: { action: "search", query: "channel-operator protocol", limit: 3 },
       }) as unknown as { content: Array<{ type: string; text?: string; uri?: string }>; structuredContent?: MonoAgentDocsSearchResult };
       expect(response.structuredContent?.results[0]?.markdown.length).toBeGreaterThan(1_200);
+      expect(response.structuredContent).not.toHaveProperty("scope");
       expect(response.content.some((block) => block.type === "text" && block.text?.includes('"action":"read"'))).toBe(true);
       expect(response.content.some((block) => block.type === "resource_link")).toBe(true);
       const target = response.structuredContent?.results[0]?.readTarget;
@@ -221,4 +457,101 @@ async function artifactDigests(): Promise<Record<string, string>> {
     result[name] = createHash("sha256").update(await readFile(join(corpusDir, name))).digest("hex");
   }
   return result;
+}
+
+async function copyCorpus(label: string): Promise<string> {
+  const copy = await mkdtemp(join(tmpdir(), `mono-agent-docs-${label}-`));
+  temporaryDirectories.push(copy);
+  await cp(corpusDir, copy, { recursive: true });
+  return copy;
+}
+
+async function refreshManifestDigests(directory: string): Promise<void> {
+  const documentsBytes = await readFile(join(directory, "documents.json"));
+  const chunksBytes = await readFile(join(directory, "chunks.json"));
+  const embeddingsBytes = await readFile(join(directory, "embeddings.f32"));
+  const manifestPath = join(directory, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+    corpusDigest: string;
+    artifacts: {
+      documentsSha256: string;
+      chunksSha256: string;
+      embeddingsSha256: string;
+    };
+  };
+  manifest.artifacts.documentsSha256 = createHash("sha256").update(documentsBytes).digest("hex");
+  manifest.artifacts.chunksSha256 = createHash("sha256").update(chunksBytes).digest("hex");
+  manifest.artifacts.embeddingsSha256 = createHash("sha256").update(embeddingsBytes).digest("hex");
+  manifest.corpusDigest = createHash("sha256")
+    .update(documentsBytes)
+    .update(chunksBytes)
+    .update(embeddingsBytes)
+    .digest("hex");
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+}
+
+function corpusFixture(
+  markdown: string,
+  focusOffset: number,
+): { readonly corpus: DocsCorpus; readonly chunk: DocsCorpusChunk } {
+  const document: DocsCorpusDocument = {
+    id: "a".repeat(64),
+    source: "docs",
+    path: "docs/fixture.md",
+    title: "Fixture",
+    route: "/fixture/",
+    canonicalUrl: "https://mono-agent-docs.vercel.app/fixture/",
+    markdown,
+    headings: [],
+    units: [],
+  };
+  const chunk: DocsCorpusChunk = {
+    id: "b".repeat(64),
+    documentId: document.id,
+    source: "docs",
+    path: document.path,
+    title: document.title,
+    headingPath: ["Fixture"],
+    startOffset: focusOffset,
+    endOffset: Math.min(markdown.length, focusOffset + 64),
+    text: markdown.slice(focusOffset, focusOffset + 64),
+    embeddingText: markdown.slice(focusOffset, focusOffset + 64),
+  };
+  return {
+    chunk,
+    corpus: {
+      manifest: {
+        schema: "mono-agent.docs-corpus.v2",
+        docsVersion: "0.15.0",
+        sourceDigest: "c".repeat(64),
+        corpusDigest: "d".repeat(64),
+        chunkerVersion: "markdown-blocks-v2",
+        documentCount: 1,
+        chunkCount: 1,
+        model: {
+          package: "@yarflam/potion-base-8m",
+          version: "1.0.4",
+          id: "minishlab/potion-base-8M",
+          dimensions: 256,
+        },
+        artifacts: {
+          documentsSha256: "e".repeat(64),
+          chunksSha256: "f".repeat(64),
+          embeddingsSha256: "0".repeat(64),
+          byteOrder: "little-endian",
+        },
+      },
+      documents: [document],
+      chunks: [chunk],
+      embeddings: [new Float32Array(256)],
+      documentsById: new Map([[document.id, document]]),
+      documentsByPath: new Map([[document.path, document]]),
+      documentsByRoute: new Map([[document.route!, document]]),
+      chunksById: new Map([[chunk.id, chunk]]),
+    },
+  };
+}
+
+function fenceMarkers(markdown: string): readonly string[] {
+  return markdown.match(/^[ \t]{0,3}(?:`{3,}|~{3,})/gmu) ?? [];
 }

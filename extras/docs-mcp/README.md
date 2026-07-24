@@ -92,7 +92,7 @@ integration.
 
 The MCP surface is one action-based tool, `mono_agent_docs`:
 
-- `{"action":"search","query":"...","limit":5,"scope":"docs"}`
+- `{"action":"search","query":"...","limit":5}`
   returns ranked, section-deduplicated Markdown excerpts of roughly 2–3k
   characters. Treat them as a map and select a returned `readTarget`.
 - `{"action":"read","target":"<readTarget>"}` expands a search hit, logical
@@ -138,7 +138,6 @@ MonoAgentDocsNavigation
 MonoAgentDocsNavigationAction
 MonoAgentDocsReadAction
 MonoAgentDocsReadResult
-MonoAgentDocsScope
 MonoAgentDocsSearchAction
 MonoAgentDocsSearchHit
 MonoAgentDocsSearchResult

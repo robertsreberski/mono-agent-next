@@ -18,7 +18,6 @@ const docsInputSchema = z.object({
   action: z.enum(["search", "read"]).describe("Use search to find sections, then read to expand an exact target."),
   query: z.string().min(3).max(500).optional().describe("Required for action=search: natural-language question or exact mono-agent config, package, environment, or CLI identifier."),
   limit: z.number().int().min(1).max(8).optional().describe("For action=search: maximum distinct sections (default 5)."),
-  scope: z.enum(["all", "docs"]).optional().describe("For action=search: the version-matched public documentation corpus."),
   target: z.string().min(1).max(2_000).optional().describe("Required for action=read: use a readTarget, previousTarget, nextTarget, logical corpus path, docs route, or canonical docs URL."),
 }).strict();
 const internalLinkSchema = z.object({
@@ -30,7 +29,6 @@ const navigationArgumentsSchema = z.object({
   action: z.enum(["search", "read"]),
   query: z.string().optional(),
   limit: z.number().int().optional(),
-  scope: z.enum(["all", "docs"]).optional(),
   target: z.string().optional(),
 });
 const navigationActionSchema = z.object({
@@ -70,7 +68,6 @@ const docsOutputSchema = z.object({
   action: z.enum(["search", "read"]),
   retrievalMode: z.literal("hybrid").optional(),
   query: z.string().optional(),
-  scope: z.enum(["all", "docs"]).optional(),
   results: z.array(searchHitSchema).optional(),
   target: z.string().optional(),
   source: z.literal("docs").optional(),
@@ -118,7 +115,6 @@ export function createMonoAgentDocsMcpServer(): McpServer {
         result = await index.search({
           query: input.query,
           ...(input.limit === undefined ? {} : { limit: input.limit }),
-          ...(input.scope === undefined ? {} : { scope: input.scope }),
         });
       } else {
         if (input.target === undefined) throw new Error("mono_agent_docs action=read requires target.");
@@ -179,7 +175,7 @@ function resultContent(
       type: "text",
       text: [
         result.navigation.guidance,
-        `Search: ${JSON.stringify(result.query)} (${result.retrievalMode}, docs ${result.docsVersion}, scope ${result.scope})`,
+        `Search: ${JSON.stringify(result.query)} (${result.retrievalMode}, docs ${result.docsVersion})`,
         navigationText(result.navigation),
       ].join("\n\n"),
     },
