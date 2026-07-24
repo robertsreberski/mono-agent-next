@@ -50,7 +50,7 @@ the documentation MCP companion is the only publishable package under `extras/`.
 | `@mono-agent/sandbox-srt` | execution | Fingerprinted fail-closed SRT command execution. |
 | `@mono-agent/operator` | operator-surface | Apache-licensed protocol, strict client, directory, reducer, actions, and fixtures. |
 | `@mono-agent/tui` | operator-surface | Standalone pi-tui renderer over the shared operator client. |
-| `@mono-agent/web` | operator-surface | Standalone authenticated browser product with owner-private durable conversations. |
+| `@mono-agent/web` | operator-surface | Standalone browser product with explicit auth policy and owner-private durable conversations. |
 | `create-mono-agent` | app | Transactional minimal, Personal, and multi-runtime project scaffolding. |
 | `@mono-agent/docs-mcp` | context | Offline search and guided reading over version-matched v1 docs. |
 | `@mono-agent/service-macos` | app | Explicit inspection, planning, and reconciliation of fingerprinted macOS services. |
@@ -269,9 +269,11 @@ not reinterpret raw frames.
 - TUI owns terminal layout, keyboard input, and rendering. It can connect to an
   explicit endpoint or a valid directory entry. Exiting closes the renderer,
   not the agent.
-- Web reads a separate `web.config.json`, owns its listener and browser bearer
-  authentication, and persists web threads in a separate owner-private store.
-  Browser disconnect does not implicitly cancel an agent turn.
+- Web reads a separate `web.config.json`, owns its listener and browser auth
+  policy, and persists web threads in a separate owner-private store. Bearer
+  remains the default; explicit no-auth treats network reachability as the
+  authorization boundary. Browser disconnect does not implicitly cancel an
+  agent turn.
 
 Neither product is selected in `mono-agent.config.json`, loads a runtime, or
 owns agent process lifecycle.

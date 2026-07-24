@@ -221,16 +221,18 @@ function AgentRail({
           <span className="rail-control-copy">{expanded ? "Collapse" : "Expand"}</span>
         </button>
       )}
-      <button
-        type="button"
-        className="rail-lock"
-        aria-label="Lock console"
-        title="Lock console"
-        onClick={consoleState.logout}
-      >
-        <ShellIcon name="lock" size={17} />
-        <span className="rail-control-copy">Lock console</span>
-      </button>
+      {consoleState.tokenAuthentication && (
+        <button
+          type="button"
+          className="rail-lock"
+          aria-label="Lock console"
+          title="Lock console"
+          onClick={consoleState.logout}
+        >
+          <ShellIcon name="lock" size={17} />
+          <span className="rail-control-copy">Lock console</span>
+        </button>
+      )}
       <span
         className={`rail-connection${consoleState.refreshing ? " is-syncing" : " is-live"}`}
         role="status"

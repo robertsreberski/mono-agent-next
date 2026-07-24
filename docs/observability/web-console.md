@@ -1,14 +1,14 @@
 ---
 title: "Standalone web operator"
-description: "Run the authenticated browser product with separate config and owner-private durable conversations."
+description: "Run the browser product with explicit auth policy, separate config, and owner-private durable conversations."
 sidebar:
   order: 5
 ---
 
 `@mono-agent/web` is a standalone browser operator for one or more locally
-registered agents. It has its own config, listener, process, authentication,
-and durable state. It is never selected by `mono-agent.config.json`, and
-loading agent config never starts it.
+registered agents. It has its own config, listener, process, auth policy, and
+durable state. It is never selected by `mono-agent.config.json`, and loading
+agent config never starts it.
 
 The browser talks only to this product. The product discovers agents and uses
 the strict `@mono-agent/operator` client, reducer, identity binding, and action
@@ -60,10 +60,11 @@ from every agent.
 
 ## Browser authentication and request boundaries
 
-The source config holds only `auth.token.$env`. The resolved token must contain
-at least 16 characters. The browser shell prompts for it, retains it only in
-that origin's `sessionStorage`, and sends bearer authentication with every
-`/api/v1/*` request.
+The default source config holds only `auth.token.$env`. The resolved token must
+contain at least 16 characters. The browser first probes bootstrap without a
+token, prompts after the expected `401`, retains the submitted value only in
+that origin's `sessionStorage`, and sends bearer authentication with subsequent
+`/api/v1/*` requests.
 
 The server validates the actual listener port and accepted local authority on
 shell, health, and API requests. Mutations additionally require JSON and a
@@ -90,6 +91,33 @@ transport-encrypted. `allowInsecureHttp` only acknowledges that risk. Prefer a
 loopback listener behind a correctly configured HTTPS reverse proxy or
 Tailscale Serve, and do not expose the direct HTTP port to an untrusted network.
 
+### Explicit no-login access
+
+Browser authentication may be disabled explicitly. This Tailscale Serve shape
+keeps the application listener local while making the console available to the
+tailnet:
+
+```json
+{
+  "configVersion": 1,
+  "listen": { "host": "127.0.0.1", "port": 5050 },
+  "auth": { "mode": "none" },
+  "allowInsecureHttp": false,
+  "externalOrigins": ["https://machine.example-tailnet.ts.net"],
+  "dataDirectory": "./.mono-agent/web",
+  "agentRegistries": ["../personal-agent/.mono-agent/trace-sources"]
+}
+```
+
+The browser opens immediately without storing or sending a bearer. The explicit
+mode is accepted on loopback, wildcard, direct LAN, and direct Tailscale-IP
+listeners; it does not require `allowInsecureHttp` or a proxy origin.
+`externalOrigins`, when present, may contain multiple unique canonical HTTPS
+origins. Host, configured proxy authority, Origin, media-type, and body bounds
+remain enforced, but they are not user authentication. Every client with
+network reachability has owner-equivalent console authority, and direct HTTP is
+plaintext. Keep the chosen network boundary intentional.
+
 ## Browser API
 
 The browser-facing API is versioned separately from the agent operator wire:
@@ -97,8 +125,8 @@ The browser-facing API is versioned separately from the agent operator wire:
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /healthz` | Unauthenticated process health after authority validation. |
-| `GET /api/v1/bootstrap` | Authenticated discovered-agent and conversation summary. |
-| `GET /api/v1/events` | Authenticated revisioned invalidation stream. |
+| `GET /api/v1/bootstrap` | Discovered-agent and conversation summary under the selected auth policy. |
+| `GET /api/v1/events` | Revisioned invalidation stream under the selected auth policy. |
 | `POST /api/v1/threads` | Create a source-bound conversation for a live agent. |
 | `GET /api/v1/threads/:id` | Read durable messages and current turn state. |
 | `PATCH /api/v1/threads/:id` | Rename, archive, or restore one conversation. |
@@ -114,8 +142,8 @@ The browser-facing API is versioned separately from the agent operator wire:
 
 The browser stream contains web thread projections, not raw operator frames.
 The embedded React/assistant-ui client is built and packed as an installable
-PWA. It keeps its bearer token in `sessionStorage`; service-worker precaching
-excludes API and health responses.
+PWA. It keeps a bearer token in `sessionStorage` only in token mode;
+service-worker precaching excludes API and health responses.
 
 The console keeps a compact agent rail, searchable conversation navigation,
 and a focused chat column on desktop; the first two surfaces become

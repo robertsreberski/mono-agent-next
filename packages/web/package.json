@@ -1,7 +1,7 @@
 {
   "name": "@mono-agent/web",
   "version": "0.15.0",
-  "description": "Standalone authenticated browser operator for mono-agent instances.",
+  "description": "Standalone browser operator with authenticated defaults and explicit no-auth mode.",
   "type": "module",
   "license": "GPL-3.0-only",
   "repository": {

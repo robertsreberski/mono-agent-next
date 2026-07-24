@@ -1,8 +1,10 @@
 # @mono-agent/web
 
-Standalone, authenticated browser operator for one or more locally registered
-mono-agent processes. It is a separate product with its own config, process,
-listener, and durable state; it is never selected by agent config.
+Standalone browser operator for one or more locally registered mono-agent
+processes. Bearer authentication remains the default; an explicit no-auth mode
+is available when the operator deliberately chooses network reachability as the
+access boundary. The product has its own config, process, listener, and durable
+state; it is never selected by agent config.
 
 ## Category
 
@@ -11,7 +13,7 @@ listener, and durable state; it is never selected by agent config.
 
 Category: `operator-surface`
 Tier: `core`
-Catalog responsibility: Runs the standalone authenticated browser product with owner-private durable conversations.
+Catalog responsibility: Runs the standalone browser product with explicit auth policy and owner-private durable conversations.
 
 <!-- package-metadata:end -->
 
@@ -19,7 +21,8 @@ Catalog responsibility: Runs the standalone authenticated browser product with o
 
 - Load one strict `web.config.json` independently of agent configuration.
 - Discover owner-private operator registry entries through `@mono-agent/operator`.
-- Authenticate every browser API request and reject cross-origin mutations.
+- Authenticate browser API requests by default, or explicitly disable browser
+  auth while retaining authority and cross-origin checks.
 - Persist conversations and messages through atomic owner-private state commits.
 - Discover explicitly provenance-marked external `cron`/`webhook` proactive
   conversations, import their replay once, persist them durably, and retain
@@ -67,16 +70,45 @@ state are not transport-encrypted. Prefer keeping web on loopback behind an
 HTTPS reverse proxy or Tailscale Serve. The opt-in acknowledges risk; it does
 not add TLS.
 
+For a single-owner Tailscale Serve deployment that should open without a login,
+keep the web listener on loopback, name the HTTPS Serve origin, and explicitly
+select no-auth mode:
+
+```json
+{
+  "$schema": "./.mono-agent/web.config.schema.json",
+  "configVersion": 1,
+  "listen": { "host": "127.0.0.1", "port": 5050 },
+  "auth": { "mode": "none" },
+  "allowInsecureHttp": false,
+  "externalOrigins": ["https://machine.example-tailnet.ts.net"],
+  "dataDirectory": "./.mono-agent/web",
+  "agentRegistries": ["../personal-agent/.mono-agent/trace-sources"]
+}
+```
+
+`auth: { "mode": "none" }` is the complete explicit opt-in. It is also accepted
+for direct LAN/Tailscale-IP and wildcard listeners without
+`allowInsecureHttp`; in that shape every client with network reachability has
+owner-equivalent console authority and plaintext HTTP exposes conversation
+traffic. `externalOrigins` is optional and may name multiple unique canonical
+HTTPS proxies. Prefer an encrypted, ACL-controlled network boundary and do not
+forward the surface to the public internet unintentionally.
+
+In token mode, supply the referenced environment value when starting:
+
 ```bash
 MONO_AGENT_WEB_AUTH_TOKEN='replace-with-a-long-random-token' \
   mono-agent-web ./web.config.json
 ```
 
-The browser shell contains no state. It prompts for the token and keeps it in
-`sessionStorage`; every `/api/v1/*` request uses bearer auth. Shell, health, and
-API requests must also use a listener-approved local authority and actual port,
-which closes the DNS-rebinding/forged-Host boundary. The health probe is
-`GET /healthz`.
+The browser shell contains no durable state. In token mode it probes the API,
+prompts after the expected `401`, and keeps the submitted token in
+`sessionStorage`; subsequent `/api/v1/*` requests use bearer auth. In no-auth
+mode the same probe succeeds and opens the console without storing or sending a
+browser token. Shell, health, and API requests must still use a
+listener-approved authority and actual port, which closes the
+DNS-rebinding/forged-Host boundary. The health probe is `GET /healthz`.
 
 Public browser assets are capped at 16 MiB and read descriptor-first with
 `O_NOFOLLOW`; every path component below the configured static root must remain
@@ -124,7 +156,7 @@ available through compact controls.
 | `operator-gateway.ts` | Thin binding to the shared directory, client, reducer, and action policy. |
 | `store.ts` | Versioned state, exclusive process lease, atomic commits, and restart recovery. |
 | `service.ts` | Conversation/turn process lifecycle and exact cancellation. |
-| `server.ts` | Authenticated HTTP API, origin/media-type enforcement, link-free descriptor-first static asset reads, streaming, and shutdown. |
+| `server.ts` | Auth-policy HTTP API, origin/media-type enforcement, link-free descriptor-first static asset reads, streaming, and shutdown. |
 | `webapp/` | React/assistant-ui browser console, PWA assets, and Vite build. |
 | `bin.ts` | Foreground standalone process entrypoint. |
 
@@ -169,7 +201,7 @@ delete-all endpoint.
 
 | Export | Use |
 | --- | --- |
-| `startWebServer` | Start the authenticated standalone product and receive an idempotent stop handle. |
+| `startWebServer` | Start the standalone product under its explicit auth policy and receive an idempotent stop handle. |
 | `loadWebConfig` | Read, resolve, and strictly validate `web.config.json`. |
 | `parseWebConfig` | Validate an already parsed authoring object with explicit source path and environment. |
 | `webConfigJsonSchema` | Write editor/schema artifacts from the executable product contract. |
@@ -228,7 +260,7 @@ webConfigJsonSchema
 The browser API is:
 
 - `GET /api/v1/bootstrap`
-- `GET /api/v1/events` (authenticated invalidation SSE)
+- `GET /api/v1/events` (invalidation SSE under the selected auth policy)
 - `POST /api/v1/threads`
 - `GET /api/v1/threads/:id`
 - `PATCH /api/v1/threads/:id`
@@ -291,8 +323,9 @@ pnpm --filter @mono-agent/web typecheck
 pnpm --filter @mono-agent/web test
 ```
 
-Focused tests cover strict secret resolution, body bounds, bearer auth,
-cross-origin rejection, real shared-client turn streaming, cancellation,
+Focused tests cover strict secret resolution, explicit no-auth policy, body
+bounds, bearer auth, cross-origin rejection, real shared-client turn
+streaming, cancellation,
 AskUser/live-input routing, uploads/quotes, proactive import and dismissal,
 browser view routes, v1/v2-to-v3 migration, telemetry rendering and restart
 persistence, deletion, exclusive ownership,

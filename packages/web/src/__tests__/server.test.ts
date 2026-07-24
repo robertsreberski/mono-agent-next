@@ -155,6 +155,40 @@ describe("standalone web product", () => {
     expect(simple.status).toBe(415);
   });
 
+  it("supports explicit no-auth while retaining request-integrity checks", async () => {
+    const root = await temporaryDirectory();
+    const server = await startWebServer({
+      config: config(join(root, "state"), {
+        auth: { mode: "none" },
+      }),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(server);
+
+    expect((await fetch(`${server.url}api/v1/bootstrap`)).status).toBe(200);
+    const created = await fetch(`${server.url}api/v1/threads`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agentId: "personal" }),
+    });
+    expect(created.status).toBe(201);
+
+    const forgedAuthority = `attacker.invalid:${server.port}`;
+    expect(await getWithAuthority(server, "/api/v1/bootstrap", forgedAuthority, false)).toBe(421);
+    const crossOrigin = await fetch(`${server.url}api/v1/threads`, {
+      method: "POST",
+      headers: { origin: "http://attacker.invalid", "content-type": "application/json" },
+      body: JSON.stringify({ agentId: "personal" }),
+    });
+    expect(crossOrigin.status).toBe(403);
+
+    const controller = new AbortController();
+    const events = await fetch(`${server.url}api/v1/events`, { signal: controller.signal });
+    expect(events.status).toBe(200);
+    await sseReader(events).cancel();
+    controller.abort();
+  });
+
   it("applies guarded agent/thread patches and streams authenticated resumable revisions", async () => {
     const root = await temporaryDirectory();
     const server = await startWebServer({
@@ -253,6 +287,27 @@ describe("standalone web product", () => {
       `console.example.test:${server.port}`,
       false,
     )).toBe(421);
+  });
+
+  it("accepts an exact HTTPS proxy authority without browser auth", async () => {
+    const root = await temporaryDirectory();
+    const externalOrigin = "https://console.example.test";
+    const server = await startWebServer({
+      config: config(join(root, "state"), {
+        auth: { mode: "none" },
+        externalOrigins: [externalOrigin],
+      }),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(server);
+
+    expect(await getWithAuthority(server, "/", "console.example.test", false)).toBe(200);
+    expect(await mutationWithExternalAuthority(
+      server,
+      "console.example.test",
+      externalOrigin,
+      false,
+    )).toBe(201);
   });
 
   it("serves packed assets without treating API or health paths as SPA navigation", async () => {
@@ -455,6 +510,65 @@ describe("standalone web product", () => {
     expect(await mutationWithAuthority(server, tailscaleAuthority)).toBe(201);
   });
 
+  it("treats explicit no-auth as the complete opt-in on any valid listener", async () => {
+    const root = await temporaryDirectory();
+    const direct = await startWebServer({
+      config: config(join(root, "state"), {
+        auth: { mode: "none" },
+        host: "0.0.0.0",
+      }),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(direct);
+    expect((await fetch(`${direct.url}api/v1/bootstrap`)).status).toBe(200);
+    expect(await mutationWithAuthority(
+      direct,
+      `100.100.100.100:${direct.port}`,
+      false,
+    )).toBe(201);
+    await direct.stop();
+    webServers.delete(direct);
+
+    const proxied = await startWebServer({
+      config: config(join(root, "state-proxied"), {
+        auth: { mode: "none" },
+        externalOrigins: [
+          "https://console.example.test",
+          "https://console-alt.example.test",
+        ],
+      }),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(proxied);
+    expect((await fetch(`${proxied.url}api/v1/bootstrap`)).status).toBe(200);
+  });
+
+  it("does not classify a deceptive 127-prefixed hostname as loopback in token mode", async () => {
+    const root = await temporaryDirectory();
+    await expect(startWebServer({
+      config: config(join(root, "state"), { host: "127.example" }),
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "insecure_http_opt_in_required" });
+  });
+
+  it("revalidates exact canonical HTTPS origins on the injected config seam", async () => {
+    const root = await temporaryDirectory();
+    for (const externalOrigins of [
+      ["http://console.example.test"],
+      ["https://console.example.test/path"],
+      ["https://console.example.test/"],
+      ["https://console.example.test", "https://console.example.test"],
+    ]) {
+      await expect(startWebServer({
+        config: config(join(root, "state"), {
+          auth: { mode: "none" },
+          externalOrigins,
+        }),
+        operatorGateway: immediateGateway(),
+      })).rejects.toMatchObject({ code: "invalid_external_origin" });
+    }
+  });
+
   it("destroys sockets on deadline and returns after an upstream ignores shutdown", async () => {
     const root = await temporaryDirectory();
     const dataDirectory = join(root, "state");
@@ -495,6 +609,7 @@ describe("standalone web product", () => {
 function config(
   dataDirectory: string,
   overrides: {
+    readonly auth?: WebConfig["auth"];
     readonly host?: string;
     readonly token?: string;
     readonly allowInsecureHttp?: boolean;
@@ -505,7 +620,7 @@ function config(
   return {
     configVersion: 1,
     listen: { host: overrides.host ?? "127.0.0.1", port: 0 },
-    auth: { token: overrides.token ?? WEB_TOKEN },
+    auth: overrides.auth ?? { token: overrides.token ?? WEB_TOKEN },
     allowInsecureHttp: overrides.allowInsecureHttp ?? false,
     dataDirectory,
     agentRegistries: overrides.agentRegistries ?? [join(dataDirectory, "missing-registry")],
@@ -587,7 +702,11 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
   return { authorization: `Bearer ${WEB_TOKEN}`, ...extra };
 }
 
-function mutationWithAuthority(server: WebServerHandle, authority: string): Promise<number> {
+function mutationWithAuthority(
+  server: WebServerHandle,
+  authority: string,
+  authenticated = true,
+): Promise<number> {
   const body = JSON.stringify({ agentId: "personal" });
   return new Promise((resolve, reject) => {
     const request = httpRequest({
@@ -596,7 +715,7 @@ function mutationWithAuthority(server: WebServerHandle, authority: string): Prom
       path: "/api/v1/threads",
       method: "POST",
       headers: {
-        authorization: `Bearer ${WEB_TOKEN}`,
+        ...(authenticated ? { authorization: `Bearer ${WEB_TOKEN}` } : {}),
         "content-type": "application/json",
         "content-length": Buffer.byteLength(body),
         host: authority,
@@ -615,6 +734,7 @@ function mutationWithExternalAuthority(
   server: WebServerHandle,
   authority: string,
   origin: string,
+  authenticated = true,
 ): Promise<number> {
   const body = JSON.stringify({ agentId: "personal" });
   return new Promise((resolve, reject) => {
@@ -624,7 +744,7 @@ function mutationWithExternalAuthority(
       path: "/api/v1/threads",
       method: "POST",
       headers: {
-        authorization: `Bearer ${WEB_TOKEN}`,
+        ...(authenticated ? { authorization: `Bearer ${WEB_TOKEN}` } : {}),
         "content-type": "application/json",
         "content-length": Buffer.byteLength(body),
         host: authority,

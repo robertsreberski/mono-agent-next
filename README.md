@@ -181,8 +181,8 @@ owner-private discovery, reducer, and action rules.
 `@mono-agent/tui` and `@mono-agent/web` are separate processes that connect over
 that protocol. They are never embedded by agent config. The TUI owns terminal
 rendering only; closing it does not stop the agent. Web has its own
-`web.config.json`, authentication, listener, and owner-private durable
-conversation store.
+`web.config.json`, auth policy, listener, and owner-private durable conversation
+store.
 
 When local-state discovery is configured, core publishes the started operator
 endpoint, public token-environment name, process identity, and capabilities into
@@ -193,8 +193,10 @@ through the shared directory; no secret value is written to discovery.
 
 - Secret-bearing module fields accept explicit environment references only and
   are redacted from explanation and validation errors.
-- Operator access is authenticated and loopback-only. Remote exporter traffic
-  requires HTTPS; HTTP is accepted only for literal loopback endpoints.
+- The agent's operator channel is authenticated and loopback-only. The
+  standalone web product applies its separately selected browser auth policy.
+  Remote exporter traffic requires HTTPS; HTTP is accepted only for literal
+  loopback endpoints.
 - Local state, memory, discovery, and web data use owner-private paths. Unsafe
   owners, modes, links, path swaps, corrupt data, and unknown formats fail closed
   rather than being repaired or overwritten.

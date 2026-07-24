@@ -15,7 +15,7 @@ Network-facing defaults and guards differ by surface:
 | TUI/operator endpoint | Authenticated loopback listener; non-loopback is rejected. |
 | Webhook and OpenAI-compatible API | Loopback by default; non-loopback requires explicit opt-in and a bearer key. |
 | Telegram and Slack | Exact configured allowlists plus provider-native credentials. |
-| Standalone web product | Authenticated `127.0.0.1:5050` by default; non-loopback plaintext requires explicit risk opt-in and a stronger bearer. |
+| Standalone web product | Authenticated `127.0.0.1:5050` by default; explicit no-auth treats network reachability as authorization; token-mode non-loopback plaintext requires a stronger bearer and risk opt-in. |
 
 The web product is an owner-equivalent operator surface. Anyone with both
 network reachability and its bearer can read retained conversations, cancel
@@ -23,6 +23,13 @@ turns, and instruct discovered agents. Host and Origin checks reduce browser
 request confusion but are not authentication, and plain LAN HTTP is not
 encrypted. Prefer loopback behind a correctly configured HTTPS reverse proxy
 or Tailscale Serve; do not publish the direct port to the internet.
+
+`auth: {"mode":"none"}` is a deliberate single-owner convenience mode and the
+complete opt-in to unauthenticated operation. It may be used on any valid
+listener and does not require `allowInsecureHttp` or `externalOrigins`. Anyone
+admitted by the chosen network boundary receives the full authority of the web
+operator without another credential prompt. Prefer TLS and ACLs; avoid public
+exposure unless that authority grant is intentional.
 
 See [`docs/reference/setup-security.md`](./docs/reference/setup-security.md) for managed-runtime, secret-persistence, sandbox, and readiness guarantees.
 

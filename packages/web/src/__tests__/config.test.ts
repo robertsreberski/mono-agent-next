@@ -50,6 +50,26 @@ describe("web product config", () => {
     expect(() => parseWebConfig({ ...base, listen: { host: "bad/host", port: 5050 } }, options)).toThrow(/listen\.host/u);
   });
 
+  it("accepts only an explicit exact no-auth mode without resolving a browser secret", () => {
+    const options = { sourcePath: join(tmpdir(), "web.config.json"), environment: {} };
+    expect(parseWebConfig({
+      configVersion: 1,
+      auth: { mode: "none" },
+    }, options).auth).toEqual({ mode: "none" });
+    expect(() => parseWebConfig({
+      configVersion: 1,
+      auth: {},
+    }, options)).toThrow(/auth\.token.*required/u);
+    expect(() => parseWebConfig({
+      configVersion: 1,
+      auth: { mode: "token" },
+    }, options)).toThrow(/auth\.mode.*must equal "none"/u);
+    expect(() => parseWebConfig({
+      configVersion: 1,
+      auth: { mode: "none", token: { $env: "WEB_TEST_TOKEN" } },
+    }, options)).toThrow(/must contain only mode/u);
+  });
+
   it("bounds config input before parsing", async () => {
     const root = await temporaryDirectory();
     const configPath = join(root, "web.config.json");
@@ -90,6 +110,8 @@ describe("web product config", () => {
     expect(webConfigJsonSchema.additionalProperties).toBe(false);
     expect(webConfigJsonSchema.properties.allowInsecureHttp.default).toBe(false);
     expect(webConfigJsonSchema.properties.externalOrigins.items.pattern).toBe("^https://");
-    expect(webConfigJsonSchema.properties.auth.properties.token.properties.$env.pattern).toContain("A-Za-z_");
+    expect(webConfigJsonSchema.properties.auth.oneOf).toHaveLength(2);
+    expect(webConfigJsonSchema.properties.auth.oneOf[0].properties.token.properties.$env.pattern).toContain("A-Za-z_");
+    expect(webConfigJsonSchema.properties.auth.oneOf[1].properties.mode.const).toBe("none");
   });
 });

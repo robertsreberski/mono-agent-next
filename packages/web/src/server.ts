@@ -82,11 +82,12 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
   const sockets = new Set<Socket>();
   const eventStreams = new Set<() => void>();
   const staticDirectory = resolve(options.staticDirectory ?? DEFAULT_STATIC_DIRECTORY);
+  const browserAuth = config.auth;
   let stopping = false;
   let stopPromise: Promise<void> | undefined;
   const server = createServer((request, response) => {
     setSecurityHeaders(response);
-    void handleRequest(request, response, config.auth.token, service, staticDirectory, eventStreams).catch((error) => {
+    void handleRequest(request, response, browserAuth, service, staticDirectory, eventStreams).catch((error) => {
       sendError(response, error);
     });
   });
@@ -105,6 +106,16 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
   if (address === null || typeof address === "string") {
     await service.stop();
     throw new WebProductError("listen_failed", "Web product did not receive a TCP address.", 500);
+  }
+  if (
+    !isLiteralLoopbackAddress((address as AddressInfo).address)
+    && isLoopback(config.listen.host)
+  ) {
+    await Promise.allSettled([closeServer(server), service.stop()]);
+    throw new WebProductError(
+      "unsafe_loopback_bind",
+      "A listener configured as loopback must resolve and bind to a literal loopback address.",
+    );
   }
   const advertisedHost = wildcard(config.listen.host) ? "127.0.0.1" : bracket(config.listen.host);
   const url = `http://${advertisedHost}:${address.port}/`;
@@ -147,7 +158,7 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
   async function handleRequest(
     request: IncomingMessage,
     response: ServerResponse,
-    token: string,
+    auth: WebConfig["auth"],
     web: WebService,
     assetsRoot: string,
     streams: Set<() => void>,
@@ -176,7 +187,7 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
       return serveWebAsset(request, response, assetsRoot, url.pathname);
     }
 
-    authenticate(request, token);
+    authenticate(request, auth);
     response.setHeader("cache-control", "no-store");
     if (request.method === "GET" && url.pathname === "/api/v1/events") {
       return openEventStream(request, response, web, streams);
@@ -282,10 +293,29 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
 }
 
 function validateRuntimeConfig(config: WebConfig): void {
-  if (typeof config.auth?.token !== "string" || config.auth.token.length < 16) {
-    throw new WebProductError("missing_auth_token", "Web browser authentication requires a token of at least 16 characters.");
+  if (typeof config.auth !== "object" || config.auth === null) {
+    throw new WebProductError("missing_auth_token", "Web browser authentication requires an explicit auth configuration.");
+  }
+  if (
+    !Array.isArray(config.externalOrigins)
+    || config.externalOrigins.some((origin) => !isCanonicalHttpsOrigin(origin))
+    || new Set(config.externalOrigins).size !== config.externalOrigins.length
+  ) {
+    throw new WebProductError(
+      "invalid_external_origin",
+      "External proxy origins must be unique canonical HTTPS origins.",
+    );
+  }
+  if ("mode" in config.auth) {
+    if (config.auth.mode !== "none" || "token" in config.auth) {
+      throw new WebProductError("invalid_auth_config", 'Browser auth mode must be exactly "none".');
+    }
+    return;
   }
   const nonLoopback = !isLoopback(normalizeHostname(config.listen.host));
+  if (typeof config.auth.token !== "string" || config.auth.token.length < 16) {
+    throw new WebProductError("missing_auth_token", "Web browser authentication requires a token of at least 16 characters.");
+  }
   if (nonLoopback && config.auth.token.length < 24) {
     throw new WebProductError("unsafe_non_loopback_bind", "A non-loopback listener requires an authentication token of at least 24 characters.");
   }
@@ -297,9 +327,10 @@ function validateRuntimeConfig(config: WebConfig): void {
   }
 }
 
-function authenticate(request: IncomingMessage, token: string): void {
+function authenticate(request: IncomingMessage, auth: WebConfig["auth"]): void {
+  if ("mode" in auth) return;
   const header = request.headers.authorization;
-  if (typeof header !== "string" || !header.startsWith("Bearer ") || !secretEqual(header.slice(7), token)) {
+  if (typeof header !== "string" || !header.startsWith("Bearer ") || !secretEqual(header.slice(7), auth.token)) {
     throw new WebProductError("unauthorized", "Unauthorized.", 401);
   }
 }
@@ -888,7 +919,32 @@ function errorCode(error: unknown): string {
     : "internal_error";
 }
 
-function isLoopback(host: string): boolean { return host === "localhost" || host === "::1" || /^127(?:\.|$)/u.test(host); }
+function isLoopback(host: string): boolean {
+  const normalized = normalizeHostname(host);
+  return normalized === "localhost" || isLiteralLoopbackAddress(normalized);
+}
+function isLiteralLoopbackAddress(host: string): boolean {
+  const normalized = normalizeHostname(host);
+  if (normalized === "::1") return true;
+  return isIP(normalized) === 4 && normalized.split(".", 1)[0] === "127";
+}
+function isCanonicalHttpsOrigin(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "https:"
+    && parsed.username === ""
+    && parsed.password === ""
+    && parsed.pathname === "/"
+    && parsed.search === ""
+    && parsed.hash === ""
+    && parsed.hostname.length > 0
+    && value === parsed.origin;
+}
 function wildcard(host: string): boolean { return host === "0.0.0.0" || host === "::"; }
 function bracket(host: string): string { return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host; }
 

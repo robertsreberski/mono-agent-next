@@ -27,6 +27,7 @@ const RAIL_KEY = "mono-agent-web-agent-rail";
 
 interface ConsoleState {
   readonly authenticated: boolean;
+  readonly tokenAuthentication: boolean;
   readonly loading: boolean;
   readonly refreshing: boolean;
   readonly error?: string;
@@ -72,8 +73,9 @@ interface ConsoleState {
 const ConsoleContext = createContext<ConsoleState | undefined>(undefined);
 
 export function ConsoleProvider({ children }: { readonly children: ReactNode }) {
-  const [authenticated, setAuthenticated] = useState(readToken().length > 0);
-  const [loading, setLoading] = useState(readToken().length > 0);
+  const [authenticated, setAuthenticated] = useState(true);
+  const [tokenAuthentication, setTokenAuthentication] = useState(readToken().length > 0);
+  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string>();
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
@@ -119,10 +121,29 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   }, []);
 
   const load = useCallback(async (initial = false): Promise<void> => {
-    if (!readToken()) return;
     if (!initial) setRefreshing(true);
     try {
-      const next = await api.bootstrap();
+      let next: Bootstrap;
+      if (initial) {
+        try {
+          next = await api.probeBootstrap();
+          saveToken("");
+          setTokenAuthentication(false);
+        } catch (probeError) {
+          if (
+            !(probeError instanceof ApiError)
+            || probeError.status !== 401
+            || readToken().length === 0
+          ) {
+            throw probeError;
+          }
+          next = await api.bootstrap();
+          setTokenAuthentication(true);
+        }
+      } else {
+        next = await api.bootstrap();
+        setTokenAuthentication(readToken().length > 0);
+      }
       for (const payload of responseNotifications(bootstrapRef.current?.threads ?? [], next)) {
         void showBackgroundNotification(payload);
       }
@@ -147,12 +168,16 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
       setError(undefined);
     } catch (loadError) {
       if (loadError instanceof ApiError && loadError.status === 401) {
+        const attemptedTokenAuthentication = readToken().length > 0;
         saveToken("");
         setAuthenticated(false);
+        setTokenAuthentication(true);
         setBootstrap(undefined);
         setDetail(undefined);
+        setError(attemptedTokenAuthentication ? loadError.message : undefined);
+      } else {
+        setError(loadError instanceof Error ? loadError.message : "Could not load the console.");
       }
-      setError(loadError instanceof Error ? loadError.message : "Could not load the console.");
       throw loadError;
     } finally {
       setLoading(false);
@@ -175,10 +200,10 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     const run = async () => {
       try {
         await load(true);
-      } catch {
-        if (!readToken()) return;
+      } catch (loadError) {
+        if (loadError instanceof ApiError && loadError.status === 401) return;
       }
-      while (!stopped && readToken()) {
+      while (!stopped) {
         try {
           await subscribeEvents(
             bootstrapRef.current?.revision,
@@ -196,6 +221,8 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
           if (streamError instanceof ApiError && streamError.status === 401) {
             saveToken("");
             setAuthenticated(false);
+            setTokenAuthentication(true);
+            setError(streamError.message);
             return;
           }
         }
@@ -215,6 +242,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
 
   const login = useCallback(async (token: string) => {
     saveToken(token);
+    setTokenAuthentication(true);
     setAuthenticated(true);
     setLoading(true);
   }, []);
@@ -402,6 +430,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
 
   const value = useMemo<ConsoleState>(() => ({
     authenticated,
+    tokenAuthentication,
     loading,
     refreshing,
     ...(error === undefined ? {} : { error }),
@@ -443,7 +472,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     setModel,
     setEffort,
   }), [
-    authenticated, loading, refreshing, error, bootstrap, detail, selectedAgentId,
+    authenticated, tokenAuthentication, loading, refreshing, error, bootstrap, detail, selectedAgentId,
     selectedThreadId, selectedAgent, selectedThread, visibleAgents, visibleThreads,
     hiddenOfflineCount, showOffline, showArchived, railExpanded, pendingFiles,
     runtime, model, effort, login, logout, load, selectAgent, selectThread,

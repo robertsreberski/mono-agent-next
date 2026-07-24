@@ -31,7 +31,7 @@ The TUI and web are products, not exporters or agent modules:
 - [Terminal operator](/observability/tui/) connects through the shared operator
   client and owns terminal presentation only.
 - [Standalone web operator](/observability/web-console/) owns its own config,
-  listener, browser authentication, process, and durable conversation store.
+  listener, browser auth policy, process, and durable conversation store.
 
 Neither product starts because it appears in agent config. The agent must
 separately select `@mono-agent/channel-operator`, and products connect to that

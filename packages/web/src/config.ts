@@ -26,22 +26,35 @@ export const webConfigJsonSchema = Object.freeze({
       },
     },
     auth: {
-      type: "object",
-      additionalProperties: false,
-      required: ["token"],
-      properties: {
-        token: {
+      description: "Bearer token policy, or explicit unauthenticated operation with mode: none.",
+      oneOf: [
+        {
           type: "object",
           additionalProperties: false,
-          required: ["$env"],
-          properties: { $env: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]*$" } },
+          required: ["token"],
+          properties: {
+            token: {
+              type: "object",
+              additionalProperties: false,
+              required: ["$env"],
+              properties: { $env: { type: "string", pattern: "^[A-Za-z_][A-Za-z0-9_]*$" } },
+            },
+          },
         },
-      },
+        {
+          type: "object",
+          additionalProperties: false,
+          required: ["mode"],
+          properties: {
+            mode: { const: "none" },
+          },
+        },
+      ],
     },
     allowInsecureHttp: {
       type: "boolean",
       default: false,
-      description: "Explicitly allow plaintext HTTP on a non-loopback trusted network.",
+      description: "Explicitly allow token-mode plaintext HTTP on a non-loopback trusted network.",
     },
     dataDirectory: { type: "string", default: "./.mono-agent/web" },
     agentRegistries: {
@@ -59,7 +72,7 @@ export const webConfigJsonSchema = Object.freeze({
         pattern: "^https://",
       },
       default: [],
-      description: "Exact HTTPS origins accepted only through a loopback reverse proxy.",
+      description: "Exact HTTPS reverse-proxy origins accepted as trusted browser authorities.",
     },
   },
 } as const);
@@ -72,7 +85,9 @@ export interface WebListenConfig {
 export interface WebConfig {
   readonly configVersion: 1;
   readonly listen: WebListenConfig;
-  readonly auth: { readonly token: string };
+  readonly auth:
+    | { readonly token: string }
+    | { readonly mode: "none" };
   readonly allowInsecureHttp: boolean;
   readonly dataDirectory: string;
   readonly agentRegistries: readonly string[];
@@ -132,18 +147,7 @@ export function parseWebConfig(raw: unknown, options: ParseWebConfigOptions): We
   const listen = root.listen === undefined
     ? { host: "127.0.0.1", port: DEFAULT_PORT }
     : parseListen(root.listen);
-  const auth = object(root.auth, "$.auth", ["token"]);
-  const tokenRef = object(auth.token, "$.auth.token", ["$env"]);
-  if (typeof tokenRef.$env !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(tokenRef.$env)) {
-    invalid("$.auth.token.$env", "must be an environment variable name");
-  }
-  const token = (options.environment ?? process.env)[tokenRef.$env];
-  if (typeof token !== "string" || token.length < 16) {
-    throw new WebProductError(
-      "missing_auth_token",
-      `Environment variable ${tokenRef.$env} must contain at least 16 characters.`,
-    );
-  }
+  const auth = parseAuth(root.auth, options.environment ?? process.env);
   if (root.allowInsecureHttp !== undefined && typeof root.allowInsecureHttp !== "boolean") {
     invalid("$.allowInsecureHttp", "must be a boolean");
   }
@@ -168,13 +172,40 @@ export function parseWebConfig(raw: unknown, options: ParseWebConfigOptions): We
   return Object.freeze({
     configVersion: 1,
     listen: Object.freeze(listen),
-    auth: Object.freeze({ token }),
+    auth,
     allowInsecureHttp: root.allowInsecureHttp === true,
     dataDirectory,
     agentRegistries: Object.freeze(registries),
     externalOrigins: Object.freeze(externalOrigins),
     sourcePath: resolve(options.sourcePath),
   });
+}
+
+function parseAuth(
+  raw: unknown,
+  environment: Readonly<Record<string, string | undefined>>,
+): WebConfig["auth"] {
+  const auth = object(raw, "$.auth", ["mode", "token"]);
+  if (auth.mode === "none") {
+    if (auth.token !== undefined) {
+      invalid("$.auth", 'must contain only mode: "none" when browser authentication is disabled');
+    }
+    return Object.freeze({ mode: "none" as const });
+  }
+  if (auth.mode !== undefined) invalid("$.auth.mode", 'must equal "none"');
+  if (auth.token === undefined) invalid("$.auth.token", "is required");
+  const tokenRef = object(auth.token, "$.auth.token", ["$env"]);
+  if (typeof tokenRef.$env !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(tokenRef.$env)) {
+    invalid("$.auth.token.$env", "must be an environment variable name");
+  }
+  const token = environment[tokenRef.$env];
+  if (typeof token !== "string" || token.length < 16) {
+    throw new WebProductError(
+      "missing_auth_token",
+      `Environment variable ${tokenRef.$env} must contain at least 16 characters.`,
+    );
+  }
+  return Object.freeze({ token });
 }
 
 function parseListen(raw: unknown): WebListenConfig {

@@ -19,7 +19,7 @@ export default defineConfig({
       manifest: {
         name: "mono-agent Console",
         short_name: "mono-agent",
-        description: "Authenticated console for mono-agent operators.",
+        description: "Private console for mono-agent operators.",
         theme_color: "#111310",
         background_color: "#111310",
         display: "standalone",

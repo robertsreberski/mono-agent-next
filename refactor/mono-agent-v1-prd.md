@@ -1035,7 +1035,8 @@ config. service-macos never infers one target from another. If service-macos is
 absent, the same agent and web configs run foreground or under another
 supervisor. Removing service-macos never changes their semantics.
 
-The machine-wide web product likewise owns its listener, browser authentication, storage, and agent discovery:
+The machine-wide web product likewise owns its listener, browser auth policy,
+storage, and agent discovery:
 
 ```json
 {
@@ -1062,8 +1063,15 @@ Loopback is the safe default. Direct plaintext LAN or Tailscale-IP binding
 requires a token of at least 24 characters and explicit
 `"allowInsecureHttp": true`; that flag acknowledges unencrypted transport and
 does not provide TLS. Prefer loopback behind an HTTPS reverse proxy or
-Tailscale Serve. Host/Origin checks remain request-integrity defenses, not a
-replacement for bearer authentication or encryption.
+Tailscale Serve.
+
+A deployment may instead select `"auth": {"mode": "none"}` as the complete
+explicit opt-in to unauthenticated browser operation. This mode is accepted on
+any valid listener without `allowInsecureHttp` or `externalOrigins`; configured
+external origins remain unique canonical HTTPS origins. Host/Origin checks
+remain request-integrity defenses, not authentication or encryption. Every
+client admitted by the chosen network boundary receives owner-equivalent
+console authority.
 
 TUI needs no persistent product config for the common case; it discovers an agent through the same owner-private registry or accepts an explicit operator endpoint. docs-mcp is placed in the coding client's `mcpServers` map. No central products registry is introduced.
 

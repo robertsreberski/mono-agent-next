@@ -37,13 +37,18 @@ generated schemas, logs, issues, screenshots, or debugging prompts.
 The operator channel accepts only literal loopback HTTP plus bearer
 authentication. Webhook and OpenAI-compatible modules default to loopback and
 require their explicit non-loopback and authentication policy when exposed.
-The web product uses its own listener and bearer; direct non-loopback plaintext
-requires a stronger token and explicit risk acknowledgement. Host and Origin
-checks defend request integrity but do not provide TLS.
+The web product uses its own listener and bearer by default; direct
+non-loopback plaintext requires a stronger token and explicit risk
+acknowledgement in token mode. Its explicit no-auth mode is the complete opt-in
+and is accepted on any valid listener without `allowInsecureHttp`. Host and
+Origin checks defend request integrity but do not authenticate users or provide
+TLS.
 
 Prefer loopback behind a correctly configured HTTPS reverse proxy or Tailscale
-Serve. Never expose an unauthenticated or plaintext owner-equivalent surface to
-an untrusted network.
+Serve. A no-auth direct listener grants every network-reachable client
+owner-equivalent authority; a proxy deployment may list one or more unique
+canonical HTTPS external origins. Keep the resulting exposure aligned with the
+owner's intended network trust boundary.
 
 ## Owner-private files
 

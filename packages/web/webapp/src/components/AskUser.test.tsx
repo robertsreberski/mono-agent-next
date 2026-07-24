@@ -74,6 +74,9 @@ vi.mock("../api", async (importOriginal) => {
     subscribeEvents: apiMocks.subscribeEvents,
     api: {
       ...actual.api,
+      probeBootstrap: async () => {
+        throw new actual.ApiError("Unauthorized.", 401, "unauthorized");
+      },
       bootstrap: apiMocks.bootstrap,
       thread: apiMocks.thread,
     },

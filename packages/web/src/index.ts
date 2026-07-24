@@ -1,4 +1,4 @@
-/** Standalone authenticated browser product over `@mono-agent/operator`. */
+/** Standalone browser product with an explicit auth policy over `@mono-agent/operator`. */
 export { loadWebConfig, parseWebConfig, webConfigJsonSchema } from "./config.js";
 export type {
   LoadWebConfigOptions,

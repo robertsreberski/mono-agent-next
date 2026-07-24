@@ -61,7 +61,7 @@ documentation MCP companion is the one publishable package under `extras/`.
 | [`@mono-agent/sandbox-srt`](./packages/sandbox-srt/README.md) | execution | Fingerprinted fail-closed Sandbox Runtime Tool command execution. |
 | [`@mono-agent/operator`](./packages/operator/README.md) | operator-surface | Shared protocol, strict client, directory, domain reducer, actions, and fixtures. |
 | [`@mono-agent/tui`](./packages/tui/README.md) | operator-surface | Standalone pi-tui renderer over the shared operator client. |
-| [`@mono-agent/web`](./packages/web/README.md) | operator-surface | Standalone authenticated browser product with owner-private durable conversations. |
+| [`@mono-agent/web`](./packages/web/README.md) | operator-surface | Standalone browser product with explicit auth policy and owner-private durable conversations. |
 | [`create-mono-agent`](./packages/create-mono-agent/README.md) | app | Transactional minimal, Personal, and multi-runtime project scaffolding. |
 | [`@mono-agent/docs-mcp`](./extras/docs-mcp/README.md) | context | Offline search and guided reading over version-matched v1 documentation. |
 | [`@mono-agent/service-macos`](./packages/service-macos/README.md) | app | Explicit inspection, planning, and reconciliation of fingerprinted macOS services. |
@@ -142,7 +142,7 @@ Operator access has three layers:
    to an already-running agent and have independent process lifecycles.
 
 The TUI owns terminal input and rendering. Web owns its separate config,
-listener, browser authentication, and durable conversation data. Neither reads
+listener, browser auth policy, and durable conversation data. Neither reads
 agent config, runs a provider, or stops the agent when a client disconnects.
 
 If the selected state store supports host presence, core waits for the operator
