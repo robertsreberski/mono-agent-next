@@ -603,9 +603,6 @@ export class PiCredentialStore implements CredentialStore {
   }
 }
 
-/** @deprecated Use PiCredentialStore. Retained as an internal source alias. */
-export const ReadOnlyPiCredentialStore = PiCredentialStore;
-
 const MAX_RUNTIME_PI_ERROR_BYTES = 4_096;
 
 function ownDataString(value: unknown): string {

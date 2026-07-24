@@ -46,6 +46,8 @@ export interface LiteralEditOptions {
   readonly signal?: AbortSignal;
   /** Test-only race seam before the exclusive temporary file is created. */
   readonly beforeTemporaryCreate?: () => void | Promise<void>;
+  /** Test-only failure seam immediately after exclusive temporary creation. */
+  readonly afterTemporaryCreate?: () => void | Promise<void>;
   /**
    * Test-only race seam. Production callers omit it. The implementation
    * revalidates the target identity and bytes after this hook and before rename.
@@ -501,6 +503,7 @@ export async function editLiteralFile(
   );
   let temporaryHandle: FileHandle | undefined;
   let temporarySnapshot: FileSnapshot | undefined;
+  let temporaryCreated = false;
   let committed = false;
   try {
     throwIfAborted(options.signal);
@@ -520,6 +523,9 @@ export async function editLiteralFile(
         | requireNoFollow(),
       Number(sourceSnapshot.mode & 0o777n),
     );
+    temporaryCreated = true;
+    temporarySnapshot = snapshot(await temporaryHandle.stat({ bigint: true }));
+    await options.afterTemporaryCreate?.();
     await temporaryHandle.chmod(Number(sourceSnapshot.mode & 0o777n));
     temporarySnapshot = snapshot(await temporaryHandle.stat({ bigint: true }));
     if (temporarySnapshot.links !== 1n) {
@@ -581,8 +587,17 @@ export async function editLiteralFile(
       sha256After: replacementSha256,
     };
   } catch (error) {
-    if (!committed && temporarySnapshot !== undefined) {
-      await unlinkIfSameIdentity(temporaryPath, temporarySnapshot);
+    if (!committed && temporaryCreated) {
+      if (temporarySnapshot === undefined) {
+        try {
+          await unlink(temporaryPath);
+        } catch {
+          // The exclusive random path was never exposed to a callback before
+          // this failure seam; cleanup remains best-effort if it vanished.
+        }
+      } else {
+        await unlinkIfSameIdentity(temporaryPath, temporarySnapshot);
+      }
     }
     throw error;
   } finally {

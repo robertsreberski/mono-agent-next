@@ -32,7 +32,7 @@ vi.mock("@mono-agent/module-sdk/secure-fs", async (importOriginal) => {
   };
 });
 
-import { ReadOnlyPiCredentialStore, redactRuntimePiText } from "../credentials.js";
+import { PiCredentialStore, redactRuntimePiText } from "../credentials.js";
 
 const roots: string[] = [];
 
@@ -63,7 +63,7 @@ async function writeAuthLock(path: string, pid: number): Promise<string> {
 describe("atomic Pi credential store", () => {
   it("reads and atomically persists API-key credentials", async () => {
     const { path } = await fixture({ anthropic: { type: "api_key", key: "api-secret" } });
-    const store = new ReadOnlyPiCredentialStore(path);
+    const store = new PiCredentialStore(path);
 
     expect(await store.read("anthropic")).toEqual({ type: "api_key", key: "api-secret" });
     expect(await store.modify("anthropic", async () => ({ type: "api_key", key: "rotated-secret" })))
@@ -76,7 +76,7 @@ describe("atomic Pi credential store", () => {
     const { path } = await fixture({
       "openai-codex": { type: "oauth", access: "old-access", refresh: "refresh-secret", expires: 1 },
     });
-    const store = new ReadOnlyPiCredentialStore(path);
+    const store = new PiCredentialStore(path);
     await expect(store.read("openai-codex")).resolves.toMatchObject({ type: "oauth", access: "old-access" });
     await store.modify("openai-codex", async (current) => ({
       ...(current as { type: "oauth"; access: string; refresh: string; expires: number }),
@@ -95,12 +95,12 @@ describe("atomic Pi credential store", () => {
   it("requires exact 0600 files and never repairs pre-existing permissions", async () => {
     const permissive = await fixture({ anthropic: { type: "api_key", key: "secret" } });
     await chmod(permissive.path, 0o644);
-    await expect(new ReadOnlyPiCredentialStore(permissive.path).read("anthropic"))
+    await expect(new PiCredentialStore(permissive.path).read("anthropic"))
       .rejects.toThrow("mode must be exactly 0600");
     expect((await lstat(permissive.path)).mode & 0o777).toBe(0o644);
 
     await chmod(permissive.path, 0o400);
-    await expect(new ReadOnlyPiCredentialStore(permissive.path).modify(
+    await expect(new PiCredentialStore(permissive.path).modify(
       "anthropic",
       async () => ({ type: "api_key", key: "rotated" }),
     )).rejects.toThrow("mode must be exactly 0600");
@@ -115,13 +115,13 @@ describe("atomic Pi credential store", () => {
     roots.push(linkRoot);
     const linkPath = join(linkRoot, "auth.json");
     await symlink(source.path, linkPath);
-    await expect(new ReadOnlyPiCredentialStore(linkPath).read("anthropic"))
+    await expect(new PiCredentialStore(linkPath).read("anthropic"))
       .rejects.toThrow(/symbolic link|Unable to open/);
     expect((await readFile(source.path, "utf8"))).toContain("secret");
 
     const secondName = join(source.root, "auth-hardlink.json");
     await link(source.path, secondName);
-    await expect(new ReadOnlyPiCredentialStore(source.path).read("anthropic"))
+    await expect(new PiCredentialStore(source.path).read("anthropic"))
       .rejects.toThrow("single-link regular file");
     expect((await lstat(source.path)).nlink).toBe(2);
   });
@@ -129,7 +129,7 @@ describe("atomic Pi credential store", () => {
   it("rejects a swapped destination before commit without overwriting it", async () => {
     const { root, path } = await fixture({ anthropic: { type: "api_key", key: "old-secret" } });
     const displaced = join(root, "original-auth.json");
-    const store = new ReadOnlyPiCredentialStore(path);
+    const store = new PiCredentialStore(path);
 
     await expect(store.modify("anthropic", async () => {
       await rename(path, displaced);
@@ -154,7 +154,7 @@ describe("atomic Pi credential store", () => {
       await symlink(adversarialTarget, committedPath);
     };
 
-    await expect(new ReadOnlyPiCredentialStore(path).modify(
+    await expect(new PiCredentialStore(path).modify(
       "anthropic",
       async () => ({ type: "api_key", key: "rotated-secret" }),
     )).rejects.toThrow(/symbolic link|regular file/);
@@ -170,7 +170,7 @@ describe("atomic Pi credential store", () => {
     const before = await readFile(path);
     const lockContents = await writeAuthLock(path, process.pid);
 
-    await expect(new ReadOnlyPiCredentialStore(path).modify(
+    await expect(new PiCredentialStore(path).modify(
       "anthropic",
       async () => ({ type: "api_key", key: "rotated-secret" }),
     )).rejects.toThrow("locked by another process");
@@ -191,7 +191,7 @@ describe("atomic Pi credential store", () => {
       return true;
     });
 
-    await expect(new ReadOnlyPiCredentialStore(path).modify(
+    await expect(new PiCredentialStore(path).modify(
       "anthropic",
       async () => ({ type: "api_key", key: "rotated-secret" }),
     )).resolves.toEqual({ type: "api_key", key: "rotated-secret" });
@@ -205,7 +205,7 @@ describe("atomic Pi credential store", () => {
     const { path } = await fixture({ anthropic: { type: "api_key", key: "old-secret" } });
     const before = await readFile(path);
 
-    await expect(new ReadOnlyPiCredentialStore(path).modify(
+    await expect(new PiCredentialStore(path).modify(
       "anthropic",
       async () => ({
         type: "oauth",
@@ -222,7 +222,7 @@ describe("atomic Pi credential store", () => {
     const { path } = await fixture({ anthropic: { type: "api_key", key: "old-secret" } });
     const before = await readFile(path);
 
-    await expect(new ReadOnlyPiCredentialStore(path).modify(
+    await expect(new PiCredentialStore(path).modify(
       "anthropic",
       async () => ({ type: "api_key", key: "x".repeat(1_048_576) }),
     )).rejects.toThrow("exceeds 1048576 bytes");
@@ -233,7 +233,7 @@ describe("atomic Pi credential store", () => {
 
   it("redacts configured credential values and bearer-shaped tokens", async () => {
     const { path } = await fixture({ anthropic: { type: "api_key", key: "api-secret" } });
-    const store = new ReadOnlyPiCredentialStore(path);
+    const store = new PiCredentialStore(path);
     const redacted = redactRuntimePiText(
       "provider failed with api-secret and Bearer another-secret",
       await store.redactionValues(),

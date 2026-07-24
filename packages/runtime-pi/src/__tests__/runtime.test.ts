@@ -23,6 +23,7 @@ import type {
 import {
   AGENT_INTERACTION_LIMITS,
   RUNTIME_SESSION_UNAVAILABLE_CODE,
+  snapshotRuntimeTurnError,
 } from "@mono-agent/module-sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -1070,6 +1071,94 @@ describe("Pi-native runtime module", () => {
     await stop(runtime);
     await expect(runtime.runTurn(request("stopped"), turnContext().context))
       .rejects.toBeInstanceOf(RuntimePiError);
+  });
+
+  it("classifies an unsupported effort before provider dispatch", async () => {
+    const { runtime, faux } = fauxRuntime();
+    const providerAttempt = vi.fn(() => fauxAssistantMessage([fauxText("must not run")]));
+    faux.setResponses([providerAttempt]);
+    await start(runtime);
+
+    let failure: unknown;
+    try {
+      await runtime.runTurn(request("invalid effort", {
+        options: { effort: "ultra" },
+      }), turnContext().context);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(RuntimePiError);
+    expect(failure).toMatchObject({ code: "UNSUPPORTED", retryable: false });
+    expect(snapshotRuntimeTurnError(failure)).toMatchObject({
+      code: "UNSUPPORTED",
+      retryability: "not-retryable",
+      sideEffects: "none",
+    });
+    expect(providerAttempt).not.toHaveBeenCalled();
+    await stop(runtime);
+  });
+
+  it("classifies a turn without a user message", async () => {
+    const { runtime, faux } = fauxRuntime();
+    const providerAttempt = vi.fn(() => fauxAssistantMessage([fauxText("must not run")]));
+    faux.setResponses([providerAttempt]);
+    await start(runtime);
+
+    let failure: unknown;
+    try {
+      await runtime.runTurn(request("unused", {
+        messages: [
+          { role: "system", content: [{ type: "text", text: "System only." }] },
+          { role: "assistant", content: [{ type: "text", text: "No user input." }] },
+          {
+            role: "tool",
+            content: [{
+              type: "tool-result",
+              result: {
+                callId: "tool-1",
+                content: [{ type: "text", text: "Tool-only context." }],
+              },
+            }],
+          },
+        ],
+      }), turnContext().context);
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(RuntimePiError);
+    expect(failure).toMatchObject({ code: "UNSUPPORTED", retryable: false });
+    expect(snapshotRuntimeTurnError(failure)).toMatchObject({
+      code: "UNSUPPORTED",
+      retryability: "not-retryable",
+      sideEffects: "none",
+    });
+    expect(providerAttempt).not.toHaveBeenCalled();
+    await stop(runtime);
+  });
+
+  it("removes a harness from active health when live-input setup throws", async () => {
+    const { runtime, faux } = fauxRuntime();
+    const providerAttempt = vi.fn(() => fauxAssistantMessage([fauxText("must not run")]));
+    faux.setResponses([providerAttempt]);
+    const setupFailure = new Error("live-input setup failed");
+    const { context } = turnContext();
+    await start(runtime);
+
+    await expect(runtime.runTurn(request("setup failure"), {
+      ...context,
+      registerLiveInput() {
+        throw setupFailure;
+      },
+    })).rejects.toThrow("live-input setup failed");
+
+    expect(await runtime.health?.({ signal: abortSignal() })).toMatchObject({
+      status: "healthy",
+      details: { state: "running", activeTurns: 0 },
+    });
+    expect(providerAttempt).not.toHaveBeenCalled();
+    await stop(runtime);
   });
 
   it("classifies typed model-discovery failures for safe fallback", async () => {
