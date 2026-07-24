@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 import { describe, expect, it } from "vitest";
 
 import type { TriggerEvent, TriggerHost, TriggerReceipt } from "@mono-agent/module-sdk/internal";
@@ -133,6 +135,72 @@ describe("trigger-cron lifecycle", () => {
     await expect(first).resolves.toMatchObject({ status: "accepted", runId: "run-1" });
   });
 
+  it("normalizes RFC3339 command offsets and deduplicates the same canonical instant", async () => {
+    const clock = new TestClock("2026-07-23T07:59:00.000Z");
+    const host = new RecordingHost();
+    const trigger = createCronTrigger({ instanceId: "cron", jobs: [job()], host, clock });
+    await trigger.start?.({ signal: new AbortController().signal });
+    clock.setNow("2026-07-23T08:01:00.000Z");
+    const command = trigger.commands?.find((entry) => entry.name === "trigger-cron:invoke");
+    if (command === undefined) throw new Error("Expected trigger-cron:invoke command.");
+
+    const first = await command.run(
+      { jobId: "heartbeat", scheduledAt: "2026-07-23T10:00:00+02:00" },
+      { signal: new AbortController().signal, logger: nullLogger },
+    );
+    expect(first).toMatchObject({
+      status: "accepted",
+      scheduledAt: "2026-07-23T08:00:00.000Z",
+    });
+    const duplicate = await command.run(
+      { jobId: "heartbeat", scheduledAt: "2026-07-23T08:00:00.000Z" },
+      { signal: new AbortController().signal, logger: nullLogger },
+    );
+    expect(duplicate).toMatchObject({
+      status: "duplicate",
+      scheduledAt: "2026-07-23T08:00:00.000Z",
+      idempotencyKey: host.events[0]?.id,
+    });
+    expect(host.events.map(scheduledAt)).toEqual(["2026-07-23T08:00:00.000Z"]);
+    await trigger.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("bounds drain with its signal or deadline and still permits a final stop", async () => {
+    const signalTrigger = createCronTrigger({
+      instanceId: "drain-signal",
+      jobs: [job()],
+      host: new RecordingHost(),
+      clock: new TestClock("2026-07-23T08:00:00.000Z"),
+    });
+    await signalTrigger.start?.({ signal: new AbortController().signal });
+    if (signalTrigger.drain === undefined) throw new Error("Expected drain lifecycle.");
+    const cancelled = new Error("operator cancelled drain");
+    const controller = new AbortController();
+    controller.abort(cancelled);
+    await expect(signalTrigger.drain({ signal: controller.signal })).rejects.toBe(cancelled);
+    await signalTrigger.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+
+    const deadlineTrigger = createCronTrigger({
+      instanceId: "drain-deadline",
+      jobs: [job()],
+      host: new RecordingHost(),
+      clock: new TestClock("2026-07-23T08:00:00.000Z"),
+    });
+    await deadlineTrigger.start?.({ signal: new AbortController().signal });
+    if (deadlineTrigger.drain === undefined) throw new Error("Expected drain lifecycle.");
+    await expect(deadlineTrigger.drain({
+      signal: new AbortController().signal,
+      deadline: "1970-01-01T00:00:00.000Z",
+    })).rejects.toMatchObject({ name: "TimeoutError" });
+    await deadlineTrigger.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+  });
+
   it("marks channel-only notify intent for the selected channel's default destination", async () => {
     const clock = new TestClock("2026-07-23T08:00:00.000Z");
     const host = new RecordingHost();
@@ -246,6 +314,86 @@ describe("trigger-cron lifecycle", () => {
     expect(replaceHost.events).toHaveLength(2);
     await replacing.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
     await expect(newest).resolves.toMatchObject({ status: "unknown" });
+  });
+
+  it("drop-oldest keeps queue depth two and runs the surviving firings in order", async () => {
+    const clock = new TestClock("2026-07-23T08:00:00.000Z");
+    const resolvers: Array<(receipt: TriggerReceipt) => void> = [];
+    const host = new RecordingHost(() => new Promise((resolve) => { resolvers.push(resolve); }));
+    const trigger = createCronTrigger({
+      instanceId: "drop-oldest",
+      jobs: [job({ overlap: "queue", maxQueueDepth: 2, overflow: "drop-oldest" })],
+      host,
+      clock,
+    });
+    await trigger.start?.({ signal: new AbortController().signal });
+    clock.setNow("2026-07-23T08:05:00.000Z");
+
+    const first = trigger.invoke("heartbeat", "2026-07-23T08:01:00.000Z");
+    await waitFor(() => host.events.length === 1);
+    const displaced = trigger.invoke("heartbeat", "2026-07-23T08:02:00.000Z");
+    const third = trigger.invoke("heartbeat", "2026-07-23T08:03:00.000Z");
+    const fourth = trigger.invoke("heartbeat", "2026-07-23T08:04:00.000Z");
+    await expect(displaced).resolves.toMatchObject({
+      status: "dropped",
+      reason: "Cron queue dropped its oldest firing.",
+    });
+
+    resolvers[0]?.({ status: "accepted", runId: "first" });
+    await expect(first).resolves.toMatchObject({ status: "accepted" });
+    await waitFor(() => host.events.length === 2);
+    resolvers[1]?.({ status: "accepted", runId: "third" });
+    await expect(third).resolves.toMatchObject({ status: "accepted" });
+    await waitFor(() => host.events.length === 3);
+    resolvers[2]?.({ status: "accepted", runId: "fourth" });
+    await expect(fourth).resolves.toMatchObject({ status: "accepted" });
+    expect(host.events.map(scheduledAt)).toEqual([
+      "2026-07-23T08:01:00.000Z",
+      "2026-07-23T08:03:00.000Z",
+      "2026-07-23T08:04:00.000Z",
+    ]);
+    await trigger.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("coalesce drops every queued firing and runs only the newest replacement", async () => {
+    const clock = new TestClock("2026-07-23T08:00:00.000Z");
+    const resolvers: Array<(receipt: TriggerReceipt) => void> = [];
+    const host = new RecordingHost(() => new Promise((resolve) => { resolvers.push(resolve); }));
+    const trigger = createCronTrigger({
+      instanceId: "coalesce",
+      jobs: [job({ overlap: "queue", maxQueueDepth: 2, overflow: "coalesce" })],
+      host,
+      clock,
+    });
+    await trigger.start?.({ signal: new AbortController().signal });
+    clock.setNow("2026-07-23T08:05:00.000Z");
+
+    const first = trigger.invoke("heartbeat", "2026-07-23T08:01:00.000Z");
+    await waitFor(() => host.events.length === 1);
+    const second = trigger.invoke("heartbeat", "2026-07-23T08:02:00.000Z");
+    const third = trigger.invoke("heartbeat", "2026-07-23T08:03:00.000Z");
+    const newest = trigger.invoke("heartbeat", "2026-07-23T08:04:00.000Z");
+    await expect(Promise.all([second, third])).resolves.toEqual([
+      expect.objectContaining({
+        status: "dropped",
+        reason: "Cron queue coalesced to its newest firing.",
+      }),
+      expect.objectContaining({
+        status: "dropped",
+        reason: "Cron queue coalesced to its newest firing.",
+      }),
+    ]);
+
+    resolvers[0]?.({ status: "accepted", runId: "first" });
+    await expect(first).resolves.toMatchObject({ status: "accepted" });
+    await waitFor(() => host.events.length === 2);
+    expect(host.events.map(scheduledAt)).toEqual([
+      "2026-07-23T08:01:00.000Z",
+      "2026-07-23T08:04:00.000Z",
+    ]);
+    resolvers[1]?.({ status: "accepted", runId: "newest" });
+    await expect(newest).resolves.toMatchObject({ status: "accepted" });
+    await trigger.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
   });
 
   it("restores the durable watermark and catches up downtime without replaying an accepted firing", async () => {
@@ -680,6 +828,45 @@ describe("trigger-cron lifecycle", () => {
     expect(durable.onlyRecord().scheduleFingerprint).toBe(newFingerprint);
     await oldTrigger.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
     await newTrigger.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("bounds drain by its context signal or deadline and remains stoppable afterward", async () => {
+    const aborted = createCronTrigger({
+      instanceId: "aborted-drain",
+      jobs: [job()],
+      host: new RecordingHost(),
+      clock: new TestClock("2026-07-23T08:00:00.000Z"),
+    });
+    await aborted.start?.({ signal: new AbortController().signal });
+    if (aborted.drain === undefined) throw new Error("Expected cron drain lifecycle.");
+    const cancellation = new Error("operator cancelled drain");
+    const controller = new AbortController();
+    controller.abort(cancellation);
+    await expect(aborted.drain({ signal: controller.signal })).rejects.toBe(cancellation);
+    await expect(aborted.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    })).resolves.toBeUndefined();
+
+    const expired = createCronTrigger({
+      instanceId: "expired-drain",
+      jobs: [job()],
+      host: new RecordingHost(),
+      clock: new TestClock("2026-07-23T08:00:00.000Z"),
+    });
+    await expired.start?.({ signal: new AbortController().signal });
+    if (expired.drain === undefined) throw new Error("Expected cron drain lifecycle.");
+    await expect(expired.drain({
+      signal: new AbortController().signal,
+      deadline: "1970-01-01T00:00:00.000Z",
+    })).rejects.toMatchObject({
+      name: "TimeoutError",
+      message: "Cron drain deadline reached.",
+    });
+    await expect(expired.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    })).resolves.toBeUndefined();
   });
 
   it("stops after durable unknown settlement even when the raw host promise never settles", async () => {

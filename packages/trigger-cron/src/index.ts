@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 import { resolve } from "node:path";
 
 import { MODULE_API_VERSION } from "@mono-agent/module-sdk";

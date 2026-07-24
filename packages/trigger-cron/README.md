@@ -74,9 +74,10 @@ or an object containing `channel` and the channel-owned conversation
    work that had not begun.
 
 The maintenance command accepts an omitted `scheduledAt` (the current clock) or
-a canonical instant no later than the current clock. Future command instants are
-rejected before durable admission so they cannot move the schedule watermark
-forward and suppress real firings.
+an RFC 3339 instant no later than the current clock. Explicit instants are
+normalized to canonical UTC before idempotency and durable admission. Future
+command instants are rejected before admission so they cannot move the schedule
+watermark forward and suppress real firings.
 
 ### Package structure
 
@@ -84,7 +85,10 @@ forward and suppress real firings.
 | --- | --- |
 | `config.ts` | Strict selected-module config and IANA timezone validation. |
 | `jobs.ts` | Bounded Markdown discovery, frontmatter schema, and cron calculation. |
-| `scheduler.ts` | Injectable clock, overlap/watchdog lifecycle, idempotency, and command. |
+| `scheduler.ts` | Injectable clock, lifecycle, timer, queue, and emission orchestration. |
+| `scheduler-durable.ts` | Durable watermark, active-fence, recovery, and record validation. |
+| `scheduler-helpers.ts` | Pure due-boundary, command-input, receipt, and lifecycle helpers. |
+| `scheduler-state.ts` | Private per-job scheduler state contracts. |
 | `index.ts` | Reserved trigger module definition and public exports. |
 
 ## Public API
