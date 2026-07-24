@@ -116,6 +116,9 @@ export class SandboxSrt implements Sandbox {
       this.config.limits.maxOutputBytes,
       prepared.stdin,
     );
+    void result.catch(() => {
+      // Observe child failures while descriptor cleanup is still in progress.
+    });
     try {
       await closeBindings(bindings);
       return await result;
