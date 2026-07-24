@@ -33,7 +33,8 @@ export async function runCreateMonoAgentCli(
 ): Promise<number> {
   const invocationName = options.invocationName ?? "create-mono-agent";
   const isCreateInvocation = invocationName.startsWith("create-mono-agent");
-  const isInitCommand = argv[0] === "init" || argv[0] === "setup";
+  const isInitCommand = !isCreateInvocation
+    && (argv[0] === "init" || argv[0] === "setup");
   const isInstallSkillCommand = !isCreateInvocation && argv[0] === "install-skill";
 
   if (!isCreateInvocation && !isInitCommand && !isInstallSkillCommand) {

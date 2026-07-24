@@ -70,7 +70,10 @@ The target must be absent or an existing empty real directory. Symlinks,
 non-directories, non-empty targets, duplicate scaffold owners, unsafe package
 names, and unknown templates fail closed. Files are prepared in a private
 sibling staging directory and published only after the full template and any
-explicit installation succeed.
+explicit installation succeed. A PID-owned lock keeps concurrent scaffolds
+serialized; after an interrupted owner exits, the next invocation quarantines
+its exact private stage and reclaims the stale lock without following
+substituted paths.
 
 `install-skill` accepts `--target claude|codex|both` (default `both`), refuses
 existing installs unless `--force` is explicit, validates the bounded bundled
@@ -123,9 +126,13 @@ mono-agent other      -> @mono-agent/cli runCli
 | Module | Purpose |
 | --- | --- |
 | `src/scaffold.ts` | Transaction, no-clobber checks, optional installer, and file publication. |
+| `src/scaffold-lock.ts` | PID-owned scaffold locking, exact stale-stage quarantine, and crash recovery. |
+| `src/npm-name.ts` | Shared npm package-name validation and normalization. |
 | `src/templates.ts` | Deterministic three-template config, schema, manifest, instructions, and secret-name files. |
 | `src/cli.ts` | npm-create/init routing and argument validation. |
-| `src/skill-installer.ts` | Bounded manifest validation and transactional Claude/Codex skill installation. |
+| `src/skill-installer.ts` | Skill install orchestration, authority discovery, and bounded source loading. |
+| `src/skill-installer/journal.ts` | Durable install journal parsing, recovery, and exact prior restoration. |
+| `src/skill-installer/fs.ts` | Fail-closed filesystem, lock, identity, and bounded-I/O primitives. |
 | `src/bin/create-mono-agent.ts` | Unambiguous npm-create entry point. |
 | `src/bin/mono-agent.ts` | Global CLI/init entry point. |
 
@@ -212,5 +219,8 @@ Focused tests prove the full template/dependency matrix, names-only secret
 references, current module field shapes, deterministic bootstrap files,
 the Personal template's ordinary stdio MCP, Markdown cron, retained channel,
 authenticated directory-backed webhook, durable memory/state, and artifact-path surfaces,
-no-overwrite behavior, concurrent ownership, rollback after installer failure,
-CLI template selection, and delegation of non-scaffold commands.
+no-overwrite behavior, concurrent ownership, interrupted-owner recovery,
+real package-manager exit/signal handling, rollback after installer failure,
+CLI invocation routing, template selection, and delegation of non-scaffold
+commands. The repository consumer verifier also loads every generated template
+through its selected built modules and the real CLI validator.
