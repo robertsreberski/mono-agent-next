@@ -4235,6 +4235,46 @@ describe("turn admission and routing", () => {
     expect(turns).toBe(0);
     await host.stop();
   });
+
+  it("rejects an effort outside the exact preflight model allowlist before provider dispatch", async () => {
+    const runtime = `@fixture/runtime-effort-${randomUUID().toLowerCase()}`;
+    let turns = 0;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create() {
+          return {
+            ...runtimeInstance(async () => {
+              turns += 1;
+              return completed("must not run");
+            }),
+            preflightModel({ model }: { readonly model: string }) {
+              return {
+                supported: true,
+                model: {
+                  id: model,
+                  efforts: ["none", "low", "high"],
+                  contextWindow: 128_000,
+                },
+              };
+            },
+          };
+        },
+      },
+    }]);
+    await project.writeConfig(minimalConfig(runtime));
+    const host = await createAgentHost(project.configPath);
+
+    await expect(host.submit({
+      requestId: "unsupported-effort",
+      conversationId: "unsupported-effort",
+      text: "run",
+      effort: "off",
+    })).rejects.toThrow(/Every eligible runtime route failed/u);
+    expect(turns).toBe(0);
+    await host.stop();
+  });
 });
 
 function lifecycleRuntime(label: string, events: string[]): FixtureController {

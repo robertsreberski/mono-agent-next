@@ -58,9 +58,11 @@ TUI process environment.
 
 Registry directories and entries must be current-user-owned and inaccessible
 to group/other users. Symlinked directories or files, multi-link files,
-malformed descriptors, and registry identities that change while opening or
-reading fail closed. At startup and immediately before each discovered turn,
-the TUI binds `/v2/info` to the selected agent id, PID, and process start time.
+unrecognized or malformed current-v3 descriptors, and registry identities that
+change while opening or reading fail closed. Structurally recognized stale
+v1/v2 descriptors and details are skipped during migration and cannot block
+valid v3 entries. At startup and immediately before each discovered turn, the
+TUI binds `/v3/info` to the selected agent id, PID, and process start time.
 
 ## Turn behavior and controls
 
@@ -73,16 +75,26 @@ the capabilities and shared state returned from `@mono-agent/operator`.
 | ordinary text | Start a turn when idle; during a compatible active turn, offer live input. |
 | `Escape` or `/cancel` | Request cancellation when the endpoint advertises it. |
 | `/runtime <instance\|default>` | Set or clear the next-turn runtime-instance override. |
-| `/model <ref\|default>` | Set or clear the next-turn model override. Advertised models are an allowlist. |
-| `/effort <level\|default>` | Set or clear the next-turn effort override. Advertised effort values are an allowlist. |
+| `/model <ref\|default>` | Select or clear one advertised atomic runtime-instance/model route; the owning runtime travels with the model selection. |
+| `/model <runtime> <ref>` | Disambiguate equal model ids advertised by different runtime instances. |
+| `/effort <level\|default>` | Set or clear the next-turn effort override from the selected route's verified allowlist. |
 | `/answer {"question":"value","other":["value-1","value-2"]}` | Losslessly answer every pending question, including punctuation-rich choices, free text, and multi-select values. |
 | `/help` | Show the in-product command summary. |
 | `/exit` or `/quit` | Close only this renderer. |
 
-When model or effort catalogs are omitted, the operator layer accepts a
-bounded protocol-valid value and leaves final validation to Core and the
-selected runtime. Unsupported actions remain unavailable; the TUI does not
+The TUI does not independently combine runtime and model values from different
+advertised choices. If the endpoint omits model metadata, it does not offer an
+explicit model override. If the selected route has no verified effort
+allowlist, it does not solicit an effort value; the configured/default effort
+remains in effect. Core and the selected runtime still validate every submitted
+route and effort. Unsupported actions remain unavailable; the TUI does not
 invent a fallback protocol.
+
+Context usage is rendered only from a trustworthy snapshot for the current
+turn. A new active turn does not reuse the preceding turn's value as if it were
+current; a current-turn usage event may make the value available before
+settlement. Compaction preserves the known context window and sticky marker but
+clears `contextUsed` until a later trustworthy usage snapshot.
 
 Closing the renderer aborts its open stream and can therefore cancel that
 exact in-flight turn at the channel boundary. It never sends a process or
@@ -97,7 +109,8 @@ service stop request, so the agent and its other channels keep running.
 | `--registry <dir>` | Add an owner-private discovery root; repeatable. |
 | `--agent <id\|label>` | Select one discovered agent. |
 | `--conversation <id>` | Use a stable conversation id; the default is a new random TUI id. |
-| `--model <ref>` | Set an initial eligible model override. |
+| `--runtime <instance>` | Select the runtime half of an initial advertised route. |
+| `--model <ref>` | Select the model half of an initial advertised route; pair it with `--runtime` when needed. |
 | `--effort <level>` | Set an initial eligible effort override. |
 | `--title <text>` | Override the renderer header. |
 | `-h`, `--help` | Print help and exit. |

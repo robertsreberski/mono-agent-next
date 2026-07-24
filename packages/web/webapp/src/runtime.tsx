@@ -1,5 +1,6 @@
 import {
   AssistantRuntimeProvider,
+  type CompleteAttachment,
   type AppendMessage,
   type ExternalThreadQueueAdapter,
   type QuoteInfo,
@@ -11,13 +12,43 @@ import type {
   OperatorJsonValue,
   OperatorToolResult,
 } from "@mono-agent/operator";
-import { type ReactNode, useCallback, useMemo } from "react";
+import {
+  createContext,
+  type ReactNode,
+  useCallback,
+  useContext,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { useConsole } from "./console";
+import { InlineAttachmentAdapter, toWebAttachments } from "./inline-attachments";
 import type { Message, Quote } from "./types";
 
 type MessageContentPart = Exclude<ThreadMessageLike["content"], string>[number];
 type JsonObject = { readonly [key: string]: OperatorJsonValue };
+
+export interface FailedComposerDraft {
+  readonly id: number;
+  readonly threadId: string;
+  readonly text: string;
+  readonly attachments: readonly CompleteAttachment[];
+  readonly quote?: QuoteInfo;
+}
+
+interface FailedDraftContextValue {
+  readonly draft?: FailedComposerDraft;
+  clear(draft: FailedComposerDraft): void;
+}
+
+const FailedDraftContext = createContext<FailedDraftContextValue>({
+  clear: () => undefined,
+});
+
+export function useFailedComposerDraft(): FailedDraftContextValue {
+  return useContext(FailedDraftContext);
+}
 
 function status(message: Message): ThreadMessageLike["status"] {
   if (message.status === "running") return { type: "running" };
@@ -125,27 +156,80 @@ export function convertOperatorActivities(
 
 export function WebRuntimeProvider({ children }: { readonly children: ReactNode }) {
   const consoleState = useConsole();
+  const [failedDrafts, setFailedDrafts] = useState<
+    ReadonlyMap<string, readonly FailedComposerDraft[]>
+  >(() => new Map());
+  const nextDraftId = useRef(1);
+  const attachmentAdapter = useMemo(
+    () => new InlineAttachmentAdapter(consoleState.reportError),
+    [consoleState.reportError],
+  );
+  const rememberFailedDraft = useCallback((
+    threadId: string,
+    text: string,
+    attachments: readonly CompleteAttachment[],
+    quote: QuoteInfo | undefined,
+  ) => {
+    const id = nextDraftId.current;
+    nextDraftId.current += 1;
+    setFailedDrafts((current) => {
+      const next = new Map(current);
+      const draft: FailedComposerDraft = {
+        id,
+        threadId,
+        text,
+        attachments,
+        ...(quote === undefined ? {} : { quote }),
+      };
+      next.set(threadId, [...(current.get(threadId) ?? []), draft]);
+      return next;
+    });
+  }, []);
   const onNew = useCallback(async (message: AppendMessage) => {
+    const threadId = consoleState.selectedThreadId;
+    if (threadId === undefined) {
+      consoleState.reportError("Create a conversation first.");
+      return;
+    }
     const text = message.content
       .filter((part): part is Extract<(typeof message.content)[number], { readonly type: "text" }> =>
         part.type === "text"
       )
       .map((part) => part.text)
-      .join("\n")
-      .trim();
-    const quote = resolveOperatorQuote(
-      message.metadata?.custom?.quote,
-      consoleState.detail?.messages ?? [],
-      consoleState.selectedAgent?.capabilities.quotes === true,
-    );
-    if (!text && consoleState.pendingFiles.length === 0) return;
-    await consoleState.send({
-      text,
-      ...(consoleState.runtime ? { runtime: consoleState.runtime } : {}),
-      ...(consoleState.model ? { model: consoleState.model } : {}),
-      ...(consoleState.effort ? { effort: consoleState.effort } : {}),
-    }, quote);
-  }, [consoleState]);
+      .join("\n");
+    const messageAttachments = message.attachments ?? [];
+    const draftQuote = quoteInfo(message.metadata?.custom?.quote);
+    try {
+      const attachments = toWebAttachments(messageAttachments);
+      const quote = resolveOperatorQuote(
+        draftQuote,
+        consoleState.detail?.messages ?? [],
+        consoleState.selectedAgent?.capabilities.quotes === true,
+      );
+      if (!text.trim() && attachments.length === 0) return;
+      const sent = await consoleState.send({
+        text,
+        ...(consoleState.runtime ? { runtime: consoleState.runtime } : {}),
+        ...(consoleState.model ? { model: consoleState.model } : {}),
+        ...(consoleState.effort ? { effort: consoleState.effort } : {}),
+      }, attachments, quote);
+      if (!sent) rememberFailedDraft(threadId, text, messageAttachments, draftQuote);
+    } catch (cause) {
+      consoleState.reportError(
+        cause instanceof Error && cause.message.trim()
+          ? cause.message
+          : "Could not prepare the message.",
+      );
+      rememberFailedDraft(threadId, text, messageAttachments, draftQuote);
+    }
+  }, [consoleState, rememberFailedDraft]);
+  const detailMatchesSelection =
+    consoleState.detail !== undefined
+    && consoleState.detail.thread.id === consoleState.selectedThreadId
+    && consoleState.detail.thread.agentId === consoleState.selectedAgentId
+    && consoleState.selectedThread !== undefined
+    && consoleState.selectedThread.id === consoleState.selectedThreadId
+    && consoleState.selectedThread.agentId === consoleState.selectedAgentId;
   const isRunning = consoleState.detail?.thread.status === "running";
   const canLiveInput = consoleState.selectedAgent?.capabilities.liveInput === true;
   const canCancel = consoleState.selectedAgent?.capabilities.cancellation === true;
@@ -153,7 +237,7 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
     isRunning && canLiveInput
       ? {
           items: [],
-          enqueue: (message) => { onNew(message); },
+          enqueue: (message) => { void onNew(message); },
           steer: () => undefined,
           remove: () => undefined,
           clear: () => undefined,
@@ -182,9 +266,11 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
         remoteId: thread.id,
         status: "archived" as const,
         title: thread.title,
-      })),
+    })),
     onSwitchToNewThread: consoleState.createThread,
-    onSwitchToThread: async (threadId: string) => { consoleState.selectThread(threadId); },
+    onSwitchToThread: async (threadId: string) => {
+      await consoleState.selectThread(threadId);
+    },
     onRename: consoleState.renameThread,
     onArchive: async (threadId: string) => { await consoleState.archiveThread(threadId, true); },
     onUnarchive: async (threadId: string) => { await consoleState.archiveThread(threadId, false); },
@@ -201,12 +287,14 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
     consoleState.selectedThreadId,
   ]);
   const runtime = useExternalStoreRuntime<Message>({
-    messages: consoleState.detail?.messages ?? [],
+    messages: detailMatchesSelection ? consoleState.detail?.messages ?? [] : [],
     convertMessage,
-    isLoading: consoleState.loading || consoleState.refreshing,
-    isRunning,
+    isLoading: consoleState.loading || consoleState.refreshing || !detailMatchesSelection,
+    isRunning: detailMatchesSelection && isRunning,
     isSendDisabled:
-      consoleState.selectedThread === undefined
+      !detailMatchesSelection
+      || consoleState.submitting
+      || consoleState.selectedThread === undefined
       || consoleState.selectedThread.archivedAt !== undefined
       || consoleState.selectedAgent?.online !== true
       || (isRunning && !canLiveInput),
@@ -214,9 +302,36 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
     onCancel: canCancel ? consoleState.cancel : undefined,
     queue,
     unstable_capabilities: { copy: true },
-    adapters: { threadList },
+    adapters: {
+      threadList,
+      ...(consoleState.selectedAgent?.capabilities.attachments === true
+        ? { attachments: attachmentAdapter }
+        : {}),
+    },
   });
-  return <AssistantRuntimeProvider runtime={runtime}>{children}</AssistantRuntimeProvider>;
+  const failedDraft = consoleState.selectedThreadId === undefined
+    ? undefined
+    : failedDrafts.get(consoleState.selectedThreadId)?.[0];
+  const failedDraftContext = useMemo<FailedDraftContextValue>(() => ({
+    ...(failedDraft === undefined ? {} : { draft: failedDraft }),
+    clear: (draft) => {
+      setFailedDrafts((current) => {
+        const queue = current.get(draft.threadId);
+        if (queue?.[0]?.id !== draft.id) return current;
+        const next = new Map(current);
+        if (queue.length === 1) next.delete(draft.threadId);
+        else next.set(draft.threadId, queue.slice(1));
+        return next;
+      });
+    },
+  }), [failedDraft]);
+  return (
+    <AssistantRuntimeProvider runtime={runtime}>
+      <FailedDraftContext.Provider value={failedDraftContext}>
+        {children}
+      </FailedDraftContext.Provider>
+    </AssistantRuntimeProvider>
+  );
 }
 
 function jsonObject(value: OperatorJsonValue | undefined): JsonObject {
@@ -277,4 +392,15 @@ export function resolveOperatorQuote(
     messageId: source.operatorMessageId,
     text: source.text,
   };
+}
+
+function quoteInfo(value: unknown): QuoteInfo | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const quote = value as Partial<QuoteInfo>;
+  return typeof quote.messageId === "string"
+    && quote.messageId.length > 0
+    && typeof quote.text === "string"
+    && quote.text.trim().length > 0
+    ? { messageId: quote.messageId, text: quote.text }
+    : undefined;
 }

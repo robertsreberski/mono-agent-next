@@ -53,6 +53,26 @@ export default defineConfig({
         viewport: { width: 390, height: 844 },
       },
     },
+    {
+      name: "chromium-compact-desktop",
+      testMatch: /console\.behavior\.spec\.ts/u,
+      use: {
+        ...devices["Desktop Chrome"],
+        deviceScaleFactor: 1,
+        viewport: { width: 1_280, height: 720 },
+      },
+    },
+    {
+      name: "chromium-tablet",
+      testMatch: /console\.behavior\.spec\.ts/u,
+      use: {
+        ...devices["Desktop Chrome"],
+        deviceScaleFactor: 1,
+        hasTouch: true,
+        isMobile: true,
+        viewport: { width: 768, height: 1_024 },
+      },
+    },
   ],
   webServer: {
     command:

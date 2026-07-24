@@ -91,6 +91,8 @@ export interface RuntimePiModelCapabilities {
   readonly approvals: true;
   readonly sandbox: false;
   readonly thinkingLevels: readonly string[];
+  readonly label: string;
+  readonly contextWindow: number;
 }
 
 export interface RuntimePiModelRegistry {
@@ -387,7 +389,10 @@ export function createRuntimePiModelRegistry(
         structuredOutput: true,
         approvals: true,
         sandbox: false,
-        thinkingLevels: getSupportedThinkingLevels(model),
+        thinkingLevels: getSupportedThinkingLevels(model).map((level) =>
+          level === "off" ? "none" : level),
+        label: model.name,
+        contextWindow: model.contextWindow,
       };
     },
   };

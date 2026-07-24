@@ -69,20 +69,32 @@ export function evaluateOperatorRuntimeOverride(
 
   if (!hasAuthoredOverride) return { allowed: true, intent: parsed };
 
-  let selectedModel = parsed.model === undefined ? undefined : info.models?.find((model) => model.id === parsed.model);
-  if (parsed.model !== undefined && info.models !== undefined && selectedModel === undefined) {
+  const effectiveRuntime = parsed.runtime ?? info.defaults?.runtime;
+  const effectiveModelId = parsed.model ?? info.defaults?.model;
+  let selectedModel = effectiveRuntime === undefined || effectiveModelId === undefined
+    ? undefined
+    : info.models?.find((model) =>
+        model.runtime === effectiveRuntime && model.id === effectiveModelId);
+  if (selectedModel === undefined && effectiveRuntime === undefined && effectiveModelId !== undefined) {
+    const matches = info.models?.filter((model) => model.id === effectiveModelId);
+    if (matches?.length === 1) selectedModel = matches[0];
+  }
+  if (
+    info.models !== undefined
+    && (parsed.runtime !== undefined || parsed.model !== undefined)
+    && selectedModel === undefined
+  ) {
     return {
       allowed: false,
       reason: "unknown_model",
-      message: `Model ${JSON.stringify(parsed.model)} is not advertised by this agent.`,
+      message: `Runtime/model route ${JSON.stringify({
+        runtime: effectiveRuntime,
+        model: effectiveModelId,
+      })} is not advertised by this agent.`,
     };
   }
 
   if (parsed.effort !== undefined) {
-    const effectiveModelId = parsed.model ?? info.defaults?.model;
-    if (selectedModel === undefined && effectiveModelId !== undefined) {
-      selectedModel = info.models?.find((model) => model.id === effectiveModelId);
-    }
     if (selectedModel?.efforts !== undefined && !selectedModel.efforts.includes(parsed.effort)) {
       return {
         allowed: false,

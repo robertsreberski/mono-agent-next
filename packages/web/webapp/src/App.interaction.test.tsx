@@ -68,6 +68,7 @@ afterEach(() => {
   window.localStorage.clear();
   window.sessionStorage.clear();
   window.history.replaceState(null, "", "/");
+  Reflect.deleteProperty(window, "matchMedia");
   vi.clearAllMocks();
 });
 
@@ -93,6 +94,11 @@ describe("responsive console shell", () => {
       requiredElement<HTMLButtonElement>(host, 'button[aria-label="Expand agent rail"]')
         .getAttribute("aria-expanded"),
     ).toBe("false");
+    const mobileNavigation = requiredElement<HTMLElement>(host, ".mobile-navigation");
+    const chat = requiredElement<HTMLElement>(host, ".chat");
+    expect(
+      mobileNavigation.compareDocumentPosition(chat) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
 
     const chooseAgent = requiredElement<HTMLButtonElement>(
       host,
@@ -110,6 +116,11 @@ describe("responsive console shell", () => {
     );
     await waitFor(() => drawer.contains(document.activeElement));
     expect(drawer.getAttribute("aria-modal")).toBe("true");
+    expect(chat.hasAttribute("inert")).toBe(true);
+    expect(chat.getAttribute("aria-hidden")).toBe("true");
+    expect(mobileNavigation.hasAttribute("inert")).toBe(true);
+    expect(document.body.hasAttribute("data-console-modal-open")).toBe(true);
+    expect(host.querySelector(".drawer-scrim")?.getAttribute("aria-hidden")).toBe("true");
 
     await act(async () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
@@ -117,7 +128,60 @@ describe("responsive console shell", () => {
 
     expect(host.querySelector('[role="dialog"][aria-label="Choose agent"]')).toBeNull();
     expect(document.activeElement).toBe(chooseAgent);
+    expect(chat.hasAttribute("inert")).toBe(false);
+    expect(document.body.hasAttribute("data-console-modal-open")).toBe(false);
 
+    await act(async () => root.unmount());
+  });
+
+  it("closes a mobile drawer when the viewport crosses into desktop", async () => {
+    let onChange: ((event: MediaQueryListEvent) => void) | undefined;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: false,
+        media: "(min-width: 901px)",
+        onchange: null,
+        addEventListener: (
+          type: string,
+          listener: (event: MediaQueryListEvent) => void,
+        ) => {
+          if (type === "change") onChange = listener;
+        },
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <ConsoleProvider>
+          <WebRuntimeProvider>
+            <App />
+          </WebRuntimeProvider>
+        </ConsoleProvider>,
+      );
+    });
+    await waitFor(() => host.querySelector(".console-shell"));
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(
+        host,
+        '.mobile-navigation button[aria-label="Open conversations"]',
+      ).click();
+    });
+    await waitFor(() => host.querySelector('[role="dialog"][aria-label="Conversations"]'));
+    expect(document.body.hasAttribute("data-console-modal-open")).toBe(true);
+
+    await act(async () => {
+      onChange?.({ matches: true } as MediaQueryListEvent);
+    });
+    expect(host.querySelector('[role="dialog"][aria-label="Conversations"]')).toBeNull();
+    expect(requiredElement<HTMLElement>(host, ".chat").hasAttribute("inert")).toBe(false);
+    expect(document.body.hasAttribute("data-console-modal-open")).toBe(false);
     await act(async () => root.unmount());
   });
 });

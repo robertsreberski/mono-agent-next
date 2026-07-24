@@ -25,7 +25,7 @@ describe("runtime-pi module import", () => {
       kind: "runtime",
       capabilities: [],
     });
-    expect(validation).toEqual({
+    expect(validation).toMatchObject({
       supported: true,
       nativeTools: [{
         id: "NodeRepl",
@@ -82,6 +82,18 @@ describe("runtime-pi module import", () => {
         approval: "core-callback",
         sandbox: "unsupported",
       }],
+    });
+    expect(module.monoAgentModule.validateModel?.({
+      model: "openai-codex:gpt-5.6-terra",
+      config,
+    })).toMatchObject({
+      supported: true,
+      model: {
+        id: "openai-codex:gpt-5.6-terra",
+        label: "GPT-5.6 Terra",
+        efforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+        contextWindow: 272_000,
+      },
     });
     expect(validation).not.toBeInstanceOf(Promise);
     expect(module.monoAgentModule.validateModel?.({

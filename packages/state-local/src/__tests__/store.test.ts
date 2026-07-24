@@ -354,7 +354,7 @@ describe("StateLocalStore", () => {
     await store.start({ signal });
     await expect(store.publishHostPresence({
       status: "ready",
-      details: { operatorRegistry: { schema: "mono-agent.operator-registry-details.v2" } },
+      details: { operatorRegistry: { schema: "mono-agent.operator-registry-details.v3" } },
       signal,
     })).resolves.toBeUndefined();
     await store.close();

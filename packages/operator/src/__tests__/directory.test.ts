@@ -134,6 +134,59 @@ describe("operator directory", () => {
     }]);
   });
 
+  it("skips legacy standalone descriptors without hiding valid v3 agents", async () => {
+    const registry = await temporaryRegistry();
+    await writeDescriptor(registry, "01-legacy-v1.json", {
+      ...descriptor(),
+      schema: "mono-agent.operator-registry.v1",
+    });
+    await writeDescriptor(registry, "02-legacy-v2.json", {
+      ...descriptor(),
+      schema: "mono-agent.operator-registry.v2",
+    });
+    const currentPath = await writeDescriptor(registry, "03-current-v3.json", descriptor({
+      agent: { id: "current-agent", label: "Current Agent" },
+    }));
+
+    await expect(discoverOperators({
+      registryDirectories: [registry],
+      now: Date.parse("2026-01-02T03:04:30.000Z"),
+    })).resolves.toEqual([expect.objectContaining({
+      id: "current-agent",
+      sourcePath: currentPath,
+    })]);
+  });
+
+  it("skips legacy state-presence operator details without hiding valid v3 agents", async () => {
+    const registry = await temporaryRegistry();
+    for (const version of ["v1", "v2"]) {
+      await writeDescriptor(registry, `legacy-${version}.json`, statePresence({
+        sourceId: `legacy-${version}`,
+        details: {
+          operatorRegistry: operatorRegistryDetails({
+            schema: `mono-agent.operator-registry-details.${version}`,
+          }),
+        },
+      }));
+    }
+    const currentPath = await writeDescriptor(registry, "current-v3.json", statePresence({
+      sourceId: "current-agent",
+      details: {
+        operatorRegistry: operatorRegistryDetails({
+          agent: { id: "current-agent", label: "Current Agent" },
+        }),
+      },
+    }));
+
+    await expect(discoverOperators({
+      registryDirectories: [registry],
+      now: Date.parse("2026-01-02T03:04:30.000Z"),
+    })).resolves.toEqual([expect.objectContaining({
+      id: "current-agent",
+      sourcePath: currentPath,
+    })]);
+  });
+
   it("skips recognized non-serving lifecycle states and active sources without an operator", async () => {
     const registry = await temporaryRegistry();
     await writeDescriptor(registry, "01-starting.json", statePresence({
@@ -187,7 +240,12 @@ describe("operator directory", () => {
 
   it("rejects malformed descriptors and non-loopback endpoints", async () => {
     const malformedRegistry = await temporaryRegistry();
-    await writeDescriptor(malformedRegistry, "bad.json", { schema: OPERATOR_REGISTRY_SCHEMA });
+    await writeDescriptor(malformedRegistry, "01-valid-v3.json", descriptor({
+      agent: { id: "valid-agent", label: "Valid Agent" },
+    }));
+    await writeDescriptor(malformedRegistry, "02-malformed-v3.json", {
+      schema: OPERATOR_REGISTRY_SCHEMA,
+    });
     await expect(discoverOperators({ registryDirectories: [malformedRegistry] })).rejects.toMatchObject({ code: "INVALID_REGISTRY" });
 
     const remoteRegistry = await temporaryRegistry();

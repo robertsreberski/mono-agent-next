@@ -223,6 +223,13 @@ allow/deny or a bounded approval interaction; runtime-enforced tools make a
 route ineligible whenever Core would need to narrow authority the runtime
 cannot prove.
 
+Config loading validates `routing.effort` when the exact primary route's
+runtime model descriptor advertises an effort allowlist. An excluded value, or
+any explicit value against an advertised empty list, fails config validation.
+Absent effort metadata remains permissive; fallback routes apply their own
+allowlists during per-turn eligibility rather than redefining the primary
+default.
+
 Provider continuation is reused only for the exact conversation/runtime/model
 route. Canonical expiry, idle rollover, daily rollover, provider eviction,
 capability downgrades, and per-message migration remove the exact stale durable

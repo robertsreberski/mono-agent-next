@@ -136,8 +136,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   background: var(--surface);
   transition: grid-template-columns 180ms ease;
 }
-.console-shell.rail-expanded { grid-template-columns: 196px 304px minmax(0, 1fr); }
-.console-shell.rail-collapsed { grid-template-columns: 72px 304px minmax(0, 1fr); }
+.console-shell.rail-expanded { grid-template-columns: 184px 288px minmax(0, 1fr); }
+.console-shell.rail-collapsed { grid-template-columns: 72px 288px minmax(0, 1fr); }
 .desktop-agent-rail, .desktop-thread-sidebar { min-width: 0; height: 100%; }
 .desktop-agent-rail { position: relative; z-index: 8; }
 .mobile-navigation, .mobile-drawer, .drawer-scrim { display: none; }
@@ -317,12 +317,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 }
 .agent-rail.is-expanded .agent-label { display: block; flex: 1; text-align: left; }
 .agent-rail.is-expanded .agent-pin {
-  position: static;
+  position: absolute;
+  top: 8px;
+  right: 4px;
   width: 31px;
   height: 31px;
   flex: none;
   border-color: transparent;
-  background: transparent;
+  background: linear-gradient(90deg, transparent, var(--rail) 35%);
 }
 .agent-rail.is-expanded .rail-offline-toggle,
 .agent-rail.is-expanded .rail-toggle,
@@ -547,6 +549,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   background: var(--bg);
 }
 .chat-header {
+  position: relative;
+  z-index: 10;
   display: flex;
   min-height: 72px;
   align-items: center;
@@ -604,6 +608,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   margin: 0 auto;
   padding: 32px 0 20px;
 }
+body[data-console-popover="run-settings"] .message-column {
+  padding-bottom: 230px;
+}
 .thread-empty { display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 5px; padding: 90px 0; color: var(--muted); }
 .thread-empty span { color: var(--text); font-size: 15px; font-weight: 700; }
 .thread-empty small { font-size: 12px; }
@@ -657,7 +664,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   font-size: 10px;
 }
 .message-actions { margin-top: 5px; opacity: .25; transition: opacity 120ms ease; }
-.message:hover .message-actions { opacity: 1; }
+.message:hover .message-actions,
+.message:focus-within .message-actions,
+.message-actions:focus-within { opacity: 1; }
 .message-actions button { padding: 2px 0; border: 0; color: var(--muted); background: transparent; font-size: 10px; cursor: pointer; }
 .telemetry { display: block; margin-top: 7px; color: #747b6c; font: 10px ui-monospace, monospace; }
 .message-error { margin-top: 8px; color: var(--danger); font-size: 12px; }
@@ -692,21 +701,26 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @keyframes spin { to { transform: rotate(360deg); } }
 .selection-toolbar {
   position: fixed;
-  z-index: 20;
+  z-index: 90;
   padding: 4px;
   border: 1px solid var(--border);
   border-radius: 9px;
   background: var(--panel-3);
   box-shadow: var(--shadow);
 }
+body[data-console-modal-open] .selection-toolbar { display: none !important; }
 .selection-toolbar-button { padding: 6px 9px; border: 0; border-radius: 6px; color: var(--text); background: transparent; font-size: 11px; cursor: pointer; }
 .selection-toolbar-button:hover { background: #363c31; }
 .scroll-bottom {
   position: sticky;
   bottom: 14px;
-  display: block;
+  display: grid;
   width: 34px;
+  min-width: 34px;
   height: 34px;
+  min-height: 34px;
+  flex: 0 0 34px;
+  place-items: center;
   margin: 0 auto 8px;
   border: 1px solid var(--border);
   border-radius: 50%;
@@ -809,8 +823,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
     gap: 2px;
   }
   .mobile-navigation button {
-    width: 38px;
-    height: 38px;
+    width: 44px;
+    height: 44px;
     display: grid;
     place-items: center;
     padding: 0;
@@ -820,10 +834,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
     cursor: pointer;
   }
   .mobile-navigation button:hover { color: var(--text); background: var(--surface-hover); }
-  .chat-header { min-height: 58px; padding-left: max(100px, calc(env(safe-area-inset-left) + 100px)); }
+  .chat-header { min-height: 64px; padding-left: max(106px, calc(env(safe-area-inset-left) + 106px)); }
   .mobile-drawer {
     position: fixed;
-    z-index: 40;
+    z-index: 200;
     top: 0;
     bottom: 0;
     left: 0;
@@ -835,7 +849,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .mobile-thread-drawer { width: min(340px, calc(100vw - 36px)); }
   .drawer-scrim {
     position: fixed;
-    z-index: 35;
+    z-index: 190;
     inset: 0;
     display: block;
     width: 100%;
@@ -858,7 +872,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 @media (max-width: 560px) {
   .chat-header {
-    padding-left: max(92px, calc(env(safe-area-inset-left) + 92px));
+    padding-left: max(102px, calc(env(safe-area-inset-left) + 102px));
     padding-right: max(10px, env(safe-area-inset-right));
   }
   .thread-actions button:first-child { display: none; }
@@ -867,9 +881,34 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .composer-toolbar { align-items: flex-end; }
   .composer-settings { max-width: 70%; flex-wrap: wrap; }
   .mobile-navigation { left: max(5px, env(safe-area-inset-left)); }
-  .mobile-navigation button { width: 36px; }
+  .mobile-navigation button { width: 44px; }
   .mobile-agent-drawer { width: min(300px, calc(100vw - 36px)); }
   .mobile-thread-drawer { width: min(340px, calc(100vw - 28px)); }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .message-actions {
+    opacity: 1;
+  }
+
+  .agent-pin,
+  .drawer-close,
+  .new-thread-button,
+  .thread-action,
+  .sidebar-utilities button,
+  .thread-search button,
+  .composer-quote-dismiss,
+  .pending-files button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .thread-menu-panel button,
+  .message-actions button,
+  .selection-toolbar-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

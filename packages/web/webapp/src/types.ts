@@ -25,6 +25,7 @@ export interface Quote {
 }
 
 export interface ModelOption {
+  readonly runtime: string;
   readonly id: string;
   readonly label?: string;
   readonly efforts?: readonly string[];

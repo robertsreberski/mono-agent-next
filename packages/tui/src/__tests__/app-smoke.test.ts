@@ -78,20 +78,20 @@ describe("standalone TUI", () => {
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
       requested.push(url);
-      if (url.endsWith("/v2/info")) return json(VALID_OPERATOR_INFO);
-      if (url.endsWith("/v2/config")) {
+      if (url.endsWith("/v3/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v3/config")) {
         return json({ revision: "config-r1", generatedAt: now, value: { safe: true }, redacted: true });
       }
-      if (url.endsWith("/v2/health")) {
+      if (url.endsWith("/v3/health")) {
         return json({ status: "healthy", checkedAt: now, details: [{ id: "core", status: "healthy" }] });
       }
-      if (url.endsWith("/v2/conversations/asset-conversation/replay")) {
+      if (url.endsWith("/v3/conversations/asset-conversation/replay")) {
         return json({
           conversationId: "asset-conversation",
           messages: [{ id: "assistant-1", role: "assistant", text: "previous", createdAt: now }],
         });
       }
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v3/turns")) {
         turnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(frames.map(serializeOperatorFrame).join(""), {
           headers: { "content-type": "application/x-ndjson" },
@@ -132,9 +132,9 @@ describe("standalone TUI", () => {
         },
       });
       expect(requested).toEqual(expect.arrayContaining([
-        "http://127.0.0.1:4321/operator/v2/config",
-        "http://127.0.0.1:4321/operator/v2/health",
-        "http://127.0.0.1:4321/operator/v2/conversations/asset-conversation/replay",
+        "http://127.0.0.1:4321/operator/v3/config",
+        "http://127.0.0.1:4321/operator/v3/health",
+        "http://127.0.0.1:4321/operator/v3/conversations/asset-conversation/replay",
       ]));
     } finally {
       await handle.stop();
@@ -155,8 +155,8 @@ describe("standalone TUI", () => {
         authorization,
         ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
       });
-      if (url.endsWith("/v2/info")) return json(VALID_OPERATOR_INFO);
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v3/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v3/turns")) {
         return new Response(delayedFixtureStream(), {
           status: 200,
           headers: { "content-type": "application/x-ndjson" },
@@ -171,7 +171,7 @@ describe("standalone TUI", () => {
       fetch: fetchImpl,
       terminal,
       conversationId: "fixture-conversation",
-      runtime: "pi",
+      runtime: "fixture-runtime",
       model: "fixture:model",
       effort: "high",
     });
@@ -188,14 +188,14 @@ describe("standalone TUI", () => {
       expect(output).toContain("completed");
     });
 
-    const turn = requests.find((request) => request.url.endsWith("/v2/turns"));
+    const turn = requests.find((request) => request.url.endsWith("/v3/turns"));
     expect(turn).toMatchObject({
       method: "POST",
       authorization: "Bearer owner-secret",
       body: {
         conversationId: "fixture-conversation",
         input: { text: "hello" },
-        runtime: "pi",
+        runtime: "fixture-runtime",
         model: "fixture:model",
         effort: "high",
         metadata: { source: "tui" },
@@ -269,7 +269,7 @@ describe("standalone TUI", () => {
     const encoder = new TextEncoder();
     const fetchImpl: typeof fetch = async (input) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) {
+      if (url.endsWith("/v3/info")) {
         return json({
           ...VALID_OPERATOR_INFO,
           agent: {
@@ -278,7 +278,7 @@ describe("standalone TUI", () => {
           },
         });
       }
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v3/turns")) {
         return new Response(new ReadableStream({
           start(controller) {
             frames.forEach((frame, index) => {
@@ -322,8 +322,8 @@ describe("standalone TUI", () => {
     let cancelBody: unknown;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) return json(VALID_OPERATOR_INFO);
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v3/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v3/turns")) {
         return new Response(new ReadableStream({
           start(controller) {
             streamController = controller;
@@ -341,7 +341,7 @@ describe("standalone TUI", () => {
           },
         }), { headers: { "content-type": "application/x-ndjson" } });
       }
-      if (url.endsWith("/v2/conversations/cancel-conversation/cancel")) {
+      if (url.endsWith("/v3/conversations/cancel-conversation/cancel")) {
         cancelBody = JSON.parse(String(init?.body));
         streamController?.enqueue(encoder.encode(serializeOperatorFrame({
           type: "error",
@@ -370,7 +370,7 @@ describe("standalone TUI", () => {
     await handle.stop();
   });
 
-  it("accepts model and effort overrides when optional allowlists are absent", async () => {
+  it("does not guess explicit runtime, model, or effort values when route metadata is absent", async () => {
     const terminal = new TestTerminal();
     const { models: _models, ...infoWithoutModels } = VALID_OPERATOR_INFO;
     let turnBody: Record<string, unknown> | undefined;
@@ -391,8 +391,8 @@ describe("standalone TUI", () => {
     ];
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) return json(infoWithoutModels);
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v3/info")) return json(infoWithoutModels);
+      if (url.endsWith("/v3/turns")) {
         turnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(frames.map(serializeOperatorFrame).join(""), {
           headers: { "content-type": "application/x-ndjson" },
@@ -412,12 +412,162 @@ describe("standalone TUI", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     await eventually(() => expect(turnBody).toBeDefined());
-    expect(turnBody).toMatchObject({
-      runtime: "alternate-pi",
-      model: "custom:model",
-      effort: "custom-effort",
-      input: { text: "use overrides" },
+    expect(turnBody).toMatchObject({ input: { text: "use overrides" } });
+    expect(turnBody).not.toHaveProperty("runtime");
+    expect(turnBody).not.toHaveProperty("model");
+    expect(turnBody).not.toHaveProperty("effort");
+    expect(stripAnsi(terminal.output())).toContain("does not advertise model routes");
+    expect(stripAnsi(terminal.output())).toContain("does not advertise verified effort levels");
+    await handle.stop();
+  });
+
+  it("keeps duplicate model ids as atomic routes and clears the whole route on default", async () => {
+    const terminal = new TestTerminal();
+    const turnBodies: Record<string, unknown>[] = [];
+    const routeInfo = {
+      ...VALID_OPERATOR_INFO,
+      defaults: {
+        runtime: "pi-primary",
+        model: "shared:model",
+        effort: "medium",
+      },
+      models: [
+        {
+          runtime: "pi-primary",
+          id: "shared:model",
+          label: "Pi shared route",
+          efforts: ["low", "medium"],
+        },
+        {
+          runtime: "codex-secondary",
+          id: "shared:model",
+          label: "Codex shared route",
+          efforts: ["high", "xhigh"],
+        },
+      ],
+    };
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/v3/info")) return json(routeInfo);
+      if (url.endsWith("/v3/turns")) {
+        turnBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        const index = turnBodies.length;
+        const frames: readonly OperatorFrame[] = [
+          {
+            type: "accepted",
+            turnId: `route-turn-${String(index)}`,
+            conversationId: "route-conversation",
+            startedAt: "2026-01-02T03:04:06.000Z",
+          },
+          {
+            type: "completed",
+            turnId: `route-turn-${String(index)}`,
+            finalMessage: { role: "assistant", text: `route ${String(index)} accepted` },
+            finishedAt: "2026-01-02T03:04:07.000Z",
+            stopReason: "completed",
+          },
+        ];
+        return new Response(frames.map(serializeOperatorFrame).join(""), {
+          headers: { "content-type": "application/x-ndjson" },
+        });
+      }
+      throw new Error(`unexpected request ${url}`);
+    };
+    const handle = await startMonoAgentTui({
+      endpoint: "http://127.0.0.1:4321/operator",
+      fetch: fetchImpl,
+      terminal,
+      conversationId: "route-conversation",
     });
+    const submit = async (value: string, expected: string) => {
+      for (const character of value) terminal.feed(character);
+      terminal.feed("\r");
+      await eventually(() => expect(stripAnsi(terminal.output())).toContain(expected));
+    };
+
+    await submit("/model shared:model", "advertised by multiple runtimes");
+    await submit("/runtime codex-secondary", "route codex-secondary shared:model selected");
+    await submit("/model codex-secondary shared:model", "route codex-secondary shared:model selected");
+    await submit("/effort low", 'Effort "low" is not advertised');
+    await submit("/effort xhigh", "effort xhigh");
+    await submit("use selected route", "route 1 accepted");
+    expect(turnBodies[0]).toMatchObject({
+      runtime: "codex-secondary",
+      model: "shared:model",
+      effort: "xhigh",
+      input: { text: "use selected route" },
+    });
+
+    await submit("/runtime default", "runtime/model overrides cleared");
+    await submit("use configured defaults", "route 2 accepted");
+    expect(turnBodies[1]).toMatchObject({
+      input: { text: "use configured defaults" },
+    });
+    expect(turnBodies[1]).not.toHaveProperty("runtime");
+    expect(turnBodies[1]).not.toHaveProperty("model");
+    expect(turnBodies[1]).not.toHaveProperty("effort");
+    await handle.stop();
+  });
+
+  it("does not solicit an effort for a selected route without verified effort metadata", async () => {
+    const terminal = new TestTerminal();
+    let turnBody: Record<string, unknown> | undefined;
+    const routeInfo = {
+      ...VALID_OPERATOR_INFO,
+      defaults: { runtime: "fixture-runtime", model: "fixture:model" },
+      models: [
+        ...(VALID_OPERATOR_INFO.models ?? []),
+        { runtime: "opaque-runtime", id: "opaque:model", label: "Opaque route" },
+      ],
+    };
+    const frames: readonly OperatorFrame[] = [
+      {
+        type: "accepted",
+        turnId: "opaque-turn",
+        conversationId: "opaque-conversation",
+        startedAt: "2026-01-02T03:04:06.000Z",
+      },
+      {
+        type: "completed",
+        turnId: "opaque-turn",
+        finalMessage: { role: "assistant", text: "opaque accepted" },
+        finishedAt: "2026-01-02T03:04:07.000Z",
+        stopReason: "completed",
+      },
+    ];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/v3/info")) return json(routeInfo);
+      if (url.endsWith("/v3/turns")) {
+        turnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(frames.map(serializeOperatorFrame).join(""), {
+          headers: { "content-type": "application/x-ndjson" },
+        });
+      }
+      throw new Error(`unexpected request ${url}`);
+    };
+    const handle = await startMonoAgentTui({
+      endpoint: "http://127.0.0.1:4321/operator",
+      fetch: fetchImpl,
+      terminal,
+      conversationId: "opaque-conversation",
+    });
+    const submit = async (value: string, expected: string) => {
+      for (const character of value) terminal.feed(character);
+      terminal.feed("\r");
+      await eventually(() => expect(stripAnsi(terminal.output())).toContain(expected));
+    };
+
+    await submit("/model opaque-runtime opaque:model", "route opaque-runtime opaque:model selected");
+    await submit("/effort", "does not advertise verified effort levels");
+    await submit("/effort custom-effort", "explicit effort overrides are");
+    await submit("use opaque route", "opaque accepted");
+    expect(turnBody).toMatchObject({
+      runtime: "opaque-runtime",
+      model: "opaque:model",
+      input: { text: "use opaque route" },
+    });
+    expect(turnBody).not.toHaveProperty("effort");
     await handle.stop();
   });
 
@@ -428,8 +578,8 @@ describe("standalone TUI", () => {
     let answerBody: unknown;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) return json(VALID_OPERATOR_INFO);
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v3/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v3/turns")) {
         return new Response(new ReadableStream({
           start(controller) {
             streamController = controller;
@@ -439,7 +589,7 @@ describe("standalone TUI", () => {
           },
         }), { headers: { "content-type": "application/x-ndjson" } });
       }
-      if (url.endsWith("/v2/conversations/fixture-conversation/ask")) {
+      if (url.endsWith("/v3/conversations/fixture-conversation/ask")) {
         answerBody = JSON.parse(String(init?.body));
         streamController?.enqueue(encoder.encode(serializeOperatorFrame(
           MULTI_QUESTION_ASK_USER_TURN_FRAMES.at(-1)!,
@@ -494,8 +644,8 @@ describe("standalone TUI", () => {
     ];
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) return json(VALID_OPERATOR_INFO);
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v3/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v3/turns")) {
         turnBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(frames.map(serializeOperatorFrame).join(""), {
           headers: { "content-type": "application/x-ndjson" },
@@ -515,6 +665,7 @@ describe("standalone TUI", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     await eventually(() => expect(turnBody).toBeDefined());
+    expect(turnBody).not.toHaveProperty("runtime");
     expect(turnBody).not.toHaveProperty("model");
     expect(turnBody).not.toHaveProperty("effort");
     expect(stripAnsi(terminal.output())).toContain("not advertised");
@@ -569,14 +720,14 @@ describe("standalone TUI", () => {
       let turnRequests = 0;
       const fetchImpl: typeof fetch = async (input) => {
         const url = String(input);
-        if (url.endsWith("/v2/info")) {
+        if (url.endsWith("/v3/info")) {
           infoRequests += 1;
           return json(infoRequests === 1 ? VALID_OPERATOR_INFO : {
             ...VALID_OPERATOR_INFO,
             process: { ...VALID_OPERATOR_INFO.process, startedAt: "2026-01-02T03:04:08.000Z" },
           });
         }
-        if (url.endsWith("/v2/turns")) {
+        if (url.endsWith("/v3/turns")) {
           turnRequests += 1;
           throw new Error("turn must not start after identity mismatch");
         }

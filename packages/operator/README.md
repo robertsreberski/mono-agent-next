@@ -24,11 +24,17 @@ web renderers. It provides the only first-party wire decoder, trusted-loopback
 client, owner-private discovery reader, deterministic conversation reducer,
 available-action rules, and golden fixtures.
 
-The current wire identity is `mono-agent.operator.v2`, its discovery schema is
-`mono-agent.operator-registry.v2`, and its routes live exclusively under
-`/v2`. Version 2 adds bounded tool-call, tool-result, and compaction frames.
-Servers do not serve legacy `/v1` routes, so a strict v1 client fails before
-dispatch and can never receive frame types it does not understand.
+The current wire identity is `mono-agent.operator.v3`, its discovery schema is
+`mono-agent.operator-registry.v3`, and its routes live exclusively under
+`/v3`. Version 3 makes configured model choices atomic runtime/model routes
+with route-specific metadata. Servers do not serve legacy `/v1` or `/v2`
+routes, so an older strict client fails before dispatch and can never
+misinterpret the new route contract.
+
+During v3 migration, a mixed owner-private registry skips descriptors and
+details objects that are structurally recognized as stale v1/v2 entries, so
+they cannot hide valid v3 agents. Unsafe files, unrecognized shapes, and
+malformed current-v3 entries still fail closed.
 
 ## Install / Usage
 
@@ -74,15 +80,17 @@ constructed and is never returned as directory state.
 1. The owning state/discovery lifecycle publishes an owner-private descriptor
    containing the literal loopback endpoint; `channel-operator` serves that
    endpoint and does not own registry persistence.
-2. A product discovers and selects a v2 entry, then `OperatorClient` validates
-   the endpoint, rejects redirects, submits bounded JSON to `/v2`, and decodes
-   bounded v2 NDJSON.
+2. A product discovers and selects a v3 entry, then `OperatorClient` validates
+   the endpoint, rejects redirects, submits bounded JSON to `/v3`, and decodes
+   bounded v3 NDJSON.
 3. Every turn starts with `accepted`, carries only validated frames, and ends
    with exactly one `completed` or `error`; stopping iteration aborts the request.
 4. The reducer retains bounded structured status, tool-call, tool-result, and
    compaction activity for product-owned replay while thought deltas exist only
    during the active turn. Usage snapshots retain the latest numeric counters
    while compaction and provider-session-eviction flags stay sticky.
+   `contextUsed` is cleared when compaction invalidates it and remains absent
+   until a later trustworthy usage snapshot; a known `contextWindow` remains.
 5. Inline attachment URLs and quote text use shared hard bounds; the serving
    channel remains responsible for decoding attachments and verifying quote
    identities against authoritative conversation replay. Message identities are
@@ -92,8 +100,16 @@ constructed and is never returned as directory state.
    only for externally delivered proactive conversations; products never infer
    provenance from an opaque conversation id or import Core's internal trigger
    execution thread.
-7. Products pass decoded frames to `reduceOperatorFrame` and render the returned
+7. Endpoint info advertises each configured model choice as one atomic
+   runtime-instance/model route. Optional labels, context windows, and effort
+   allowlists describe that exact pair; duplicate model ids owned by different
+   runtime instances remain distinct choices. A default effort must belong to
+   the exact default route's advertised allowlist; absent effort metadata
+   remains permissive rather than synthesizing capability.
+8. Products pass decoded frames to `reduceOperatorFrame` and render the returned
    state and `availableOperatorActions` without a second decoder or reducer.
+   They offer explicit effort values only from the selected route's verified
+   allowlist and do not solicit a free-form value when that metadata is absent.
 
 ### Package structure
 
@@ -116,7 +132,7 @@ constructed and is never returned as directory state.
 | `discoverOperators` / `OperatorDirectory` | Read owner-private registries and select or pin an agent deterministically. |
 | `initialOperatorState` / `reduceOperatorFrame` | Produce the same renderer-neutral state in every product. |
 | `availableOperatorActions` | Gate cancel, live input, AskUser, overrides, attachments, quoting, and views from one policy. |
-| `evaluateOperatorRuntimeOverride` | Apply one deterministic capability/model/effort eligibility decision in every renderer before Core validation. |
+| `evaluateOperatorRuntimeOverride` | Apply one deterministic atomic runtime/model-route and per-model-effort eligibility decision in every renderer before Core validation. |
 | `assertOperatorIdentity` | Bind endpoint info to the selected registry agent id, process id, and process start time before use. |
 | `parseOperatorFrame` / `serializeOperatorFrame` | Implement a compliant server without duplicating bounded thought, activity, tool, compaction, or terminal-frame validation. |
 | `OPERATOR_ROUTES` / `OPERATOR_LIMITS` | Share route names and hard protocol bounds with servers and tests. |

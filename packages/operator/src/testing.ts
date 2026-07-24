@@ -25,8 +25,13 @@ export const VALID_OPERATOR_INFO: OperatorInfo = Object.freeze({
   agent: { id: "fixture-agent", label: "Fixture Agent" },
   process: { pid: 42, startedAt: "2026-01-02T03:04:05.000Z" },
   capabilities: FIXTURE_CAPABILITIES,
-  defaults: { runtime: "pi", model: "fixture:model", effort: "medium" },
-  models: [{ id: "fixture:model", efforts: ["low", "medium", "high"], contextWindow: 128_000 }],
+  defaults: { runtime: "fixture-runtime", model: "fixture:model", effort: "medium" },
+  models: [{
+    runtime: "fixture-runtime",
+    id: "fixture:model",
+    efforts: ["low", "medium", "high"],
+    contextWindow: 128_000,
+  }],
 });
 
 export const VALID_TURN_REQUEST: OperatorTurnRequest = Object.freeze({

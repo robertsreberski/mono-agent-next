@@ -17,25 +17,25 @@ import {
 import { MALFORMED_OPERATOR_FRAMES, VALID_OPERATOR_INFO, VALID_TURN_FRAMES, VALID_TURN_REQUEST } from "../testing.js";
 
 describe("operator protocol", () => {
-  it("uses an explicit v2 identity, discovery boundary, and route namespace", () => {
-    expect(OPERATOR_PROTOCOL).toBe("mono-agent.operator.v2");
-    expect(OPERATOR_REGISTRY_SCHEMA).toBe("mono-agent.operator-registry.v2");
-    expect(OPERATOR_REGISTRY_DETAILS_SCHEMA).toBe("mono-agent.operator-registry-details.v2");
+  it("uses an explicit v3 identity, discovery boundary, and route namespace", () => {
+    expect(OPERATOR_PROTOCOL).toBe("mono-agent.operator.v3");
+    expect(OPERATOR_REGISTRY_SCHEMA).toBe("mono-agent.operator-registry.v3");
+    expect(OPERATOR_REGISTRY_DETAILS_SCHEMA).toBe("mono-agent.operator-registry-details.v3");
     expect([
       OPERATOR_ROUTES.info,
       OPERATOR_ROUTES.turns,
       OPERATOR_ROUTES.config,
       OPERATOR_ROUTES.health,
       OPERATOR_ROUTES.conversations,
-    ].every((route) => route.startsWith("/v2/"))).toBe(true);
-    expect(OPERATOR_ROUTES.ask("conversation")).toBe("/v2/conversations/conversation/ask");
-    expect(OPERATOR_ROUTES.cancel("conversation")).toBe("/v2/conversations/conversation/cancel");
-    expect(OPERATOR_ROUTES.liveInput("conversation")).toBe("/v2/conversations/conversation/live-input");
-    expect(OPERATOR_ROUTES.replay("conversation")).toBe("/v2/conversations/conversation/replay");
+    ].every((route) => route.startsWith("/v3/"))).toBe(true);
+    expect(OPERATOR_ROUTES.ask("conversation")).toBe("/v3/conversations/conversation/ask");
+    expect(OPERATOR_ROUTES.cancel("conversation")).toBe("/v3/conversations/conversation/cancel");
+    expect(OPERATOR_ROUTES.liveInput("conversation")).toBe("/v3/conversations/conversation/live-input");
+    expect(OPERATOR_ROUTES.replay("conversation")).toBe("/v3/conversations/conversation/replay");
     expect(() => parseOperatorInfo({
       ...VALID_OPERATOR_INFO,
       protocol: "mono-agent.operator.v1",
-    })).toThrow("must equal mono-agent.operator.v2");
+    })).toThrow("must equal mono-agent.operator.v3");
   });
 
   it("round-trips the golden info, request, and frames", () => {
@@ -44,6 +44,50 @@ describe("operator protocol", () => {
     for (const frame of VALID_TURN_FRAMES) {
       expect(parseOperatorFrame(JSON.parse(serializeOperatorFrame(frame)))).toEqual(frame);
     }
+  });
+
+  it("requires unique atomic runtime/model routes with exact effort metadata", () => {
+    expect(() => parseOperatorInfo({
+      ...VALID_OPERATOR_INFO,
+      models: [{ id: "fixture:model" }],
+    })).toThrow(/models\[0\]\.runtime/u);
+    expect(() => parseOperatorInfo({
+      ...VALID_OPERATOR_INFO,
+      models: [
+        ...VALID_OPERATOR_INFO.models!,
+        ...VALID_OPERATOR_INFO.models!,
+      ],
+    })).toThrow(/unique runtime\/model routes/u);
+    expect(parseOperatorInfo({
+      ...VALID_OPERATOR_INFO,
+      models: [
+        ...VALID_OPERATOR_INFO.models!,
+        {
+          ...VALID_OPERATOR_INFO.models![0],
+          runtime: "other-runtime",
+        },
+      ],
+    }).models).toHaveLength(2);
+    expect(() => parseOperatorInfo({
+      ...VALID_OPERATOR_INFO,
+      models: [{
+        ...VALID_OPERATOR_INFO.models![0],
+        efforts: ["high", "high"],
+      }],
+    })).toThrow(/efforts.*unique/u);
+    expect(() => parseOperatorInfo({
+      ...VALID_OPERATOR_INFO,
+      defaults: { runtime: "other-runtime", model: "fixture:model" },
+    })).toThrow(/defaults.*advertised runtime\/model route/u);
+    expect(() => parseOperatorInfo({
+      ...VALID_OPERATOR_INFO,
+      defaults: { ...VALID_OPERATOR_INFO.defaults, effort: "extreme" },
+    })).toThrow(/defaults\.effort.*advertised by the default runtime\/model route/u);
+    expect(parseOperatorInfo({
+      ...VALID_OPERATOR_INFO,
+      defaults: { ...VALID_OPERATOR_INFO.defaults, effort: "provider-default" },
+      models: VALID_OPERATOR_INFO.models!.map(({ efforts: _efforts, ...entry }) => entry),
+    }).defaults?.effort).toBe("provider-default");
   });
 
   it("accepts bounded opaque message identities without widening other identifiers", () => {

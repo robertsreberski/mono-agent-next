@@ -1,5 +1,6 @@
 import { dirname, isAbsolute, resolve } from "node:path";
 import {
+  type RuntimeModelDescriptor,
   type RuntimeModelValidation,
   type RuntimeModuleDefinition,
 } from "@mono-agent/module-sdk";
@@ -45,7 +46,10 @@ const TOP_LEVEL_KEYS = new Set([
   "policy",
 ]);
 export const MAX_CONTEXT_BYTES = 1_000_000;
+type ConfiguredRuntimeModel = Readonly<RuntimeModelDescriptor & { readonly runtime: string }>;
+interface RuntimeRouteValidation { readonly issues: readonly AgentConfigIssue[]; readonly models: readonly ConfiguredRuntimeModel[]; }
 const environments = new WeakMap<LoadedAgentConfig, Readonly<Record<string, string | undefined>>>();
+const runtimeModels = new WeakMap<LoadedAgentConfig, readonly ConfiguredRuntimeModel[]>();
 const validatedConfigs = new WeakSet<LoadedAgentConfig>();
 export async function loadAgentConfig(
   configPath: string,
@@ -115,9 +119,10 @@ export async function loadAgentConfig(
   if (referenceIssues.length > 0) {
     throw new AgentConfigError(`Selected module references are invalid: ${absoluteConfigPath}`, referenceIssues);
   }
-  const routeIssues = validateRuntimeRoutes(raw, modules);
-  if (routeIssues.length > 0) {
-    throw new AgentConfigError(`Configured runtime routes are invalid: ${absoluteConfigPath}`, routeIssues);
+  const routeValidation = validateRuntimeRoutes(raw, modules);
+  if (routeValidation.issues.length > 0) {
+    throw new AgentConfigError(`Configured runtime routes are invalid: ${absoluteConfigPath}`,
+      routeValidation.issues);
   }
   const loaded: LoadedAgentConfig = deepFreeze({
     configPath: absoluteConfigPath,
@@ -134,13 +139,15 @@ export async function loadAgentConfig(
   });
   validatedConfigs.add(loaded);
   environments.set(loaded, environment);
+  runtimeModels.set(loaded, routeValidation.models);
   return loaded;
 }
 function validateRuntimeRoutes(
   config: AgentConfig,
   modules: readonly LoadedAgentModule[],
-): readonly AgentConfigIssue[] {
+): RuntimeRouteValidation {
   const issues: AgentConfigIssue[] = [];
+  const models: ConfiguredRuntimeModel[] = [];
   const seen = new Set<string>();
   const routes = [config.routing.primary, ...config.routing.fallbacks];
   for (const [index, route] of routes.entries()) {
@@ -152,36 +159,51 @@ function validateRuntimeRoutes(
       module.slot === "runtime" && module.instanceId === route.runtime);
     if (loaded === undefined) continue;
     const definition = loaded.definition as RuntimeModuleDefinition;
-    if (definition.validateModel === undefined) continue;
-    let validation: RuntimeModelValidation;
-    try {
-      const rawValidation = definition.validateModel({
-        model: route.model,
-        config: moduleConfigFor(loaded),
-      });
-      if (isPromiseLike(rawValidation)) {
-        throw new TypeError("runtime definition validateModel must be synchronous");
+    let validation: RuntimeModelValidation = { supported: true };
+    if (definition.validateModel !== undefined) {
+      try {
+        const rawValidation = definition.validateModel({
+          model: route.model,
+          config: moduleConfigFor(loaded),
+        });
+        if (typeof rawValidation === "object" && rawValidation !== null
+          && typeof Reflect.get(rawValidation, "then") === "function") {
+          throw new TypeError("runtime definition validateModel must be synchronous");
+        }
+        validation = normalizeRuntimeModelValidation(
+          rawValidation,
+          "runtime definition validateModel result",
+        );
+      } catch (error) {
+        issue(issues, `${routePath}.model`, errorMessage(error), "runtime_model_validation");
+        continue;
       }
-      validation = normalizeRuntimeModelValidation(
-        rawValidation,
-        "runtime definition validateModel result",
-      );
-    } catch (error) {
-      issues.push({
-        path: `${routePath}.model`,
-        message: errorMessage(error),
-        code: "runtime_model_validation",
-      });
-      continue;
     }
     if (!validation.supported) {
-      issues.push({
-        path: `${routePath}.model`,
-        message: `${loaded.packageName} does not support model ${JSON.stringify(route.model)}`,
-        code: "unsupported_model",
-      });
+      issue(issues, `${routePath}.model`,
+        `${loaded.packageName} does not support model ${JSON.stringify(route.model)}`, "unsupported_model");
       continue;
     }
+    if (validation.model !== undefined && validation.model.id !== route.model) {
+      issue(issues, `${routePath}.model`,
+        `${loaded.packageName} described model ${JSON.stringify(validation.model.id)} for requested model ${JSON.stringify(route.model)}`,
+        "runtime_model_validation");
+      continue;
+    }
+    if (index === 0 && config.routing.effort !== undefined && validation.model?.efforts !== undefined
+      && !validation.model.efforts.includes(config.routing.effort)) {
+      issue(issues, "routing.effort",
+        `${loaded.packageName} model ${JSON.stringify(route.model)} does not support effort ${JSON.stringify(config.routing.effort)}`,
+        "unsupported_effort");
+    }
+    models.push(Object.freeze({
+      runtime: route.runtime,
+      ...validation.model,
+      id: route.model,
+      ...(validation.model?.efforts === undefined
+        ? {}
+        : { efforts: Object.freeze([...validation.model.efforts]) }),
+    }));
     const nativeToolIssue = runtimeNativeToolPolicyIssue({
       nativeTools: validation.nativeTools ?? [],
       ...(validation.capabilities === undefined
@@ -190,19 +212,10 @@ function validateRuntimeRoutes(
       config,
     });
     if (nativeToolIssue !== undefined) {
-      issues.push({
-        path: `${routePath}.model`,
-        message: `${loaded.packageName} ${nativeToolIssue}`,
-        code: "native_tool_policy",
-      });
+      issue(issues, `${routePath}.model`, `${loaded.packageName} ${nativeToolIssue}`, "native_tool_policy");
     }
   }
-  return issues;
-}
-function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
-  return typeof value === "object"
-    && value !== null
-    && typeof Reflect.get(value, "then") === "function";
+  return { issues: Object.freeze(issues), models: Object.freeze(models) };
 }
 export async function validateAgentConfig(
   configPath: string,
@@ -220,6 +233,13 @@ export async function validateAgentConfig(
 }
 export function environmentFor(config: LoadedAgentConfig): Readonly<Record<string, string | undefined>> {
   return environments.get(config) ?? process.env;
+}
+export function runtimeModelsFor(
+  config: LoadedAgentConfig,
+): readonly ConfiguredRuntimeModel[] {
+  const models = runtimeModels.get(config);
+  if (models === undefined) throw new TypeError("Loaded agent config has no validated runtime models");
+  return models;
 }
 export function isLoadedAgentConfig(value: unknown): value is LoadedAgentConfig {
   return isRecord(value) && validatedConfigs.has(value as unknown as LoadedAgentConfig);

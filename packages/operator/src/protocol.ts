@@ -380,11 +380,23 @@ export function parseOperatorCapabilities(value: unknown, path = "capabilities")
 
 function model(value: unknown, path: string): OperatorModel {
   const input = record(value, path);
-  keys(input, ["id", "label", "efforts", "contextWindow"], path);
+  keys(input, ["runtime", "id", "label", "efforts", "contextWindow"], path);
+  const efforts = input.efforts === undefined
+    ? undefined
+    : array(
+        input.efforts,
+        `${path}.efforts`,
+        (item, itemPath) => identifier(item, itemPath),
+        50,
+      );
+  if (efforts !== undefined && new Set(efforts).size !== efforts.length) {
+    fail(`${path}.efforts`, "must contain unique values");
+  }
   return {
+    runtime: identifier(input.runtime, `${path}.runtime`),
     id: identifier(input.id, `${path}.id`),
     ...(input.label === undefined ? {} : { label: text(input.label, `${path}.label`, { max: 1_024 }) }),
-    ...(input.efforts === undefined ? {} : { efforts: array(input.efforts, `${path}.efforts`, (item, itemPath) => identifier(item, itemPath), 50) }),
+    ...(efforts === undefined ? {} : { efforts }),
     ...(input.contextWindow === undefined ? {} : { contextWindow: integer(input.contextWindow, `${path}.contextWindow`, 1) }),
   };
 }
@@ -407,13 +419,31 @@ export function parseOperatorInfo(value: unknown): OperatorInfo {
       ...(parsed.effort === undefined ? {} : { effort: identifier(parsed.effort, "info.defaults.effort") }),
     };
   }
+  const models = input.models === undefined
+    ? undefined
+    : array(input.models, "info.models", model, 1_000);
+  if (models !== undefined) {
+    const routes = models.map((entry) => `${entry.runtime}\0${entry.id}`);
+    if (new Set(routes).size !== routes.length) {
+      fail("info.models", "must contain unique runtime/model routes");
+    }
+    const defaultRoute = models.find((entry) =>
+      entry.runtime === defaults?.runtime && entry.id === defaults?.model);
+    if (defaults?.runtime !== undefined && defaults.model !== undefined && defaultRoute === undefined) {
+      fail("info.defaults", "must identify an advertised runtime/model route");
+    }
+    if (defaults?.effort !== undefined && defaultRoute?.efforts !== undefined
+      && !defaultRoute.efforts.includes(defaults.effort)) {
+      fail("info.defaults.effort", "must be advertised by the default runtime/model route");
+    }
+  }
   return {
     protocol: OPERATOR_PROTOCOL,
     agent: { id: identifier(agent.id, "info.agent.id"), label: text(agent.label, "info.agent.label", { max: 1_024 }) },
     process: { pid: integer(process.pid, "info.process.pid", 1), startedAt: timestamp(process.startedAt, "info.process.startedAt") },
     capabilities: parseOperatorCapabilities(input.capabilities, "info.capabilities"),
     ...(defaults === undefined ? {} : { defaults }),
-    ...(input.models === undefined ? {} : { models: array(input.models, "info.models", model, 1_000) }),
+    ...(models === undefined ? {} : { models }),
   };
 }
 

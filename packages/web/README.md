@@ -32,6 +32,8 @@ Catalog responsibility: Runs the standalone browser product with explicit auth p
   exact active conversation only on explicit operator cancellation or product shutdown.
 - Persist and render per-turn numeric usage plus compaction and provider-session
   eviction events without retaining thoughts, activities, or provider payloads.
+  `contextUsed` is current only after a trustworthy usage snapshot for that
+  turn and is invalidated by compaction until a later trustworthy snapshot.
 - Route live input, structured AskUser answers, bounded inline uploads, quotes,
   replay, redacted config, and health through capability-gated shared client APIs.
 - Keep a service-owned turn running and durably settling when its browser stream
@@ -146,7 +148,16 @@ three-surface desktop shell, then presents agent and conversation navigation
 as keyboard-contained drawers on narrow screens. Running structured activity
 stays visible; terminal activity collapses into a manually reopenable
 disclosure. Exact context telemetry and capability-gated run overrides remain
-available through compact controls.
+available through compact controls. Context, conversation actions, and run
+settings use one controlled portal layer: opening one closes the previous
+popover, panels stay within the viewport above the transcript, Escape and
+outside-pointer dismissal work predictably, and keyboard focus returns to the
+trigger when appropriate. Opening a narrow-screen navigation drawer dismisses
+popovers, makes background regions inert, traps focus, and restores focus to
+the drawer launcher on close. Changing agents or conversations while composer
+text, a quote, attachments, or AskUser input is pending requires explicit
+discard confirmation; cancelling preserves the input, while confirming clears
+it and releases queued attachment state before navigation.
 
 ### Package structure
 
@@ -265,7 +276,7 @@ The browser API is:
 - `GET /api/v1/threads/:id`
 - `PATCH /api/v1/threads/:id`
 - `DELETE /api/v1/threads/:id`
-- `POST /api/v1/threads/:id/turns` (web-state NDJSON)
+- `POST /api/v1/threads/:id/turns` (text and/or attachment turn; web-state NDJSON)
 - `POST /api/v1/threads/:id/cancel`
 - `POST /api/v1/threads/:id/live-input`
 - `POST /api/v1/threads/:id/ask`
@@ -286,9 +297,31 @@ Quotes are selectable only for messages carrying an authoritative agent
 transcript message id and only when the selected endpoint advertises quote
 support. The browser maps its local rendered id back to that transcript id and
 submits the complete authoritative message text for replay verification.
-Model choices come only from Core's strictly validated primary/fallback routes;
-when an endpoint omits an effort allowlist, the runtime remains the final
-validator for a bounded free-form effort.
+A queued attachment is sufficient to send a turn without text. An accepted
+send leaves the composer cleared. A failed new-turn or live-input submission
+restores the exact text, quote, and attachment descriptors for correction or
+retry and announces the failure rather than silently discarding the draft. A
+failed AskUser submission likewise preserves its selections.
+
+Model choices come only from Core's strictly validated primary/fallback
+routes. Each choice is one atomic runtime-instance plus runtime-owned-model
+pair, with any verified label, context window, and per-model effort allowlist.
+Selecting a model therefore selects its owning runtime as the same decision;
+renderers never synthesize a runtime/model pair from independent choices.
+An explicit effort control is offered only from that route's verified
+allowlist. If the allowlist is absent or empty, the browser offers only the
+configured/default behavior and never asks the operator to guess a free-form
+value. Default model and effort selections stay implicit and omit request-level
+overrides. A refreshed catalog clears authored route or effort values that are
+no longer advertised before another submission. The selected runtime remains
+authoritative when validating every submitted route and effort.
+
+The context control never presents a previous turn's settled `contextUsed` as
+current after a new turn begins. It may show a current-turn value before
+settlement once a trustworthy usage snapshot arrives; the settled result
+normally supplies the final count and context window. Compaction retains a
+known window and sticky marker but clears the invalid count until a later
+trustworthy snapshot.
 
 ## Dependency Boundary
 
@@ -326,7 +359,8 @@ pnpm --filter @mono-agent/web test
 Focused tests cover strict secret resolution, explicit no-auth policy, body
 bounds, bearer auth, cross-origin rejection, real shared-client turn
 streaming, cancellation,
-AskUser/live-input routing, uploads/quotes, proactive import and dismissal,
+AskUser/live-input routing, text and attachment-only turns, failed-send draft
+recovery, uploads/quotes, proactive import and dismissal,
 browser view routes, v1/v2-to-v3 migration, telemetry rendering and restart
 persistence, deletion, exclusive ownership,
 atomic recovery, corruption preservation, modes, and symlink rejection.

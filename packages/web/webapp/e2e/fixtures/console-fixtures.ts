@@ -4,11 +4,32 @@ import type {
   Agent,
   Bootstrap,
   Message,
+  ModelOption,
+  StartTurnInput,
   Thread,
   ThreadDetail,
 } from "../../src/types";
 
 export type VisualScenario = "interactive" | "running" | "settled";
+
+export interface FixtureOptions {
+  readonly askFailure?: string;
+  readonly denseTranscript?: boolean;
+  readonly effortMetadata?: "complete" | "missing";
+  readonly priorCompletedTelemetry?: boolean;
+  readonly threadResponseDelays?: Readonly<Record<string, number>>;
+  readonly turnFailure?: string;
+  readonly turnResponseDelayMs?: number;
+}
+
+export interface FixtureTurnRequest {
+  readonly threadId: string;
+  readonly input: StartTurnInput;
+}
+
+export interface FixtureHarness {
+  readonly turnRequests: readonly FixtureTurnRequest[];
+}
 
 export const scenarioThreadIds = {
   interactive: "thread-interactive",
@@ -25,6 +46,23 @@ export const scenarioTitles = {
 const token = "visual-fixture-token-000000000000";
 const now = "2026-07-24T10:00:00.000Z";
 const nowMs = Date.parse(now);
+
+const configuredRoutes = [
+  {
+    runtime: "pi",
+    id: "shared-model",
+    label: "Pi shared route",
+    efforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    contextWindow: 272_000,
+  },
+  {
+    runtime: "codex-app-server",
+    id: "shared-model",
+    label: "Codex shared route",
+    efforts: ["low", "medium", "high"],
+    contextWindow: 196_000,
+  },
+] as const satisfies readonly (ModelOption & { readonly runtime: string })[];
 
 const personalAgent = {
   id: "personal",
@@ -46,23 +84,10 @@ const personalAgent = {
   },
   defaults: {
     runtime: "pi",
-    model: "gpt-5.6-terra",
+    model: "shared-model",
     effort: "high",
   },
-  models: [
-    {
-      id: "gpt-5.6-terra",
-      label: "Terra",
-      efforts: ["medium", "high"],
-      contextWindow: 200_000,
-    },
-    {
-      id: "gpt-5.4",
-      label: "GPT-5.4",
-      efforts: ["low", "medium", "high"],
-      contextWindow: 128_000,
-    },
-  ],
+  models: configuredRoutes,
 } as const satisfies Agent;
 
 const agents = [
@@ -268,8 +293,8 @@ const details = {
         telemetry: {
           inputTokens: 7_944,
           outputTokens: 511,
-          contextWindow: 200_000,
-          contextUsed: 8_455,
+          contextWindow: 272_000,
+          contextUsed: 61_337,
           compacted: true,
           sessionEvicted: false,
         },
@@ -278,14 +303,24 @@ const details = {
   },
 } as const satisfies Readonly<Record<VisualScenario, ThreadDetail>>;
 
-export async function openFixtureConsole(page: Page, scenario: VisualScenario): Promise<void> {
+export async function openFixtureConsole(
+  page: Page,
+  scenario: VisualScenario,
+  options: FixtureOptions = {},
+): Promise<FixtureHarness> {
+  const turnRequests: FixtureTurnRequest[] = [];
   await installDeterministicBrowserState(page);
-  await page.route("**/api/v1/**", (route) => respondToApi(route, scenario));
+  await page.unroute("**/api/v1/**");
+  await page.route(
+    "**/api/v1/**",
+    (route) => respondToApi(route, scenario, options, turnRequests),
+  );
   await page.goto(`/?thread=${scenarioThreadIds[scenario]}`, { waitUntil: "domcontentloaded" });
   await expect(page.getByRole("heading", { name: scenarioTitles[scenario] })).toBeVisible();
   await page.evaluate(async () => {
     await document.fonts.ready;
   });
+  return { turnRequests };
 }
 
 async function installDeterministicBrowserState(page: Page): Promise<void> {
@@ -298,7 +333,12 @@ async function installDeterministicBrowserState(page: Page): Promise<void> {
   }, { fixtureToken: token, fixtureNow: nowMs });
 }
 
-async function respondToApi(route: Route, scenario: VisualScenario): Promise<void> {
+async function respondToApi(
+  route: Route,
+  scenario: VisualScenario,
+  options: FixtureOptions,
+  turnRequests: FixtureTurnRequest[],
+): Promise<void> {
   const request = route.request();
   const url = new URL(request.url());
   if (request.headers().authorization !== `Bearer ${token}`) {
@@ -309,7 +349,7 @@ async function respondToApi(route: Route, scenario: VisualScenario): Promise<voi
     const bootstrap = {
       version: 1,
       revision: 42,
-      agents,
+      agents: fixtureAgents(options),
       threads,
       newProactiveThreadIds: [],
     } satisfies Bootstrap;
@@ -338,12 +378,53 @@ async function respondToApi(route: Route, scenario: VisualScenario): Promise<voi
   const threadMatch = /^\/api\/v1\/threads\/([^/]+)$/u.exec(url.pathname);
   if (request.method() === "GET" && threadMatch !== null) {
     const requestedId = decodeURIComponent(threadMatch[1] ?? "");
-    const detail = Object.values(details).find((candidate) => candidate.thread.id === requestedId);
+    const detail = fixtureDetail(requestedId, options);
     if (detail === undefined) {
       await json(route, 404, { error: { code: "not_found", message: "Unknown fixture thread." } });
       return;
     }
+    await delay(options.threadResponseDelays?.[requestedId] ?? 0);
     await json(route, 200, detail);
+    return;
+  }
+  const turnMatch = /^\/api\/v1\/threads\/([^/]+)\/turns$/u.exec(url.pathname);
+  if (request.method() === "POST" && turnMatch !== null) {
+    const threadId = decodeURIComponent(turnMatch[1] ?? "");
+    const detail = fixtureDetail(threadId, options);
+    if (detail === undefined) {
+      await json(route, 404, { error: { code: "not_found", message: "Unknown fixture thread." } });
+      return;
+    }
+    const input = request.postDataJSON() as StartTurnInput;
+    turnRequests.push({ threadId, input });
+    await delay(options.turnResponseDelayMs ?? 0);
+    if (options.turnFailure !== undefined) {
+      await json(route, 502, {
+        error: {
+          code: "fixture_turn_failure",
+          message: options.turnFailure,
+        },
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      headers: {
+        "cache-control": "no-store",
+        "content-type": "application/x-ndjson; charset=utf-8",
+      },
+      body: `${JSON.stringify({ type: "done", detail })}\n`,
+    });
+    return;
+  }
+  const askMatch = /^\/api\/v1\/threads\/([^/]+)\/ask$/u.exec(url.pathname);
+  if (request.method() === "POST" && askMatch !== null && options.askFailure !== undefined) {
+    await json(route, 502, {
+      error: {
+        code: "fixture_ask_failure",
+        message: options.askFailure,
+      },
+    });
     return;
   }
   await json(route, 500, {
@@ -353,6 +434,67 @@ async function respondToApi(route: Route, scenario: VisualScenario): Promise<voi
     },
     scenario,
   });
+}
+
+function fixtureAgents(options: FixtureOptions): readonly Agent[] {
+  if (options.effortMetadata !== "missing") return agents;
+  return agents.map((agent) => ({
+    ...agent,
+    models: agent.models?.map((route) => {
+      const { efforts: _efforts, ...withoutEfforts } = route;
+      return withoutEfforts;
+    }),
+  }));
+}
+
+function fixtureDetail(
+  threadId: string,
+  options: FixtureOptions,
+): ThreadDetail | undefined {
+  const detail = Object.values(details).find((candidate) => candidate.thread.id === threadId);
+  if (detail === undefined) return undefined;
+  let result: ThreadDetail = detail;
+  if (options.denseTranscript === true && threadId === scenarioThreadIds.settled) {
+    result = {
+      ...result,
+      messages: result.messages.map((candidate) => candidate.id === "settled-response"
+        ? {
+            ...candidate,
+            text: `${candidate.text}\n\n${Array.from(
+              { length: 36 },
+              (_value, index) => `Verification detail ${index + 1}: retained evidence remains reviewable.`,
+            ).join("\n\n")}`,
+          }
+        : candidate),
+    };
+  }
+  if (
+    options.priorCompletedTelemetry === true
+    && threadId === scenarioThreadIds.running
+  ) {
+    result = {
+      ...result,
+      messages: [
+        message({
+          id: "running-prior-response",
+          operatorMessageId: "operator-running-prior-response",
+          turnId: "turn-before-running",
+          role: "assistant",
+          text: "The previous response completed with trustworthy context telemetry.",
+          telemetry: {
+            inputTokens: 31_200,
+            outputTokens: 901,
+            contextWindow: 272_000,
+            contextUsed: 75_444,
+            compacted: false,
+            sessionEvicted: false,
+          },
+        }),
+        ...result.messages,
+      ],
+    };
+  }
+  return result;
 }
 
 async function json(route: Route, status: number, body: unknown): Promise<void> {
@@ -392,4 +534,9 @@ function message(input: Omit<Message, "createdAt" | "status" | "threadId" | "upd
     status: "complete",
     ...input,
   };
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  if (milliseconds <= 0) return;
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }

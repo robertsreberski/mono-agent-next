@@ -14,6 +14,7 @@ import {
 } from "react";
 
 import { Chat } from "./chat";
+import { dismissPopovers } from "./components/Popover";
 import { useConsole } from "./console";
 import { requestNotificationPermission } from "./notifications";
 import { ShellIcon } from "./shell-icons";
@@ -159,7 +160,7 @@ function AgentRail({
               type="button"
               className={`agent-button${agent.id === consoleState.selectedAgentId ? " is-active" : ""}`}
               onClick={() => {
-                consoleState.selectAgent(agent.id);
+                void consoleState.selectAgent(agent.id);
                 onSelect?.();
               }}
               aria-pressed={agent.id === consoleState.selectedAgentId}
@@ -449,22 +450,40 @@ function ConsoleShell() {
     setAgentDrawer(false);
     setThreadDrawer(false);
   }, []);
+  const navigationModalOpen = agentDrawer || threadDrawer;
   useModalFocus(agentDrawer, agentDrawerRef, closeDrawers);
   useModalFocus(threadDrawer, threadDrawerRef, closeDrawers);
+  useEffect(() => {
+    document.body.toggleAttribute("data-console-modal-open", navigationModalOpen);
+    return () => document.body.removeAttribute("data-console-modal-open");
+  }, [navigationModalOpen]);
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const desktop = window.matchMedia("(min-width: 901px)");
+    const closeOnDesktop = (event: MediaQueryListEvent) => {
+      if (event.matches) closeDrawers();
+    };
+    if (desktop.matches) closeDrawers();
+    desktop.addEventListener("change", closeOnDesktop);
+    return () => desktop.removeEventListener("change", closeOnDesktop);
+  }, [closeDrawers]);
   if (consoleState.loading && consoleState.bootstrap === undefined) {
     return <main className="loading-page"><BrandMark /><span>Discovering agents…</span></main>;
   }
   return (
     <div className={`console-shell${consoleState.railExpanded ? " rail-expanded" : " rail-collapsed"}`}>
-      <div className="desktop-agent-rail"><AgentRail /></div>
-      <div className="desktop-thread-sidebar"><ThreadSidebar /></div>
-      <Chat />
-      <div className="mobile-navigation" aria-label="Console navigation">
+      <nav
+        className="mobile-navigation"
+        aria-label="Console navigation"
+        aria-hidden={navigationModalOpen || undefined}
+        inert={navigationModalOpen}
+      >
         <button
           type="button"
           aria-label="Choose agent"
           title="Choose agent"
           onClick={() => {
+            dismissPopovers();
             setThreadDrawer(false);
             setAgentDrawer(true);
           }}
@@ -476,19 +495,34 @@ function ConsoleShell() {
           aria-label="Open conversations"
           title="Open conversations"
           onClick={() => {
+            dismissPopovers();
             setAgentDrawer(false);
             setThreadDrawer(true);
           }}
         >
           <ShellIcon name="menu" size={18} />
         </button>
+      </nav>
+      <div
+        className="desktop-agent-rail"
+        aria-hidden={navigationModalOpen || undefined}
+        inert={navigationModalOpen}
+      >
+        <AgentRail />
       </div>
-      {(agentDrawer || threadDrawer) && (
-        <button
+      <div
+        className="desktop-thread-sidebar"
+        aria-hidden={navigationModalOpen || undefined}
+        inert={navigationModalOpen}
+      >
+        <ThreadSidebar />
+      </div>
+      <Chat backgroundInert={navigationModalOpen} />
+      {navigationModalOpen && (
+        <div
           className="drawer-scrim"
-          type="button"
-          aria-label="Close navigation"
-          onClick={closeDrawers}
+          aria-hidden="true"
+          onPointerDown={closeDrawers}
         />
       )}
       {agentDrawer && (

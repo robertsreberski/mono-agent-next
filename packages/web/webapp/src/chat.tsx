@@ -9,47 +9,80 @@ import {
   SelectionToolbar,
   UserMessage,
 } from "./components/Messages";
-import type { Telemetry } from "./types";
+import { Popover, PopoverProvider } from "./components/Popover";
+import type { Message, Telemetry } from "./types";
 import "./chat.css";
 
-function ContextUsage({ telemetry }: { readonly telemetry?: Telemetry }) {
-  const contextUsed = telemetry?.contextUsed;
+export function ContextUsage({
+  pending = false,
+  telemetry,
+}: {
+  readonly pending?: boolean;
+  readonly telemetry?: Telemetry;
+}) {
+  const contextUsed = pending ? undefined : telemetry?.contextUsed;
   const contextWindow = telemetry?.contextWindow;
   const percent =
     contextUsed === undefined || contextWindow === undefined || contextWindow <= 0
       ? undefined
       : Math.min(100, Math.round((contextUsed / contextWindow) * 100));
   return (
-    <details className="context-usage">
-      <summary aria-label="Context usage" title="Context usage">
-        <Icon name="spark" size={13} />
-        <span>
-          {contextUsed === undefined ? "Context unavailable" : `Context ${compactCount(contextUsed)}`}
-        </span>
-        {percent !== undefined && <small>{percent}%</small>}
-        <Icon name="chevron" size={13} />
-      </summary>
-      <div className="context-usage-panel">
+    <Popover
+      id="context-usage"
+      triggerClassName="context-usage-trigger"
+      triggerLabel="Context usage"
+      panelClassName="context-usage-panel"
+      trigger={(
+        <>
+          <Icon name="spark" size={13} />
+          <span>
+            {pending
+              ? "Context pending"
+              : contextUsed === undefined
+                ? "Context unavailable"
+                : `Context ${compactCount(contextUsed)}`}
+          </span>
+          {percent !== undefined && <small>{percent}%</small>}
+          <Icon name="chevron" size={13} />
+        </>
+      )}
+    >
+      <div>
         {telemetry === undefined ? (
-          <p>Exact context telemetry is not available for this conversation yet.</p>
+          <p>
+            {pending
+              ? "Exact context telemetry is not available for the active response yet."
+              : "Exact context telemetry is not available for this conversation yet."}
+          </p>
         ) : (
-          <dl>
-            <div><dt>Input</dt><dd>{telemetry.inputTokens.toLocaleString()}</dd></div>
-            <div><dt>Output</dt><dd>{telemetry.outputTokens.toLocaleString()}</dd></div>
-            <div>
-              <dt>Used</dt>
-              <dd>{contextUsed === undefined ? "Unavailable" : contextUsed.toLocaleString()}</dd>
-            </div>
-            <div>
-              <dt>Window</dt>
-              <dd>{contextWindow === undefined ? "Unavailable" : contextWindow.toLocaleString()}</dd>
-            </div>
-            <div><dt>Compaction</dt><dd>{telemetry.compacted ? "Applied" : "No"}</dd></div>
-            <div><dt>Session</dt><dd>{telemetry.sessionEvicted ? "Renewed" : "Retained"}</dd></div>
-          </dl>
+          <>
+            {pending && (
+              <p>Exact context telemetry is not available for the active response yet.</p>
+            )}
+            <dl>
+              <div><dt>Input</dt><dd>{telemetry.inputTokens.toLocaleString()}</dd></div>
+              <div><dt>Output</dt><dd>{telemetry.outputTokens.toLocaleString()}</dd></div>
+              <div>
+                <dt>Used</dt>
+                <dd>
+                  {pending
+                    ? "Pending"
+                    : contextUsed === undefined
+                      ? "Unavailable"
+                      : contextUsed.toLocaleString()}
+                </dd>
+              </div>
+              <div>
+                <dt>Window</dt>
+                <dd>{contextWindow === undefined ? "Unavailable" : contextWindow.toLocaleString()}</dd>
+              </div>
+              <div><dt>Compaction</dt><dd>{telemetry.compacted ? "Applied" : "No"}</dd></div>
+              <div><dt>Session</dt><dd>{telemetry.sessionEvicted ? "Renewed" : "Retained"}</dd></div>
+            </dl>
+          </>
         )}
       </div>
-    </details>
+    </Popover>
   );
 }
 
@@ -58,113 +91,161 @@ function ThreadActions() {
   const thread = consoleState.selectedThread;
   if (thread === undefined) return null;
   return (
-    <details className="thread-menu">
-      <summary className="thread-menu-trigger" aria-label="Conversation actions" title="Conversation actions">
+    <Popover
+      id="thread-actions"
+      triggerClassName="thread-menu-trigger"
+      triggerLabel="Conversation actions"
+      panelClassName="thread-menu-panel"
+      panelRole="menu"
+      trigger={(
         <Icon name="more" size={18} />
-      </summary>
-      <div className="thread-menu-panel">
-        <button
-          type="button"
-          onClick={() => {
-            const next = window.prompt("Conversation title", thread.title)?.trim();
-            if (next) void consoleState.renameThread(thread.id, next);
-          }}
-        >
-          <Icon name="settings" size={14} />
-          <span>Rename</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => void consoleState.archiveThread(thread.id, !thread.archivedAt)}
-        >
-          <Icon name={thread.archivedAt ? "restore" : "archive"} size={14} />
-          <span>{thread.archivedAt ? "Restore" : "Archive"}</span>
-        </button>
-        {thread.archivedAt && (
+      )}
+    >
+      {(close) => (
+        <>
           <button
             type="button"
-            className="danger"
+            role="menuitem"
             onClick={() => {
-              if (window.confirm("Permanently delete this archived conversation?")) {
-                void consoleState.deleteThread(thread.id);
-              }
+              close();
+              const next = window.prompt("Conversation title", thread.title)?.trim();
+              if (next) void consoleState.renameThread(thread.id, next);
             }}
           >
-            <Icon name="trash" size={14} />
-            <span>Delete</span>
+            <Icon name="settings" size={14} />
+            <span>Rename</span>
           </button>
-        )}
-      </div>
-    </details>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              close();
+              void consoleState.archiveThread(thread.id, !thread.archivedAt);
+            }}
+          >
+            <Icon name={thread.archivedAt ? "restore" : "archive"} size={14} />
+            <span>{thread.archivedAt ? "Restore" : "Archive"}</span>
+          </button>
+          {thread.archivedAt && (
+            <button
+              type="button"
+              className="danger"
+              role="menuitem"
+              onClick={() => {
+                close();
+                if (window.confirm("Permanently delete this archived conversation?")) {
+                  void consoleState.deleteThread(thread.id);
+                }
+              }}
+            >
+              <Icon name="trash" size={14} />
+              <span>Delete</span>
+            </button>
+          )}
+        </>
+      )}
+    </Popover>
   );
 }
 
-export function Chat() {
+export function currentAssistantContext(messages: readonly Message[] | undefined): {
+  readonly pending: boolean;
+  readonly telemetry?: Telemetry;
+} {
+  const latestAssistant = messages?.findLast((message) => message.role === "assistant");
+  return {
+    pending:
+      latestAssistant?.status === "running"
+      && latestAssistant.telemetry?.contextUsed === undefined,
+    ...(latestAssistant?.telemetry === undefined
+      ? {}
+      : { telemetry: latestAssistant.telemetry }),
+  };
+}
+
+export function displayedAssistantContext(
+  messages: readonly Message[] | undefined,
+  pending: boolean,
+): {
+  readonly pending: boolean;
+  readonly telemetry?: Telemetry;
+} {
+  return pending ? { pending: true } : currentAssistantContext(messages);
+}
+
+export function Chat({ backgroundInert = false }: { readonly backgroundInert?: boolean }) {
   const consoleState = useConsole();
   const thread = consoleState.selectedThread;
   const title = useMemo(() => thread?.title ?? "No conversation selected", [thread?.title]);
-  const telemetry = useMemo(
-    () => consoleState.detail?.messages.findLast(
-      (message) => message.role === "assistant" && message.telemetry !== undefined,
-    )?.telemetry,
-    [consoleState.detail?.messages],
+  const context = useMemo(
+    () => displayedAssistantContext(
+      consoleState.detail?.messages,
+      consoleState.sending,
+    ),
+    [consoleState.detail?.messages, consoleState.sending],
   );
   return (
-    <main className="chat">
-      <header className="chat-header">
-        <div className="chat-heading">
-          <span className="eyebrow">{consoleState.selectedAgent?.label ?? "mono-agent"}</span>
-          <h1>{title}</h1>
-        </div>
-        {thread !== undefined && (
-          <div className="chat-header-actions">
-            <ContextUsage {...(telemetry === undefined ? {} : { telemetry })} />
-            <ThreadActions />
+    <PopoverProvider>
+      <main
+        className="chat"
+        aria-hidden={backgroundInert || undefined}
+        inert={backgroundInert}
+      >
+        <header className="chat-header">
+          <div className="chat-heading">
+            <span className="eyebrow">{consoleState.selectedAgent?.label ?? "mono-agent"}</span>
+            <h1>{title}</h1>
           </div>
-        )}
-      </header>
-      {consoleState.error && <div className="error-banner" role="alert">{consoleState.error}</div>}
-      {thread === undefined ? (
-        <div className="empty-chat">
-          <div className="empty-chat-mark"><Icon name="spark" size={20} /></div>
-          <h2>Start a conversation</h2>
-          <p>Select an online agent and create a thread.</p>
-          <button
-            className="primary"
-            disabled={!consoleState.selectedAgent?.online}
-            onClick={() => void consoleState.createThread()}
-          >
-            New conversation
-          </button>
-        </div>
-      ) : (
-        <ThreadPrimitive.Root className="thread-root">
-          <SelectionToolbar />
-          <ThreadPrimitive.Viewport className="thread-viewport" autoScroll>
-            <div className="message-column">
-              <ThreadPrimitive.Empty>
-                <div className="thread-empty">
-                  <span>New conversation</span>
-                  <small>Send a message to begin.</small>
-                </div>
-              </ThreadPrimitive.Empty>
-              <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
+          {thread !== undefined && (
+            <div className="chat-header-actions">
+              <ContextUsage {...context} />
+              <ThreadActions />
             </div>
-            <ThreadPrimitive.ScrollToBottom
-              className="scroll-bottom"
-              aria-label="Scroll to latest"
+          )}
+        </header>
+        {consoleState.error && <div className="error-banner" role="alert">{consoleState.error}</div>}
+        {thread === undefined ? (
+          <div className="empty-chat">
+            <div className="empty-chat-mark"><Icon name="spark" size={20} /></div>
+            <h2>Start a conversation</h2>
+            <p>Select an online agent and create a thread.</p>
+            <button
+              className="primary"
+              disabled={!consoleState.selectedAgent?.online}
+              onClick={() => void consoleState.createThread()}
             >
-              <Icon name="chevron" size={16} />
-            </ThreadPrimitive.ScrollToBottom>
-            <ThreadPrimitive.ViewportFooter className="thread-footer">
-              {thread.archivedAt
-                ? <div className="archived-note">This conversation is archived. Restore it to continue.</div>
-                : <Composer />}
-            </ThreadPrimitive.ViewportFooter>
-          </ThreadPrimitive.Viewport>
-        </ThreadPrimitive.Root>
-      )}
-    </main>
+              New conversation
+            </button>
+          </div>
+        ) : (
+          <ThreadPrimitive.Root className="thread-root">
+            <SelectionToolbar />
+            <ThreadPrimitive.Viewport className="thread-viewport" autoScroll>
+              <div className="message-column">
+                <ThreadPrimitive.Empty>
+                  <div className="thread-empty">
+                    <span>New conversation</span>
+                    <small>Send a message to begin.</small>
+                  </div>
+                </ThreadPrimitive.Empty>
+                <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
+              </div>
+              <ThreadPrimitive.ScrollToBottom
+                className="scroll-bottom"
+                aria-label="Scroll to latest"
+              >
+                <Icon name="chevron" size={16} />
+              </ThreadPrimitive.ScrollToBottom>
+              <ThreadPrimitive.ViewportFooter className="thread-footer">
+                {thread.archivedAt
+                  ? <div className="archived-note">This conversation is archived. Restore it to continue.</div>
+                  : <Composer />}
+              </ThreadPrimitive.ViewportFooter>
+            </ThreadPrimitive.Viewport>
+          </ThreadPrimitive.Root>
+        )}
+      </main>
+    </PopoverProvider>
   );
 }
 

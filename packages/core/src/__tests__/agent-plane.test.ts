@@ -76,6 +76,8 @@ describe("complete agent plane", () => {
     const stateName = `@fixture/state-${suffix}`;
     const operatorName = `@fixture/operator-${suffix}`;
     const published: unknown[] = [];
+    let definitionValidations = 0;
+    let instancePreflights = 0;
     const startedAt = "2026-07-22T12:00:00.000Z";
     const state = Object.assign(new MemoryStateStore(), {
       async publishHostPresence(request: unknown) {
@@ -86,7 +88,31 @@ describe("complete agent plane", () => {
       {
         name: runtimeName,
         kind: "runtime",
-        controller: runtimeController(() => completed("unused")),
+        controller: {
+          validateModel(request) {
+            definitionValidations += 1;
+            const model = (request as { readonly model: string }).model;
+            return {
+              supported: true,
+              model: {
+                id: model,
+                label: "Fixture model",
+                efforts: ["none", "high"],
+                contextWindow: 128_000,
+              },
+            };
+          },
+          create(context) {
+            const runtime = runtimeController(() => completed("unused")).create(context);
+            return {
+              ...(runtime as object),
+              preflightModel() {
+                instancePreflights += 1;
+                return { supported: true };
+              },
+            };
+          },
+        },
       },
       {
         name: stateName,
@@ -126,7 +152,13 @@ describe("complete agent plane", () => {
               agent: { id: "fixture-agent", label: "Fixture Agent" },
               process: { pid: process.pid },
               defaults: { runtime: "main", model: "fixture:model" },
-              models: [{ id: "fixture:model" }],
+              models: [{
+                runtime: "main",
+                id: "fixture:model",
+                label: "Fixture model",
+                efforts: ["none", "high"],
+                contextWindow: 128_000,
+              }],
             });
             return {
               capabilities: {
@@ -153,7 +185,7 @@ describe("complete agent plane", () => {
               readHostPresence() {
                 return {
                   operatorRegistry: {
-                    schema: "mono-agent.operator-registry-details.v2",
+                    schema: "mono-agent.operator-registry-details.v3",
                     agent: { id: "fixture-agent", label: "Fixture Agent" },
                     operator: {
                       endpoint: "http://127.0.0.1:43210",
@@ -194,12 +226,14 @@ describe("complete agent plane", () => {
     const host = await createAgentHost(project.configPath, {
       environment: { MONO_AGENT_OPERATOR_TOKEN: "fixture-operator-token-that-is-long-enough" },
     });
+    expect(definitionValidations).toBe(1);
+    expect(instancePreflights).toBe(0);
     expect(published).toHaveLength(1);
     expect(published[0]).toMatchObject({
       status: "ready",
       details: {
         operatorRegistry: {
-          schema: "mono-agent.operator-registry-details.v2",
+          schema: "mono-agent.operator-registry-details.v3",
           agent: { id: "fixture-agent", label: "Fixture Agent" },
           operator: {
             endpoint: "http://127.0.0.1:43210",

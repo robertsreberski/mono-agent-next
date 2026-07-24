@@ -17,41 +17,41 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `aff69ed0a8cc14a2c38bf2513816248fe2e5c562597d828f435c52a4bc86abc6`
+Source manifest digest: `3f063dbfda55f88675294b8d64430e92ae84c51f7000ad2f077f673fb813f3ea`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 212 | 84547 |
-| Tests | 143 | 65299 |
+| Production | 214 | 86188 |
+| Tests | 149 | 68144 |
 | Repository and product tooling | 63 | 22877 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **418** | **172723** |
+| **Total executable source** | **426** | **177209** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 398.8 lines.
+Average production file size is 402.7 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 84547 | 130000 | within limit |
-| kernel-production | 14997 | 15000 | within limit |
+| repository-production | 86188 | 130000 | within limit |
+| kernel-production | 14994 | 15000 | within limit |
 
 ## Largest package ownership surfaces
 
 | Package | Production files | Production lines | Test lines |
 | --- | ---: | ---: | ---: |
 | `@mono-agent/state-local` | 14 | 12164 | 4264 |
-| `@mono-agent/core` | 19 | 12010 | 16150 |
-| `@mono-agent/runtime-pi` | 15 | 7866 | 4429 |
+| `@mono-agent/core` | 19 | 11998 | 16321 |
+| `@mono-agent/web` | 28 | 8759 | 5756 |
+| `@mono-agent/runtime-pi` | 15 | 7936 | 4504 |
 | `@mono-agent/memory-local` | 14 | 7529 | 3932 |
-| `@mono-agent/web` | 26 | 7433 | 3519 |
 | `@mono-agent/service-macos` | 14 | 4336 | 1851 |
 | `create-mono-agent` | 7 | 3505 | 1289 |
 | `@mono-agent/channel-webhook` | 5 | 2659 | 1368 |
@@ -67,7 +67,7 @@ The complete package table is retained in the generated report model exposed by
 | First-party dependency edges | 22 |
 | First-party dependency cycles | 0 |
 | Public code entrypoints | 28 |
-| Public named exports | 981 |
+| Public named exports | 982 |
 | Distinct scaffold config paths | 104 |
 
 The first-party package graph is acyclic.

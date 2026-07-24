@@ -163,6 +163,14 @@ describe("Pi-native runtime module", () => {
     expect(firstContext.events.some((event) => event.type === "text-delta")).toBe(true);
     expect(firstContext.events.some((event) => event.type === "usage")).toBe(true);
     expect(firstContext.events.some((event) => event.type === "session")).toBe(true);
+    expect(first.usage).toMatchObject({
+      contextWindow: 128_000,
+    });
+    expect(first.usage?.contextUsed).toBeGreaterThan(0);
+    expect(firstContext.events).toContainEqual({
+      type: "usage",
+      usage: first.usage,
+    });
 
     const secondContext = turnContext();
     const second = await runtime.runTurn(request("two", {
@@ -937,11 +945,43 @@ describe("Pi-native runtime module", () => {
       }),
     ]);
     const controller = new AbortController();
-    const { context } = turnContext();
+    const { context, events } = turnContext();
     await start(runtime);
     const run = runtime.runTurn(request("abort", { signal: controller.signal }), context);
     setTimeout(() => controller.abort(), 10);
-    await expect(run).resolves.toMatchObject({ status: "cancelled" });
+    const result = await run;
+    expect(result).toEqual({ status: "cancelled" });
+    const usageEvent = events.find((event) => event.type === "usage");
+    expect(usageEvent).toMatchObject({
+      type: "usage",
+      usage: { contextWindow: 128_000 },
+    });
+    expect(usageEvent).not.toHaveProperty("usage.contextUsed");
+    await stop(runtime);
+  });
+
+  it("does not claim current context usage for an aborted assistant result", async () => {
+    const { runtime, faux } = fauxRuntime();
+    faux.setResponses([
+      fauxAssistantMessage([], {
+        stopReason: "aborted",
+        errorMessage: "provider aborted",
+      }),
+    ]);
+    const { context, events } = turnContext();
+    await start(runtime);
+    const result = await runtime.runTurn(request("provider abort"), context);
+    expect(result).toMatchObject({
+      status: "cancelled",
+      usage: { contextWindow: 128_000 },
+    });
+    expect(result.usage).not.toHaveProperty("contextUsed");
+    const usageEvent = events.find((event) => event.type === "usage");
+    expect(usageEvent).toMatchObject({
+      type: "usage",
+      usage: { contextWindow: 128_000 },
+    });
+    expect(usageEvent).not.toHaveProperty("usage.contextUsed");
     await stop(runtime);
   });
 
@@ -963,6 +1003,11 @@ describe("Pi-native runtime module", () => {
       .toMatchObject({ supported: false });
     expect(await runtime.preflightModel?.({ model: "faux:faux-model", signal: abortSignal() })).toMatchObject({
       supported: true,
+      model: {
+        id: "faux:faux-model",
+        efforts: ["none", "minimal", "low", "medium", "high"],
+        contextWindow: 128_000,
+      },
       capabilities: {
         attachments: false,
         approvals: true,
@@ -1028,6 +1073,17 @@ describe("Pi-native runtime module", () => {
         sandbox: "unsupported",
       }],
     });
+    faux.setResponses([fauxAssistantMessage("none accepted")]);
+    await expect(runtime.runTurn(request("disable reasoning", {
+      options: { effort: "none" },
+    }), turnContext().context)).resolves.toMatchObject({
+      status: "completed",
+    });
+    await expect(runtime.runTurn(request("upstream spelling is not public", {
+      options: { effort: "off" },
+    }), turnContext().context)).rejects.toThrow(
+      'runtime-pi effort is unsupported: "off"',
+    );
     const aborted = new AbortController();
     aborted.abort(new Error("preflight cancelled"));
     await expect(runtime.preflightModel?.({
@@ -1184,8 +1240,9 @@ describe("Pi-native runtime module", () => {
     ]);
     await start(runtime);
     let error: unknown;
+    const failureContext = turnContext();
     try {
-      await runtime.runTurn(request("fail"), turnContext().context);
+      await runtime.runTurn(request("fail"), failureContext.context);
     } catch (caught) {
       error = caught;
     }
@@ -1201,6 +1258,12 @@ describe("Pi-native runtime module", () => {
     expect(JSON.stringify(Object.getOwnPropertyDescriptors(cause))).not.toContain(
       "sk-secret-provider-payload",
     );
+    const usageEvent = failureContext.events.find((event) => event.type === "usage");
+    expect(usageEvent).toMatchObject({
+      type: "usage",
+      usage: { contextWindow: 128_000 },
+    });
+    expect(usageEvent).not.toHaveProperty("usage.contextUsed");
     await stop(runtime);
   });
 

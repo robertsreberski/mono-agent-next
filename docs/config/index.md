@@ -31,6 +31,12 @@ Every replaceable capability is selected where it is used:
 }
 ```
 
+`routing.effort` is checked at load time when the exact primary runtime/model
+descriptor advertises an effort allowlist. A value outside that list fails
+configuration; an advertised empty list permits no explicit default effort.
+Absent effort metadata remains permissive and does not cause Core to invent an
+allowlist.
+
 The map key is the stable instance id. `$use` is the exact implementation
 package. Singleton memory, state, and sandbox slots use the slot itself as
 identity.

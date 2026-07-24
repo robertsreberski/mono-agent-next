@@ -46,12 +46,13 @@ function MarkdownText() {
     && typeof operatorMessageId === "string"
     && operatorMessageId.length > 0;
   return (
-    <MarkdownTextPrimitive
-      className="markdown"
-      data-aui-quote-selectable={canQuote ? true : "false"}
-      defer
-      smooth
-    />
+    <div data-aui-quote-selectable={canQuote ? "true" : "false"}>
+      <MarkdownTextPrimitive
+        className="markdown"
+        defer
+        smooth
+      />
+    </div>
   );
 }
 
@@ -154,7 +155,10 @@ function AssistantParts() {
 
 export function UserMessage() {
   return (
-    <MessagePrimitive.Root className="message message-user">
+    <MessagePrimitive.Root
+      className="message message-user"
+      data-aui-quote-selectable="false"
+    >
       <div className="message-bubble">
         <StoredQuote />
         <Attachments />
@@ -167,7 +171,10 @@ export function UserMessage() {
 
 export function AssistantMessage() {
   return (
-    <MessagePrimitive.Root className="message message-assistant">
+    <MessagePrimitive.Root
+      className="message message-assistant"
+      data-aui-quote-selectable="false"
+    >
       <div className="assistant-mark" aria-hidden="true">
         <Icon name="spark" size={15} />
       </div>

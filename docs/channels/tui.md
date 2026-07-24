@@ -56,10 +56,10 @@ Every route requires bearer authentication.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /v2/info` | Protocol, agent/process identity, and explicit capability flags. |
-| `GET /v2/health` | Bounded channel health for the current process. |
-| `POST /v2/turns` | Start one text turn and receive `application/x-ndjson`. |
-| `POST /v2/conversations/:id/cancel` | Cancel active turns for that exact conversation. |
+| `GET /v3/info` | Protocol, agent/process identity, explicit capability flags, and configured atomic model routes. |
+| `GET /v3/health` | Bounded channel health for the current process. |
+| `POST /v3/turns` | Start one text and/or attachment turn and receive `application/x-ndjson`. |
+| `POST /v3/conversations/:id/cancel` | Cancel active turns for that exact conversation. |
 
 A turn begins with `accepted`, can emit assistant `delta` and `activity`
 frames, and ends with exactly one `completed` or `error` frame. The selected
@@ -70,11 +70,20 @@ the same request signal.
 The current channel advertises only controls backed by Core host methods:
 cancellation, runtime overrides, attachments, replay-verified quotes, live
 input, AskUser, proactive delivery, redacted config, replay, and health. Its
-info response also exposes model hints derived only from strictly validated
-configured routes. Conversation summaries retain explicit whitelisted
+info response also exposes configured model choices as atomic
+runtime-instance/model routes derived only from strict validation. Any label,
+context window, or effort allowlist belongs to that exact pair; renderers do
+not independently combine runtime and model values or ask for an effort the
+route did not advertise. Conversation summaries retain explicit whitelisted
 `cron`/`webhook` provenance from delivery metadata; renderers do not infer it
 from conversation ids. An unsupported capability remains false and is not
 simulated by a product.
+
+Usage frames carry exact numeric values when the runtime can prove them.
+`contextUsed` is absent until a trustworthy snapshot for the current turn,
+cleared immediately when compaction invalidates it, and restored only by a
+later trustworthy snapshot. A known `contextWindow` and sticky compaction or
+provider-session-eviction markers remain available independently.
 
 ## Protocol bounds and request security
 
@@ -99,11 +108,12 @@ authentication are both mandatory; the channel deliberately has no
 
 `channel-operator` returns its actual endpoint after `start()`, but it does not
 write a registry. The owning state/discovery lifecycle may publish an
-owner-private `mono-agent.operator-registry.v2` descriptor containing agent id,
+owner-private `mono-agent.operator-registry.v3` descriptor containing agent id,
 label, endpoint, token environment name, process id/start time, heartbeat, and
 capabilities. `@mono-agent/operator` rejects unsafe directory modes, symlinks,
-multi-link files, wrong ownership, and malformed descriptors. It marks stale
-entries and excludes them from automatic selection; products bind a selected
+multi-link files, wrong ownership, and unrecognized or malformed current-v3
+descriptors. Structurally recognized stale v1/v2 descriptors and details are
+skipped so they cannot block valid v3 entries. Products bind a selected
 endpoint's live agent id, PID, and process start time before use.
 
 Until a host publishes that descriptor, standalone products can use a direct

@@ -8,23 +8,31 @@
   gap: 9px;
 }
 
-.thread-menu {
-  position: relative;
+.popover-anchor {
+  display: inline-flex;
 }
 
-.thread-menu > summary {
-  list-style: none;
+.popover-panel {
+  position: fixed;
+  z-index: 100;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: var(--shadow);
 }
 
-.thread-menu > summary::-webkit-details-marker {
-  display: none;
+.popover-panel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .thread-menu-trigger {
   display: grid;
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   place-items: center;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 9px;
   color: var(--muted);
@@ -32,19 +40,18 @@
   cursor: pointer;
 }
 
+.thread-menu-trigger:hover,
+.thread-menu-trigger[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--panel-2);
+}
+
 .thread-menu-panel {
-  position: absolute;
-  z-index: 20;
-  top: calc(100% + 7px);
-  right: 0;
   display: grid;
   min-width: 148px;
   gap: 2px;
   padding: 5px;
-  border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
 }
 
 .thread-menu-panel button {
@@ -174,8 +181,8 @@
 
 .activity-root[data-open="true"] .activity-chevron,
 .tool-call[open] summary svg,
-.context-usage[open] summary > svg:last-child,
-.composer-settings-menu[open] > summary > svg:last-child {
+.context-usage-trigger[aria-expanded="true"] > svg:last-child,
+.composer-settings-trigger[aria-expanded="true"] > svg:last-child {
   transform: rotate(180deg);
 }
 
@@ -301,36 +308,36 @@
   white-space: pre-wrap;
 }
 
-.context-usage {
-  position: relative;
-  width: max-content;
-  color: #747b6c;
-  font-size: 10px;
-}
-
-.context-usage > summary {
+.context-usage-trigger {
   display: inline-flex;
+  min-height: 38px;
   align-items: center;
   gap: 5px;
-  list-style: none;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 8px;
+  color: #747b6c;
+  background: transparent;
+  font-size: 10px;
   cursor: pointer;
 }
 
-.context-usage > summary::-webkit-details-marker {
-  display: none;
+.context-usage-trigger:hover,
+.context-usage-trigger[aria-expanded="true"] {
+  color: var(--text-soft);
+  background: var(--panel-2);
+}
+
+.context-usage-trigger > svg:last-child,
+.composer-settings-trigger > svg:last-child {
+  transition: transform 150ms ease;
 }
 
 .context-usage-panel {
-  position: absolute;
-  z-index: 10;
-  top: calc(100% + 9px);
-  right: 0;
-  width: 190px;
+  width: 210px;
   padding: 8px;
-  border: 1px solid var(--border);
   border-radius: 9px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
+  font-size: 11px;
 }
 
 .context-usage-panel dl {
@@ -364,7 +371,7 @@
 }
 
 .composer-tool,
-.composer-settings-menu > summary {
+.composer-settings-trigger {
   display: grid;
   height: 30px;
   place-items: center;
@@ -380,40 +387,25 @@
 }
 
 .composer-tool:hover,
-.composer-settings-menu > summary:hover {
+.composer-settings-trigger:hover,
+.composer-settings-trigger[aria-expanded="true"] {
   color: var(--text);
   background: var(--panel-2);
 }
 
-.composer-settings-menu {
-  position: relative;
-}
-
-.composer-settings-menu > summary {
+.composer-settings-trigger {
   display: flex;
   gap: 6px;
   padding: 0 8px;
-  list-style: none;
   font-size: 10px;
 }
 
-.composer-settings-menu > summary::-webkit-details-marker {
-  display: none;
-}
-
 .composer-settings-panel {
-  position: absolute;
-  z-index: 20;
-  bottom: calc(100% + 8px);
-  left: 0;
   display: grid;
   width: min(290px, calc(100vw - 40px));
   gap: 10px;
   padding: 12px;
-  border: 1px solid var(--border);
   border-radius: 11px;
-  background: var(--panel);
-  box-shadow: var(--shadow);
 }
 
 .composer-settings-panel label {
@@ -493,6 +485,12 @@
 }
 
 .scroll-bottom {
+  display: grid;
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  min-height: 34px;
+  flex: 0 0 34px;
   place-items: center;
 }
 
@@ -502,11 +500,11 @@
 }
 
 @media (max-width: 720px) {
-  .context-usage > summary span {
+  .context-usage-trigger span {
     display: none;
   }
 
-  .composer-settings-menu > summary span,
+  .composer-settings-trigger span,
   .composer-hint {
     display: none;
   }
@@ -518,5 +516,15 @@
   .context-compaction-row small {
     width: 100%;
     margin-left: 14px;
+  }
+}
+
+@media (hover: none), (pointer: coarse) {
+  .context-usage-trigger,
+  .thread-menu-trigger,
+  .composer-tool,
+  .composer-settings-trigger {
+    min-width: 44px;
+    min-height: 44px;
   }
 }

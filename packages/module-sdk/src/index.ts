@@ -867,8 +867,16 @@ export interface RuntimeModelValidationRequest {
   /** Parsed module config supplied without granting host capabilities. */
   readonly config: unknown;
 }
+/** Provider-neutral metadata a runtime can enforce for one exact model. */
+export interface RuntimeModelDescriptor {
+  readonly id: string;
+  readonly label?: string;
+  readonly efforts?: readonly string[];
+  readonly contextWindow?: number;
+}
 export interface RuntimeModelValidation {
   readonly supported: boolean;
+  readonly model?: RuntimeModelDescriptor;
   /** Effective capabilities for this exact model route. */
   readonly capabilities?: RuntimeCapabilities;
   /** Native tools available on this exact model route. */
@@ -878,6 +886,7 @@ export interface RuntimeModelValidation {
 export interface RuntimeModelPreflightRequest { readonly model: string; readonly signal: AbortSignal; }
 export interface RuntimeModelPreflightResult {
   readonly supported: boolean;
+  readonly model?: RuntimeModelDescriptor;
   readonly capabilities?: RuntimeCapabilities;
   readonly nativeTools?: readonly RuntimeNativeToolDescriptor[];
   readonly diagnostics?: readonly ModuleDiagnostic[];

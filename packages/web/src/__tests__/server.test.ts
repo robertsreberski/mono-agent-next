@@ -661,7 +661,7 @@ async function startOperatorFixture(): Promise<{ readonly url: string; readonly 
     if (request.headers.authorization !== `Bearer ${OPERATOR_TOKEN}`) {
       response.writeHead(401, { "content-type": "application/json" }); response.end('{"error":"unauthorized"}'); return;
     }
-    if (request.method === "POST" && request.url === "/v2/turns") {
+    if (request.method === "POST" && request.url === "/v3/turns") {
       const body = JSON.parse(await bodyText(request)) as { conversationId: string };
       const now = new Date().toISOString();
       const frames = [
@@ -678,7 +678,7 @@ async function startOperatorFixture(): Promise<{ readonly url: string; readonly 
     if (request.method === "POST" && request.url?.endsWith("/cancel")) {
       response.writeHead(200, { "content-type": "application/json" }); response.end('{"status":"accepted"}'); return;
     }
-    if (request.method === "GET" && request.url === "/v2/info") {
+    if (request.method === "GET" && request.url === "/v3/info") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ protocol: OPERATOR_PROTOCOL, agent: { id: "personal", label: "Personal Agent" }, process: { pid: process.pid, startedAt }, capabilities: capabilities() }));
       return;

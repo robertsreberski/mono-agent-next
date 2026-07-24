@@ -232,7 +232,7 @@ describe("operator HTTP channel", () => {
     const first = parseOperatorInfo(await authorizedJson(channel.startInfo.infoUrl));
     const second = parseOperatorInfo(await authorizedJson(channel.startInfo.infoUrl));
     expect(first).toMatchObject({
-      protocol: "mono-agent.operator.v2",
+      protocol: "mono-agent.operator.v3",
       agent: { id: "operator", label: "Fixture Agent" },
       capabilities: {
         attachments: true,
@@ -249,7 +249,7 @@ describe("operator HTTP channel", () => {
     });
   });
 
-  it("fails legacy v1 routes closed before dispatching or streaming v2 frames", async () => {
+  it("fails legacy v1 and v2 routes closed before dispatching or streaming v3 frames", async () => {
     const dispatch = vi.fn(async (_request: ChannelInboundRequest, reply: ChannelReplySink) => {
       await reply.emit({
         type: "tool-call",
@@ -265,11 +265,21 @@ describe("operator HTTP channel", () => {
 
     const legacyTurn = await postJson(`${channel.startInfo.baseUrl}/v1/turns`, {
       conversationId: "legacy-client",
-      input: { text: "do not negotiate v2" },
+      input: { text: "do not negotiate v3" },
     });
     expect(legacyTurn.status).toBe(404);
     expect(legacyTurn.headers.get("content-type")).toContain("application/json");
     expect(await legacyTurn.text()).not.toContain("tool_call");
+    const priorInfo = await fetch(`${channel.startInfo.baseUrl}/v2/info`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(priorInfo.status).toBe(404);
+    const priorTurn = await postJson(`${channel.startInfo.baseUrl}/v2/turns`, {
+      conversationId: "prior-client",
+      input: { text: "do not negotiate v3" },
+    });
+    expect(priorTurn.status).toBe(404);
+    expect(await priorTurn.text()).not.toContain("tool_call");
     expect(dispatch).not.toHaveBeenCalled();
   });
 
@@ -725,7 +735,7 @@ describe("operator HTTP channel", () => {
       input: { text: "wait" },
     });
     const cancel = await postJson(
-      `${channel.startInfo.baseUrl}/v2/conversations/cancel-me/cancel`,
+      `${channel.startInfo.baseUrl}/v3/conversations/cancel-me/cancel`,
       { reason: "operator requested" },
     );
     expect(cancel.status).toBe(202);
@@ -738,7 +748,7 @@ describe("operator HTTP channel", () => {
     });
 
     const idle = await postJson(
-      `${channel.startInfo.baseUrl}/v2/conversations/missing/cancel`,
+      `${channel.startInfo.baseUrl}/v3/conversations/missing/cancel`,
       {},
     );
     expect(idle.status).toBe(200);
@@ -827,7 +837,10 @@ describe("operator HTTP channel", () => {
 
     await expect(client.getInfo()).resolves.toMatchObject({
       capabilities: { liveInput: true, askUser: true, proactive: true, configView: true, replay: true },
-      models: [{ id: "openai:test" }, { id: "openai:fallback" }],
+      models: [
+        { runtime: "pi", id: "openai:test" },
+        { runtime: "pi", id: "openai:fallback" },
+      ],
     });
     await expect(client.getConversations()).resolves.toMatchObject({
       conversations: [{
@@ -854,6 +867,17 @@ describe("operator HTTP channel", () => {
     }));
     const usageFrames = frames.filter((frame) => frame.type === "usage");
     expect(usageFrames).toHaveLength(4);
+    expect(usageFrames[1]).toEqual({
+      type: "usage",
+      turnId: expect.any(String),
+      usage: {
+        inputTokens: 3,
+        outputTokens: 5,
+        contextWindow: 128_000,
+        compacted: true,
+        sessionEvicted: false,
+      },
+    });
     expect(usageFrames.at(-1)).toEqual({
       type: "usage",
       turnId: expect.any(String),
@@ -946,14 +970,14 @@ describe("mono-agent operator channel module", () => {
     expect(channel.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/u);
     expect(channel.readHostPresence?.()).toMatchObject({
       operatorRegistry: {
-        schema: "mono-agent.operator-registry-details.v2",
+        schema: "mono-agent.operator-registry-details.v3",
         agent: operatorIdentity.agent,
         operator: { endpoint: channel.endpoint, tokenEnvironment: "OPERATOR_TOKEN" },
         process: { pid: process.pid, startedAt: channel.startInfo?.startedAt },
         capabilities: { attachments: true, cancellation: true, health: true, quotes: true },
       },
     });
-    const response = await postJson(`${channel.endpoint}/v2/turns`, {
+    const response = await postJson(`${channel.endpoint}/v3/turns`, {
       conversationId: "module-conversation",
       input: { text: "hello module" },
     });
@@ -1334,7 +1358,10 @@ function identity(id: string, label: string): OperatorIdentityGrant {
     agent: { id, label },
     process: { pid: process.pid },
     defaults: { runtime: "pi", model: "openai:test", effort: "medium" },
-    models: [{ id: "openai:test" }, { id: "openai:fallback" }],
+    models: [
+      { runtime: "pi", id: "openai:test" },
+      { runtime: "pi", id: "openai:fallback" },
+    ],
     configPath: "/config/mono-agent.config.json",
     projectRoot: "/project",
   };
@@ -1380,7 +1407,7 @@ async function oversizedBodyStatus(
     });
     socket.once("connect", () => {
       socket.write([
-        "POST /v2/turns HTTP/1.1",
+        "POST /v3/turns HTTP/1.1",
         `Host: ${endpoint.host}`,
         `Authorization: Bearer ${TOKEN}`,
         "Content-Type: application/json",

@@ -43,11 +43,54 @@ describe("evaluateOperatorRuntimeOverride", () => {
     expect(evaluateOperatorRuntimeOverride(VALID_OPERATOR_INFO, { model: "missing:model" })).toEqual({
       allowed: false,
       reason: "unknown_model",
-      message: 'Model "missing:model" is not advertised by this agent.',
+      message: 'Runtime/model route {"runtime":"fixture-runtime","model":"missing:model"} is not advertised by this agent.',
     });
     expect(evaluateOperatorRuntimeOverride(VALID_OPERATOR_INFO, { model: "fixture:model" })).toEqual({
       allowed: true,
       intent: { model: "fixture:model" },
+    });
+  });
+
+  it("treats runtime and model as one configured route", () => {
+    const routes = info({
+      models: [
+        {
+          runtime: "fixture-runtime",
+          id: "fixture:model",
+          efforts: ["low", "high"],
+        },
+        {
+          runtime: "other-runtime",
+          id: "fixture:model",
+          efforts: ["minimal"],
+        },
+      ],
+    });
+    expect(evaluateOperatorRuntimeOverride(routes, {
+      runtime: "other-runtime",
+      model: "fixture:model",
+      effort: "minimal",
+    })).toEqual({
+      allowed: true,
+      intent: {
+        runtime: "other-runtime",
+        model: "fixture:model",
+        effort: "minimal",
+      },
+    });
+    expect(evaluateOperatorRuntimeOverride(routes, {
+      runtime: "missing-runtime",
+      model: "fixture:model",
+    })).toMatchObject({
+      allowed: false,
+      reason: "unknown_model",
+    });
+    expect(evaluateOperatorRuntimeOverride(routes, {
+      runtime: "other-runtime",
+      effort: "high",
+    })).toMatchObject({
+      allowed: false,
+      reason: "unsupported_effort",
     });
   });
 
@@ -78,7 +121,7 @@ describe("evaluateOperatorRuntimeOverride", () => {
       intent: { runtime: "custom-runtime", model: "custom:model", effort: "custom-effort" },
     });
 
-    const withoutEfforts = info({ models: [{ id: "fixture:model" }] });
+    const withoutEfforts = info({ models: [{ runtime: "fixture-runtime", id: "fixture:model" }] });
     expect(evaluateOperatorRuntimeOverride(withoutEfforts, { model: "fixture:model", effort: "custom-effort" })).toEqual({
       allowed: true,
       intent: { model: "fixture:model", effort: "custom-effort" },

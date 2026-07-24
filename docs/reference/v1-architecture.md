@@ -264,6 +264,17 @@ versioned protocol.
 directory, identity checks, reducer, and action-eligibility rules. Renderers do
 not reinterpret raw frames.
 
+Core advertises configured model choices as atomic runtime-instance/model
+routes. Verified labels, context windows, and effort allowlists belong to that
+exact pair; duplicate model ids on different runtime instances remain distinct.
+Renderers neither recombine route members nor solicit an effort absent from the
+selected route's allowlist. Config loading likewise rejects a primary default
+effort excluded by an advertised allowlist while leaving absent effort
+metadata permissive. Usage reports `contextUsed` only from a trustworthy
+snapshot for the current turn. Starting a turn does not reuse the preceding
+settled value, and compaction invalidates the count until a later trustworthy
+snapshot while retaining a known context window.
+
 `@mono-agent/tui` and `@mono-agent/web` are separately started products:
 
 - TUI owns terminal layout, keyboard input, and rendering. It can connect to an
@@ -273,7 +284,11 @@ not reinterpret raw frames.
   policy, and persists web threads in a separate owner-private store. Bearer
   remains the default; explicit no-auth treats network reachability as the
   authorization boundary. Browser disconnect does not implicitly cancel an
-  agent turn.
+  agent turn. Attachment-only turns are valid; failed new-turn, live-input, or
+  AskUser submissions preserve their retryable input and surface an accessible
+  error. Context, conversation-action, and run-settings popovers share one
+  controlled, collision-aware, transcript-safe layer with keyboard dismissal
+  and focus restoration.
 
 Neither product is selected in `mono-agent.config.json`, loads a runtime, or
 owns agent process lifecycle.
@@ -283,7 +298,10 @@ the selected operator channel reports its actual bound endpoint. The
 owner-private state presence contains the agent id and label, endpoint, public
 token-environment name, process identity, heartbeat, and negotiated
 capabilities. The shared directory strictly parses and identity-binds that
-record; it never receives the bearer-token value.
+record; it never receives the bearer-token value. A mixed v3 migration
+directory skips structurally recognized stale v1/v2 descriptors and details,
+while unsafe files, unrecognized shapes, and malformed current-v3 entries
+remain fail-closed.
 
 ## Security properties
 

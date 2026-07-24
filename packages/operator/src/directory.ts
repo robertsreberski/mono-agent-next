@@ -10,6 +10,14 @@ import { OPERATOR_REGISTRY_DETAILS_SCHEMA, OPERATOR_REGISTRY_SCHEMA, type Discov
 const DEFAULT_STALE_AFTER_MS = 45_000;
 const MAX_REGISTRY_FILE_BYTES = 1_048_576;
 const STATE_PRESENCE_SCHEMA = "mono-agent.state-presence.v1";
+const LEGACY_OPERATOR_REGISTRY_SCHEMAS = new Set([
+  "mono-agent.operator-registry.v1",
+  "mono-agent.operator-registry.v2",
+]);
+const LEGACY_OPERATOR_REGISTRY_DETAILS_SCHEMAS = new Set([
+  "mono-agent.operator-registry-details.v1",
+  "mono-agent.operator-registry-details.v2",
+]);
 type UnknownRecord = Record<string, unknown>;
 
 interface StatePresenceEnvelope {
@@ -189,6 +197,12 @@ function parseStatePresenceOperatorDescriptor(value: unknown): OperatorRegistryD
   const operatorRegistry = presence.details?.operatorRegistry;
   if (operatorRegistry === undefined) return undefined;
   const details = strictRecord(operatorRegistry, "presence.details.operatorRegistry");
+  if (
+    typeof details.schema === "string"
+    && LEGACY_OPERATOR_REGISTRY_DETAILS_SCHEMAS.has(details.schema)
+  ) {
+    return undefined;
+  }
   strictKeys(details, ["schema", "agent", "operator", "process", "capabilities"], "presence.details.operatorRegistry");
   if (details.schema !== OPERATOR_REGISTRY_DETAILS_SCHEMA) {
     invalid(
@@ -220,6 +234,15 @@ function parseDiscoveryDescriptor(value: unknown): OperatorRegistryDescriptor | 
     && (value as { schema?: unknown }).schema === STATE_PRESENCE_SCHEMA
   ) {
     return parseStatePresenceOperatorDescriptor(value);
+  }
+  if (
+    typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+    && typeof (value as { schema?: unknown }).schema === "string"
+    && LEGACY_OPERATOR_REGISTRY_SCHEMAS.has((value as { schema: string }).schema)
+  ) {
+    return undefined;
   }
   return parseRegistryDescriptor(value);
 }

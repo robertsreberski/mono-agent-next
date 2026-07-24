@@ -30,6 +30,7 @@ import {
   type DiscoveredOperator,
   type OperatorFrame,
   type OperatorInfo,
+  type OperatorModel,
   type OperatorQuote,
   type OperatorToolResult,
 } from "@mono-agent/operator";
@@ -207,7 +208,7 @@ export class MonoAgentTuiApp {
         await this.showHealth();
         return;
       case "help":
-        this.addNotice('/attach <path> · /quote <message-id>[=<text>] · /send [text] · /replay · /config · /health · /runtime <instance|default> · /model <ref|default> · /effort <level|default> · /answer {"question":"value","other":["value"]} · /cancel · /exit');
+        this.addNotice('/attach <path> · /quote <message-id>[=<text>] · /send [text] · /replay · /config · /health · /runtime <instance|default> · /model [runtime] <ref|default> · /effort <level|default> · /answer {"question":"value","other":["value"]} · /cancel · /exit');
         return;
       default:
         this.addNotice(`Unknown command /${name}. Run /help.`, "warning");
@@ -326,6 +327,12 @@ export class MonoAgentTuiApp {
         ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
       });
       if (!decision.allowed) throw new Error(decision.message);
+      this.assertVerifiedEffort(
+        info,
+        decision.intent.runtime,
+        decision.intent.model,
+        decision.intent.effort,
+      );
       this.info = info;
       this.runtimeOverride = decision.intent.runtime;
       this.modelOverride = decision.intent.model;
@@ -477,22 +484,51 @@ export class MonoAgentTuiApp {
       return;
     }
     if (value.length === 0) {
-      this.addNotice("Use /runtime <configured-instance|default>.", "warning");
+      const runtimes = [...new Set(this.info?.models?.map((model) => model.runtime) ?? [])];
+      this.addNotice(runtimes.length === 0
+        ? "This agent does not advertise model routes; explicit runtime overrides are unavailable."
+        : `Runtimes: ${runtimes.join(", ")}. A runtime selects its current/default model when available; otherwise use /model <runtime> <model>.`);
       return;
     }
-    const decision = evaluateOperatorRuntimeOverride(this.info!, {
-      ...(value === "default" ? {} : { runtime: value }),
-      ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
-      ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
-    });
-    if (!decision.allowed) {
-      this.addNotice(decision.message, "warning");
+    if (value === "default") {
+      this.clearRouteOverrides("runtime/model overrides cleared");
       return;
     }
-    this.runtimeOverride = decision.intent.runtime;
-    this.modelOverride = decision.intent.model;
-    this.effortOverride = decision.intent.effort;
-    this.setStatus(this.statusText(value === "default" ? "runtime override cleared" : `runtime ${value}`));
+
+    const routes = this.info?.models;
+    if (routes === undefined || routes.length === 0) {
+      this.addNotice(
+        "This agent does not advertise model routes; explicit runtime overrides are unavailable.",
+        "warning",
+      );
+      return;
+    }
+    const candidates = routes.filter((route) => route.runtime === value);
+    const effectiveModel = this.modelOverride ?? this.info?.defaults?.model;
+    const matchingCurrentModel = effectiveModel === undefined
+      ? undefined
+      : candidates.find((route) => route.id === effectiveModel);
+    const route = matchingCurrentModel ?? (candidates.length === 1 ? candidates[0] : undefined);
+    if (route === undefined) {
+      if (candidates.length > 1) {
+        this.addNotice(
+          `Runtime ${JSON.stringify(value)} has multiple model routes; select one with /model <runtime> <model>: ${candidates.map(routeChoice).join(", ")}`,
+          "warning",
+        );
+        return;
+      }
+      const decision = evaluateOperatorRuntimeOverride(this.info!, {
+        runtime: value,
+        ...(effectiveModel === undefined ? {} : { model: effectiveModel }),
+      });
+      if (!decision.allowed) {
+        this.addNotice(decision.message, "warning");
+        return;
+      }
+      this.addNotice(`Runtime ${JSON.stringify(value)} has no advertised model route.`, "warning");
+      return;
+    }
+    this.selectRoute(route);
   }
 
   private setModel(value: string): void {
@@ -501,43 +537,96 @@ export class MonoAgentTuiApp {
       return;
     }
     if (value.length === 0) {
-      const choices = this.info?.models?.map((model) => model.id).join(", ");
-      this.addNotice(choices === undefined
-        ? "No model allowlist advertised; enter a non-empty model reference."
-        : `Models: ${choices.length === 0 ? "none advertised" : choices}`);
+      const choices = this.info?.models?.map(routeChoice) ?? [];
+      this.addNotice(choices.length === 0
+        ? "This agent does not advertise model routes; explicit model overrides are unavailable."
+        : `Model routes: ${choices.join(", ")}. Select duplicates with /model <runtime> <model>.`);
       return;
     }
-    const decision = evaluateOperatorRuntimeOverride(this.info!, {
-      ...(this.runtimeOverride === undefined ? {} : { runtime: this.runtimeOverride }),
-      ...(value === "default"
-        ? {}
-        : {
-            model: value,
-            ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
-          }),
-    });
-    if (!decision.allowed) {
-      this.addNotice(decision.message, "warning");
+    if (value === "default") {
+      this.clearRouteOverrides("runtime/model overrides cleared");
       return;
     }
-    this.runtimeOverride = decision.intent.runtime;
-    this.modelOverride = decision.intent.model;
-    this.effortOverride = decision.intent.effort;
-    if (value === "default") this.effortOverride = undefined;
-    this.setStatus(this.statusText(value === "default" ? "model override cleared" : `model ${value}`));
+
+    const routes = this.info?.models;
+    if (routes === undefined || routes.length === 0) {
+      this.addNotice(
+        "This agent does not advertise model routes; explicit model overrides are unavailable.",
+        "warning",
+      );
+      return;
+    }
+    const parts = value.split(/\s+/u);
+    let route: OperatorModel | undefined;
+    if (parts.length === 1) {
+      const matches = routes.filter((candidate) => candidate.id === parts[0]);
+      if (matches.length > 1) {
+        this.addNotice(
+          `Model ${JSON.stringify(parts[0])} is advertised by multiple runtimes; select one with /model <runtime> <model>: ${matches.map(routeChoice).join(", ")}`,
+          "warning",
+        );
+        return;
+      }
+      route = matches[0];
+    } else if (parts.length === 2) {
+      route = routes.find((candidate) =>
+        candidate.runtime === parts[0] && candidate.id === parts[1]);
+    } else {
+      this.addNotice("Use /model <model>, /model <runtime> <model>, or /model default.", "warning");
+      return;
+    }
+    if (route === undefined) {
+      const decision = evaluateOperatorRuntimeOverride(this.info!, {
+        ...(parts.length === 2 ? { runtime: parts[0] } : {}),
+        model: parts.at(-1)!,
+      });
+      this.addNotice(
+        decision.allowed
+          ? `Model route ${JSON.stringify(value)} is not advertised by this agent.`
+          : decision.message,
+        "warning",
+      );
+      return;
+    }
+    this.selectRoute(route);
   }
 
   private validateInitialOverrides(): void {
-    const decision = evaluateOperatorRuntimeOverride(this.info!, {
-      ...(this.runtimeOverride === undefined ? {} : { runtime: this.runtimeOverride }),
-      ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
+    const hasRouteOverride =
+      this.runtimeOverride !== undefined || this.modelOverride !== undefined;
+    if (!hasRouteOverride && this.effortOverride === undefined) return;
+
+    if (hasRouteOverride && (this.info?.models === undefined || this.info.models.length === 0)) {
+      throw new Error(
+        "This agent does not advertise model routes; initial runtime/model overrides are unavailable.",
+      );
+    }
+    const effectiveRuntime = hasRouteOverride
+      ? this.runtimeOverride ?? this.info?.defaults?.runtime
+      : undefined;
+    const effectiveModel = hasRouteOverride
+      ? this.modelOverride ?? this.info?.defaults?.model
+      : undefined;
+    if (hasRouteOverride && (effectiveRuntime === undefined || effectiveModel === undefined)) {
+      throw new Error("Initial runtime/model overrides must resolve to one complete advertised route.");
+    }
+    const intent = {
+      ...(effectiveRuntime === undefined ? {} : { runtime: effectiveRuntime }),
+      ...(effectiveModel === undefined ? {} : { model: effectiveModel }),
       ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
-    });
+    };
+    const decision = evaluateOperatorRuntimeOverride(this.info!, intent);
     if (!decision.allowed) {
       throw new Error(decision.message);
     }
-    this.runtimeOverride = decision.intent.runtime;
-    this.modelOverride = decision.intent.model;
+    this.assertVerifiedEffort(
+      this.info!,
+      decision.intent.runtime,
+      decision.intent.model,
+      decision.intent.effort,
+    );
+    this.runtimeOverride = effectiveRuntime;
+    this.modelOverride = effectiveModel;
     this.effortOverride = decision.intent.effort;
   }
 
@@ -546,12 +635,36 @@ export class MonoAgentTuiApp {
       this.addNotice("The selected agent does not permit effort overrides.", "warning");
       return;
     }
-    const effectiveModel = this.modelOverride ?? this.info?.defaults?.model;
-    const efforts = this.info?.models?.find((model) => model.id === effectiveModel)?.efforts;
+    if (value === "default") {
+      const decision = evaluateOperatorRuntimeOverride(this.info!, {
+        ...(this.runtimeOverride === undefined ? {} : { runtime: this.runtimeOverride }),
+        ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
+      });
+      if (!decision.allowed) {
+        this.addNotice(decision.message, "warning");
+        return;
+      }
+      this.effortOverride = undefined;
+      this.setStatus(this.statusText("effort override cleared"));
+      return;
+    }
+    const route = this.routeForIntent(
+      this.info!,
+      this.runtimeOverride,
+      this.modelOverride,
+    );
+    const efforts = route?.efforts;
     if (value.length === 0) {
-      this.addNotice(efforts === undefined
-        ? "No effort allowlist advertised; enter a non-empty effort value."
-        : `Effort levels: ${efforts.length === 0 ? "none advertised" : efforts.join(", ")}`);
+      this.addNotice(route === undefined || efforts === undefined || efforts.length === 0
+        ? "The selected route does not advertise verified effort levels; its configured/default effort remains in effect."
+        : `Effort levels for ${routeChoice(route)}: ${efforts.join(", ")}`);
+      return;
+    }
+    if (efforts === undefined || efforts.length === 0) {
+      this.addNotice(
+        "The selected route does not advertise verified effort levels; explicit effort overrides are unavailable.",
+        "warning",
+      );
       return;
     }
     const decision = evaluateOperatorRuntimeOverride(this.info!, {
@@ -566,7 +679,61 @@ export class MonoAgentTuiApp {
     this.runtimeOverride = decision.intent.runtime;
     this.modelOverride = decision.intent.model;
     this.effortOverride = decision.intent.effort;
-    this.setStatus(this.statusText(value === "default" ? "effort override cleared" : `effort ${value}`));
+    this.setStatus(this.statusText(`effort ${value}`));
+  }
+
+  private selectRoute(route: OperatorModel): void {
+    const decision = evaluateOperatorRuntimeOverride(this.info!, {
+      runtime: route.runtime,
+      model: route.id,
+    });
+    if (!decision.allowed) {
+      this.addNotice(decision.message, "warning");
+      return;
+    }
+    this.runtimeOverride = route.runtime;
+    this.modelOverride = route.id;
+    this.effortOverride = undefined;
+    this.setStatus(this.statusText(`route ${routeChoice(route)} selected · effort defaulted`));
+  }
+
+  private clearRouteOverrides(status: string): void {
+    const decision = evaluateOperatorRuntimeOverride(this.info!, {});
+    if (!decision.allowed) {
+      this.addNotice(decision.message, "warning");
+      return;
+    }
+    this.runtimeOverride = undefined;
+    this.modelOverride = undefined;
+    this.effortOverride = undefined;
+    this.setStatus(this.statusText(status));
+  }
+
+  private routeForIntent(
+    info: OperatorInfo,
+    runtime: string | undefined,
+    model: string | undefined,
+  ): OperatorModel | undefined {
+    const effectiveRuntime = runtime ?? info.defaults?.runtime;
+    const effectiveModel = model ?? info.defaults?.model;
+    if (effectiveRuntime === undefined || effectiveModel === undefined) return undefined;
+    return info.models?.find((candidate) =>
+      candidate.runtime === effectiveRuntime && candidate.id === effectiveModel);
+  }
+
+  private assertVerifiedEffort(
+    info: OperatorInfo,
+    runtime: string | undefined,
+    model: string | undefined,
+    effort: string | undefined,
+  ): void {
+    if (effort === undefined) return;
+    const route = this.routeForIntent(info, runtime, model);
+    if (route?.efforts === undefined || route.efforts.length === 0) {
+      throw new Error(
+        "The selected route does not advertise verified effort levels; explicit effort overrides are unavailable.",
+      );
+    }
   }
 
   private async answerAsk(value: string): Promise<void> {
@@ -874,6 +1041,10 @@ function boundedView(value: string): string {
 function boundedStatus(value: string): string {
   const compact = value.replace(/\s+/gu, " ").trim();
   return compact.length <= 160 ? compact : `${compact.slice(0, 159)}…`;
+}
+
+function routeChoice(route: OperatorModel): string {
+  return `${route.runtime} ${route.id}`;
 }
 
 function toolResultText(result: OperatorToolResult): string {

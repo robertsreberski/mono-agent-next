@@ -1,12 +1,16 @@
 import type {
   ModuleDiagnostic,
+  RuntimeModelDescriptor,
   RuntimeModelValidation,
   RuntimeModelValidationRequest,
   RuntimeNativeToolDescriptor,
 } from "@mono-agent/module-sdk";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 
 import { runtimePiCodingNativeTools } from "./coding-tool-descriptors.js";
 import { parsePiModelReference, parseRuntimePiConfig } from "./config.js";
+import type { RuntimePiConfig } from "./config.js";
 
 export const runtimePiNodeReplTool: RuntimeNativeToolDescriptor = Object.freeze({
   id: "NodeRepl",
@@ -49,6 +53,53 @@ function diagnostic(message: string): ModuleDiagnostic {
   };
 }
 
+function publicThinkingLevels(
+  levels: readonly string[],
+): readonly string[] {
+  return Object.freeze(levels.map((level) => level === "off" ? "none" : level));
+}
+
+function configuredLocalModelDescriptor(
+  config: RuntimePiConfig,
+  provider: string,
+  modelId: string,
+): RuntimeModelDescriptor | undefined {
+  const model = config.localProviders
+    .find((candidate) => candidate.id === provider)
+    ?.models
+    ?.find((candidate) => candidate.id === modelId);
+  if (model === undefined) return undefined;
+  return {
+    id: `${provider}:${modelId}`,
+    label: model.name ?? model.id,
+    efforts: model.reasoning === true
+      ? Object.freeze(["none", "minimal", "low", "medium", "high"])
+      : Object.freeze(["none"]),
+    contextWindow: model.contextWindow ?? 128_000,
+  };
+}
+
+function staticModelDescriptor(
+  config: RuntimePiConfig,
+  reference: string,
+): RuntimeModelDescriptor | undefined {
+  const { provider, model } = parsePiModelReference(reference);
+  const local = configuredLocalModelDescriptor(config, provider, model);
+  if (local !== undefined) return local;
+  if (config.localProviders.some((candidate) => candidate.id === provider)) {
+    // A local provider with no authored catalog is discovered at runtime.
+    return undefined;
+  }
+  const resolved = builtinModels().getModel(provider, model);
+  if (resolved === undefined) return undefined;
+  return {
+    id: reference,
+    label: resolved.name,
+    efforts: publicThinkingLevels(getSupportedThinkingLevels(resolved)),
+    contextWindow: resolved.contextWindow,
+  };
+}
+
 /**
  * Validate only the deterministic Pi route and config syntax available before
  * a runtime instance exists. Exact catalog, discovery, and auth checks belong
@@ -57,7 +108,7 @@ function diagnostic(message: string): ModuleDiagnostic {
 export function validateRuntimePiModel(
   request: RuntimeModelValidationRequest,
 ): RuntimeModelValidation {
-  parseRuntimePiConfig(request.config);
+  const config = parseRuntimePiConfig(request.config);
   try {
     parsePiModelReference(request.model);
   } catch (error) {
@@ -68,8 +119,10 @@ export function validateRuntimePiModel(
       ],
     };
   }
+  const model = staticModelDescriptor(config, request.model);
   return {
     supported: true,
+    ...(model === undefined ? {} : { model }),
     nativeTools: runtimePiNativeTools,
   };
 }

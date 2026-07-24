@@ -22,6 +22,7 @@ import {
   parseRuntimeNativeToolDescriptor,
   type ApprovalRequest,
   type AskUserRequest,
+  type RuntimeModelDescriptor,
   type RuntimeSession,
   type RuntimeToolResult,
 } from "../index.js";
@@ -334,6 +335,12 @@ describe("route, artifact, and native tool contracts", () => {
   });
 
   it("keeps pure validation on the definition and live preflight on the instance", async () => {
+    const model = {
+      id: "example:model",
+      label: "Example model",
+      efforts: ["none", "high"],
+      contextWindow: 128_000,
+    } satisfies RuntimeModelDescriptor;
     const definition = defineRuntimeModule({
       manifest: {
         packageName: "@example/runtime",
@@ -349,7 +356,15 @@ describe("route, artifact, and native tool contracts", () => {
       }),
       validateModel({ model, config }) {
         const prefix = (config as { prefix: string }).prefix;
-        return { supported: model.startsWith(prefix) };
+        return {
+          supported: model.startsWith(prefix),
+          model: {
+            id: model,
+            label: "Example model",
+            efforts: ["none", "high"],
+            contextWindow: 128_000,
+          },
+        };
       },
       create: () => ({
         capabilities: {
@@ -363,6 +378,12 @@ describe("route, artifact, and native tool contracts", () => {
         },
         preflightModel: async ({ model }) => ({
           supported: model === "example:model",
+          model: {
+            id: model,
+            label: "Example model",
+            efforts: ["none", "high"],
+            contextWindow: 128_000,
+          },
           diagnostics: [],
         }),
         async runTurn() {
@@ -385,5 +406,7 @@ describe("route, artifact, and native tool contracts", () => {
 
     expect(validation?.supported).toBe(true);
     expect(preflight?.supported).toBe(true);
+    expect(validation?.model).toEqual(model);
+    expect(preflight?.model).toEqual(model);
   });
 });

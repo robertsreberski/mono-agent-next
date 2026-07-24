@@ -860,9 +860,11 @@ function validGrantModels(value: unknown): value is readonly OperatorModel[] {
     if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
     const model = candidate as Record<string, unknown>;
     if (Object.keys(model).some((field) =>
-      !["id", "label", "efforts", "contextWindow"].includes(field))) return false;
-    if (!validGrantText(model.id, 256) || ids.has(model.id)) return false;
-    ids.add(model.id);
+      !["runtime", "id", "label", "efforts", "contextWindow"].includes(field))) return false;
+    if (!validGrantText(model.runtime, 256) || !validGrantText(model.id, 256)) return false;
+    const routeId = `${model.runtime}\0${model.id}`;
+    if (ids.has(routeId)) return false;
+    ids.add(routeId);
     if (model.label !== undefined && !validGrantText(model.label, 1_024)) return false;
     if (model.contextWindow !== undefined
       && (!Number.isSafeInteger(model.contextWindow) || Number(model.contextWindow) < 1)) return false;
@@ -1030,9 +1032,11 @@ function mergeOperatorUsage(
         : { contextWindow: previous.contextWindow }),
     ...(next.contextUsed !== undefined
       ? { contextUsed: next.contextUsed }
-      : previous?.contextUsed === undefined
+      : next.compacted
         ? {}
-        : { contextUsed: previous.contextUsed }),
+        : previous?.contextUsed === undefined
+          ? {}
+          : { contextUsed: previous.contextUsed }),
     compacted: previous?.compacted === true || next.compacted,
     sessionEvicted: previous?.sessionEvicted === true || next.sessionEvicted,
   };

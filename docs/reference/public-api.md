@@ -18,7 +18,7 @@ pnpm run generate:source-beta-docs
 
 | Package | Public entrypoints | Named exports | Package API |
 | --- | ---: | ---: | --- |
-| `@mono-agent/module-sdk` | 5 | 335 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
+| `@mono-agent/module-sdk` | 5 | 336 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
 | `@mono-agent/core` | 1 | 59 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/core/README.md) |
 | `@mono-agent/cli` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/cli/README.md) |
 | `@mono-agent/runtime-pi` | 1 | 6 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-pi/README.md) |
@@ -201,6 +201,7 @@ RuntimeIncompleteTurnResult
 RuntimeLiveInput
 RuntimeLiveInputDisposition
 RuntimeLiveInputHandler
+RuntimeModelDescriptor
 RuntimeModelPreflightRequest
 RuntimeModelPreflightResult
 RuntimeModelValidation

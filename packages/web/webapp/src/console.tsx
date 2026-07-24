@@ -25,11 +25,43 @@ const OFFLINE_KEY = "mono-agent-web-show-offline";
 const ARCHIVE_KEY = "mono-agent-web-show-archived";
 const RAIL_KEY = "mono-agent-web-agent-rail";
 
+interface Selection {
+  readonly agentId?: string;
+  readonly threadId?: string;
+  readonly detail?: ThreadDetail;
+}
+
+export interface ConversationNavigationBlocker {
+  hasPending(): boolean;
+  discard(): void | Promise<void>;
+}
+
+interface RunOverrides {
+  readonly runtime: string;
+  readonly model: string;
+  readonly effort: string;
+}
+
+interface PendingContextBaseline {
+  readonly turnId?: string;
+  readonly assistantMessageId?: string;
+}
+
+interface SelectionScope {
+  readonly epoch: number;
+  readonly agentId: string;
+  readonly threadId: string;
+}
+
 interface ConsoleState {
   readonly authenticated: boolean;
   readonly tokenAuthentication: boolean;
   readonly loading: boolean;
   readonly refreshing: boolean;
+  /** True while the selected conversation's message request is in flight. */
+  readonly submitting: boolean;
+  /** True until the selected conversation reports trustworthy current-turn context. */
+  readonly sending: boolean;
   readonly error?: string;
   readonly bootstrap?: Bootstrap;
   readonly detail?: ThreadDetail;
@@ -43,31 +75,35 @@ interface ConsoleState {
   readonly showOffline: boolean;
   readonly showArchived: boolean;
   readonly railExpanded: boolean;
-  readonly pendingFiles: readonly File[];
+  /** Authored overrides only. Empty means follow the selected agent default. */
   readonly runtime: string;
   readonly model: string;
   readonly effort: string;
   login(token: string): Promise<void>;
   logout(): void;
   retry(): Promise<void>;
-  selectAgent(agentId: string): void;
-  selectThread(threadId: string): void;
+  selectAgent(agentId: string): Promise<void>;
+  selectThread(threadId: string): Promise<void>;
   createThread(): Promise<void>;
   patchAgent(agentId: string, pinned: boolean): Promise<void>;
   renameThread(threadId: string, title: string): Promise<void>;
   archiveThread(threadId: string, archived: boolean): Promise<void>;
   deleteThread(threadId: string): Promise<void>;
   cancel(): Promise<void>;
-  answerAsk(answers: Readonly<Record<string, readonly string[]>>): Promise<void>;
-  send(input: Omit<StartTurnInput, "attachments" | "quote">, quote?: Quote): Promise<void>;
+  answerAsk(answers: Readonly<Record<string, readonly string[]>>): Promise<boolean>;
+  send(
+    input: Omit<StartTurnInput, "attachments" | "quote">,
+    attachments: readonly Attachment[],
+    quote?: Quote,
+  ): Promise<boolean>;
+  reportError(message: string): void;
   setShowOffline(value: boolean): void;
   setShowArchived(value: boolean): void;
   setRailExpanded(value: boolean): void;
-  addFiles(files: FileList | readonly File[]): void;
-  removeFile(index: number): void;
   setRuntime(value: string): void;
   setModel(value: string): void;
   setEffort(value: string): void;
+  registerNavigationBlocker(blocker: ConversationNavigationBlocker): () => void;
 }
 
 const ConsoleContext = createContext<ConsoleState | undefined>(undefined);
@@ -79,26 +115,165 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string>();
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
-  const [detail, setDetail] = useState<ThreadDetail>();
-  const [selectedAgentId, setSelectedAgentId] = useState<string>();
-  const [selectedThreadId, setSelectedThreadId] = useState<string>();
+  const [selection, setSelection] = useState<Selection>({});
+  const [submittingThreadIds, setSubmittingThreadIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const [pendingContextThreadIds, setPendingContextThreadIds] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [showOffline, setShowOfflineState] = useState(window.localStorage.getItem(OFFLINE_KEY) === "true");
   const [showArchived, setShowArchivedState] = useState(window.localStorage.getItem(ARCHIVE_KEY) === "true");
   const [railExpanded, setRailExpandedState] = useState(window.localStorage.getItem(RAIL_KEY) === "expanded");
-  const [pendingFiles, setPendingFiles] = useState<readonly File[]>([]);
-  const [runtime, setRuntime] = useState("");
-  const [model, setModel] = useState("");
-  const [effort, setEffort] = useState("");
+  const [runOverrides, setRunOverridesState] = useState<RunOverrides>(EMPTY_RUN_OVERRIDES);
   const bootstrapRef = useRef<Bootstrap | undefined>(undefined);
-  const selectedAgentRef = useRef<string | undefined>(undefined);
-  const selectedThreadRef = useRef<string | undefined>(undefined);
+  const selectionRef = useRef<Selection>({});
+  const runOverridesRef = useRef<RunOverrides>(EMPTY_RUN_OVERRIDES);
+  const submittingThreadIdsRef = useRef<ReadonlySet<string>>(new Set());
+  const pendingContextsRef = useRef<ReadonlyMap<string, PendingContextBaseline>>(new Map());
+  const navigationBlockersRef = useRef<ReadonlySet<ConversationNavigationBlocker>>(new Set());
+  const selectionEpochRef = useRef(0);
+  const detailRequestRef = useRef(0);
+  const loadRequestRef = useRef(0);
   const refreshTimerRef = useRef<number | undefined>(undefined);
-  const pendingFilesRef = useRef<readonly File[]>(pendingFiles);
 
   bootstrapRef.current = bootstrap;
-  selectedAgentRef.current = selectedAgentId;
-  selectedThreadRef.current = selectedThreadId;
-  pendingFilesRef.current = pendingFiles;
+  selectionRef.current = selection;
+  runOverridesRef.current = runOverrides;
+
+  const commitSelection = useCallback((next: Selection) => {
+    selectionRef.current = next;
+    setSelection(next);
+  }, []);
+
+  const commitRunOverrides = useCallback((next: RunOverrides) => {
+    runOverridesRef.current = next;
+    setRunOverridesState(next);
+  }, []);
+
+  const clearRunOverrides = useCallback(() => {
+    commitRunOverrides(EMPTY_RUN_OVERRIDES);
+  }, [commitRunOverrides]);
+
+  const beginSelection = useCallback((
+    agentId: string | undefined,
+    threadId: string | undefined,
+  ): number => {
+    if (selectionRef.current.agentId !== agentId) clearRunOverrides();
+    const epoch = selectionEpochRef.current + 1;
+    selectionEpochRef.current = epoch;
+    detailRequestRef.current += 1;
+    commitSelection(selectionIdentity(agentId, threadId));
+    updateThreadUrl(threadId);
+    return epoch;
+  }, [clearRunOverrides, commitSelection]);
+
+  const reportError = useCallback((message: string) => {
+    setError(message);
+  }, []);
+
+  const setSubmitting = useCallback((threadId: string, value: boolean) => {
+    const next = new Set(submittingThreadIdsRef.current);
+    if (value) next.add(threadId);
+    else next.delete(threadId);
+    submittingThreadIdsRef.current = next;
+    setSubmittingThreadIds(next);
+  }, []);
+
+  const markContextPending = useCallback((threadId: string, detail: ThreadDetail) => {
+    const latestAssistant = detail.messages.findLast((message) => message.role === "assistant");
+    const turnId = detail.thread.activeTurnId ?? detail.thread.lastTurnId;
+    const next = new Map(pendingContextsRef.current);
+    next.set(threadId, {
+      ...(turnId === undefined ? {} : { turnId }),
+      ...(latestAssistant === undefined ? {} : { assistantMessageId: latestAssistant.id }),
+    });
+    pendingContextsRef.current = next;
+    setPendingContextThreadIds(new Set(next.keys()));
+  }, []);
+
+  const clearContextPending = useCallback((threadId: string) => {
+    if (!pendingContextsRef.current.has(threadId)) return;
+    const next = new Map(pendingContextsRef.current);
+    next.delete(threadId);
+    pendingContextsRef.current = next;
+    setPendingContextThreadIds(new Set(next.keys()));
+  }, []);
+
+  const reconcileContextPending = useCallback((detail: ThreadDetail) => {
+    const baseline = pendingContextsRef.current.get(detail.thread.id);
+    if (
+      baseline !== undefined
+      && (
+        hasTrustworthyCurrentContext(detail, baseline)
+        || (
+          isTerminalTurnStatus(detail.thread.status)
+          && hasCurrentTurnAdvanced(detail, baseline)
+        )
+      )
+    ) {
+      clearContextPending(detail.thread.id);
+    }
+  }, [clearContextPending]);
+
+  const registerNavigationBlocker = useCallback((blocker: ConversationNavigationBlocker) => {
+    const next = new Set(navigationBlockersRef.current);
+    next.add(blocker);
+    navigationBlockersRef.current = next;
+    return () => {
+      if (!navigationBlockersRef.current.has(blocker)) return;
+      const remaining = new Set(navigationBlockersRef.current);
+      remaining.delete(blocker);
+      navigationBlockersRef.current = remaining;
+    };
+  }, []);
+
+  const confirmNavigation = useCallback(async (): Promise<boolean> => {
+    const blockers = [...navigationBlockersRef.current].filter((blocker) => blocker.hasPending());
+    const hasPendingAsk = matchingDetail(selectionRef.current)?.thread.pendingAsk !== undefined;
+    if (blockers.length === 0 && !hasPendingAsk) return true;
+    if (!window.confirm("Discard the unsent message or pending response input for this conversation?")) {
+      return false;
+    }
+    try {
+      for (const blocker of blockers) await blocker.discard();
+      return true;
+    } catch (cause) {
+      reportError(errorMessage(cause, "Could not discard the current draft."));
+      return false;
+    }
+  }, [reportError]);
+
+  const requestDetail = useCallback(async (
+    threadId: string,
+    epoch: number,
+  ): Promise<void> => {
+    const requestId = detailRequestRef.current + 1;
+    detailRequestRef.current = requestId;
+    try {
+      const nextDetail = await api.thread(threadId);
+      const current = selectionRef.current;
+      if (
+        detailRequestRef.current !== requestId
+        || selectionEpochRef.current !== epoch
+        || current.threadId !== threadId
+        || nextDetail.thread.id !== threadId
+        || nextDetail.thread.agentId !== current.agentId
+      ) {
+        return;
+      }
+      reconcileContextPending(nextDetail);
+      commitSelection({ ...current, detail: nextDetail });
+    } catch (cause) {
+      if (
+        detailRequestRef.current === requestId
+        && selectionEpochRef.current === epoch
+        && selectionRef.current.threadId === threadId
+      ) {
+        reportError(errorMessage(cause, "Could not load the conversation."));
+      }
+    }
+  }, [commitSelection, reconcileContextPending, reportError]);
 
   const chooseSelection = useCallback((next: Bootstrap): {
     readonly agentId?: string;
@@ -106,9 +281,9 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   } => {
     const requested = new URLSearchParams(window.location.search).get("thread") ?? undefined;
     const existingThread = next.threads.find((thread) =>
-      thread.id === (requested ?? selectedThreadRef.current)
+      thread.id === (requested ?? selectionRef.current.threadId)
     );
-    const currentAgent = next.agents.find((agent) => agent.id === selectedAgentRef.current);
+    const currentAgent = next.agents.find((agent) => agent.id === selectionRef.current.agentId);
     const agentId = existingThread?.agentId
       ?? currentAgent?.id
       ?? next.agents.find((agent) => agent.online || agent.pinned)?.id
@@ -120,7 +295,12 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     return { ...(agentId === undefined ? {} : { agentId }), ...(threadId === undefined ? {} : { threadId }) };
   }, []);
 
-  const load = useCallback(async (initial = false): Promise<void> => {
+  const load = useCallback(async (
+    initial = false,
+    errorScope?: SelectionScope,
+  ): Promise<void> => {
+    const loadRequest = loadRequestRef.current + 1;
+    loadRequestRef.current = loadRequest;
     if (!initial) setRefreshing(true);
     try {
       let next: Bootstrap;
@@ -144,46 +324,72 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
         next = await api.bootstrap();
         setTokenAuthentication(readToken().length > 0);
       }
+      if (loadRequestRef.current !== loadRequest) return;
+      if (initial) setError(undefined);
       for (const payload of responseNotifications(bootstrapRef.current?.threads ?? [], next)) {
         void showBackgroundNotification(payload);
       }
-      const selection = chooseSelection(next);
-      const nextDetail = selection.threadId === undefined
-        ? undefined
-        : await api.thread(selection.threadId);
+      const nextIdentity = chooseSelection(next);
+      const current = selectionRef.current;
+      const nextAgent = next.agents.find((agent) => agent.id === nextIdentity.agentId);
+      const reconciledOverrides = current.agentId === nextIdentity.agentId
+        ? sanitizeRunOverrides(runOverridesRef.current, nextAgent)
+        : EMPTY_RUN_OVERRIDES;
+      if (!sameRunOverrides(runOverridesRef.current, reconciledOverrides)) {
+        commitRunOverrides(reconciledOverrides);
+      }
       bootstrapRef.current = next;
-      selectedAgentRef.current = selection.agentId;
-      selectedThreadRef.current = selection.threadId;
       setBootstrap(next);
-      setSelectedAgentId(selection.agentId);
-      setSelectedThreadId(selection.threadId);
-      setDetail(nextDetail);
-      const browserUrl = new URL(window.location.href);
-      if (selection.threadId === undefined) browserUrl.searchParams.delete("thread");
-      else browserUrl.searchParams.set("thread", selection.threadId);
-      history.replaceState(null, "", browserUrl);
-      setRuntime(next.agents.find((agent) => agent.id === selection.agentId)?.defaults?.runtime ?? "");
-      setModel((current) => current || next.agents.find((agent) => agent.id === selection.agentId)?.defaults?.model || "");
-      setEffort((current) => current || next.agents.find((agent) => agent.id === selection.agentId)?.defaults?.effort || "");
-      setError(undefined);
+      const identityChanged =
+        current.agentId !== nextIdentity.agentId
+        || current.threadId !== nextIdentity.threadId;
+      const epoch = identityChanged
+        ? beginSelection(nextIdentity.agentId, nextIdentity.threadId)
+        : selectionEpochRef.current;
+      updateThreadUrl(nextIdentity.threadId);
+      if (nextIdentity.threadId === undefined) {
+        if (!identityChanged && current.detail !== undefined) {
+          commitSelection(selectionIdentity(nextIdentity.agentId, undefined));
+        }
+      } else {
+        await requestDetail(nextIdentity.threadId, epoch);
+      }
     } catch (loadError) {
+      if (loadRequestRef.current !== loadRequest) return;
       if (loadError instanceof ApiError && loadError.status === 401) {
         const attemptedTokenAuthentication = readToken().length > 0;
         saveToken("");
         setAuthenticated(false);
         setTokenAuthentication(true);
         setBootstrap(undefined);
-        setDetail(undefined);
+        beginSelection(undefined, undefined);
         setError(attemptedTokenAuthentication ? loadError.message : undefined);
-      } else {
-        setError(loadError instanceof Error ? loadError.message : "Could not load the console.");
+      } else if (
+        errorScope === undefined
+        || selectionMatches(
+          errorScope.epoch,
+          selectionEpochRef.current,
+          errorScope.threadId,
+          errorScope.agentId,
+          selectionRef.current,
+        )
+      ) {
+        setError(errorMessage(loadError, "Could not load the console."));
       }
       throw loadError;
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (loadRequestRef.current === loadRequest) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
-  }, [chooseSelection]);
+  }, [
+    beginSelection,
+    chooseSelection,
+    commitRunOverrides,
+    commitSelection,
+    requestDetail,
+  ]);
 
   useEffect(() => {
     if (!authenticated) return;
@@ -248,142 +454,303 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   }, []);
 
   const logout = useCallback(() => {
-    if (
-      pendingFilesRef.current.length > 0
-      && !window.confirm("Discard the files staged for this conversation?")
-    ) {
-      return;
-    }
     saveToken("");
     setAuthenticated(false);
     setBootstrap(undefined);
-    setDetail(undefined);
+    beginSelection(undefined, undefined);
+    clearRunOverrides();
+    submittingThreadIdsRef.current = new Set();
+    pendingContextsRef.current = new Map();
+    setSubmittingThreadIds(new Set());
+    setPendingContextThreadIds(new Set());
     setError(undefined);
-  }, []);
+  }, [beginSelection, clearRunOverrides]);
 
-  const selectThread = useCallback((threadId: string) => {
+  const selectThread = useCallback(async (threadId: string) => {
     const thread = bootstrapRef.current?.threads.find((candidate) => candidate.id === threadId);
     if (thread === undefined) return;
-    if (
-      selectedThreadRef.current !== threadId
-      && pendingFilesRef.current.length > 0
-      && !window.confirm("Discard the files staged for this conversation?")
-    ) {
-      return;
-    }
-    selectedAgentRef.current = thread.agentId;
-    selectedThreadRef.current = threadId;
-    setSelectedAgentId(thread.agentId);
-    setSelectedThreadId(threadId);
-    setPendingFiles([]);
-    const url = new URL(window.location.href);
-    url.searchParams.set("thread", threadId);
-    history.replaceState(null, "", url);
-    void api.thread(threadId).then(setDetail, (cause: unknown) => {
-      setError(cause instanceof Error ? cause.message : "Could not load the conversation.");
-    });
-  }, []);
+    const current = selectionRef.current;
+    if (current.threadId === threadId && current.agentId === thread.agentId) return;
+    if (!await confirmNavigation()) return;
+    setError(undefined);
+    const epoch = beginSelection(thread.agentId, threadId);
+    await requestDetail(threadId, epoch);
+  }, [beginSelection, confirmNavigation, requestDetail]);
 
-  const selectAgent = useCallback((agentId: string) => {
-    if (
-      selectedAgentRef.current !== agentId
-      && pendingFilesRef.current.length > 0
-      && !window.confirm("Discard the files staged for this conversation?")
-    ) {
-      return;
-    }
-    selectedAgentRef.current = agentId;
-    setSelectedAgentId(agentId);
-    const thread = bootstrapRef.current?.threads.find((candidate) =>
+  const selectAgent = useCallback(async (agentId: string) => {
+    const current = selectionRef.current;
+    const currentThread = bootstrapRef.current?.threads.find((candidate) =>
+      candidate.id === current.threadId && candidate.agentId === agentId
+    );
+    const thread = currentThread ?? bootstrapRef.current?.threads.find((candidate) =>
       candidate.agentId === agentId && candidate.archivedAt === undefined
     );
-    if (thread !== undefined) selectThread(thread.id);
-    else {
-      selectedThreadRef.current = undefined;
-      setSelectedThreadId(undefined);
-      setDetail(undefined);
-      setPendingFiles([]);
-      const url = new URL(window.location.href);
-      url.searchParams.delete("thread");
-      history.replaceState(null, "", url);
+    if (
+      current.agentId === agentId
+      && current.threadId === thread?.id
+    ) {
+      return;
     }
-    const agent = bootstrapRef.current?.agents.find((candidate) => candidate.id === agentId);
-    setRuntime(agent?.defaults?.runtime ?? "");
-    setModel(agent?.defaults?.model ?? "");
-    setEffort(agent?.defaults?.effort ?? "");
-  }, [selectThread]);
+    if (!await confirmNavigation()) return;
+    setError(undefined);
+    if (thread !== undefined) {
+      const epoch = beginSelection(agentId, thread.id);
+      await requestDetail(thread.id, epoch);
+    } else {
+      beginSelection(agentId, undefined);
+    }
+  }, [beginSelection, confirmNavigation, requestDetail]);
 
   const createThread = useCallback(async () => {
-    const agentId = selectedAgentRef.current;
-    if (agentId === undefined) throw new Error("Select an agent first.");
-    const thread = await api.createThread(agentId);
-    await load();
-    selectThread(thread.id);
-  }, [load, selectThread]);
+    const agentId = selectionRef.current.agentId;
+    if (agentId === undefined) {
+      reportError("Select an agent first.");
+      return;
+    }
+    if (!await confirmNavigation()) return;
+    setError(undefined);
+    try {
+      const thread = await api.createThread(agentId);
+      await load();
+      const catalogThread = bootstrapRef.current?.threads.find((candidate) =>
+        candidate.id === thread.id && candidate.agentId === agentId
+      );
+      if (catalogThread === undefined) {
+        reportError("The new conversation was created but is not available yet.");
+        return;
+      }
+      const epoch = beginSelection(agentId, thread.id);
+      await requestDetail(thread.id, epoch);
+    } catch (cause) {
+      reportError(errorMessage(cause, "Could not create the conversation."));
+    }
+  }, [beginSelection, confirmNavigation, load, reportError, requestDetail]);
 
   const patchAgent = useCallback(async (agentId: string, pinned: boolean) => {
-    await api.patchAgent(agentId, pinned);
-    await load();
-  }, [load]);
+    setError(undefined);
+    try {
+      await api.patchAgent(agentId, pinned);
+      await load();
+    } catch (cause) {
+      reportError(errorMessage(cause, "Could not update the agent."));
+    }
+  }, [load, reportError]);
 
   const renameThread = useCallback(async (threadId: string, title: string) => {
-    await api.patchThread(threadId, { title });
-    await load();
-  }, [load]);
+    setError(undefined);
+    try {
+      await api.patchThread(threadId, { title });
+      await load();
+    } catch (cause) {
+      reportError(errorMessage(cause, "Could not rename the conversation."));
+    }
+  }, [load, reportError]);
 
   const archiveThread = useCallback(async (threadId: string, archived: boolean) => {
-    await api.patchThread(threadId, { archived });
-    await load();
-  }, [load]);
+    setError(undefined);
+    try {
+      await api.patchThread(threadId, { archived });
+      await load();
+    } catch (cause) {
+      reportError(errorMessage(
+        cause,
+        archived ? "Could not archive the conversation." : "Could not restore the conversation.",
+      ));
+    }
+  }, [load, reportError]);
 
   const deleteThread = useCallback(async (threadId: string) => {
-    await api.deleteThread(threadId);
-    selectedThreadRef.current = undefined;
-    await load();
-  }, [load]);
+    setError(undefined);
+    try {
+      await api.deleteThread(threadId);
+      if (selectionRef.current.threadId === threadId) {
+        beginSelection(selectionRef.current.agentId, undefined);
+      }
+      await load();
+    } catch (cause) {
+      reportError(errorMessage(cause, "Could not delete the conversation."));
+    }
+  }, [beginSelection, load, reportError]);
 
   const cancel = useCallback(async () => {
-    const threadId = selectedThreadRef.current;
-    if (threadId === undefined) return;
-    setDetail(await api.cancel(threadId));
-    await load();
-  }, [load]);
+    const { agentId, threadId } = selectionRef.current;
+    if (agentId === undefined || threadId === undefined) return;
+    const epoch = selectionEpochRef.current;
+    setError(undefined);
+    try {
+      const cancelled = await api.cancel(threadId);
+      const current = selectionRef.current;
+      if (
+        selectionEpochRef.current === epoch
+        && current.threadId === threadId
+        && cancelled.thread.id === threadId
+        && cancelled.thread.agentId === current.agentId
+      ) {
+        commitSelection({ ...current, detail: cancelled });
+      }
+      await load(false, { epoch, agentId, threadId });
+    } catch (cause) {
+      if (selectionMatches(epoch, selectionEpochRef.current, threadId, agentId, selectionRef.current)) {
+        reportError(errorMessage(cause, "Could not stop the response."));
+      }
+    }
+  }, [commitSelection, load, reportError]);
 
   const answerAsk = useCallback(async (answers: Readonly<Record<string, readonly string[]>>) => {
-    const thread = detail?.thread;
-    if (thread?.pendingAsk === undefined) return;
-    await api.answerAsk(thread.id, thread.pendingAsk.interactionId, answers);
-    await load();
-  }, [detail?.thread, load]);
+    const current = selectionRef.current;
+    const thread = matchingDetail(current)?.thread;
+    if (thread?.pendingAsk === undefined) return false;
+    const epoch = selectionEpochRef.current;
+    const agentId = thread.agentId;
+    const interactionId = thread.pendingAsk.interactionId;
+    setError(undefined);
+    try {
+      await api.answerAsk(thread.id, interactionId, answers);
+      await load(false, { epoch, agentId, threadId: thread.id });
+      return true;
+    } catch (cause) {
+      if (selectionMatches(epoch, selectionEpochRef.current, thread.id, agentId, selectionRef.current)) {
+        reportError(errorMessage(cause, "Could not submit the requested input."));
+      }
+      return false;
+    }
+  }, [load, reportError]);
 
   const send = useCallback(async (
     input: Omit<StartTurnInput, "attachments" | "quote">,
+    attachments: readonly Attachment[],
     quote?: Quote,
-  ) => {
-    const thread = detail?.thread;
-    if (thread === undefined) throw new Error("Create a conversation first.");
-    if (thread.status === "running") {
-      if (pendingFiles.length > 0) throw new Error("Attachments cannot be added while steering a run.");
-      await api.liveInput(thread.id, input.text);
-      return;
+  ): Promise<boolean> => {
+    const current = selectionRef.current;
+    const thread = matchingDetail(current)?.thread;
+    const catalogThread = bootstrapRef.current?.threads.find((candidate) =>
+      candidate.id === current.threadId && candidate.agentId === current.agentId
+    );
+    if (
+      thread === undefined
+      || catalogThread === undefined
+      || thread.id !== catalogThread.id
+      || thread.agentId !== catalogThread.agentId
+    ) {
+      reportError("Wait for the selected conversation to finish loading.");
+      return false;
     }
-    const attachments = await Promise.all(pendingFiles.map(fileAttachment));
-    setPendingFiles([]);
+    const epoch = selectionEpochRef.current;
+    const agent = bootstrapRef.current?.agents.find((candidate) => candidate.id === thread.agentId);
+    const safeOverrides = sanitizeRunOverrides({
+      runtime: input.runtime ?? "",
+      model: input.model ?? "",
+      effort: input.effort ?? "",
+    }, agent);
+    if (!sameRunOverrides(runOverridesRef.current, safeOverrides)) {
+      commitRunOverrides(safeOverrides);
+    }
+    setError(undefined);
+    setSubmitting(thread.id, true);
+    if (thread.status === "running") {
+      if (attachments.length > 0) {
+        reportError("Attachments cannot be added while steering a run.");
+        setSubmitting(thread.id, false);
+        return false;
+      }
+      try {
+        await api.liveInput(thread.id, input.text);
+        return true;
+      } catch (cause) {
+        if (selectionMatches(
+          epoch,
+          selectionEpochRef.current,
+          thread.id,
+          thread.agentId,
+          selectionRef.current,
+        )) {
+          reportError(errorMessage(cause, "Could not send live input."));
+        }
+        return false;
+      } finally {
+        setSubmitting(thread.id, false);
+      }
+    }
+    markContextPending(thread.id, current.detail!);
+    detailRequestRef.current += 1;
+    let streamError: string | undefined;
     try {
       await streamTurn(thread.id, {
-        ...input,
+        text: input.text,
+        ...(safeOverrides.runtime ? { runtime: safeOverrides.runtime } : {}),
+        ...(safeOverrides.model ? { model: safeOverrides.model } : {}),
+        ...(safeOverrides.effort ? { effort: safeOverrides.effort } : {}),
         ...(attachments.length === 0 ? {} : { attachments }),
         ...(quote === undefined ? {} : { quote: { ...quote, conversationId: thread.operatorConversationId ?? `web:${thread.id}` } }),
       }, (frame) => {
-        setDetail(frame.detail);
-        if (frame.type === "error") setError(frame.error?.message ?? "The agent run failed.");
+        if (frame.type === "error") {
+          streamError = frame.error?.message ?? "The agent run failed.";
+        }
+        const frameMatchesThread =
+          frame.detail.thread.id === thread.id
+          && frame.detail.thread.agentId === thread.agentId;
+        if (frameMatchesThread) {
+          reconcileContextPending(frame.detail);
+          const baseline = pendingContextsRef.current.get(thread.id);
+          if (
+            frame.type !== "state"
+            || (
+              baseline !== undefined
+              && isTerminalTurnStatus(frame.detail.thread.status)
+              && hasCurrentTurnAdvanced(frame.detail, baseline)
+            )
+          ) {
+            clearContextPending(thread.id);
+          }
+        }
+        const selected = selectionRef.current;
+        if (
+          !selectionMatches(
+            epoch,
+            selectionEpochRef.current,
+            thread.id,
+            thread.agentId,
+            selected,
+          )
+          || !frameMatchesThread
+        ) {
+          return;
+        }
+        commitSelection({ ...selected, detail: frame.detail });
+        if (streamError !== undefined) reportError(streamError);
       });
-    } catch (sendError) {
-      setPendingFiles((current) => current.length > 0 ? current : pendingFiles);
-      throw sendError;
+    } catch (cause) {
+      clearContextPending(thread.id);
+      if (selectionMatches(
+        epoch,
+        selectionEpochRef.current,
+        thread.id,
+        thread.agentId,
+        selectionRef.current,
+      )) {
+        reportError(errorMessage(cause, "Could not send the message."));
+      }
+      return false;
+    } finally {
+      setSubmitting(thread.id, false);
     }
-    await load();
-  }, [detail?.thread, load, pendingFiles]);
+    try {
+      await load(false, { epoch, agentId: thread.agentId, threadId: thread.id });
+    } catch {
+      // load() already surfaced the refresh failure; the submitted turn still
+      // completed and must not be duplicated by restoring the composer.
+    }
+    return streamError === undefined;
+  }, [
+    clearContextPending,
+    commitRunOverrides,
+    commitSelection,
+    load,
+    markContextPending,
+    reconcileContextPending,
+    reportError,
+    setSubmitting,
+  ]);
 
   const setShowOffline = useCallback((value: boolean) => {
     window.localStorage.setItem(OFFLINE_KEY, String(value));
@@ -397,28 +764,28 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     window.localStorage.setItem(RAIL_KEY, value ? "expanded" : "collapsed");
     setRailExpandedState(value);
   }, []);
-  const addFiles = useCallback((files: FileList | readonly File[]) => {
-    const additions = Array.from(files);
-    const invalid = additions.find((file) => file.size > 512 * 1_024);
-    if (invalid !== undefined) {
-      setError(`${invalid.name} exceeds the 512 KiB inline attachment limit.`);
-      return;
-    }
-    setPendingFiles((current) => {
-      const combined = [...current, ...additions].slice(0, 3);
-      if (combined.reduce((sum, file) => sum + file.size, 0) > 700 * 1_024) {
-        setError("Attachments exceed the safe inline request budget.");
-        return current;
-      }
-      return combined;
+  const setRuntime = useCallback((value: string) => {
+    commitRunOverrides({
+      ...runOverridesRef.current,
+      runtime: value,
+      ...(value ? {} : { model: "", effort: "" }),
     });
-  }, []);
-  const removeFile = useCallback((index: number) => {
-    setPendingFiles((files) => files.filter((_file, candidate) => candidate !== index));
-  }, []);
+  }, [commitRunOverrides]);
+  const setModel = useCallback((value: string) => {
+    commitRunOverrides({
+      ...runOverridesRef.current,
+      model: value,
+      ...(value ? {} : { runtime: "", effort: "" }),
+    });
+  }, [commitRunOverrides]);
+  const setEffort = useCallback((value: string) => {
+    commitRunOverrides({ ...runOverridesRef.current, effort: value });
+  }, [commitRunOverrides]);
 
   const agents = bootstrap?.agents ?? [];
   const threads = bootstrap?.threads ?? [];
+  const selectedAgentId = selection.agentId;
+  const selectedThreadId = selection.threadId;
   const visibleAgents = agents.filter((agent) => showOffline || agent.online || agent.pinned);
   const hiddenOfflineCount = agents.filter((agent) => !agent.online && !agent.pinned).length;
   const visibleThreads = threads.filter((thread) =>
@@ -426,13 +793,30 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     && (showArchived ? thread.archivedAt !== undefined : thread.archivedAt === undefined)
   );
   const selectedAgent = agents.find((agent) => agent.id === selectedAgentId);
-  const selectedThread = threads.find((thread) => thread.id === selectedThreadId);
+  const selectedThread = threads.find((thread) =>
+    thread.id === selectedThreadId && thread.agentId === selectedAgentId
+  );
+  const detail = matchingDetail(selection);
+  const submitting =
+    selectedThreadId !== undefined && submittingThreadIds.has(selectedThreadId);
+  const sending =
+    selectedThreadId !== undefined && pendingContextThreadIds.has(selectedThreadId);
+  const { runtime, model, effort } = runOverrides;
+  const retry = useCallback(async () => {
+    try {
+      await load();
+    } catch {
+      // load() owns the user-visible error.
+    }
+  }, [load]);
 
   const value = useMemo<ConsoleState>(() => ({
     authenticated,
     tokenAuthentication,
     loading,
     refreshing,
+    submitting,
+    sending,
     ...(error === undefined ? {} : { error }),
     ...(bootstrap === undefined ? {} : { bootstrap }),
     ...(detail === undefined ? {} : { detail }),
@@ -446,13 +830,12 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     showOffline,
     showArchived,
     railExpanded,
-    pendingFiles,
     runtime,
     model,
     effort,
     login,
     logout,
-    retry: () => load(),
+    retry,
     selectAgent,
     selectThread,
     createThread,
@@ -463,22 +846,22 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     cancel,
     answerAsk,
     send,
+    reportError,
     setShowOffline,
     setShowArchived,
     setRailExpanded,
-    addFiles,
-    removeFile,
     setRuntime,
     setModel,
     setEffort,
+    registerNavigationBlocker,
   }), [
-    authenticated, tokenAuthentication, loading, refreshing, error, bootstrap, detail, selectedAgentId,
+    authenticated, tokenAuthentication, loading, refreshing, submitting, sending, error, bootstrap, detail, selectedAgentId,
     selectedThreadId, selectedAgent, selectedThread, visibleAgents, visibleThreads,
-    hiddenOfflineCount, showOffline, showArchived, railExpanded, pendingFiles,
-    runtime, model, effort, login, logout, load, selectAgent, selectThread,
+    hiddenOfflineCount, showOffline, showArchived, railExpanded,
+    runtime, model, effort, login, logout, retry, selectAgent, selectThread,
     createThread, patchAgent, renameThread, archiveThread, deleteThread, cancel,
-    answerAsk, send, setShowOffline, setShowArchived, setRailExpanded, addFiles,
-    removeFile,
+    answerAsk, send, reportError, setShowOffline, setShowArchived, setRailExpanded,
+    setRuntime, setModel, setEffort, registerNavigationBlocker,
   ]);
 
   return <ConsoleContext.Provider value={value}>{children}</ConsoleContext.Provider>;
@@ -490,18 +873,133 @@ export function useConsole(): ConsoleState {
   return value;
 }
 
-async function fileAttachment(file: File): Promise<Attachment> {
-  const url = await new Promise<string>((resolveValue, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolveValue(String(reader.result));
-    reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name}.`));
-    reader.readAsDataURL(file);
-  });
+function matchingDetail(selection: Selection): ThreadDetail | undefined {
+  const detail = selection.detail;
+  return detail !== undefined
+    && detail.thread.id === selection.threadId
+    && detail.thread.agentId === selection.agentId
+    ? detail
+    : undefined;
+}
+
+function selectionIdentity(
+  agentId: string | undefined,
+  threadId: string | undefined,
+): Selection {
   return {
-    id: globalThis.crypto?.randomUUID?.() ?? `attachment-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    name: file.name,
-    mediaType: file.type || "application/octet-stream",
-    sizeBytes: file.size,
-    url,
+    ...(agentId === undefined ? {} : { agentId }),
+    ...(threadId === undefined ? {} : { threadId }),
   };
+}
+
+function updateThreadUrl(threadId: string | undefined): void {
+  const browserUrl = new URL(window.location.href);
+  if (threadId === undefined) browserUrl.searchParams.delete("thread");
+  else browserUrl.searchParams.set("thread", threadId);
+  history.replaceState(null, "", browserUrl);
+}
+
+function errorMessage(cause: unknown, fallback: string): string {
+  return cause instanceof Error && cause.message.trim() ? cause.message : fallback;
+}
+
+const EMPTY_RUN_OVERRIDES: RunOverrides = {
+  runtime: "",
+  model: "",
+  effort: "",
+};
+
+function sanitizeRunOverrides(
+  overrides: RunOverrides,
+  agent: Agent | undefined,
+): RunOverrides {
+  if (agent?.capabilities.runtimeOverrides !== true) return EMPTY_RUN_OVERRIDES;
+
+  const authoredRoute = overrides.runtime.length > 0 || overrides.model.length > 0;
+  if (
+    (overrides.runtime.length > 0) !== (overrides.model.length > 0)
+  ) {
+    return EMPTY_RUN_OVERRIDES;
+  }
+
+  const runtime = authoredRoute ? overrides.runtime : agent.defaults?.runtime;
+  const model = authoredRoute ? overrides.model : agent.defaults?.model;
+  const selectedModel = runtime === undefined || model === undefined
+    ? undefined
+    : agent.models?.find((candidate) =>
+        candidate.runtime === runtime && candidate.id === model
+      );
+
+  if (authoredRoute && selectedModel === undefined) return EMPTY_RUN_OVERRIDES;
+  if (
+    overrides.effort
+    && !selectedModel?.efforts?.includes(overrides.effort)
+  ) {
+    return { ...overrides, effort: "" };
+  }
+  return overrides;
+}
+
+function sameRunOverrides(left: RunOverrides, right: RunOverrides): boolean {
+  return (
+    left.runtime === right.runtime
+    && left.model === right.model
+    && left.effort === right.effort
+  );
+}
+
+function selectionMatches(
+  expectedEpoch: number,
+  currentEpoch: number,
+  threadId: string,
+  agentId: string,
+  selection: Selection,
+): boolean {
+  return (
+    expectedEpoch === currentEpoch
+    && selection.threadId === threadId
+    && selection.agentId === agentId
+  );
+}
+
+function hasTrustworthyCurrentContext(
+  detail: ThreadDetail,
+  baseline: PendingContextBaseline,
+): boolean {
+  const latestAssistant = detail.messages.findLast((message) => message.role === "assistant");
+  if (latestAssistant?.telemetry?.contextUsed === undefined) return false;
+
+  const currentTurnId = detail.thread.activeTurnId ?? detail.thread.lastTurnId;
+  if (currentTurnId !== undefined) {
+    if (currentTurnId === baseline.turnId) return false;
+    if (
+      latestAssistant.turnId !== undefined
+      && latestAssistant.turnId !== currentTurnId
+    ) {
+      return false;
+    }
+    return latestAssistant.id !== baseline.assistantMessageId;
+  }
+  return latestAssistant.id !== baseline.assistantMessageId;
+}
+
+function hasCurrentTurnAdvanced(
+  detail: ThreadDetail,
+  baseline: PendingContextBaseline,
+): boolean {
+  const currentTurnId = detail.thread.activeTurnId ?? detail.thread.lastTurnId;
+  if (currentTurnId !== undefined || baseline.turnId !== undefined) {
+    return currentTurnId !== baseline.turnId;
+  }
+  const latestAssistant = detail.messages.findLast((message) => message.role === "assistant");
+  return latestAssistant?.id !== baseline.assistantMessageId;
+}
+
+function isTerminalTurnStatus(status: Thread["status"]): boolean {
+  return (
+    status === "complete"
+    || status === "failed"
+    || status === "cancelled"
+    || status === "interrupted"
+  );
 }

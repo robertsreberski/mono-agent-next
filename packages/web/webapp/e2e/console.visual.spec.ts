@@ -31,15 +31,18 @@ test.describe("assistant-ui console visual contract", () => {
     await expect(page).toHaveScreenshot("ask-quote-attachment.png");
   });
 
-  test("context and run settings stay compact", async ({ page }, testInfo) => {
+  test("context and run settings stay compact and mutually exclusive", async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== "chromium-desktop");
     await openFixtureConsole(page, "settled");
 
-    await page.locator('summary[aria-label="Context usage"]').click();
+    await page.getByRole("button", { name: "Context usage" }).click();
+    await expect(page.getByText("61,337", { exact: true })).toBeVisible();
+    await expect(page).toHaveScreenshot("context-open.png");
+
     await openRunSettings(page);
-    await expect(page.getByText("8,455", { exact: true })).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "Context usage" })).toBeHidden();
     await expect(page.getByLabel("Model")).toBeVisible();
-    await expect(page).toHaveScreenshot("context-and-run-settings-open.png");
+    await expect(page).toHaveScreenshot("run-settings-open.png");
   });
 
   test("mobile agent drawer", async ({ page }, testInfo) => {

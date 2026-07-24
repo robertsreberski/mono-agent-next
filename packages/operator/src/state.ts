@@ -170,9 +170,11 @@ function mergeUsage(
         : { contextWindow: previous.contextWindow }),
     ...(next.contextUsed !== undefined
       ? { contextUsed: next.contextUsed }
-      : previous?.contextUsed === undefined
+      : next.compacted
         ? {}
-        : { contextUsed: previous.contextUsed }),
+        : previous?.contextUsed === undefined
+          ? {}
+          : { contextUsed: previous.contextUsed }),
     compacted: previous?.compacted === true || next.compacted,
     sessionEvicted: previous?.sessionEvicted === true || next.sessionEvicted,
   };

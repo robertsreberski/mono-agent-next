@@ -131,7 +131,7 @@ The browser-facing API is versioned separately from the agent operator wire:
 | `GET /api/v1/threads/:id` | Read durable messages and current turn state. |
 | `PATCH /api/v1/threads/:id` | Rename, archive, or restore one conversation. |
 | `DELETE /api/v1/threads/:id` | Delete one archived conversation or dismiss one proactive import. |
-| `POST /api/v1/threads/:id/turns` | Start a text turn and stream web-owned state snapshots as NDJSON. |
+| `POST /api/v1/threads/:id/turns` | Start a text and/or attachment turn and stream web-owned state snapshots as NDJSON. |
 | `POST /api/v1/threads/:id/cancel` | Explicitly cancel that conversation's active turn. |
 | `POST /api/v1/threads/:id/live-input` | Steer a web-owned active turn when advertised. |
 | `POST /api/v1/threads/:id/ask` | Submit one canonical structured AskUser answer. |
@@ -151,9 +151,51 @@ keyboard-contained drawers on narrow screens. assistant-ui owns thread,
 message, quote, composer, and selection behavior. Structured progress,
 tool-call/result, and compaction events are grouped into one **Activity**
 disclosure that stays open while a response is running and collapses when the
-turn settles. Exact context telemetry and capability-gated model, effort, and
-advanced runtime overrides stay in compact controls instead of occupying the
-transcript.
+turn settles. Exact context telemetry and capability-gated atomic
+runtime/model route and effort overrides stay in compact controls instead of
+occupying the transcript.
+
+Model choices are configured routes, not independent model hints. Each choice
+atomically carries its runtime instance and runtime-owned model id together
+with any verified label, context window, and per-model effort allowlist. A
+model selection changes the whole route. The effort control contains only
+values verified for that route; if an allowlist is absent or empty, the
+browser retains the configured/default effort and does not solicit an unknown
+value. Default route and effort selections stay implicit and do not author
+request-level overrides. If the same agent publishes a refreshed catalog, any
+authored route or effort no longer advertised is cleared before another
+submission.
+
+The context control reports `contextUsed` only from the latest trustworthy
+usage snapshot for the current turn. Starting a turn hides the previous
+turn's count rather than presenting it as current. A current-turn snapshot may
+make the value available while the turn is still active, and the settled
+result normally supplies the final count and `contextWindow`. Compaction keeps
+the known window and sticky compaction marker but invalidates `contextUsed`
+until a later trustworthy usage snapshot arrives.
+
+Context, conversation actions, and run settings share one controlled popover
+layer. Opening one closes the previous panel; panels render through a portal,
+flip or clamp to the viewport, and remain above the transcript. Escape closes
+and returns focus to the trigger. An outside pointer closes without stealing
+focus from its target, and choosing a menu action closes its panel first.
+Opening mobile navigation dismisses popovers, makes background regions inert
+and hidden from accessibility APIs, traps focus in the drawer, and restores
+focus to the launcher after Escape, scrim, or close-button dismissal. Crossing
+to the desktop layout also closes the mobile modal instead of leaving hidden
+background regions inert.
+
+Switching agents or conversations while composer text, a quote, attachments,
+or AskUser input is pending asks for explicit discard confirmation. Cancelling
+keeps that input in place. Confirming resets it and releases queued attachment
+state before navigation, so hidden files cannot consume the next conversation's
+upload allowance.
+
+Queued attachments can be sent without text. An accepted send leaves the
+composer cleared. If a new-turn or live-input submission fails, the exact text,
+quote, and attachment descriptors are restored for correction or retry and the
+failure is announced as an accessible alert instead of becoming an unhandled
+or silent loss. Failed AskUser submissions keep their selected answers.
 
 ## Durable state and turn ownership
 
@@ -190,10 +232,11 @@ The runnable web product provides owner-private registry discovery, durable
 source-bound conversations, streamed turns, bounded uploads, replay-verified
 assistant-ui quotes, structured AskUser forms, live input, runtime/model/effort
 overrides, cancellation, response/proactive notifications, archived
-conversation management, and pinned offline agents. Core advertises model
-choices only from strictly validated configured routes. Explicit `cron` or
-`webhook` provenance is retained through delivery metadata and rendered on the
-new proactive conversation; it is never guessed from a conversation id.
+conversation management, and pinned offline agents. Core advertises only
+strictly validated configured runtime/model routes and their verified
+per-model effort choices. Explicit `cron` or `webhook` provenance is retained
+through delivery metadata and rendered on the new proactive conversation; it
+is never guessed from a conversation id.
 
 Remote reset, multi-user accounts, TLS termination, and OS service management
 remain outside this product. The foreground binary is independently supervised

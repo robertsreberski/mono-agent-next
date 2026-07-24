@@ -461,6 +461,12 @@ describe("runtime live boundary", () => {
     };
     const normalized = normalizeRuntimeModelValidation({
       supported: true,
+      model: {
+        id: "provider:model",
+        label: "Model",
+        efforts: ["none", "high"],
+        contextWindow: 128_000,
+      },
       capabilities,
       diagnostics: [{
         code: "ready",
@@ -470,6 +476,12 @@ describe("runtime live boundary", () => {
     });
     capabilities.attachments = true;
     expect(normalized.capabilities?.attachments).toBe(false);
+    expect(normalized.model).toEqual({
+      id: "provider:model",
+      label: "Model",
+      efforts: ["none", "high"],
+      contextWindow: 128_000,
+    });
     expect(() => normalizeRuntimeModelValidation({
       supported: true,
       capabilities: { ...capabilities, tools: "yes" },
@@ -479,6 +491,34 @@ describe("runtime live boundary", () => {
       capabilities,
       unexpected: true,
     })).toThrow(/unknown key/u);
+    expect(() => normalizeRuntimeModelValidation({
+      supported: true,
+      model: {
+        id: "provider:model",
+        efforts: ["high", "high"],
+      },
+    })).toThrow(/efforts.*duplicates/u);
+    expect(() => normalizeRuntimeModelValidation({
+      supported: true,
+      model: {
+        id: "provider:model",
+        contextWindow: 0,
+      },
+    })).toThrow(/contextWindow.*positive safe integer/u);
+    expect(() => normalizeRuntimeModelValidation({
+      supported: true,
+      model: {
+        id: "provider:model",
+        label: "x".repeat(1_025),
+      },
+    })).toThrow(/model\.label.*1024-byte boundary/u);
+    expect(() => normalizeRuntimeModelValidation({
+      supported: true,
+      model: {
+        id: "provider:model",
+        unexpected: true,
+      },
+    })).toThrow(/model.*unknown key/u);
   });
 });
 

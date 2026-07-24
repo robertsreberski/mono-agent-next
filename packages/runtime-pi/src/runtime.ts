@@ -4,12 +4,13 @@ import { TextDecoder } from "node:util";
 
 import {
   AgentHarness,
+  calculateContextTokens,
   type AgentMessage,
   type AgentTool,
   type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import {
-  clampThinkingLevel,
+  getSupportedThinkingLevels,
   type AssistantMessage,
   type ImageContent,
   type Model,
@@ -177,13 +178,21 @@ function jsonValue(value: unknown): JsonValue {
   }
 }
 
-function runtimeUsage(usage: Usage): RuntimeUsage {
+function runtimeUsage(
+  usage: Usage,
+  model: Model<string>,
+  contextIsTrustworthy: boolean,
+): RuntimeUsage {
   return {
     inputTokens: usage.input,
     outputTokens: usage.output,
     totalTokens: usage.totalTokens,
     cacheReadTokens: usage.cacheRead,
     cacheWriteTokens: usage.cacheWrite,
+    contextWindow: model.contextWindow,
+    ...(contextIsTrustworthy
+      ? { contextUsed: calculateContextTokens(usage) }
+      : {}),
     cost: {
       currency: "USD",
       input: usage.cost.input,
@@ -816,13 +825,14 @@ function assistantTurnMessage(message: AssistantMessage): TurnMessage {
   };
 }
 
-function thinkingLevel(effort: string | undefined, model: Model<string>): { level: ThinkingLevel; clamped: boolean } {
-  const requested = effort === undefined || effort === "none" ? "off" : effort;
-  if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(requested)) {
+function thinkingLevel(effort: string | undefined, model: Model<string>): ThinkingLevel {
+  if (effort === undefined) return "off";
+  const supported = new Set<string>(getSupportedThinkingLevels(model).map((level) =>
+    level === "off" ? "none" : level));
+  if (!supported.has(effort)) {
     throw new TypeError(`runtime-pi effort is unsupported: ${JSON.stringify(effort)}`);
   }
-  const level = clampThinkingLevel(model, requested as ThinkingLevel) as ThinkingLevel;
-  return { level, clamped: level !== requested };
+  return effort === "none" ? "off" : effort as ThinkingLevel;
 }
 
 function exactCapabilities(attachments: boolean): RuntimeCapabilities {
@@ -1024,6 +1034,12 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
         const capabilities = await registry.capabilities(model, signal);
         return {
           supported: true,
+          model: {
+            id: model,
+            label: capabilities.label,
+            efforts: capabilities.thinkingLevels,
+            contextWindow: capabilities.contextWindow,
+          },
           capabilities: exactCapabilities(capabilities.attachments),
           nativeTools: runtimePiNativeTools,
         };
@@ -1162,7 +1178,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
               session: attempt.session,
               models: registry.models,
               model,
-              thinkingLevel: effort.level,
+              thinkingLevel: effort,
               ...(authoredSystemPrompt === undefined ? {} : { systemPrompt: authoredSystemPrompt }),
               tools: responseSchema === undefined ? [
                 ...piTools(
@@ -1314,16 +1330,6 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
             });
 
             try {
-              if (effort.clamped) {
-                await context.emit({
-                  type: "diagnostic",
-                  diagnostic: diagnostic(
-                    "runtime-pi.effort-clamped",
-                    "warning",
-                    `Requested effort ${JSON.stringify(request.options?.effort)} was clamped to ${effort.level}`,
-                  ),
-                });
-              }
               if (request.signal.aborted) return { completed: false, value: { status: "cancelled" } };
               const result = await harness.prompt(
                 prompt.text,
@@ -1331,7 +1337,13 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
               );
               await harness.waitForIdle();
               if (abortPromise !== undefined) await abortPromise;
-              const usage = runtimeUsage(result.usage);
+              const usage = runtimeUsage(
+                result.usage,
+                model,
+                result.stopReason !== "aborted"
+                  && result.stopReason !== "error"
+                  && !request.signal.aborted,
+              );
               await context.emit({ type: "usage", usage });
               const message = assistantTurnMessage(result);
               if (maxTurnsHit) {

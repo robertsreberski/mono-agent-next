@@ -29,6 +29,13 @@ through `$use`. Routing references the instance id and a runtime-owned model:
 }
 ```
 
+When the exact primary runtime/model descriptor advertises an effort
+allowlist, Core validates `routing.effort` against it during config loading.
+An advertised empty list rejects every explicit default effort; absent effort
+metadata remains permissive because Core does not invent runtime capability.
+Fallback effort eligibility is evaluated against each fallback's own
+descriptor when that route is attempted.
+
 Core validates references but does not import provider SDKs, discover auth,
 rewrite model names, or hide runtime failure. A fallback is eligible only when
 the next runtime satisfies the request's capabilities and the prior typed

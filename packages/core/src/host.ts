@@ -15,12 +15,13 @@ import {
   type JsonObject, type JsonValue, type Memory, type MemoryHost, type MemoryModuleDefinition, type MemoryRecord,
   type MemoryRuntimeCaptureRequest, type MemoryRuntimeCaptureResult, type ModuleDiagnostic,
   type ModuleHost, type ModuleHealth, type ModuleInstance, type ModuleLogger, type Runtime, type RuntimeLiveInputHandler,
-  type RuntimeModuleDefinition, type RuntimeNativeToolDescriptor, type RuntimeSession, type RuntimeTurnErrorSnapshot, type RuntimeToolCall,
+  type RuntimeModuleDefinition, type RuntimeNativeToolDescriptor, type RuntimeSession,
+  type RuntimeTurnErrorSnapshot, type RuntimeToolCall,
   type RuntimeToolResult, type RuntimeTurnEvent, type RuntimeTurnResult, type TurnMessage,
 } from "@mono-agent/module-sdk";
 import type { Exporter, ReservedModuleDefinition, Sandbox, StateStore, TriggerEvent, TriggerHost, TriggerReceipt } from "@mono-agent/module-sdk/internal";
 import { assertChannelInstanceCompliance, assertMemoryInstanceCompliance, assertRuntimeInstanceCompliance } from "@mono-agent/module-sdk/testing";
-import { ensureLoadedAgentConfig, environmentFor } from "./config.js";
+import { ensureLoadedAgentConfig, environmentFor, runtimeModelsFor } from "./config.js";
 import { cloneIntrinsicUint8Array } from "./binary.js";
 import { assertOwnKeys, denseOwnDataArray as boundedOwnDataArray, ownDataRecord as boundedOwnDataRecord, snapshotBoundedValue } from "./bounded-value.js";
 import { AgentAdmissionError, AgentConfigError, AgentModuleError, RunExecutionError, errorMessage } from "./errors.js";
@@ -53,6 +54,12 @@ const MAX_CONFIGURED_SKILLS = 256, MAX_SKILL_ROOT_ENTRIES = 1_024;
 const ASK_USER_TOOL_NAME = "AskUser", MEMORY_RECALL_TOOL_NAME = "MemoryRecall", PROACTIVE_SUPPRESSION_SENTINEL = "NOTHING_TO_REPORT";
 type SessionDisposition = "retain" | "isolate" | "evict";
 interface RunningModule { readonly loaded: LoadedAgentModule; readonly instance: ModuleInstance }
+interface PendingInteraction<Request extends { readonly interactionId: string }, Result> {
+  readonly interactionId: string;
+  readonly request: Request;
+  readonly resolve: (result: Result) => void;
+  readonly reject: (error: Error) => void;
+}
 type VerbatimEntry = Extract<AgentTranscriptEntry, { readonly kind: "verbatim" }>;
 type DeliveryIntent = Awaited<ReturnType<StateExecutionClient["prepareDelivery"]>> | undefined;
 interface BoundChannelTool { readonly instanceId: string; readonly channel: Channel; readonly name: string; readonly tool: ChannelSendTool }
@@ -69,18 +76,8 @@ interface ActiveTurn {
   route?: RuntimeRoute;
   sessionsSupported?: boolean;
   liveInput: RuntimeLiveInputHandler | undefined;
-  pendingAsk: {
-    readonly interactionId: string;
-    readonly request: AskUserRequest;
-    readonly resolve: (answer: AskUserAnswer) => void;
-    readonly reject: (error: Error) => void;
-  } | undefined;
-  pendingApproval: {
-    readonly interactionId: string;
-    readonly request: ApprovalRequest;
-    readonly resolve: (decision: ApprovalDecision) => void;
-    readonly reject: (error: Error) => void;
-  } | undefined;
+  pendingAsk: PendingInteraction<AskUserRequest, AskUserAnswer> | undefined;
+  pendingApproval: PendingInteraction<ApprovalRequest, ApprovalDecision> | undefined;
 }
 interface TranscriptArtifactDraft { readonly kind: "pending-artifact"; readonly slot: string; readonly name?: string }
 type TranscriptContentDraft = AgentTranscriptContentPart | TranscriptArtifactDraft;
@@ -245,55 +242,17 @@ class AgentHostImplementation implements AgentHost {
       if (this.#hostAbort.signal.aborted || suppliedSignal?.aborted === true) {
         throw abortError("Runtime live-input acknowledgement was aborted");
       }
-      const settledAt = new Date().toISOString();
-      await this.#appendInteractionEvidence(
-        { requestId: active.requestId, conversationId, text: "" },
-        active,
-        {
-          kind: "live-input",
-          interactionId: normalizedInput.id,
-          phase: "requeued",
-          receivedAt: normalizedInput.receivedAt,
-          settledAt,
-        },
-        normalizedInput.text,
-        AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-      ).catch(() => undefined);
-      active.controller.abort(
-        new RunExecutionError(
-          "uncertain",
-          "live-input-acknowledgement-unknown",
-          "Runtime live-input acknowledgement failed after dispatch",
-          { cause: error, requestId: active.requestId, runId: active.id },
-        ),
+      return this.#requeueLiveInput(
+        conversationId, active, normalizedInput, "live-input-acknowledgement-unknown",
+        "Runtime live-input acknowledgement failed after dispatch", error,
       );
-      return "requeue";
     }
     if (!isRuntimeLiveInputDisposition(result)) {
       const invalid = new TypeError("Runtime live-input handler returned an invalid disposition");
-      const settledAt = new Date().toISOString();
-      await this.#appendInteractionEvidence(
-        { requestId: active.requestId, conversationId, text: "" },
-        active,
-        {
-          kind: "live-input",
-          interactionId: normalizedInput.id,
-          phase: "requeued",
-          receivedAt: normalizedInput.receivedAt,
-          settledAt,
-        },
-        normalizedInput.text,
-        AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-      ).catch(() => undefined);
-      active.controller.abort(
-        new RunExecutionError(
-          "uncertain",
-          "live-input-disposition-invalid",
-          invalid.message,
-          { cause: invalid, requestId: active.requestId, runId: active.id },
-        ),
+      return this.#requeueLiveInput(
+        conversationId, active, normalizedInput, "live-input-disposition-invalid",
+        invalid.message, invalid,
       );
-      return "requeue";
     }
     const settledAt = new Date().toISOString();
     const evidence: AgentInteractionEvidence = {
@@ -329,23 +288,40 @@ class AgentHostImplementation implements AgentHost {
     }
     return result;
   }
+  async #requeueLiveInput(
+    conversationId: string,
+    active: ActiveTurn,
+    input: AgentLiveInput,
+    code: string,
+    message: string,
+    cause: unknown,
+  ): Promise<"requeue"> {
+    await this.#appendInteractionEvidence(
+      { requestId: active.requestId, conversationId, text: "" },
+      active,
+      {
+        kind: "live-input", interactionId: input.id, phase: "requeued",
+        receivedAt: input.receivedAt, settledAt: new Date().toISOString(),
+      },
+      input.text,
+      AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
+    ).catch(() => undefined);
+    active.controller.abort(new RunExecutionError(
+      "uncertain", code, message,
+      { cause, requestId: active.requestId, runId: active.id },
+    ));
+    return "requeue";
+  }
   async answerAsk(conversationId: string, answer: AgentAskAnswer): Promise<AgentAskAnswerStatus> {
     const active = this.#activeTurns.get(conversationId);
     if (active === undefined || active.pendingAsk === undefined) return "expired";
     const pending = active.pendingAsk;
     if (pending.interactionId !== answer.interactionId) return "mismatch";
-    let parsed: AskUserAnswer;
-    try {
-      parsed = parseAskUserAnswer(
-        { ...answer, answeredAt: new Date().toISOString() },
-        pending.request,
-      );
-    } catch {
-      return "mismatch";
-    }
-    active.pendingAsk = undefined;
-    pending.resolve(parsed);
-    return "accepted";
+    return acceptInteraction(
+      pending,
+      () => parseAskUserAnswer({ ...answer, answeredAt: new Date().toISOString() }, pending.request),
+      () => { active.pendingAsk = undefined; },
+    );
   }
   async answerApproval(
     conversationId: string,
@@ -355,15 +331,11 @@ class AgentHostImplementation implements AgentHost {
     if (active === undefined || active.pendingApproval === undefined) return "expired";
     const pending = active.pendingApproval;
     if (pending.interactionId !== decision.interactionId) return "mismatch";
-    let parsed: ApprovalDecision;
-    try {
-      parsed = parseApprovalDecision(decision, pending.request);
-    } catch {
-      return "mismatch";
-    }
-    active.pendingApproval = undefined;
-    pending.resolve(parsed);
-    return "accepted";
+    return acceptInteraction(
+      pending,
+      () => parseApprovalDecision(decision, pending.request),
+      () => { active.pendingApproval = undefined; },
+    );
   }
   async conversations(): Promise<readonly AgentConversationSummary[]> {
     if (this.#execution !== undefined) {
@@ -1164,10 +1136,6 @@ class AgentHostImplementation implements AgentHost {
       }));
     }
     if (module.slot === "channel" && declaresHostCapability(module, "operator.identity.v1")) {
-      const configuredModels = [...new Set([
-        this.config.raw.routing.primary,
-        ...this.config.raw.routing.fallbacks,
-      ].map((route) => route.model))].map((model) => Object.freeze({ id: model }));
       capabilityValues.set("operator.identity.v1", Object.freeze({
         agent: Object.freeze({ id: this.config.raw.agent.id, label: this.config.raw.agent.name }),
         process: Object.freeze({ pid: process.pid }),
@@ -1176,7 +1144,7 @@ class AgentHostImplementation implements AgentHost {
           model: this.config.raw.routing.primary.model,
           ...(this.config.raw.routing.effort === undefined ? {} : { effort: this.config.raw.routing.effort }),
         }),
-        models: Object.freeze(configuredModels),
+        models: runtimeModelsFor(this.config),
         configPath: this.config.configPath,
         projectRoot: this.config.projectRoot,
       }));
@@ -1506,7 +1474,7 @@ class AgentHostImplementation implements AgentHost {
       });
       current = previous.catch(() => {}).then(() => gate);
       this.#conversationTails.set(input.conversationId, current);
-      await waitWithAbort(previous.catch(() => {}), admissionSignal);
+      await waitForValueWithAbort(previous.catch(() => {}), admissionSignal);
       const releaseSlot = await this.#semaphore.acquire(admissionSignal);
       try {
         const admission = await this.#admitRun(input, fingerprint, admissionSignal);
@@ -1827,6 +1795,10 @@ class AgentHostImplementation implements AgentHost {
     await this.#loadConversation(input.conversationId, signal);
     const recalled = await this.#recallMemory(input, signal);
     const routes = routeCandidates(this.config, input);
+    const selectedEffort = escalateMessageEffort(
+      input.text,
+      input.effort ?? this.config.raw.routing.effort,
+    );
     const runHistoryTool = this.#execution === undefined
       ? []
       : [createRunHistoryTool({
@@ -1903,6 +1875,24 @@ class AgentHostImplementation implements AgentHost {
         );
         if (!validation.supported) {
           await rejectRoute("unsupported-model", `${route.runtime} does not support model ${route.model}`);
+          continue;
+        }
+        if (validation.model !== undefined && validation.model.id !== route.model) {
+          await rejectRoute(
+            "invalid-model-description",
+            `${route.runtime} described another model for ${route.model}`,
+          );
+          continue;
+        }
+        if (
+          selectedEffort !== undefined
+          && validation.model?.efforts !== undefined
+          && !validation.model.efforts.includes(selectedEffort)
+        ) {
+          await rejectRoute(
+            "unsupported-effort",
+            `${route.runtime}:${route.model} does not support effort ${selectedEffort}`,
+          );
           continue;
         }
         routeCapabilities = validation.capabilities ?? routeCapabilities;
@@ -2079,6 +2069,7 @@ class AgentHostImplementation implements AgentHost {
           tools,
           active.id,
           recalled,
+          selectedEffort,
           signal,
         );
         runtimeSessionUsed = runtimeRequest.session !== undefined;
@@ -2233,12 +2224,14 @@ class AgentHostImplementation implements AgentHost {
   ): Promise<AskUserAnswer> {
     throwIfAborted(signal);
     const parsedRequest = parseAskUserRequest(request);
-    await this.#appendInteractionEvidence(input, active, {
+    const evidence = {
       kind: "ask-user",
       interactionId: parsedRequest.interactionId,
-      phase: "requested",
       requestedAt: parsedRequest.requestedAt,
       questionCount: parsedRequest.questions.length,
+    } as const;
+    await this.#appendInteractionEvidence(input, active, {
+      ...evidence, phase: "requested",
     }, renderAskUserRequest(parsedRequest), signal);
     let parsedAnswer: AskUserAnswer;
     try {
@@ -2259,57 +2252,31 @@ class AgentHostImplementation implements AgentHost {
           ? (() => {
               throw new Error("AskUser interaction handler is unavailable");
             })()
-          : await this.#awaitChannelAskUser(active, parsedRequest, signal, emitAsk);
+          : await awaitChannelInteraction(
+              parsedRequest, signal, emitAsk,
+              () => active.pendingAsk,
+              (pending) => { active.pendingAsk = pending; },
+              "AskUser",
+            );
     } catch (error) {
       const settledAt = new Date().toISOString();
       const settlementSignal = AbortSignal.timeout(this.#options.lifecycleTimeoutMs);
       await this.#appendInteractionEvidence(input, active, {
-        kind: "ask-user",
-        interactionId: parsedRequest.interactionId,
+        ...evidence,
         phase: signal.aborted ? "cancelled" : "expired",
-        requestedAt: parsedRequest.requestedAt,
         settledAt,
-        questionCount: parsedRequest.questions.length,
       }, signal.aborted
         ? "AskUser interaction cancelled."
         : "AskUser interaction expired without an answer.", settlementSignal);
       throw error;
     }
     await this.#appendInteractionEvidence(input, active, {
-      kind: "ask-user",
-      interactionId: parsedRequest.interactionId,
+      ...evidence,
       phase: "answered",
-      requestedAt: parsedRequest.requestedAt,
       settledAt: parsedAnswer.answeredAt,
-      questionCount: parsedRequest.questions.length,
       answeredQuestionCount: Object.keys(parsedAnswer.answers).length,
     }, renderAskUserAnswer(parsedRequest, parsedAnswer), signal);
     return parsedAnswer;
-  }
-  async #awaitChannelAskUser(
-    active: ActiveTurn,
-    request: AskUserRequest,
-    signal: AbortSignal,
-    emitAsk: (request: AskUserRequest) => Promise<void>,
-  ): Promise<AskUserAnswer> {
-    if (active.pendingAsk !== undefined) throw new Error("Only one AskUser interaction may be pending per turn");
-    let rejectPending!: (error: Error) => void;
-    const answer = new Promise<AskUserAnswer>((resolve, reject) => {
-      rejectPending = reject;
-      active.pendingAsk = { interactionId: request.interactionId, request, resolve, reject };
-    });
-    const abort = (): void => {
-      active.pendingAsk = undefined;
-      rejectPending(abortError("AskUser interaction was aborted"));
-    };
-    signal.addEventListener("abort", abort, { once: true });
-    try {
-      const [, resolved] = await Promise.all([emitAsk(request), answer]);
-      return resolved;
-    } finally {
-      signal.removeEventListener("abort", abort);
-      active.pendingAsk = undefined;
-    }
   }
   async #requestRuntimeApproval(
     input: AgentSubmitInput,
@@ -2382,13 +2349,15 @@ class AgentHostImplementation implements AgentHost {
   ): Promise<ApprovalDecision> {
     throwIfAborted(signal);
     const parsedRequest = parseApprovalRequest(request);
-    await this.#appendInteractionEvidence(input, active, {
+    const evidence = {
       kind: "approval",
       interactionId: parsedRequest.interactionId,
-      phase: "requested",
       requestedAt: parsedRequest.requestedAt,
       toolId: parsedRequest.toolId,
       effects: parsedRequest.effects,
+    } as const;
+    await this.#appendInteractionEvidence(input, active, {
+      ...evidence, phase: "requested",
     }, `Approval requested for ${parsedRequest.displayName}: ${parsedRequest.summary}`, signal);
     const timeoutMs =
       this.config.raw.policy.approvals.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
@@ -2408,11 +2377,11 @@ class AgentHostImplementation implements AgentHost {
               if (emitApproval === undefined) {
                 throw new Error("Approval interaction handler is unavailable");
               }
-              return this.#awaitChannelApproval(
-                active,
-                parsedRequest,
-                boundedSignal,
-                emitApproval,
+              return awaitChannelInteraction(
+                parsedRequest, boundedSignal, emitApproval,
+                () => active.pendingApproval,
+                (pending) => { active.pendingApproval = pending; },
+                "approval",
               );
             },
             timeoutMs,
@@ -2431,13 +2400,9 @@ class AgentHostImplementation implements AgentHost {
       if (signal.aborted) {
         const settledAt = new Date().toISOString();
         await this.#appendInteractionEvidence(input, active, {
-          kind: "approval",
-          interactionId: parsedRequest.interactionId,
+          ...evidence,
           phase: "cancelled",
-          requestedAt: parsedRequest.requestedAt,
           settledAt,
-          toolId: parsedRequest.toolId,
-          effects: parsedRequest.effects,
         }, "Approval interaction cancelled.", AbortSignal.timeout(
           this.#options.lifecycleTimeoutMs,
         ));
@@ -2451,51 +2416,14 @@ class AgentHostImplementation implements AgentHost {
       }, parsedRequest);
     }
     await this.#appendInteractionEvidence(input, active, {
-      kind: "approval",
-      interactionId: parsedRequest.interactionId,
+      ...evidence,
       phase: "answered",
-      requestedAt: parsedRequest.requestedAt,
       settledAt: parsedDecision.decidedAt,
-      toolId: parsedRequest.toolId,
-      effects: parsedRequest.effects,
       decision: parsedDecision.decision,
     }, `Approval ${parsedDecision.decision === "allow_once" ? "allowed once" : "denied"}.${
       parsedDecision.reason === undefined ? "" : ` Reason: ${parsedDecision.reason}`
     }`, signal);
     return parsedDecision;
-  }
-  async #awaitChannelApproval(
-    active: ActiveTurn,
-    request: ApprovalRequest,
-    signal: AbortSignal,
-    emitApproval: (request: ApprovalRequest) => Promise<void>,
-  ): Promise<ApprovalDecision> {
-    throwIfAborted(signal);
-    if (active.pendingApproval !== undefined) {
-      throw new Error("Only one approval interaction may be pending per turn");
-    }
-    let rejectPending!: (error: Error) => void;
-    const decision = new Promise<ApprovalDecision>((resolve, reject) => {
-      rejectPending = reject;
-      active.pendingApproval = {
-        interactionId: request.interactionId,
-        request,
-        resolve,
-        reject,
-      };
-    });
-    const abort = (): void => {
-      active.pendingApproval = undefined;
-      rejectPending(abortError("Approval interaction was aborted"));
-    };
-    signal.addEventListener("abort", abort, { once: true });
-    try {
-      const [, resolved] = await Promise.all([emitApproval(request), decision]);
-      return resolved;
-    } finally {
-      signal.removeEventListener("abort", abort);
-      active.pendingApproval = undefined;
-    }
   }
   async #runtimeRequest(
     input: AgentSubmitInput,
@@ -2505,6 +2433,7 @@ class AgentHostImplementation implements AgentHost {
     tools: readonly CoreRuntimeTool[],
     turnId: string,
     recalled: readonly MemoryRecord[],
+    effort: string | undefined,
     signal: AbortSignal,
   ) {
     const history = (this.#history.get(input.conversationId) ?? []).map((message) => immutableClone(message));
@@ -2519,10 +2448,6 @@ class AgentHostImplementation implements AgentHost {
         signal,
       );
     const metadata = toJsonObject(input.metadata);
-    const effort = escalateMessageEffort(
-      input.text,
-      input.effort ?? this.config.raw.routing.effort,
-    );
     return {
       turnId,
       conversationId: input.conversationId,
@@ -2541,7 +2466,9 @@ class AgentHostImplementation implements AgentHost {
           role: "user" as const,
           content: [
             { type: "text" as const, text: input.text },
-            ...attachmentParts(input.attachments ?? []),
+            ...(input.attachments ?? []).map((attachment) => ({
+              type: "attachment" as const, attachment,
+            })),
           ],
         },
       ]),
@@ -3433,6 +3360,45 @@ class AgentHostImplementation implements AgentHost {
     ));
   }
 }
+function acceptInteraction<Request extends { readonly interactionId: string }, Result>(
+  pending: PendingInteraction<Request, Result>,
+  parse: () => Result,
+  clear: () => void,
+): "accepted" | "mismatch" {
+  let result: Result;
+  try { result = parse(); } catch { return "mismatch"; }
+  clear();
+  pending.resolve(result);
+  return "accepted";
+}
+async function awaitChannelInteraction<Request extends { readonly interactionId: string }, Result>(
+  request: Request,
+  signal: AbortSignal,
+  emit: (request: Request) => Promise<void>,
+  current: () => PendingInteraction<Request, Result> | undefined,
+  assign: (pending: PendingInteraction<Request, Result> | undefined) => void,
+  label: "AskUser" | "approval",
+): Promise<Result> {
+  throwIfAborted(signal);
+  if (current() !== undefined) throw new Error(`Only one ${label} interaction may be pending per turn`);
+  let rejectPending!: (error: Error) => void;
+  const result = new Promise<Result>((resolve, reject) => {
+    rejectPending = reject;
+    assign({ interactionId: request.interactionId, request, resolve, reject });
+  });
+  const abort = (): void => {
+    assign(undefined);
+    rejectPending(abortError(`${label === "approval" ? "Approval" : label} interaction was aborted`));
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    const [, resolved] = await Promise.all([emit(request), result]);
+    return resolved;
+  } finally {
+    signal.removeEventListener("abort", abort);
+    assign(undefined);
+  }
+}
 function sanitizeModuleCommandError(error: unknown, redact: (value: string) => string, depth = 0): Error {
   const message = boundedUtf8(redact(inspectModuleFailure(error)), 4_096);
   const nestedCause = depth >= 4 ? undefined : ownDataProperty(error, "cause");
@@ -4245,11 +4211,6 @@ function toJsonValue(value: unknown, seen = new Set<object>(), depth = 0): JsonV
   }
   return String(value);
 }
-function attachmentParts(
-  attachments: readonly ChannelAttachment[],
-): TurnMessage["content"][number][] {
-  return attachments.map((attachment) => ({ type: "attachment", attachment }));
-}
 function turnBinaryData(value: Uint8Array | string, label: string): Uint8Array {
   if (value instanceof Uint8Array) return new Uint8Array(value);
   if (typeof value !== "string" || value.length === 0 || /\s/u.test(value)) {
@@ -4270,14 +4231,7 @@ function submissionFingerprint(input: AgentSubmitInput): DurableFingerprint {
     kind: "mono-agent.submission-fingerprint",
     conversationId: input.conversationId,
     text: input.text,
-    attachments: (input.attachments ?? []).map((attachment) => ({
-      id: attachment.id,
-      kind: attachment.kind,
-      name: attachment.name,
-      mediaType: attachment.mediaType,
-      sizeBytes: attachment.sizeBytes,
-      sha256: `sha256:${createHash("sha256").update(attachment.data).digest("hex")}`,
-    })),
+    attachments: attachmentFingerprints(input.attachments),
     runtime: input.runtime ?? null,
     model: input.model ?? null,
     effort: input.effort ?? null,
@@ -4371,17 +4325,20 @@ function deliveryFingerprint(
     channelInstanceId,
     conversationId: message.conversationId,
     text: message.text,
-    attachments: (message.attachments ?? []).map((attachment) => ({
-      id: attachment.id,
-      kind: attachment.kind,
-      name: attachment.name,
-      mediaType: attachment.mediaType,
-      sizeBytes: attachment.sizeBytes,
-      sha256: `sha256:${createHash("sha256").update(attachment.data).digest("hex")}`,
-    })),
+    attachments: attachmentFingerprints(message.attachments),
     replyToMessageId: message.replyToMessageId ?? null,
     metadata: message.metadata ?? null,
   });
+}
+function attachmentFingerprints(attachments: readonly ChannelAttachment[] | undefined) {
+  return (attachments ?? []).map((attachment) => ({
+    id: attachment.id,
+    kind: attachment.kind,
+    name: attachment.name,
+    mediaType: attachment.mediaType,
+    sizeBytes: attachment.sizeBytes,
+    sha256: `sha256:${createHash("sha256").update(attachment.data).digest("hex")}`,
+  }));
 }
 function deliveryHistoryText(message: ChannelOutboundMessage): string {
   return [message.text, ...(message.attachments ?? []).map((item) =>
@@ -4603,7 +4560,7 @@ function parseCachedAssistantMessage(value: unknown): AgentResponseMessage {
   if (message.role !== "assistant") {
     throw new TypeError("cached response.message must be an assistant message");
   }
-  const content = denseOwnDataArray(
+  const content = boundedOwnDataArray(
     message.content,
     "cached response.message.content",
     256,
@@ -4812,7 +4769,7 @@ function normalizeSubmitInput(input: AgentSubmitInput): AgentSubmitInput {
       throw new TypeError("signal must be an AbortSignal", { cause: error });
     }
   }
-  const attachments = denseOwnDataArray(input.attachments ?? [], "attachments", DEFAULT_MAX_ATTACHMENTS);
+  const attachments = boundedOwnDataArray(input.attachments ?? [], "attachments", DEFAULT_MAX_ATTACHMENTS);
   let totalBytes = 0;
   const normalized = attachments.map((value, index): ChannelAttachment => {
     const attachment = ownDataRecord(value, `attachments.${String(index)}`,
@@ -4870,11 +4827,8 @@ function ownDataRecord(value: unknown, path: string, allowed: readonly string[])
   assertOwnKeys(output, allowed, path);
   return output;
 }
-function denseOwnDataArray(value: unknown, path: string, maximum: number): readonly unknown[] {
-  return boundedOwnDataArray(value, path, maximum);
-}
 function submitStringList(value: unknown, path: string): readonly string[] {
-  const entries = denseOwnDataArray(value, path, SUBMIT_SNAPSHOT_MAX_ITEMS);
+  const entries = boundedOwnDataArray(value, path, SUBMIT_SNAPSHOT_MAX_ITEMS);
   for (const [index, entry] of entries.entries()) {
     if (
       typeof entry !== "string"
@@ -4932,11 +4886,8 @@ function renderRecalledMemory(records: readonly MemoryRecord[]): string {
 function runtimeSessionRouteKey(route: RuntimeRoute): string {
   return Buffer.from(JSON.stringify([route.runtime, route.model]), "utf8").toString("base64url");
 }
-function runtimeSessionConversationSuffix(conversationId: string): string {
-  return `:${Buffer.from(conversationId, "utf8").toString("base64url")}`;
-}
 function runtimeSessionMapKey(route: RuntimeRoute, conversationId: string): string {
-  return `${runtimeSessionRouteKey(route)}${runtimeSessionConversationSuffix(conversationId)}`;
+  return `${runtimeSessionRouteKey(route)}:${Buffer.from(conversationId, "utf8").toString("base64url")}`;
 }
 function encodePersistedValue(value: unknown): Uint8Array {
   const source = JSON.stringify(value, (_key, entry: unknown) => entry instanceof Uint8Array
@@ -5140,19 +5091,6 @@ function referencedEnvironmentValues(
       .filter((value): value is string => typeof value === "string" && value.length > 0)
       .sort((left, right) => right.length - left.length || left.localeCompare(right)),
   );
-}
-async function waitWithAbort(promise: Promise<unknown>, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) throw abortError();
-  let listener: (() => void) | undefined;
-  const aborted = new Promise<never>((_, reject) => {
-    listener = () => reject(abortError());
-    signal.addEventListener("abort", listener, { once: true });
-  });
-  try {
-    await Promise.race([promise, aborted]);
-  } finally {
-    if (listener !== undefined) signal.removeEventListener("abort", listener);
-  }
 }
 async function waitForValueWithAbort<T>(
   promise: Promise<T>,

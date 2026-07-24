@@ -199,7 +199,11 @@ model's own maximum.
 1. The v1 core validates the selected module schema and creates one runtime
    instance.
 2. The runtime resolves the `provider:model` route through Pi's built-in model
-   registry or an explicitly configured local provider.
+   registry or an explicitly configured local provider. Validation and
+   preflight return metadata for that exact model: its label, context window,
+   and the effort values Pi reports as supported. Pi's upstream `off` value is
+   exposed through mono-agent's existing public `none` spelling; unsupported
+   explicit effort values fail instead of being silently clamped.
 3. For an ordinary turn, Core's pre-provider negotiation accepts the nine exact
    authority descriptors and supplies the fail-closed approval callback. For a
    schema-constrained turn, the runtime suppresses those native tools and
@@ -216,8 +220,10 @@ model's own maximum.
    incomplete forks are deleted while the caller's prior committed session
    remains immutable.
 7. Pi text, thinking, tools, usage, compaction, live steering, and session
-   linkage are normalized into module-sdk contracts; Core-owned AskUser calls
-   block and resume through the same request-tool continuation.
+   linkage are normalized into module-sdk contracts. Usage includes the
+   model's exact context window and Pi's native calculated current-context
+   token count; Core-owned AskUser calls block and resume through the same
+   request-tool continuation.
 
 Native session ids are accepted only with the exact runtime-instance, model,
 and canonical-conversation binding that created them. A mismatch is rejected

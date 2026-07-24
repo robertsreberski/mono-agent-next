@@ -1,17 +1,17 @@
-export const OPERATOR_PROTOCOL = "mono-agent.operator.v2" as const;
-export const OPERATOR_REGISTRY_SCHEMA = "mono-agent.operator-registry.v2" as const;
-export const OPERATOR_REGISTRY_DETAILS_SCHEMA = "mono-agent.operator-registry-details.v2" as const;
+export const OPERATOR_PROTOCOL = "mono-agent.operator.v3" as const;
+export const OPERATOR_REGISTRY_SCHEMA = "mono-agent.operator-registry.v3" as const;
+export const OPERATOR_REGISTRY_DETAILS_SCHEMA = "mono-agent.operator-registry-details.v3" as const;
 
 export const OPERATOR_ROUTES = Object.freeze({
-  info: "/v2/info",
-  turns: "/v2/turns",
-  config: "/v2/config",
-  health: "/v2/health",
-  conversations: "/v2/conversations",
-  ask: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/ask`,
-  cancel: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/cancel`,
-  liveInput: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/live-input`,
-  replay: (conversationId: string) => `/v2/conversations/${encodeURIComponent(conversationId)}/replay`,
+  info: "/v3/info",
+  turns: "/v3/turns",
+  config: "/v3/config",
+  health: "/v3/health",
+  conversations: "/v3/conversations",
+  ask: (conversationId: string) => `/v3/conversations/${encodeURIComponent(conversationId)}/ask`,
+  cancel: (conversationId: string) => `/v3/conversations/${encodeURIComponent(conversationId)}/cancel`,
+  liveInput: (conversationId: string) => `/v3/conversations/${encodeURIComponent(conversationId)}/live-input`,
+  replay: (conversationId: string) => `/v3/conversations/${encodeURIComponent(conversationId)}/replay`,
 });
 
 export const OPERATOR_LIMITS = Object.freeze({
@@ -84,6 +84,7 @@ export interface OperatorCapabilities {
 }
 
 export interface OperatorModel {
+  runtime: string;
   id: string;
   label?: string;
   efforts?: readonly string[];

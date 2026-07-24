@@ -30,13 +30,13 @@ describe("web operator gateway", () => {
     await writeDescriptor(join(registry, "agent.json"), "http://127.0.0.1:43210", process.pid, now);
     const fetchImpl: typeof fetch = async (input) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) {
+      if (url.endsWith("/v3/info")) {
         return new Response(JSON.stringify({
           ...operatorInfo(true, now),
           capabilities: { ...capabilities(true), proactive: true, replay: true },
         }), { headers: { "content-type": "application/json" } });
       }
-      if (url.endsWith("/v2/conversations")) {
+      if (url.endsWith("/v3/conversations")) {
         return new Response(JSON.stringify({ conversations: [
           { id: "opaque-external-cron", title: "Update", updatedAt: now, triggerKind: "cron" },
           { id: "opaque-external-webhook", title: "Webhook", updatedAt: now, triggerKind: "webhook" },
@@ -46,8 +46,8 @@ describe("web operator gateway", () => {
         ] }), { headers: { "content-type": "application/json" } });
       }
       if (
-        url.endsWith("/v2/conversations/opaque-external-cron/replay")
-        || url.endsWith("/v2/conversations/opaque-external-webhook/replay")
+        url.endsWith("/v3/conversations/opaque-external-cron/replay")
+        || url.endsWith("/v3/conversations/opaque-external-webhook/replay")
       ) {
         const webhook = url.includes("webhook");
         return new Response(JSON.stringify({
@@ -101,10 +101,10 @@ describe("web operator gateway", () => {
     const forwarded: unknown[] = [];
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) {
+      if (url.endsWith("/v3/info")) {
         return new Response(JSON.stringify(info), { status: 200, headers: { "content-type": "application/json" } });
       }
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v3/turns")) {
         const request = JSON.parse(String(init?.body)) as { conversationId: string };
         forwarded.push(request);
         const finishedAt = new Date().toISOString();
@@ -155,13 +155,13 @@ describe("web operator gateway", () => {
     const fetchImpl: typeof fetch = async (input) => {
       const url = String(input);
       requestedUrls.push(url);
-      if (url === "http://127.0.0.1:43210/v2/info") {
+      if (url === "http://127.0.0.1:43210/v3/info") {
         return new Response(JSON.stringify(operatorInfo(true, startedAt)), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
-      if (url === "http://127.0.0.1:43210/v2/turns") {
+      if (url === "http://127.0.0.1:43210/v3/turns") {
         return new Response(new ReadableStream<Uint8Array>({
           start(controller) {
             stream = controller;
@@ -173,7 +173,7 @@ describe("web operator gateway", () => {
           },
         }), { status: 200, headers: { "content-type": "application/x-ndjson" } });
       }
-      if (url === "http://127.0.0.1:43210/v2/conversations/web%3Aswap/cancel") {
+      if (url === "http://127.0.0.1:43210/v3/conversations/web%3Aswap/cancel") {
         stream.enqueue(encoder.encode(`${JSON.stringify({
           type: "error",
           turnId: "turn-swap",
@@ -199,7 +199,7 @@ describe("web operator gateway", () => {
     await writeDescriptor(descriptorPath, "http://127.0.0.1:43211", process.pid + 1, new Date(Date.now() + 1_000).toISOString());
     await gateway.cancel("personal", "web:swap");
     await expect(running).rejects.toMatchObject({ code: "operator_cancelled" });
-    expect(requestedUrls).toContain("http://127.0.0.1:43210/v2/conversations/web%3Aswap/cancel");
+    expect(requestedUrls).toContain("http://127.0.0.1:43210/v3/conversations/web%3Aswap/cancel");
     expect(requestedUrls.some((url) => url.includes(":43211"))).toBe(false);
   });
 
@@ -217,13 +217,13 @@ describe("web operator gateway", () => {
     let pendingState: OperatorConversationState | undefined;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = String(input);
-      if (url.endsWith("/v2/info")) {
+      if (url.endsWith("/v3/info")) {
         return new Response(JSON.stringify({
           ...operatorInfo(true, startedAt),
           capabilities: { ...capabilities(true), liveInput: true, askUser: true },
         }), { headers: { "content-type": "application/json" } });
       }
-      if (url.endsWith("/v2/turns")) {
+      if (url.endsWith("/v3/turns")) {
         return new Response(new ReadableStream({
           start(controller) {
             stream = controller;
@@ -299,7 +299,10 @@ function operatorInfo(runtimeOverrides: boolean, startedAt: string): OperatorInf
     process: { pid: process.pid, startedAt },
     capabilities: capabilities(runtimeOverrides),
     defaults: { runtime: "pi", model: "approved:model", effort: "high" },
-    models: [{ id: "approved:model", efforts: ["low", "high"] }],
+    models: [
+      { runtime: "pi", id: "approved:model", efforts: ["low", "high"] },
+      { runtime: "pi-secondary", id: "approved:model", efforts: ["low", "high"] },
+    ],
   };
 }
 

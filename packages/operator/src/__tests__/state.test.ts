@@ -85,7 +85,23 @@ describe("operator domain state", () => {
         sessionEvicted: false,
       },
     });
-    const evicted = reduceOperatorFrame(compacted, {
+    const compactionEvent = reduceOperatorFrame(compacted, {
+      type: "compaction",
+      turnId: "turn-a",
+      compaction: {
+        compacted: true,
+        tokensBefore: 15,
+        tokensAfter: 8,
+      },
+    });
+    expect(compactionEvent.usage).toEqual({
+      inputTokens: 12,
+      outputTokens: 3,
+      contextWindow: 128_000,
+      compacted: true,
+      sessionEvicted: false,
+    });
+    const evicted = reduceOperatorFrame(compactionEvent, {
       type: "usage",
       turnId: "turn-a",
       usage: {

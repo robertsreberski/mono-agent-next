@@ -56,9 +56,12 @@ Controls:
 - submit ordinary text to start a turn;
 - submit during an active turn to offer eligible live input;
 - `Escape` or `/cancel` cancels the active conversation when eligible;
-- `/runtime <instance|default>`, `/model <ref|default>`, and
-  `/effort <level|default>` set next-turn overrides when permitted; advertised
-  model and effort catalogs act as allowlists;
+- `/runtime <instance|default>`, `/model <ref|default>` (or
+  `/model <runtime> <ref>` when model ids repeat), and
+  `/effort <level|default>` set next-turn overrides when permitted. An
+  advertised model is one atomic runtime-instance/model route, and selecting it
+  carries its owning runtime; each route's advertised efforts are its exact
+  allowlist;
 - `/answer {"question":"value","other":["value-1","value-2"]}` answers every
   question in one pending AskUser interaction. JSON is the lossless grammar
   for punctuation, backslashes, free text, and multi-select answers; the legacy
@@ -73,9 +76,12 @@ Controls:
   when advertised;
 - `/exit` or `/quit` closes this TUI only.
 
-Model and effort catalogs are optional allowlists. When an endpoint omits one,
-the shared operator contract accepts any bounded, protocol-valid value and
-leaves final validation to the selected runtime.
+Renderers never construct a model route by independently combining a runtime
+and model from different advertised choices. When the endpoint omits model
+metadata, no explicit model override is offered. When the selected route omits
+or has an empty effort allowlist, no explicit effort override is offered; the
+configured/default effort remains in effect instead of asking the operator to
+guess a value.
 
 Programmatic hosts can inject a terminal for testing without a process TTY:
 
@@ -96,12 +102,14 @@ await handle.waitUntilExit();
 
 1. `startMonoAgentTui` creates the shared `OperatorClient`, directly or from
    a shared-directory selection.
-2. Discovered connections bind registry id, PID, and start time to `/v2/info`
+2. Discovered connections bind registry id, PID, and start time to `/v3/info`
    at startup and immediately before every turn.
 3. A submitted prompt calls `OperatorClient.streamTurn`.
 4. Every normalized frame passes through `reduceOperatorFrame`; the renderer
    never parses NDJSON or invents domain state. Tool and compaction activity is
    rendered as bounded terminal text, while reasoning remains transient status.
+   Context usage is shown only from a trustworthy current-turn snapshot and is
+   cleared after compaction until a later trustworthy snapshot.
 5. Cancel, live-input, AskUser, attachment, quote, model/effort, and view
    controls are gated by `availableOperatorActions`.
 6. `MonoAgentTuiApp` makes C0/C1 and bidi controls visible and inert before

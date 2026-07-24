@@ -11,6 +11,7 @@ import {
   type RouteIdentity,
   type RuntimeCapabilities,
   type RuntimeCompaction,
+  type RuntimeModelDescriptor,
   type RuntimeModelValidation,
   type RuntimeNativeToolDescriptor,
   type RuntimeSession,
@@ -53,6 +54,8 @@ export const RUNTIME_TOOL_CALL_MAX_BYTES = 512 * 1024;
 export const RUNTIME_CAPABILITIES_MAX_BYTES = 1024;
 
 const MAX_IDENTIFIER_BYTES = 4_096;
+const MAX_MODEL_LABEL_BYTES = 1_024;
+const MAX_MODEL_EFFORT_BYTES = 256;
 const MAX_MEDIA_TYPE_BYTES = 255;
 const MAX_FILE_NAME_BYTES = 255;
 const MAX_DIAGNOSTIC_MESSAGE_BYTES = 16 * 1024;
@@ -236,9 +239,11 @@ export function normalizeRuntimeModelValidation(
   const input = shape(
     runtimeSnapshot(value, path, RUNTIME_MODEL_VALIDATION_MAX_BYTES).value,
     path,
-    ["supported", "capabilities", "nativeTools", "diagnostics"],
+    ["supported", "model", "capabilities", "nativeTools", "diagnostics"],
   );
   if (typeof input.supported !== "boolean") fail(`${path}.supported`, "must be boolean");
+  const model = optional(input.model, (model) =>
+    runtimeModelDescriptor(model, `${path}.model`));
   const capabilities = optional(input.capabilities, (capabilities) =>
     runtimeCapabilities(capabilities, `${path}.capabilities`));
   const nativeTools = optional(input.nativeTools, (nativeTools) =>
@@ -257,10 +262,35 @@ export function normalizeRuntimeModelValidation(
       diagnosticValue(diagnostic, `${path}.diagnostics[${String(index)}]`)));
   return compact({
     supported: input.supported,
+    model,
     capabilities,
     nativeTools,
     diagnostics,
   }) as RuntimeModelValidation;
+}
+
+function runtimeModelDescriptor(
+  value: unknown,
+  path: string,
+): RuntimeModelDescriptor {
+  const input = shape(value, path, ["id", "label", "efforts", "contextWindow"]);
+  const efforts = optional(input.efforts, (efforts) => {
+    const values = denseOwnDataArray(efforts, `${path}.efforts`, RUNTIME_MODEL_VALIDATION_MAX_ITEMS)
+      .map((effort, index) =>
+        boundedText(effort, `${path}.efforts[${String(index)}]`, MAX_MODEL_EFFORT_BYTES));
+    if (new Set(values).size !== values.length) fail(`${path}.efforts`, "must not contain duplicates");
+    return Object.freeze(values);
+  });
+  const contextWindow = optional(input.contextWindow, (contextWindow) => {
+    if (!Number.isSafeInteger(contextWindow) || Number(contextWindow) < 1)
+      fail(`${path}.contextWindow`, "must be a positive safe integer");
+    return Number(contextWindow);
+  });
+  return compact({
+    id: boundedText(input.id, `${path}.id`, MAX_IDENTIFIER_BYTES),
+    label: optional(input.label, (label) => boundedText(label, `${path}.label`, MAX_MODEL_LABEL_BYTES)),
+    efforts, contextWindow,
+  }) as RuntimeModelDescriptor;
 }
 
 /** Descriptor-safe parser for host health, lifecycle, and module diagnostics. */

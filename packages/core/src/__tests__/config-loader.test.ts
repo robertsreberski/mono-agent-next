@@ -65,6 +65,59 @@ describe("strict config and module loading", () => {
     expect(Object.isFrozen(loaded.mcp)).toBe(true);
   });
 
+  it("validates the configured effort against only the primary route's advertised allowlist", async () => {
+    let advertisePrimaryEfforts = true;
+    let created = 0;
+    const project = await fixture({
+      kind: "runtime",
+      controller: {
+        validateModel(request) {
+          const model = (request as { readonly model: string }).model;
+          return {
+            supported: true,
+            model: {
+              id: model,
+              ...(model === "primary:model" && !advertisePrimaryEfforts
+                ? {}
+                : { efforts: model === "primary:model" ? ["none", "high"] : ["low"] }),
+            },
+          };
+        },
+        create() {
+          created += 1;
+          return {};
+        },
+      },
+    });
+    const config = (effort: string) => minimalConfig(project.modules[0]!.name, {
+      routing: {
+        primary: { runtime: "main", model: "primary:model" },
+        fallbacks: [{ runtime: "main", model: "fallback:model" }],
+        effort,
+      },
+    });
+
+    await project.writeConfig(config("high"));
+    await expect(loadAgentConfig(project.configPath)).resolves.toMatchObject({
+      raw: { routing: { effort: "high" } },
+    });
+    await project.writeConfig(config("off"));
+    await expect(loadAgentConfig(project.configPath)).rejects.toMatchObject({
+      issues: [expect.objectContaining({
+        path: "routing.effort",
+        code: "unsupported_effort",
+        message: expect.stringMatching(/primary:model.*off/u),
+      })],
+    });
+
+    advertisePrimaryEfforts = false;
+    await project.writeConfig(config("custom"));
+    await expect(loadAgentConfig(project.configPath)).resolves.toMatchObject({
+      raw: { routing: { effort: "custom" } },
+    });
+    expect(created).toBe(0);
+  });
+
   it("returns an opaque immutable snapshot of the exact validated config and MCP bytes", async () => {
     const project = await fixture({ kind: "runtime", controller: runtimeController(async () => ({})) });
     const runtime = project.modules[0]!.name;

@@ -446,6 +446,12 @@ Core understands only the runtime instance id and passes the model identifier to
 
 Authentication, OAuth/API-key resolution, model discovery, native sessions, stream retry, and runtime-specific options remain runtime-owned. A project may configure Pi, Claude SDK, Codex, and OpenCode together.
 
+When the exact primary route descriptor advertises an effort allowlist, config
+loading rejects a `routing.effort` outside that list; an advertised empty list
+rejects every explicit value. Absent effort metadata remains permissive rather
+than synthesizing a capability. Fallback route allowlists govern per-turn
+fallback eligibility and do not redefine the primary default.
+
 Fallback is an attempt boundary, not migration of one runtime's private session object. The neutral transcript supplies canonical settled history to the next eligible runtime. Capability negotiation rejects a route that cannot satisfy required MCP, tool, attachment, approval, structured-output, or sandbox policy. A fallback never widens permissions and never blindly repeats a committed non-idempotent effect.
 
 Runtime-neutral history commits user-visible input, settled output, AskUser evidence, verbatim appends, selected route, and provider-session linkage only after settlement. Provider-native sessions are optimization and execution state, never the only user-visible history.
@@ -1107,6 +1113,34 @@ compaction and provider-session eviction telemetry, and proactive delivery into
 new operator conversations. Capability flags, not type presence, determine
 what an endpoint and product may expose.
 
+Configured model choices cross the operator boundary only as atomic
+runtime-instance/model routes. Each route may include a verified display label,
+context window, and effort allowlist for that exact model. Duplicate
+runtime-owned model ids remain distinct when their runtime instances differ.
+Renderers never combine a runtime from one advertised route with a model from
+another and never solicit a free-form effort when the selected route omits or
+empties its allowlist; configured/default behavior remains available without an
+explicit override. Choosing a default clears the request-level route or effort
+override rather than copying endpoint defaults into every turn.
+
+`contextUsed` is displayed only from a trustworthy usage snapshot for the
+current turn. Starting a turn must not relabel the previous settled value as
+current, although a current-turn usage snapshot may make it available before
+settlement. Compaction preserves a known `contextWindow` and sticky event
+marker but invalidates `contextUsed` until a later trustworthy snapshot.
+
+Web context, conversation-action, and run-settings panels share one controlled,
+portal-based popover layer with mutual exclusion, viewport collision handling,
+Escape/outside dismissal, deterministic focus return, and transcript-safe
+stacking. Mobile modal navigation dismisses popovers, makes the background
+inert to pointer, keyboard, and accessibility traversal, traps focus, and
+returns it to the launcher. Web accepts attachment-only turns. Failed
+new-turn/live-input submissions preserve or restore the exact text, quote, and
+attachment draft for retry and expose an accessible error; failed AskUser
+submissions retain their selections. Navigation away from pending composer or
+AskUser input requires explicit discard confirmation and releases queued
+attachment state before a confirmed switch.
+
 The first runnable G2 slice deliberately implements a narrower executable
 path: owner-private discovery reading, strict text-turn streaming,
 cancellation, runtime overrides, health, pi-tui rendering, authenticated web
@@ -1305,11 +1339,17 @@ Markdown jobs, five-field/timezone validation, duplicate rejection, runtime/mode
 - protocol and frame bounds, disconnect cancellation, capability advertisement, and owner-private discovery;
 - every TUI/web wire interaction uses the shared client;
 - fixture-equivalent domain state and actions;
-- per-turn context-window usage, compaction, and provider-session eviction telemetry;
+- atomic configured runtime/model route choices with verified per-model effort
+  allowlists and no renderer-authored unknown effort values;
+- truthful per-turn context-window usage, including active-turn and
+  post-compaction invalidation, plus compaction and provider-session eviction
+  telemetry;
 - proactive trigger delivery into a new operator conversation persisted by attached products;
 - independent product startup/config and no agent-config product registry;
 - TUI conversations, model/effort, cancel, live input, AskUser, quote, attachments, config, replay, health;
-- web durability, uploads, notifications, active-turn survival, invalidation, deletion, browser auth, host/origin safety.
+- web durability, attachment-only and recoverable failed sends, controlled
+  accessible popovers/modals, uploads, notifications, active-turn survival,
+  invalidation, deletion, browser auth, host/origin safety.
 
 **Memory**
 

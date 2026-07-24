@@ -140,9 +140,14 @@ one snapshot for evidence, uncertainty, and fallback rather than re-reading a
 mutable thrown object.
 
 Model validation and preflight return the effective capabilities and native
-tools for that exact route. `maxTurns` and `maxOutputTokens` may be advertised
-only when the runtime enforces the corresponding request bound. Every native
-tool declares its effects plus approval and sandbox enforcement. A
+tools for that exact route. They may also return a provider-neutral
+`RuntimeModelDescriptor` containing the exact runtime-owned model id plus only
+metadata the runtime can verify: label, explicit effort allowlist, and context
+window. Core adds the configured runtime instance when exposing an atomic
+operator route; renderers must not combine the descriptor with another
+runtime. `maxTurns` and `maxOutputTokens` may be advertised only when the
+runtime enforces the corresponding request bound. Every native tool declares
+its effects plus approval and sandbox enforcement. A
 `core-callback` tool calls `RuntimeTurnContext.requestApproval` before every
 invocation using the exact advertised id, display name, and effect set; Core
 then applies global and request-local tool policy and either decides
@@ -150,6 +155,12 @@ immediately or performs a bounded interaction. The callback is absent when the
 exact route advertises no `core-callback` descriptor. A `runtime-enforced`
 surface is eligible only while the effective Core policy does not require
 narrowing that the runtime cannot prove.
+
+`RuntimeUsage.contextWindow` is the exact model window when known, while
+`contextUsed` is the runtime's trustworthy token count for that usage snapshot.
+Consumers must not reuse a preceding turn's `contextUsed` as current. A
+compaction event invalidates the count until a later trustworthy usage
+snapshot, without invalidating a known context window.
 
 The first-party reserved `StateStore` contract includes both ordinary
 generation-bound `list` pagination and mutation-tolerant prefix `scan`, plus a
@@ -180,6 +191,7 @@ There is no generic plugin hook or discovery registry.
 | --- | --- |
 | Declare compatible module metadata | `MODULE_API_VERSION`, `ModuleManifest`, `ModuleSchema` |
 | Implement a runtime | `defineRuntimeModule`, `Runtime`, `RuntimeTurnRequest`, `RuntimeTurnContext`, `RuntimeTurnResult`, `RuntimeTurnError` |
+| Describe one validated runtime-owned model | `RuntimeModelDescriptor`, `RuntimeModelValidation`, `RuntimeModelPreflightResult` |
 | Snapshot a typed runtime failure safely | `snapshotRuntimeTurnError`, `RuntimeTurnErrorSnapshot` |
 | Stream text, transient thinking, transient activity, tool activity, usage, compaction, sessions, and live input | `RuntimeTurnEvent`, `RuntimeActivityEvent`, `RuntimeUsage`, `RuntimeSession`, `RuntimeLiveInputHandler` |
 | Implement a channel | `defineChannelModule`, `Channel`, `ChannelHost`, `ChannelInboundRequest`, `ChannelReplyEvent`, `ChannelReplySink`, `ChannelCapabilities`, `ChannelSendTool`, `ChannelSendToolContext`, `ChannelCurrentRunOutputRequest` |
@@ -384,6 +396,7 @@ RuntimeIncompleteTurnResult
 RuntimeLiveInput
 RuntimeLiveInputDisposition
 RuntimeLiveInputHandler
+RuntimeModelDescriptor
 RuntimeModelPreflightRequest
 RuntimeModelPreflightResult
 RuntimeModelValidation

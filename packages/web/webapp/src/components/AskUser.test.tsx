@@ -10,16 +10,16 @@ import { Composer } from "./Composer";
 
 const apiMocks = vi.hoisted(() => {
   const state = { interactionId: "interaction-one" };
-  const thread = () => ({
-    id: "thread-1",
+  const thread = (id = "thread-1") => ({
+    id,
     agentId: "agent-1",
-    operatorConversationId: "operator-thread-1",
-    title: "Needs input",
+    operatorConversationId: `operator-${id}`,
+    title: id === "thread-1" ? "Needs input" : "Other conversation",
     titleManual: false,
     createdAt: "2026-07-24T08:00:00.000Z",
     updatedAt: "2026-07-24T08:01:00.000Z",
     status: "idle" as const,
-    pendingAsk: {
+    ...(id === "thread-1" ? { pendingAsk: {
       interactionId: state.interactionId,
       requestedAt: "2026-07-24T08:01:00.000Z",
       questions: [
@@ -31,7 +31,7 @@ const apiMocks = vi.hoisted(() => {
           multiple: false,
         },
       ],
-    },
+    } } : {}),
   });
   return {
     state,
@@ -48,10 +48,11 @@ const apiMocks = vi.hoisted(() => {
           capabilities: {},
         },
       ],
-      threads: [thread()],
+      threads: [thread(), thread("thread-2")],
       newProactiveThreadIds: [],
     })),
-    thread: vi.fn(async () => ({ thread: thread(), messages: [] })),
+    thread: vi.fn(async (threadId: string) => ({ thread: thread(threadId), messages: [] })),
+    answerAsk: vi.fn(async () => ({ status: "accepted" })),
     subscribeEvents: vi.fn(
       async (
         _revision: number | undefined,
@@ -79,6 +80,7 @@ vi.mock("../api", async (importOriginal) => {
       },
       bootstrap: apiMocks.bootstrap,
       thread: apiMocks.thread,
+      answerAsk: apiMocks.answerAsk,
     },
   };
 });
@@ -143,14 +145,104 @@ describe("AskUser interaction identity", () => {
 
     await act(async () => root.unmount());
   });
+
+  it("keeps selected answers retryable when submission fails", async () => {
+    apiMocks.answerAsk.mockRejectedValueOnce(new Error("AskUser delivery failed."));
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(
+        <ConsoleProvider>
+          <WebRuntimeProvider>
+            <Composer />
+            <RefreshProbe />
+          </WebRuntimeProvider>
+        </ConsoleProvider>,
+      );
+    });
+    const form = await waitFor(() => host.querySelector<HTMLFormElement>(".ask-card"));
+    const choice = requiredElement<HTMLInputElement>(form, 'input[name="approval"]');
+    const submit = requiredElement<HTMLButtonElement>(form, 'button[type="submit"]');
+    await act(async () => choice.click());
+    await act(async () => submit.click());
+    await waitFor(() =>
+      host.querySelector('[role="alert"]')?.textContent === "AskUser delivery failed."
+    );
+
+    expect(choice.checked).toBe(true);
+    expect(submit.disabled).toBe(false);
+    await act(async () => root.unmount());
+  });
+
+  it("guards selected and in-flight answers and hides a late failure after switching", async () => {
+    const answer = deferred<{ status: string }>();
+    apiMocks.answerAsk.mockImplementationOnce(async () => await answer.promise);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+
+    await act(async () => {
+      root.render(
+        <ConsoleProvider>
+          <WebRuntimeProvider>
+            <Composer />
+            <RefreshProbe />
+          </WebRuntimeProvider>
+        </ConsoleProvider>,
+      );
+    });
+    const form = await waitFor(() => host.querySelector<HTMLFormElement>(".ask-card"));
+    const choice = requiredElement<HTMLInputElement>(form, 'input[name="approval"]');
+    const submit = requiredElement<HTMLButtonElement>(form, 'button[type="submit"]');
+    await act(async () => choice.click());
+    await act(async () => submit.click());
+    await waitFor(() => submit.textContent === "Submitting…");
+
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(host, 'button[aria-label="Select other thread"]').click();
+    });
+    await waitFor(() => confirm.mock.calls.length === 1);
+    expect(requiredElement<HTMLOutputElement>(host, '[data-testid="selected-thread"]').textContent)
+      .toBe("thread-1");
+    expect(choice.checked).toBe(true);
+
+    confirm.mockReturnValue(true);
+    await act(async () => {
+      requiredElement<HTMLButtonElement>(host, 'button[aria-label="Select other thread"]').click();
+    });
+    await waitFor(() =>
+      requiredElement<HTMLOutputElement>(host, '[data-testid="selected-thread"]').textContent
+        === "thread-2"
+    );
+    await act(async () => answer.reject(new Error("Late AskUser delivery failed.")));
+    await waitFor(() => apiMocks.answerAsk.mock.results[0]?.type === "return");
+    expect(requiredElement<HTMLOutputElement>(host, '[data-testid="console-error"]').textContent)
+      .toBe("");
+
+    await act(async () => root.unmount());
+  });
 });
 
 function RefreshProbe() {
   const consoleState = useConsole();
   return (
-    <button type="button" aria-label="Refresh test state" onClick={() => void consoleState.retry()}>
-      Refresh
-    </button>
+    <>
+      <button type="button" aria-label="Refresh test state" onClick={() => void consoleState.retry()}>
+        Refresh
+      </button>
+      <button
+        type="button"
+        aria-label="Select other thread"
+        onClick={() => void consoleState.selectThread("thread-2")}
+      >
+        Other
+      </button>
+      <output data-testid="selected-thread">{consoleState.selectedThreadId ?? ""}</output>
+      <output data-testid="console-error" role="alert">{consoleState.error ?? ""}</output>
+    </>
   );
 }
 
@@ -175,6 +267,17 @@ function requiredElement<ElementType extends Element>(
   const element = host.querySelector<ElementType>(selector);
   if (!element) throw new Error(`Expected ${selector} to be rendered`);
   return element;
+}
+
+function deferred<Value>(): {
+  readonly promise: Promise<Value>;
+  readonly reject: (cause: unknown) => void;
+} {
+  let rejectPromise!: (cause: unknown) => void;
+  const promise = new Promise<Value>((_resolve, reject) => {
+    rejectPromise = reject;
+  });
+  return { promise, reject: rejectPromise };
 }
 
 function memoryStorage(): Storage {
