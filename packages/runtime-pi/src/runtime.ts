@@ -7,10 +7,8 @@ import {
   calculateContextTokens,
   type AgentMessage,
   type AgentTool,
-  type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import {
-  getSupportedThinkingLevels,
   type AssistantMessage,
   type ImageContent,
   type Model,
@@ -63,6 +61,7 @@ import {
 } from "./model.js";
 import {
   createRuntimePiModelRegistry,
+  resolvePiThinkingLevel,
   RuntimePiModelDiscoveryError,
   type RuntimePiModelRegistry,
 } from "./models.js";
@@ -825,16 +824,6 @@ function assistantTurnMessage(message: AssistantMessage): TurnMessage {
   };
 }
 
-function thinkingLevel(effort: string | undefined, model: Model<string>): ThinkingLevel {
-  if (effort === undefined) return "off";
-  const supported = new Set<string>(getSupportedThinkingLevels(model).map((level) =>
-    level === "off" ? "none" : level));
-  if (!supported.has(effort)) {
-    throw new TypeError(`runtime-pi effort is unsupported: ${JSON.stringify(effort)}`);
-  }
-  return effort === "none" ? "off" : effort as ThinkingLevel;
-}
-
 function exactCapabilities(attachments: boolean): RuntimeCapabilities {
   return {
     tools: true,
@@ -1150,7 +1139,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
             const toolErrors = new Set<string>();
             let structuredOutput: JsonValue | undefined;
             const responseSchema = request.options?.responseSchema;
-            const effort = thinkingLevel(request.options?.effort, model);
+            const effort = resolvePiThinkingLevel(request.options?.effort, model);
             const authoredSystemPrompt = systemPrompt(request.messages);
             const nodeRepl = createNodeReplController(cwd);
             const codingTools = responseSchema === undefined

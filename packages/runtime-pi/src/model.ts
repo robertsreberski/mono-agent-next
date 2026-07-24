@@ -5,12 +5,12 @@ import type {
   RuntimeModelValidationRequest,
   RuntimeNativeToolDescriptor,
 } from "@mono-agent/module-sdk";
-import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { builtinModels } from "@earendil-works/pi-ai/providers/all";
 
 import { runtimePiCodingNativeTools } from "./coding-tool-descriptors.js";
 import { parsePiModelReference, parseRuntimePiConfig } from "./config.js";
 import type { RuntimePiConfig } from "./config.js";
+import { configuredRuntimePiModel, publicPiEffortLevels } from "./models.js";
 
 export const runtimePiNodeReplTool: RuntimeNativeToolDescriptor = Object.freeze({
   id: "NodeRepl",
@@ -53,29 +53,20 @@ function diagnostic(message: string): ModuleDiagnostic {
   };
 }
 
-function publicThinkingLevels(
-  levels: readonly string[],
-): readonly string[] {
-  return Object.freeze(levels.map((level) => level === "off" ? "none" : level));
-}
-
 function configuredLocalModelDescriptor(
   config: RuntimePiConfig,
   provider: string,
   modelId: string,
 ): RuntimeModelDescriptor | undefined {
-  const model = config.localProviders
-    .find((candidate) => candidate.id === provider)
-    ?.models
-    ?.find((candidate) => candidate.id === modelId);
-  if (model === undefined) return undefined;
+  const providerConfig = config.localProviders.find((candidate) => candidate.id === provider);
+  const model = providerConfig?.models?.find((candidate) => candidate.id === modelId);
+  if (providerConfig === undefined || model === undefined) return undefined;
+  const resolved = configuredRuntimePiModel(providerConfig, model);
   return {
     id: `${provider}:${modelId}`,
-    label: model.name ?? model.id,
-    efforts: model.reasoning === true
-      ? Object.freeze(["none", "minimal", "low", "medium", "high"])
-      : Object.freeze(["none"]),
-    contextWindow: model.contextWindow ?? 128_000,
+    label: resolved.name,
+    efforts: publicPiEffortLevels(resolved),
+    contextWindow: resolved.contextWindow,
   };
 }
 
@@ -95,7 +86,7 @@ function staticModelDescriptor(
   return {
     id: reference,
     label: resolved.name,
-    efforts: publicThinkingLevels(getSupportedThinkingLevels(resolved)),
+    efforts: publicPiEffortLevels(resolved),
     contextWindow: resolved.contextWindow,
   };
 }

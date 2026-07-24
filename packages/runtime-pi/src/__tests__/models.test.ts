@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseRuntimePiConfig } from "../config.js";
 import {
   createRuntimePiModelRegistry,
+  resolvePiThinkingLevel,
   RuntimePiModelDiscoveryError,
 } from "../models.js";
 import { isCheckedTransientProviderFailure } from "../runtime.js";
@@ -65,11 +66,12 @@ describe("runtime-pi model registry", () => {
       localProviders: [{
         id: "fixture",
         baseUrl: "http://127.0.0.1:1/v1",
-        models: [{ id: "vision", input: ["text", "image"] }],
+        models: [{ id: "vision", reasoning: true, input: ["text", "image"] }],
       }],
     }), new InMemoryCredentialStore());
 
-    await expect(registry.resolve("fixture:vision")).resolves.toMatchObject({
+    const model = await registry.resolve("fixture:vision");
+    expect(model).toMatchObject({
       id: "vision",
       provider: "fixture",
       baseUrl: "http://127.0.0.1:1/v1",
@@ -78,7 +80,26 @@ describe("runtime-pi model registry", () => {
       attachments: true,
       approvals: true,
       sandbox: false,
+      thinkingLevels: ["none", "minimal", "low", "medium", "high"],
     });
+    expect(resolvePiThinkingLevel("none", model)).toBe("off");
+    expect(resolvePiThinkingLevel("high", model)).toBe("high");
+    expect(() => resolvePiThinkingLevel("max", model)).toThrow(
+      'runtime-pi effort is unsupported: "max"',
+    );
+  });
+
+  it("preserves extended levels only when the exact Pi model opts into them", async () => {
+    const registry = createRuntimePiModelRegistry(parseRuntimePiConfig({}), new InMemoryCredentialStore());
+    const model = await registry.resolve("openai-codex:gpt-5.6-terra");
+
+    await expect(registry.capabilities("openai-codex:gpt-5.6-terra")).resolves.toMatchObject({
+      thinkingLevels: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    });
+    expect(resolvePiThinkingLevel("max", model)).toBe("max");
+    expect(() => resolvePiThinkingLevel("off", model)).toThrow(
+      'runtime-pi effort is unsupported: "off"',
+    );
   });
 
   it("discovers an omitted local model list through Pi's provider refresh hook", async () => {

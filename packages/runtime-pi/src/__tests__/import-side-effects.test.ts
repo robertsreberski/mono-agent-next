@@ -95,6 +95,25 @@ describe("runtime-pi module import", () => {
         contextWindow: 272_000,
       },
     });
+    const localConfig = module.monoAgentModule.schema.parse({
+      localProviders: [{
+        id: "fixture",
+        baseUrl: "http://127.0.0.1:1/v1",
+        models: [{ id: "echo", reasoning: true, contextWindow: 16_384 }],
+      }],
+    });
+    expect(module.monoAgentModule.validateModel?.({
+      model: "fixture:echo",
+      config: localConfig,
+    })).toMatchObject({
+      supported: true,
+      model: {
+        id: "fixture:echo",
+        label: "echo",
+        efforts: ["none", "minimal", "low", "medium", "high"],
+        contextWindow: 16_384,
+      },
+    });
     expect(validation).not.toBeInstanceOf(Promise);
     expect(module.monoAgentModule.validateModel?.({
       model: "openai/gpt-5",

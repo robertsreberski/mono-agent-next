@@ -1494,6 +1494,7 @@ import {
   createOperatorClientForEntry,
   discoverOperators,
 } from "@mono-agent/operator";
+import { monoAgentModule as runtimePiModule } from "@mono-agent/runtime-pi";
 import { startWebServer } from "@mono-agent/web";
 
 const EXPECTED_REPLY = "mono-agent-next durable provider fact 7d3f9c";
@@ -1514,6 +1515,7 @@ let secondHost;
 let webServer;
 
 try {
+  provePackedRuntimePiCapabilities();
   firstHost = await createAgentHost(configPath, { drainTimeoutMs: 5000, lifecycleTimeoutMs: 5000 });
   const firstEndpoints = endpoints(firstHost);
   await proveWebhookAuthentication(firstEndpoints.webhook);
@@ -1682,6 +1684,20 @@ async function proveWebhookAuthentication(endpoint) {
   assert.equal(completed.text, EXPECTED_REPLY);
 }
 
+function provePackedRuntimePiCapabilities() {
+  const validation = runtimePiModule.validateModel?.({
+    model: "openai-codex:gpt-5.6-terra",
+    config: runtimePiModule.schema.parse({}),
+  });
+  assert.equal(validation?.supported, true);
+  assert.deepEqual(validation?.model, {
+    id: "openai-codex:gpt-5.6-terra",
+    label: "GPT-5.6 Terra",
+    efforts: ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+    contextWindow: 272_000,
+  });
+}
+
 async function proveOperatorSurfaces(endpoint, conversationId, expectedMessages) {
   const anonymous = new OperatorClient({ endpoint, requestTimeoutMs: 5000 });
   await assert.rejects(
@@ -1711,6 +1727,13 @@ async function proveOperatorSurfaces(endpoint, conversationId, expectedMessages)
   assert.equal(info.capabilities.configView, true);
   assert.equal(info.capabilities.health, true);
   assert.equal(info.capabilities.askUser, true);
+  assert.deepEqual(info.models, [{
+    runtime: "pi",
+    id: "local:echo",
+    label: "echo",
+    efforts: ["none", "minimal", "low", "medium", "high"],
+    contextWindow: 16_384,
+  }]);
   assert.equal(replay.messages.length, expectedMessages);
   assert.equal(config.redacted, true);
   const serializedConfig = JSON.stringify(config.value);

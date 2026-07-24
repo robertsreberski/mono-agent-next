@@ -5,6 +5,7 @@ import {
   lazyApi,
   type CredentialStore,
   type Model,
+  type ModelThinkingLevel,
   type Models,
   type MutableModels,
   type Provider,
@@ -19,6 +20,22 @@ import type {
   RuntimePiModelConfig,
 } from "./config.js";
 import { parsePiModelReference } from "./config.js";
+
+export function publicPiEffortLevels(model: Model<string>): readonly string[] {
+  return Object.freeze(getSupportedThinkingLevels(model).map((level) =>
+    level === "off" ? "none" : level));
+}
+
+export function resolvePiThinkingLevel(
+  effort: string | undefined,
+  model: Model<string>,
+): ModelThinkingLevel {
+  if (effort === undefined) return "off";
+  if (!publicPiEffortLevels(model).includes(effort)) {
+    throw new TypeError(`runtime-pi effort is unsupported: ${JSON.stringify(effort)}`);
+  }
+  return effort === "none" ? "off" : effort as ModelThinkingLevel;
+}
 
 const MODEL_DISCOVERY_TIMEOUT_MS = 10_000;
 const MAX_MODEL_DISCOVERY_BYTES = 1_048_576;
@@ -149,6 +166,13 @@ function piModel(
       maxTokensField: "max_tokens",
     },
   };
+}
+
+export function configuredRuntimePiModel(
+  provider: RuntimePiLocalProviderConfig,
+  model: RuntimePiModelConfig,
+): Model<"openai-completions"> {
+  return piModel(provider.id, openAiCompatibleBaseUrl(provider.baseUrl), model);
 }
 
 async function readBoundedJson(response: Response): Promise<unknown> {
@@ -318,7 +342,7 @@ function addLocalProvider(
     name: providerId,
     baseUrl,
     auth: localAuth(providerId, config),
-    models: (config.models ?? []).map((model) => piModel(providerId, baseUrl, model)),
+    models: (config.models ?? []).map((model) => configuredRuntimePiModel(config, model)),
     fetchModels: (context) => discoverLocalModels(providerId, baseUrl, context),
     api: lazyApi(() => import("@earendil-works/pi-ai/api/openai-completions")),
   });
@@ -389,8 +413,7 @@ export function createRuntimePiModelRegistry(
         structuredOutput: true,
         approvals: true,
         sandbox: false,
-        thinkingLevels: getSupportedThinkingLevels(model).map((level) =>
-          level === "off" ? "none" : level),
+        thinkingLevels: publicPiEffortLevels(model),
         label: model.name,
         contextWindow: model.contextWindow,
       };
