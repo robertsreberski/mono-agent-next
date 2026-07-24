@@ -47,7 +47,7 @@ export interface ClaudeTransport {
   run(request: ClaudeTransportRequest, events: ClaudeTransportEvents): Promise<ClaudeTransportResult>;
 }
 
-function ownDataString(value: unknown, key: PropertyKey): string | undefined {
+export function ownDataValue(value: unknown, key: PropertyKey): unknown {
   if (
     value === null
     || (typeof value !== "object" && typeof value !== "function")
@@ -56,7 +56,6 @@ function ownDataString(value: unknown, key: PropertyKey): string | undefined {
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
     return descriptor !== undefined
       && "value" in descriptor
-      && typeof descriptor.value === "string"
       ? descriptor.value
       : undefined;
   } catch {
@@ -70,15 +69,15 @@ export function isClaudeSessionUnavailable(
 ): boolean {
   if (value instanceof ClaudeSessionUnavailableError) return true;
   if (sessionId === undefined) return false;
-  const message = typeof value === "string"
+  const rawMessage = typeof value === "string"
     ? value
-    : ownDataString(value, "message");
-  if (message === undefined) return false;
+    : ownDataValue(value, "message");
+  if (typeof rawMessage !== "string") return false;
   const prefix = `Session ${sessionId} not found`;
-  return message === prefix
-    || message === `${prefix} in any project directory`
-    || message === `${prefix} (no projects directory)`
-    || message.startsWith(`${prefix} in project directory for `);
+  return rawMessage === prefix
+    || rawMessage === `${prefix} in any project directory`
+    || rawMessage === `${prefix} (no projects directory)`
+    || rawMessage.startsWith(`${prefix} in project directory for `);
 }
 
 export function claudeEnvironment(auth: { method: "oauth-token" | "api-key"; token: string } | undefined): NodeJS.ProcessEnv {

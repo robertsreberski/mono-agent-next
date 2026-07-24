@@ -31,6 +31,11 @@ function text(value: unknown, fallback: string, path: string): string {
   return value;
 }
 
+function requiredText(value: unknown, path: string): string {
+  if (value === undefined) throw new TypeError(`${path} is required`);
+  return text(value, "", path);
+}
+
 function integer(value: unknown, fallback: number, min: number, max: number, path: string): number {
   if (value === undefined) return fallback;
   if (!Number.isInteger(value) || Number(value) < min || Number(value) > max) throw new TypeError(`${path} must be an integer from ${min} through ${max}`);
@@ -67,7 +72,10 @@ export function parseRuntimeClaudeConfig(input: unknown): RuntimeClaudeConfig {
     const candidate = object(value.auth, "runtime-claude config.auth");
     strict(candidate, ["method", "token"], "runtime-claude config.auth");
     if (candidate.method !== "oauth-token" && candidate.method !== "api-key") throw new TypeError("runtime-claude config.auth.method is invalid");
-    auth = { method: candidate.method, token: text(candidate.token, "", "runtime-claude config.auth.token") };
+    auth = {
+      method: candidate.method,
+      token: requiredText(candidate.token, "runtime-claude config.auth.token"),
+    };
   }
   return {
     mode: value.mode ?? "sdk",

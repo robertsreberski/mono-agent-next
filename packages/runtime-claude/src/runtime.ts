@@ -32,6 +32,7 @@ import { createClaudeSdkTransport } from "./sdk.js";
 import {
   ClaudeSessionUnavailableError,
   claudeEnvironment,
+  ownDataValue,
   type ClaudeTransport,
   type ClaudeTransportControl,
 } from "./transport.js";
@@ -39,21 +40,6 @@ import {
 type RuntimeState = "created" | "running" | "draining" | "stopped";
 const SAFE_CAUSE_MESSAGE_CHARS = 4_096;
 const SAFE_CAUSE_IDENTITY_CHARS = 128;
-
-function ownDataValue(value: unknown, key: PropertyKey): unknown {
-  if (
-    value === null
-    || (typeof value !== "object" && typeof value !== "function")
-  ) return undefined;
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor !== undefined && "value" in descriptor
-      ? descriptor.value
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 function failureMessage(value: unknown): string {
   const ownMessage = ownDataValue(value, "message");
@@ -113,7 +99,9 @@ function redact(value: unknown, secret: string | undefined): string {
   let message = failureMessage(value);
   if (secret !== undefined && secret.length > 0) message = message.split(secret).join("[REDACTED]");
   return bounded(
-    message.replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]"),
+    message
+      .replace(/\bsk-ant-[A-Za-z0-9_-]{20,}/g, "[REDACTED]")
+      .replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]"),
     SAFE_CAUSE_MESSAGE_CHARS,
   );
 }

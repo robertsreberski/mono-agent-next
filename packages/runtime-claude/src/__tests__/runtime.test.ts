@@ -469,5 +469,11 @@ describe("runtime-claude transports", () => {
       expect(token["x-mono-agent-secret"]).toBe(true);
     }
     expect(() => parseRuntimeClaudeConfig({ unexpected: true })).toThrow("is not supported");
+    expect(() => parseRuntimeClaudeConfig({
+      auth: { method: "api-key" },
+    })).toThrow("runtime-claude config.auth.token is required");
+    expect(() => parseRuntimeClaudeConfig({
+      auth: { method: "oauth-token", token: "" },
+    })).toThrow("runtime-claude config.auth.token must be a non-empty trimmed string");
   });
 });
