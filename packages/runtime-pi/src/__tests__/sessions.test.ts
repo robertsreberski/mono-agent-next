@@ -397,6 +397,10 @@ describe("RuntimePiSessionManager", () => {
     });
     let release!: () => void;
     const gate = new Promise<void>((resolvePromise) => { release = resolvePromise; });
+    let confirmAttemptOpen!: () => void;
+    const attemptOpen = new Promise<void>((resolvePromise) => {
+      confirmAttemptOpen = resolvePromise;
+    });
     const active = crashed.withAttempt(
       {
         conversationId: "crashed-conversation",
@@ -405,6 +409,7 @@ describe("RuntimePiSessionManager", () => {
         signal: new AbortController().signal,
       },
       async () => {
+        confirmAttemptOpen();
         await gate;
         return { completed: false, value: undefined };
       },
@@ -418,6 +423,7 @@ describe("RuntimePiSessionManager", () => {
         pid: 99_999_999,
       });
     });
+    await attemptOpen;
 
     const recovered = new RuntimePiSessionManager({
       cwd: root,
