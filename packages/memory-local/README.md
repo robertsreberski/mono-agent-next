@@ -150,7 +150,9 @@ adoption, strict audit, and existing-store admission.
 4. Completed-turn capture records a durable intake, obtains schema-constrained
    extraction, then atomically commits BuJo/FTS rows, vector-or-retry state, and
    the replay receipt. Exact duplicate replay reconstructs missing vector
-   intake without rerunning a completed capture.
+   intake without rerunning a completed capture. Forgetting atomically removes
+   the record from every referencing receipt and retains an empty receipt as a
+   privacy tombstone, so replay cannot resurrect intentionally forgotten facts.
 5. Optional Ollama embeddings populate `sqlite-vec`; recall combines bounded
    FTS and vector candidates with stable ordering and a total `maxBytes` cap.
 6. Explicit consolidation reads canonical rows and refreshes bounded
@@ -179,7 +181,8 @@ adoption, strict audit, and existing-store admission.
 | `index.ts` | Memory module definition and curated exports. |
 
 Maintenance is explicit: `audit({ strict: true })` gates cutover and rejects
-missing expected FTS or vector rows,
+missing expected FTS or vector rows, malformed capture receipts, and receipts
+that reference missing canonical records;
 `previewForget` shows the exact record and vector before deletion, `backup`
 writes a verified copy with SHA-256 evidence, `rebuild` recreates FTS/vector
 indexes, `consolidate` refreshes projection-only index/future-log files, and

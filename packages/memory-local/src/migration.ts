@@ -17,6 +17,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { load as loadSqliteVec } from "sqlite-vec";
 
 import {
+  assertCaptureReceiptIntegrity,
   assertReadableMemoryRows,
   auditBujoDatabase,
   type BujoAuditSnapshot,
@@ -470,8 +471,9 @@ async function adoptV0MemoryLocalCopyInternal(
     embedding = readEmbeddingIdentity(preCommit, snapshot);
     try {
       assertReadableMemoryRows(preCommit, parseMemoryLocalConfig(undefined), snapshot);
+      assertCaptureReceiptIntegrity(preCommit);
     } catch {
-      throw migrationFailure("Adoption target contains invalid memory records.");
+      throw migrationFailure("Adoption target contains invalid memory records or capture receipts.");
     }
     assertStrictDatabase(snapshot, embedding);
     await databaseBinding.verify();
