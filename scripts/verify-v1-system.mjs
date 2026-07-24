@@ -2048,6 +2048,9 @@ function assertProviderRequests(requests, scenarioProof) {
     }
     if (input.endsWith(`Assistant: ${EXPECTED_REPLY}`)) capturedReplies.push(EXPECTED_REPLY);
     else if (input.endsWith(`Assistant: ${ASK_USER_COMPLETION}`)) capturedReplies.push(ASK_USER_COMPLETION);
+    else if (input.endsWith(`Assistant: ${RUN_HISTORY_COMPLETION}`)) {
+      capturedReplies.push(RUN_HISTORY_COMPLETION);
+    }
     else throw new Error(`Memory capture received an unexpected completion: ${JSON.stringify(input)}`);
   }
   const expectedCapturedReplies = [
