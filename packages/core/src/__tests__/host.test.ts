@@ -1223,6 +1223,144 @@ describe("agent host lifecycle", () => {
     await expect(host.health()).resolves.toMatchObject({ status: "stopped", accepting: false });
   });
 
+  it("lets post-settlement memory capture exceed the lifecycle timeout without degrading health", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-${suffix}`;
+    const memory = `@fixture/memory-${suffix}`;
+    let captureCompleted = false;
+    let captureSignal: AbortSignal | undefined;
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create: () => runtimeInstance(async () => completed("settled")),
+        },
+      },
+      {
+        name: memory,
+        kind: "memory",
+        controller: {
+          create: () => ({
+            capabilities: { capture: true, forget: true },
+            async recall() {
+              return { records: [] };
+            },
+            async capture(request: { readonly signal: AbortSignal }) {
+              captureSignal = request.signal;
+              await new Promise<void>((resolve, reject) => {
+                const timeout = setTimeout(resolve, 75);
+                request.signal.addEventListener("abort", () => {
+                  clearTimeout(timeout);
+                  reject(request.signal.reason);
+                }, { once: true });
+              });
+              captureCompleted = true;
+            },
+            async forget() {
+              return false;
+            },
+          }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      memory: { $use: memory },
+    }));
+    const host = await createAgentHost(project.configPath, {
+      lifecycleTimeoutMs: 20,
+    });
+
+    try {
+      await expect(host.submit({
+        requestId: "slow-memory-capture-1",
+        conversationId: "slow-memory-capture",
+        text: "remember this",
+      })).resolves.toMatchObject({ status: "completed", text: "settled" });
+      expect(captureCompleted).toBe(true);
+      expect(captureSignal?.aborted).toBe(false);
+      await expect(host.health()).resolves.toMatchObject({ status: "healthy" });
+    } finally {
+      await host.stop();
+    }
+  });
+
+  it("aborts an unfinished post-settlement memory capture when host stop reaches its drain bound", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-${suffix}`;
+    const memory = `@fixture/memory-${suffix}`;
+    let markCaptureStarted!: () => void;
+    let markCaptureAborted!: () => void;
+    const captureStarted = new Promise<void>((resolve) => {
+      markCaptureStarted = resolve;
+    });
+    const captureAborted = new Promise<void>((resolve) => {
+      markCaptureAborted = resolve;
+    });
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create: () => runtimeInstance(async () => completed("durably settled")),
+        },
+      },
+      {
+        name: memory,
+        kind: "memory",
+        controller: {
+          create: () => ({
+            capabilities: { capture: true, forget: true },
+            async recall() {
+              return { records: [] };
+            },
+            async capture(request: { readonly signal: AbortSignal }) {
+              markCaptureStarted();
+              await new Promise<never>((_resolve, reject) => {
+                const abort = () => {
+                  markCaptureAborted();
+                  reject(request.signal.reason);
+                };
+                if (request.signal.aborted) {
+                  abort();
+                  return;
+                }
+                request.signal.addEventListener("abort", abort, { once: true });
+              });
+            },
+            async forget() {
+              return false;
+            },
+          }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      memory: { $use: memory },
+    }));
+    const host = await createAgentHost(project.configPath, {
+      drainTimeoutMs: 20,
+      lifecycleTimeoutMs: 100,
+    });
+    const turn = host.submit({
+      requestId: "stopped-memory-capture-1",
+      conversationId: "stopped-memory-capture",
+      text: "remember this",
+    });
+
+    await captureStarted;
+    await expect(settleWithin(host.stop(), 500)).resolves.toBeUndefined();
+    await expect(settleWithin(captureAborted, 100)).resolves.toBeUndefined();
+    await expect(settleWithin(turn, 500)).resolves.toMatchObject({
+      status: "completed",
+      text: "durably settled",
+    });
+    await expect(host.health()).resolves.toMatchObject({
+      status: "stopped",
+      accepting: false,
+    });
+  });
+
   it("bounds MCP close during stop when the client ignores shutdown", async () => {
     const runtime = `@fixture/runtime-${randomUUID().toLowerCase()}`;
     const project = await fixture([{

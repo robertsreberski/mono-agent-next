@@ -2670,7 +2670,7 @@ class AgentHostImplementation implements AgentHost {
           runtime: route.runtime,
           model: route.model,
         },
-      }, signal);
+      }, this.#hostAbort.signal);
     }
     return response;
   }

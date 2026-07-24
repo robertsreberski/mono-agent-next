@@ -180,8 +180,14 @@ writes a verified copy with SHA-256 evidence, `rebuild` recreates FTS/vector
 indexes, `consolidate` refreshes projection-only index/future-log files, and
 `retryIntake` resumes bounded failed capture or vector work. The module exposes
 the same logic as `memory-local:audit`, `backup`, `rebuild`, `forget`, and
-`consolidate` maintenance commands. Rebuild requires `confirm: true`; forget
-previews by default and mutates only with `dryRun: false, confirm: true`.
+`consolidate` maintenance commands, plus `memory-local:retry` with an optional
+`limit` from 1 through 1,000. Runtime-backed capture retry requires the command
+to run on an AgentHost that has the configured runtime loaded and a
+`lifecycleTimeoutMs` at least as large as `capture.timeoutMs`; a default
+10-second host cannot recover a slower capture. The one-shot memory CLI creates
+only the memory module and is not that recovery path.
+Rebuild requires `confirm: true`; forget previews by default and mutates only
+with `dryRun: false, confirm: true`.
 
 Non-serving module diagnostics reuse the read-only audit path. A healthy store
 is silent; incomplete FTS/vector/intake/projection state returns bounded

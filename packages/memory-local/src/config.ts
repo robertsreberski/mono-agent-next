@@ -12,6 +12,7 @@ export const DEFAULT_RUNTIME_CAPTURE_TIMEOUT_MS = 360_000;
 export const DEFAULT_EMBEDDING_TIMEOUT_MS = 30_000;
 export const DEFAULT_EMBEDDING_BREAKER_FAILURES = 3;
 export const DEFAULT_EMBEDDING_BREAKER_RESET_MS = 30_000;
+export const MAX_MEMORY_LOCAL_INTAKE_RETRIES = 1_000;
 
 export interface MemoryLocalModelRoute {
   readonly runtime: string;

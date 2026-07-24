@@ -294,6 +294,7 @@ describe("memory-local maintenance commands", () => {
         "memory-local:rebuild",
         "memory-local:forget",
         "memory-local:consolidate",
+        "memory-local:retry",
       ]);
       for (const command of memory.commands) {
         expect(command.name).toMatch(/^memory-local:/u);
@@ -311,6 +312,12 @@ describe("memory-local maintenance commands", () => {
             { required: ["recordId"] },
             { required: ["recordId", "dryRun", "confirm"] },
           ],
+        });
+      expect(findCommand(memory.commands, "memory-local:retry").inputSchema)
+        .toMatchObject({
+          properties: {
+            limit: { type: "integer", minimum: 1, maximum: 1_000, default: 32 },
+          },
         });
 
       await expect(findCommand(memory.commands, "memory-local:audit")
@@ -386,6 +393,54 @@ describe("memory-local maintenance commands", () => {
       await memory.stop();
     }
   }, 15_000);
+
+  it("retries bounded durable intake through a running host command", async () => {
+    const fixture = await createFixture();
+    let captureAvailable = false;
+    const grant: MemoryRuntimeCaptureGrant = {
+      async complete({ input }) {
+        if (!captureAvailable) throw new Error("runtime unavailable");
+        return { text: "", structuredOutput: { records: [{ text: input }] } };
+      },
+    };
+    const memory = await openMemoryLocal({
+      ...options(fixture, memoryConfig(3)),
+      host: runtimeHost(grant),
+      embeddingProvider: new CountingEmbeddings(3),
+    });
+    try {
+      await expect(memory.capture?.({
+        record: record("retry-command", "Remember the violet bicycle.", "2026-07-23T11:00:00.000Z"),
+        signal,
+      })).rejects.toMatchObject({ code: "runtime_capture_invalid" });
+
+      const retry = findCommand(memory.commands, "memory-local:retry");
+      for (const input of [{ limit: 0 }, { limit: 1_001 }, { limit: 1.5 }, { extra: true }]) {
+        await expect(retry.run(input, { signal, logger }))
+          .rejects.toMatchObject({ code: "maintenance_failed" });
+      }
+
+      captureAvailable = true;
+      await expect(retry.run({ limit: 1 }, { signal, logger })).resolves.toEqual({
+        capturesRetried: 1,
+        vectorsRetried: 0,
+        failed: 0,
+        remainingCaptures: 0,
+        remainingVectors: 0,
+      });
+      await expect(retry.run(undefined, { signal, logger })).resolves.toEqual({
+        capturesRetried: 0,
+        vectorsRetried: 0,
+        failed: 0,
+        remainingCaptures: 0,
+        remainingVectors: 0,
+      });
+      expect((await memory.recall({ query: "violet bicycle", limit: 1, signal })).records)
+        .toHaveLength(1);
+    } finally {
+      await memory.stop();
+    }
+  });
 });
 
 class CountingEmbeddings implements MemoryEmbeddingProvider {
