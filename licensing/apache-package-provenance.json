@@ -38,7 +38,7 @@
     },
     {
       "path": "packages/module-sdk/README.md",
-      "sha256": "9366920f02e27739461b3f08f9b7386ac480a22d2e680c028902be220f23a088",
+      "sha256": "38103f10c62dcf7ed8616aac42ea853ffc176d3bbf6db9b65081cf2f17258081",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -75,7 +75,7 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/contract-codecs.test.ts",
-      "sha256": "1fd7974142cef193a8c707b57bca774dc5900b26217af02ad0b974e9661f8d82",
+      "sha256": "8dbd6e5b56243cd74171cb85af7a8e02d1aa04d5896713149cb3ef0cb2ad91cb",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -135,7 +135,7 @@
     },
     {
       "path": "packages/module-sdk/src/index.ts",
-      "sha256": "04068da880ab7739336ac03bb1e93479e1fda1812637baff279f03e567985eb9",
+      "sha256": "c8659fa1bd507b6f6653a3001016ac4eb7ebcd0ca56b7a2aabf3015c9077c96d",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -221,7 +221,7 @@
     },
     {
       "path": "packages/operator/README.md",
-      "sha256": "5e837e4993f3054c28d7b1b6a1fddb58db951d2a154f52b47a371ef5d27d176f",
+      "sha256": "9fe816fe4ab5cade8998a66b9fd07d64148261857488e8ea2bc1c868fc3d60a6",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -258,7 +258,7 @@
     },
     {
       "path": "packages/operator/src/__tests__/directory.test.ts",
-      "sha256": "5cb0f3b7611458dff37dfc15d3004e7bf6ddbbe43f6b0b1bac18a87eab41e396",
+      "sha256": "30cd1cccef99ceec0a5b2073bd6f90e84fe181ec866f26fcf68c327d0e5303a5",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -282,7 +282,7 @@
     },
     {
       "path": "packages/operator/src/__tests__/overrides.test.ts",
-      "sha256": "b211e32ff065e05b1049401be004357f345347babde6128e752a2e22f3d42821",
+      "sha256": "426150fb4acb24b14f1b98f3b92e7072e4726f7f90a3cd25dd9a433e6377a6c0",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -294,7 +294,7 @@
     },
     {
       "path": "packages/operator/src/__tests__/protocol.test.ts",
-      "sha256": "dfc82710fbe55a1ea64b3618e442323d5b20f2f7d0937c760125bb463600d886",
+      "sha256": "68ebb5c94ac2e3db30618c286cc4013f9a40e680a2cf0f716e0c063a6c007775",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -306,7 +306,7 @@
     },
     {
       "path": "packages/operator/src/__tests__/state.test.ts",
-      "sha256": "30b559cc0e487f8460b3bd72bbf504509c18e60992ab51e3881415defcbdd88b",
+      "sha256": "70a7ebff6a5bbed2de57c1fe1ccea79989f1bae0edcbce47fea608a0f57da6ff",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -337,7 +337,7 @@
     },
     {
       "path": "packages/operator/src/directory.ts",
-      "sha256": "871b831e0a1855cbc896b976d5f901313b6bff983441f0daba25ad2f7d7e3d24",
+      "sha256": "53902918042e14693be97d0a31286da2b08599edc67376dc165a292d7cc74eba",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -349,7 +349,7 @@
     },
     {
       "path": "packages/operator/src/identity.ts",
-      "sha256": "ac72d1ccb8fb16df38b05082e7ea239c585db3eda5f93c0dc81f9a2a73760895",
+      "sha256": "562c9c49edab744a1eeb0eb6f69acc71b7a07920a4f052741348307a70a4d778",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -373,7 +373,7 @@
     },
     {
       "path": "packages/operator/src/overrides.ts",
-      "sha256": "19a192330a4b31d9e03d0b053bf4022a96b35579b82c79ab2123caf9fdf9ff0a",
+      "sha256": "d1d2b22738d5a19f3aab1495bafde2cc0a62457b8e3f534a14402c81db696607",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -385,7 +385,7 @@
     },
     {
       "path": "packages/operator/src/protocol.ts",
-      "sha256": "3aa9c452e278a873200154ce21cf19adc2adfe926131d49c41b5f9d7d49a9a9b",
+      "sha256": "047413d8a618baba2f3dbdd84020b649c57aaf9ba9575b799adfd1551c5d245e",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -397,7 +397,7 @@
     },
     {
       "path": "packages/operator/src/state.ts",
-      "sha256": "cfba36de51ea0e198c5f223b9a5c5eba2d7e8ed2f7a3de1c24f6af6e0f77f7ba",
+      "sha256": "04dc41e759d60a4033d051cadd59ea4e84f9777e43de33bc942d98ce70e38f6c",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -409,7 +409,7 @@
     },
     {
       "path": "packages/operator/src/testing.ts",
-      "sha256": "16f53f232271e9c5c20899c31c85f8feb551c7c6af780e13a49b9be62f8d785f",
+      "sha256": "da06f81cd7b4e7ede6ed1085cf47933ae1af24419ec015215433c38e8d7f0c1d",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -421,7 +421,7 @@
     },
     {
       "path": "packages/operator/src/types.ts",
-      "sha256": "5797c8a61878bed2ee4c762b3b8f99a507ad2bde2065cd1814a66dd12dd042f0",
+      "sha256": "b348569ee452a4bf2f941c6b6a58ccca0c97754c6645c4295dbaf28b0e0afd21",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
