@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  AGENT_INTERACTION_LIMITS,
+  ASK_USER_MAX_ANSWER_BYTES,
   MODULE_API_VERSION,
   defineChannelModule,
+  parseAskUserAnswer,
   type Channel,
   type ChannelAttachment,
   type ChannelInboundRequest,
@@ -15,7 +18,14 @@ import {
   type ModuleHealth,
 } from "@mono-agent/module-sdk";
 
-import { createTelegramBotApiClient, type TelegramBotClient, type TelegramBotClientFactory, type TelegramMessageUpdate, type TelegramUpdate } from "./bot.js";
+import {
+  createTelegramBotApiClient,
+  type TelegramBotClient,
+  type TelegramBotClientFactory,
+  type TelegramMessageUpdate,
+  type TelegramSendMessageRequest,
+  type TelegramUpdate,
+} from "./bot.js";
 import { type TelegramConfig, telegramConfigSchema } from "./config.js";
 import { TelegramDelivery } from "./delivery.js";
 import { resolveTelegramChatId, telegramConversationId } from "./destination.js";
@@ -26,6 +36,8 @@ import {
 const PACKAGE_NAME = "@mono-agent/channel-telegram";
 const PACKAGE_VERSION = "0.15.0";
 const STOP_TIMEOUT_MS = 1_000;
+const TELEGRAM_TEXT_LIMIT = 4_096;
+const MAX_ASK_BUTTONS_PER_QUESTION = 8;
 const MAX_PENDING_ASKS = 1_000;
 const MAX_CALLBACK_ANSWERS = 10_000;
 const MAX_RUNTIME_SELECTIONS = 1_000;
@@ -47,7 +59,6 @@ interface TelegramCallbackAnswer {
 }
 
 interface TelegramRuntimeSelection {
-  readonly runtime?: string;
   readonly model?: string;
   readonly effort?: string;
 }
@@ -80,16 +91,22 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
   const client = (options.clientFactory ?? ((config) => createTelegramBotApiClient(config)))(context.config);
   const delivery = new TelegramDelivery(context.config, client);
   const sendTools = createTelegramSendTools(context.config);
-  let lifecycle: AbortController | undefined;
+  let pollLifecycle: AbortController | undefined;
+  let turnLifecycle: AbortController | undefined;
   let polling: Promise<void> | undefined;
+  let shutdownPromise: Promise<void> | undefined;
+  let confirmationLifecycle: AbortController | undefined;
   let offset = 0;
+  let confirmedOffset = 0;
   let running = false;
   let stopped = false;
+  let forceStopped = false;
   let active = 0;
   let lastError: string | undefined;
   const pendingAsks = new Map<string, PendingTelegramAsk>();
   const callbackAnswers = new Map<string, TelegramCallbackAnswer>();
   const runtimeSelections = new Map<string, TelegramRuntimeSelection>();
+  const idleWaiters = new Set<() => void>();
 
   const clearPendingAsk = (chatId: string): void => {
     const pending = pendingAsks.get(chatId);
@@ -98,30 +115,40 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
   };
 
   const rememberCallback = (token: string, answer: TelegramCallbackAnswer, pending: PendingTelegramAsk): void => {
+    if (callbackAnswers.size >= MAX_CALLBACK_ANSWERS) {
+      throw new Error("Telegram AskUser callback capacity is exhausted.");
+    }
     callbackAnswers.set(token, answer);
     pending.tokens.add(token);
-    while (callbackAnswers.size > MAX_CALLBACK_ANSWERS) {
-      const oldest = callbackAnswers.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      callbackAnswers.delete(oldest);
-    }
   };
 
   const rememberAsk = (chatId: string, ask: AskUserRequest): PendingTelegramAsk => {
-    clearPendingAsk(chatId);
-    const pending: PendingTelegramAsk = { ask, answers: {}, done: new Set(), tokens: new Set() };
-    pendingAsks.set(chatId, pending);
-    while (pendingAsks.size > MAX_PENDING_ASKS) {
-      const oldest = pendingAsks.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      clearPendingAsk(oldest);
+    const existingTokens = pendingAsks.get(chatId)?.tokens.size ?? 0;
+    if (!pendingAsks.has(chatId) && pendingAsks.size >= MAX_PENDING_ASKS) {
+      throw new Error("Telegram pending AskUser capacity is exhausted.");
     }
+    if (callbackAnswers.size - existingTokens + askCallbackCount(ask) > MAX_CALLBACK_ANSWERS) {
+      throw new Error("Telegram AskUser callback capacity is exhausted.");
+    }
+    clearPendingAsk(chatId);
+    const answers = Object.create(null) as Record<string, readonly string[]>;
+    const pending: PendingTelegramAsk = { ask, answers, done: new Set(), tokens: new Set() };
+    pendingAsks.set(chatId, pending);
     return pending;
   };
 
   const authorized = (chatId: string): boolean => context.config.allowAllChats || context.config.allowedChatIds.includes(chatId);
 
+  const releaseActiveUpdate = (): void => {
+    active -= 1;
+    if (active === 0) {
+      for (const resolve of idleWaiters) resolve();
+      idleWaiters.clear();
+    }
+  };
+
   const processUpdate = async (update: TelegramUpdate, signal: AbortSignal): Promise<void> => {
+    if (update.kind === "ignored") return;
     if (!authorized(update.chatId)) return;
     if (update.kind === "callback") {
       const replyText = decodeReplyCallback(update.data);
@@ -143,25 +170,23 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
       if (answer !== undefined && answer.chatId === update.chatId && context.host.answerAsk !== undefined) {
         const pending = pendingAsks.get(update.chatId);
         if (pending !== undefined && pending.ask.interactionId === answer.interactionId) {
-          callbackAnswers.delete(update.data);
-          pending.tokens.delete(update.data);
-          if (answer.value !== undefined) pending.answers[answer.questionId] = pending.ask.questions.find((question) => question.id === answer.questionId)?.multiple === true ? [...(pending.answers[answer.questionId] ?? []), answer.value] : [answer.value];
-          if (answer.done || pending.ask.questions.find((question) => question.id === answer.questionId)?.multiple !== true) pending.done.add(answer.questionId);
+          const consumeCallback = recordAskAnswer(pending, answer);
+          if (consumeCallback) {
+            callbackAnswers.delete(update.data);
+            pending.tokens.delete(update.data);
+          }
           if (await maybeAnswerAsk(context, update.chatId, pending, signal)) clearPendingAsk(update.chatId);
         }
       }
       await client.answerCallback?.(update.callbackId, signal).catch(() => undefined);
       return;
-    }
-    active += 1;
-    try {
+    } else {
       await react(client, context.config.reactions.working, update, "👀", signal);
       const pendingAsk = pendingAsks.get(update.chatId);
       if (pendingAsk !== undefined && context.host.answerAsk !== undefined) {
         const question = pendingAsk.ask.questions.find((candidate) => !pendingAsk.done.has(candidate.id));
         if (question !== undefined && question.allowFreeText && update.text.trim().length > 0) {
-          pendingAsk.answers[question.id] = [update.text];
-          pendingAsk.done.add(question.id);
+          recordAskFreeText(pendingAsk, question.id, update.text);
           if (await maybeAnswerAsk(context, update.chatId, pendingAsk, signal)) clearPendingAsk(update.chatId);
           return;
         }
@@ -222,12 +247,13 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
           if (event.type === "text-delta") replyText += event.delta;
           else if (event.type === "text-replace") replyText = event.text;
           else if (event.type === "activity" && event.text.length > 0) {
+            const text = boundedTelegramText(event.text);
             if (activityMessageId !== undefined && client.editMessage !== undefined) {
-              await client.editMessage({ chatId: update.chatId, messageId: activityMessageId, text: event.text, signal });
+              await client.editMessage({ chatId: update.chatId, messageId: activityMessageId, text, signal });
             } else {
               activityMessageId = (await client.sendMessage({
                 chatId: update.chatId,
-                text: event.text,
+                text,
                 replyToMessageId: update.messageId,
                 signal,
               })).messageId;
@@ -236,18 +262,27 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
             await client.sendAttachment({ chatId: update.chatId, attachment: event.attachment, signal });
           } else if (event.type === "ask-user" && context.host.answerAsk !== undefined) {
             const pending = rememberAsk(update.chatId, event.ask);
-            for (const question of event.ask.questions) {
-              const buttons = (question.choices ?? []).slice(0, 8).map((choice) => {
-                const token = `ask:${randomUUID().slice(0, 12)}`;
-                rememberCallback(token, { chatId: update.chatId, interactionId: event.ask.interactionId, questionId: question.id, value: choice.value, done: false }, pending);
-                return { label: choice.label, data: token };
-              });
-              if (question.multiple) {
-                const token = `ask:${randomUUID().slice(0, 12)}`;
-                rememberCallback(token, { chatId: update.chatId, interactionId: event.ask.interactionId, questionId: question.id, done: true }, pending);
-                buttons.push({ label: "Done", data: token });
+            try {
+              for (const question of event.ask.questions) {
+                const buttons = (question.choices ?? []).slice(0, MAX_ASK_BUTTONS_PER_QUESTION).map((choice) => {
+                  const token = `ask:${randomUUID().slice(0, 12)}`;
+                  rememberCallback(token, { chatId: update.chatId, interactionId: event.ask.interactionId, questionId: question.id, value: choice.value, done: false }, pending);
+                  return { label: choice.label, data: token };
+                });
+                if (question.multiple) {
+                  const token = `ask:${randomUUID().slice(0, 12)}`;
+                  rememberCallback(token, { chatId: update.chatId, interactionId: event.ask.interactionId, questionId: question.id, done: true }, pending);
+                  buttons.push({ label: "Done", data: token });
+                }
+                await sendChunkedTelegramMessage(client, {
+                  chatId: update.chatId,
+                  replyToMessageId: update.messageId,
+                  signal,
+                }, question.prompt, buttons);
               }
-              await client.sendMessage({ chatId: update.chatId, text: question.prompt, replyToMessageId: update.messageId, ...(buttons.length === 0 ? {} : { buttons }), signal });
+            } catch (error) {
+              clearPendingAsk(update.chatId);
+              throw error;
             }
           }
         },
@@ -263,32 +298,54 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
       const result = await context.host.dispatch(request, reply);
       const final = result.text ?? replyText;
       if (result.status === "completed" && final.length > 0) {
-        await client.sendMessage({ chatId: update.chatId, text: final, replyToMessageId: update.messageId, signal });
+        await sendChunkedTelegramMessage(client, {
+          chatId: update.chatId,
+          replyToMessageId: update.messageId,
+          signal,
+        }, final);
         await react(client, context.config.reactions.done, update, "👍", signal);
       } else if (result.status === "rejected") {
         await react(client, context.config.reactions.error, update, "👎", signal);
       }
-    } finally {
-      active -= 1;
     }
   };
 
-  const poll = async (signal: AbortSignal): Promise<void> => {
-    while (!signal.aborted) {
+  const poll = async (pollSignal: AbortSignal, turnSignal: AbortSignal): Promise<void> => {
+    while (!pollSignal.aborted) {
       try {
-        const updates = await client.poll(offset, context.config.pollSeconds, signal);
+        const requestedOffset = offset;
+        const updates = await client.poll(requestedOffset, context.config.pollSeconds, pollSignal);
+        confirmedOffset = Math.max(confirmedOffset, requestedOffset);
+        let updateFailed = false;
         for (const update of updates) {
-          if (signal.aborted) break;
+          if (pollSignal.aborted) break;
           if (update.updateId < offset) continue;
-          await processUpdate(update, signal);
-          offset = Math.max(offset, update.updateId + 1);
+          active += 1;
+          try {
+            await processUpdate(update, turnSignal);
+          } catch {
+            if (turnSignal.aborted) break;
+            updateFailed = true;
+            lastError = "Telegram update processing is degraded.";
+            context.logger.warn(lastError, {
+              instanceId: context.instanceId,
+              updateId: update.updateId,
+              ...(update.kind === "ignored" ? {} : { chatId: update.chatId }),
+            });
+            if (update.kind === "message") {
+              await react(client, context.config.reactions.error, update, "👎", turnSignal);
+            }
+          } finally {
+            if (!turnSignal.aborted) offset = Math.max(offset, update.updateId + 1);
+            releaseActiveUpdate();
+          }
         }
-        lastError = undefined;
-      } catch (error) {
-        if (signal.aborted) break;
+        if (!updateFailed && !pollSignal.aborted) lastError = undefined;
+      } catch {
+        if (pollSignal.aborted) break;
         lastError = "Telegram polling is degraded.";
         context.logger.warn(lastError, { instanceId: context.instanceId });
-        await delay(100, signal);
+        await delay(100, pollSignal);
       }
     }
   };
@@ -311,12 +368,50 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
       if (running) return;
       if (stopped) throw new Error("Telegram channel cannot restart after stop.");
       throwIfAborted(startContext.signal);
-      lifecycle = new AbortController();
+      pollLifecycle = new AbortController();
+      turnLifecycle = new AbortController();
       running = true;
-      polling = poll(lifecycle.signal).finally(() => { running = false; });
+      polling = poll(pollLifecycle.signal, turnLifecycle.signal).finally(() => { running = false; });
     },
-    async drain() { await stop(); },
-    async stop() { await stop(); },
+    async drain(drainContext) {
+      if (shutdownPromise !== undefined) {
+        await shutdownPromise;
+        return;
+      }
+      stopped = true;
+      pollLifecycle?.abort(new Error("Telegram channel is draining."));
+      shutdownPromise = (async () => {
+        try {
+          const idle = await waitForIdle(
+            drainContext.deadline,
+            drainContext.signal,
+            turnLifecycle?.signal,
+          );
+          if (!idle) turnLifecycle?.abort(new Error("Telegram channel drain grace ended."));
+          const pollingStopped = await waitForPolling(
+            drainContext.deadline,
+            drainContext.signal,
+          );
+          if (idle && pollingStopped) {
+            await confirmProcessedOffset(drainContext.deadline, drainContext.signal);
+          } else if (offset > confirmedOffset) {
+            failProcessedOffsetConfirmation(offset);
+          }
+        } finally {
+          await finishShutdown();
+        }
+      })();
+      await shutdownPromise;
+    },
+    async stop() {
+      stopped = true;
+      forceStopped = true;
+      pollLifecycle?.abort(new Error("Telegram channel stopped."));
+      turnLifecycle?.abort(new Error("Telegram channel stopped."));
+      confirmationLifecycle?.abort(new Error("Telegram offset confirmation stopped."));
+      shutdownPromise ??= finishShutdown();
+      await shutdownPromise;
+    },
     async health(): Promise<ModuleHealth> {
       const deliveryDegraded = delivery.degraded;
       const deliveryReceiptCapacityExhausted = delivery.receiptCapacityExhausted;
@@ -343,16 +438,100 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
     deliver(message, signal) { return delivery.deliver(message, signal); },
   };
 
-  async function stop(): Promise<void> {
-    if (stopped) return;
-    stopped = true;
-    lifecycle?.abort(new Error("Telegram channel stopped."));
+  async function waitForIdle(
+    deadline: string | undefined,
+    signal: AbortSignal,
+    forceSignal: AbortSignal | undefined,
+  ): Promise<boolean> {
+    if (active === 0) return true;
+    const timeoutMs = drainTimeoutMs(deadline);
+    if (timeoutMs === 0 || signal.aborted || forceSignal?.aborted === true) return false;
+    return await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (idle: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        idleWaiters.delete(onIdle);
+        signal.removeEventListener("abort", onAbort);
+        forceSignal?.removeEventListener("abort", onAbort);
+        resolve(idle);
+      };
+      const onIdle = (): void => { finish(true); };
+      const onAbort = (): void => { finish(false); };
+      const timer = setTimeout(() => { finish(false); }, timeoutMs);
+      idleWaiters.add(onIdle);
+      signal.addEventListener("abort", onAbort, { once: true });
+      forceSignal?.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  async function finishShutdown(): Promise<void> {
     if (polling !== undefined) await Promise.race([polling.catch(() => undefined), delay(STOP_TIMEOUT_MS)]);
     for (const chatId of [...pendingAsks.keys()]) clearPendingAsk(chatId);
     callbackAnswers.clear();
     runtimeSelections.clear();
     await client.close?.().catch(() => undefined);
     running = false;
+  }
+
+  async function waitForPolling(deadline: string | undefined, signal: AbortSignal): Promise<boolean> {
+    if (polling === undefined) return true;
+    const timeoutMs = drainTimeoutMs(deadline);
+    if (timeoutMs === 0 || signal.aborted) return false;
+    return await settlesWithin(polling, timeoutMs, signal);
+  }
+
+  async function confirmProcessedOffset(deadline: string | undefined, signal: AbortSignal): Promise<void> {
+    const targetOffset = offset;
+    if (targetOffset <= confirmedOffset) return;
+    const timeoutMs = drainTimeoutMs(deadline);
+    if (timeoutMs === 0 || signal.aborted || forceStopped) {
+      failProcessedOffsetConfirmation(targetOffset);
+    }
+    const expiresAt = Date.now() + timeoutMs;
+    const controller = new AbortController();
+    confirmationLifecycle = controller;
+    const abortFromParent = (): void => {
+      controller.abort(signal.reason ?? new Error("Telegram offset confirmation aborted."));
+    };
+    const timer = setTimeout(() => {
+      controller.abort(new Error("Telegram offset confirmation timed out."));
+    }, timeoutMs);
+    signal.addEventListener("abort", abortFromParent, { once: true });
+    let resolveAborted!: (result: "aborted") => void;
+    const aborted = new Promise<"aborted">((resolve) => {
+      resolveAborted = resolve;
+    });
+    const abortConfirmation = (): void => { resolveAborted("aborted"); };
+    controller.signal.addEventListener("abort", abortConfirmation, { once: true });
+    const attempt = Promise.resolve()
+      .then(async () => await client.poll(targetOffset, 0, controller.signal))
+      .then(() => "confirmed" as const, () => "failed" as const);
+    try {
+      const result = await Promise.race([attempt, aborted]);
+      if (
+        result !== "confirmed"
+        || controller.signal.aborted
+        || signal.aborted
+        || forceStopped
+        || Date.now() >= expiresAt
+      ) {
+        failProcessedOffsetConfirmation(targetOffset);
+      }
+      confirmedOffset = Math.max(confirmedOffset, targetOffset);
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abortFromParent);
+      controller.signal.removeEventListener("abort", abortConfirmation);
+      if (confirmationLifecycle === controller) confirmationLifecycle = undefined;
+    }
+  }
+
+  function failProcessedOffsetConfirmation(targetOffset: number): never {
+    lastError = "Telegram update confirmation is degraded.";
+    context.logger.warn(lastError, { instanceId: context.instanceId, offset: targetOffset });
+    throw new Error(lastError);
   }
 }
 
@@ -363,8 +542,75 @@ async function maybeAnswerAsk(
   signal: AbortSignal,
 ): Promise<boolean> {
   if (!pending.ask.questions.every((question) => pending.done.has(question.id))) return false;
-  const result = await context.host.answerAsk?.(`telegram:${chatId}`, { interactionId: pending.ask.interactionId, answers: pending.answers, answeredAt: new Date().toISOString() }, signal);
+  const answer = parseAskUserAnswer({
+    interactionId: pending.ask.interactionId,
+    answers: pending.answers,
+    answeredAt: new Date().toISOString(),
+  }, pending.ask);
+  const result = await context.host.answerAsk?.(`telegram:${chatId}`, answer, signal);
   return result?.status === "accepted" || result?.status === "expired" || result?.status === "mismatch";
+}
+
+function recordAskAnswer(
+  pending: Pick<PendingTelegramAsk, "ask" | "answers" | "done">,
+  answer: TelegramCallbackAnswer,
+): boolean {
+  const question = pending.ask.questions.find((candidate) => candidate.id === answer.questionId);
+  if (question === undefined) return true;
+  if (answer.value !== undefined) {
+    recordAskValue(pending, answer.questionId, answer.value, question.multiple);
+  }
+  if (answer.done) {
+    if ((pending.answers[answer.questionId]?.length ?? 0) === 0) return false;
+    pending.done.add(answer.questionId);
+  } else if (!question.multiple) {
+    pending.done.add(answer.questionId);
+  }
+  return true;
+}
+
+function recordAskFreeText(
+  pending: Pick<PendingTelegramAsk, "ask" | "answers" | "done">,
+  questionId: string,
+  value: string,
+): void {
+  const question = pending.ask.questions.find((candidate) => candidate.id === questionId);
+  if (question === undefined || !validAskAnswerValue(value)) return;
+  recordAskValue(pending, questionId, value, question.multiple);
+  if (!question.multiple) pending.done.add(questionId);
+}
+
+function recordAskValue(
+  pending: Pick<PendingTelegramAsk, "answers">,
+  questionId: string,
+  value: string,
+  multiple: boolean,
+): void {
+  if (!multiple) {
+    pending.answers[questionId] = [value];
+    return;
+  }
+  const current = pending.answers[questionId] ?? [];
+  if (
+    current.length >= AGENT_INTERACTION_LIMITS.askAnswerValuesPerQuestion
+    || current.includes(value)
+  ) return;
+  pending.answers[questionId] = [...current, value];
+}
+
+function validAskAnswerValue(value: string): boolean {
+  return value.trim().length > 0
+    && !value.includes("\0")
+    && new TextEncoder().encode(value).byteLength <= ASK_USER_MAX_ANSWER_BYTES;
+}
+
+function askCallbackCount(ask: AskUserRequest): number {
+  return ask.questions.reduce(
+    (count, question) => count
+      + Math.min(question.choices?.length ?? 0, MAX_ASK_BUTTONS_PER_QUESTION)
+      + (question.multiple ? 1 : 0),
+    0,
+  );
 }
 
 function inbound(
@@ -383,7 +629,6 @@ function inbound(
     text,
     attachments,
     receivedAt: update.receivedAt,
-    ...(selection?.runtime === undefined ? {} : { runtime: selection.runtime }),
     ...(selection?.model === undefined ? {} : { model: selection.model }),
     ...(selection?.effort === undefined ? {} : { effort: selection.effort }),
     signal,
@@ -395,12 +640,95 @@ async function react(client: TelegramBotClient, enabled: boolean, update: Telegr
   if (enabled) await client.setReaction?.(update.chatId, update.messageId, emoji, signal).catch(() => undefined);
 }
 
+async function sendChunkedTelegramMessage(
+  client: TelegramBotClient,
+  request: Omit<TelegramSendMessageRequest, "text" | "buttons">,
+  text: string,
+  buttons: readonly { readonly label: string; readonly data: string }[] = [],
+): Promise<{ readonly messageId: string }> {
+  const chunks = telegramTextChunks(text);
+  if (chunks.length === 0) throw new Error("Telegram messages require non-empty text.");
+  let result: { readonly messageId: string } | undefined;
+  for (const [index, chunk] of chunks.entries()) {
+    result = await client.sendMessage({
+      ...request,
+      text: chunk,
+      ...(index === chunks.length - 1 && buttons.length > 0 ? { buttons } : {}),
+    });
+  }
+  return result!;
+}
+
+function telegramTextChunks(text: string): readonly string[] {
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + TELEGRAM_TEXT_LIMIT, text.length);
+    if (end < text.length && isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))) {
+      end -= 1;
+    }
+    chunks.push(text.slice(start, end));
+    start = end;
+  }
+  return chunks;
+}
+
+function boundedTelegramText(text: string): string {
+  if (text.length <= TELEGRAM_TEXT_LIMIT) return text;
+  let end = TELEGRAM_TEXT_LIMIT - 1;
+  if (isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))) {
+    end -= 1;
+  }
+  return `${text.slice(0, end)}…`;
+}
+
+function isHighSurrogate(value: number): boolean {
+  return value >= 0xd800 && value <= 0xdbff;
+}
+
+function isLowSurrogate(value: number): boolean {
+  return value >= 0xdc00 && value <= 0xdfff;
+}
+
+function drainTimeoutMs(deadline: string | undefined): number {
+  if (deadline === undefined) return STOP_TIMEOUT_MS;
+  const parsed = Date.parse(deadline);
+  return Number.isFinite(parsed) ? Math.max(0, parsed - Date.now()) : 0;
+}
+
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted === true) return;
   await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
     timer.unref();
-    signal?.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+    signal?.addEventListener("abort", finish, { once: true });
+  });
+}
+
+async function settlesWithin(promise: Promise<unknown>, timeoutMs: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return false;
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (result: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const onAbort = (): void => { finish(false); };
+    const timer = setTimeout(() => { finish(false); }, timeoutMs);
+    timer.unref();
+    signal.addEventListener("abort", onAbort, { once: true });
+    void promise.then(() => { finish(true); }, () => { finish(true); });
   });
 }
 

@@ -77,6 +77,17 @@ normalized `ChannelInboundRequest` -> Core -> final reply. Supported Core
 controls route `/cancel`, live steering, and bounded AskUser button/free-text
 answers. `/model` and `/effort` maintain bounded, process-local per-chat
 overrides. Activity updates edit one status message when Telegram supports it.
+Interactive replies and AskUser prompts are split at Telegram's 4096-character
+message bound; activity text is bounded to one editable message. Multiple
+AskUser answers are unique, capped at 20 values, and require at least one value
+before Done. A failed update is reported with the configured error reaction and
+skipped so later updates can continue. Unsupported updates with valid Telegram
+update IDs are consumed without dispatch so they cannot wedge the poll offset.
+A successful graceful drain stops polling, lets the active turn finish until
+the host deadline, and confirms the consumed offset before closing. A failed,
+aborted, or timed-out confirmation closes the transport but rejects the drain
+and marks health degraded, exposing that an unconfirmed update may replay
+instead of claiming a clean shutdown.
 Core proactive delivery -> durable Core/state receipt -> exact Telegram
 destination -> fingerprint-guarded Bot API send.
 For a channel-only notification, the selected adapter resolves
@@ -93,6 +104,7 @@ owns tool policy, deterministic idempotency, and receipt-keyed history.
 | --- | --- |
 | `config.ts` | Strict configuration and env-only secret schema. |
 | `bot.ts` | Injectable Bot API transport and bounded HTTP implementation. |
+| `http.ts` | Shared bounded HTTP response readers and record guard. |
 | `delivery.ts` | Exact-destination idempotent proactive delivery. |
 | `send-tools.ts` | Strict message/file tool schemas and side-effect-free outbound preparation. |
 | `transcription.ts` | Bounded OpenAI-compatible audio transcription. |

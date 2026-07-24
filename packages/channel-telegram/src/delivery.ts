@@ -16,6 +16,7 @@ import {
   resolveTelegramChatId,
   telegramConversationId,
 } from "./destination.js";
+import { isRecord } from "./http.js";
 
 const MAX_DELIVERY_RECEIPTS = 1_000;
 const MAX_DELIVERY_ATTACHMENTS = 10;
@@ -240,10 +241,6 @@ function attachmentCaption(
     };
   }
   return { status: "valid", value };
-}
-
-function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function prepareTelegramDelivery(
