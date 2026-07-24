@@ -198,83 +198,174 @@ export function createSlackSocketModeTransport(config: SlackConfig, fetchImpl: t
 function parseEnvelope(envelope: Record<string, unknown>): SlackSocketEvent | undefined {
   const envelopeId = envelope.envelope_id as string;
   if (envelope.type === "events_api" && record(envelope.payload)) {
-    const payload = envelope.payload;
-    const event = record(payload.event) ? payload.event : undefined;
-    if (typeof payload.team_id !== "string" || event === undefined) return undefined;
-    if (event.type === "app_home_opened" && typeof event.user === "string") {
-      return {
-        kind: "home-opened",
-        envelopeId,
-        teamId: payload.team_id,
-        userId: event.user,
-        receivedAt: new Date().toISOString(),
-      };
-    }
-    if (event.type !== "message" || event.subtype !== undefined || typeof event.channel !== "string" || typeof event.ts !== "string" || typeof event.user !== "string") return undefined;
-    return { kind: "message", envelopeId, teamId: payload.team_id, channelId: event.channel, messageId: event.ts, threadId: typeof event.thread_ts === "string" ? event.thread_ts : event.ts, userId: event.user, text: typeof event.text === "string" ? event.text : "", files: Object.freeze(parseFiles(event.files)), receivedAt: new Date().toISOString() };
+    return parseEventsApiEnvelope(envelopeId, envelope.payload);
   }
   if (envelope.type === "interactive" && record(envelope.payload)) {
-    const payload = envelope.payload;
-    if ((payload.type === "shortcut" || payload.type === "message_action")
-      && record(payload.team)
-      && record(payload.user)
-      && typeof payload.team.id === "string"
-      && typeof payload.user.id === "string"
-      && typeof payload.callback_id === "string") {
-      const channelId = record(payload.channel) && typeof payload.channel.id === "string"
-        ? payload.channel.id
-        : undefined;
-      const messageId = record(payload.message) && typeof payload.message.ts === "string"
-        ? payload.message.ts
-        : undefined;
-      const threadId = record(payload.message) && typeof payload.message.thread_ts === "string"
-        ? payload.message.thread_ts
-        : messageId;
-      return {
-        kind: "shortcut",
-        envelopeId,
-        teamId: payload.team.id,
-        userId: payload.user.id,
-        callbackId: payload.callback_id,
-        ...(channelId === undefined ? {} : { sourceChannelId: channelId }),
-        ...(messageId === undefined ? {} : { sourceMessageId: messageId }),
-        ...(threadId === undefined ? {} : { sourceThreadId: threadId }),
-        receivedAt: new Date().toISOString(),
-      };
-    }
-    const action = Array.isArray(payload.actions) && record(payload.actions[0]) ? payload.actions[0] : undefined;
-    if (record(payload.team)
-      && record(payload.user)
-      && action !== undefined
-      && typeof payload.team.id === "string"
-      && typeof payload.user.id === "string"
-      && typeof action.action_id === "string"
-      && (!record(payload.channel) || !record(payload.message))) {
-      return {
-        kind: "home-action",
-        envelopeId,
-        teamId: payload.team.id,
-        userId: payload.user.id,
-        actionId: action.action_id,
-        receivedAt: new Date().toISOString(),
-      };
-    }
-    if (!record(payload.team) || !record(payload.channel) || !record(payload.user) || !record(payload.message) || action === undefined || typeof payload.team.id !== "string" || typeof payload.channel.id !== "string" || typeof payload.user.id !== "string" || typeof payload.message.ts !== "string" || typeof action.action_id !== "string" || typeof action.value !== "string") return undefined;
-    return { kind: "action", envelopeId, teamId: payload.team.id, channelId: payload.channel.id, messageId: payload.message.ts, threadId: typeof payload.message.thread_ts === "string" ? payload.message.thread_ts : payload.message.ts, userId: payload.user.id, actionId: action.action_id, value: action.value, receivedAt: new Date().toISOString() };
+    return parseInteractiveEnvelope(envelopeId, envelope.payload);
   }
   return undefined;
+}
+
+function parseEventsApiEnvelope(
+  envelopeId: string,
+  payload: Record<string, unknown>,
+): SlackSocketEvent | undefined {
+  const event = record(payload.event) ? payload.event : undefined;
+  if (typeof payload.team_id !== "string" || event === undefined) return undefined;
+  if (event.type === "app_home_opened" && typeof event.user === "string") {
+    return {
+      kind: "home-opened",
+      envelopeId,
+      teamId: payload.team_id,
+      userId: event.user,
+      receivedAt: new Date().toISOString(),
+    };
+  }
+  if (!humanMessage(event)) return undefined;
+  return {
+    kind: "message",
+    envelopeId,
+    teamId: payload.team_id,
+    channelId: event.channel,
+    messageId: event.ts,
+    threadId: typeof event.thread_ts === "string" ? event.thread_ts : event.ts,
+    userId: event.user,
+    text: typeof event.text === "string" ? event.text : "",
+    files: Object.freeze(parseFiles(event.files)),
+    receivedAt: new Date().toISOString(),
+  };
+}
+
+function humanMessage(event: Record<string, unknown>): event is Record<string, unknown> & {
+  readonly channel: string;
+  readonly ts: string;
+  readonly user: string;
+} {
+  return event.type === "message"
+    && event.subtype === undefined
+    && !Object.hasOwn(event, "bot_id")
+    && !Object.hasOwn(event, "app_id")
+    && typeof event.channel === "string"
+    && typeof event.ts === "string"
+    && typeof event.user === "string";
+}
+
+function parseInteractiveEnvelope(
+  envelopeId: string,
+  payload: Record<string, unknown>,
+): SlackSocketEvent | undefined {
+  const shortcut = parseShortcut(envelopeId, payload);
+  if (shortcut !== undefined) return shortcut;
+  const action = Array.isArray(payload.actions) && record(payload.actions[0])
+    ? payload.actions[0]
+    : undefined;
+  if (!record(payload.team)
+    || !record(payload.user)
+    || action === undefined
+    || typeof payload.team.id !== "string"
+    || typeof payload.user.id !== "string"
+    || typeof action.action_id !== "string") {
+    return undefined;
+  }
+  if (!record(payload.channel) || !record(payload.message)) {
+    return {
+      kind: "home-action",
+      envelopeId,
+      teamId: payload.team.id,
+      userId: payload.user.id,
+      actionId: action.action_id,
+      receivedAt: new Date().toISOString(),
+    };
+  }
+  if (typeof payload.channel.id !== "string"
+    || typeof payload.message.ts !== "string"
+    || typeof action.value !== "string") {
+    return undefined;
+  }
+  return {
+    kind: "action",
+    envelopeId,
+    teamId: payload.team.id,
+    channelId: payload.channel.id,
+    messageId: payload.message.ts,
+    threadId: typeof payload.message.thread_ts === "string"
+      ? payload.message.thread_ts
+      : payload.message.ts,
+    userId: payload.user.id,
+    actionId: action.action_id,
+    value: action.value,
+    receivedAt: new Date().toISOString(),
+  };
+}
+
+function parseShortcut(
+  envelopeId: string,
+  payload: Record<string, unknown>,
+): SlackShortcutEvent | undefined {
+  if ((payload.type !== "shortcut" && payload.type !== "message_action")
+    || !record(payload.team)
+    || !record(payload.user)
+    || typeof payload.team.id !== "string"
+    || typeof payload.user.id !== "string"
+    || typeof payload.callback_id !== "string") {
+    return undefined;
+  }
+  const channelId = record(payload.channel) && typeof payload.channel.id === "string"
+    ? payload.channel.id
+    : undefined;
+  const messageId = record(payload.message) && typeof payload.message.ts === "string"
+    ? payload.message.ts
+    : undefined;
+  const threadId = record(payload.message) && typeof payload.message.thread_ts === "string"
+    ? payload.message.thread_ts
+    : messageId;
+  return {
+    kind: "shortcut",
+    envelopeId,
+    teamId: payload.team.id,
+    userId: payload.user.id,
+    callbackId: payload.callback_id,
+    ...(channelId === undefined ? {} : { sourceChannelId: channelId }),
+    ...(messageId === undefined ? {} : { sourceMessageId: messageId }),
+    ...(threadId === undefined ? {} : { sourceThreadId: threadId }),
+    receivedAt: new Date().toISOString(),
+  };
 }
 
 function parseFiles(value: unknown): SlackRemoteFile[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((item) => {
-    if (!record(item) || typeof item.id !== "string" || typeof item.name !== "string" || typeof item.url_private_download !== "string") return [];
-    return [{ id: item.id, name: safeName(item.name), mediaType: typeof item.mimetype === "string" ? item.mimetype : "application/octet-stream", ...(Number.isSafeInteger(item.size) ? { sizeBytes: item.size as number } : {}), privateUrl: item.url_private_download }];
+    if (!record(item)
+      || typeof item.id !== "string"
+      || typeof item.name !== "string"
+      || typeof item.url_private_download !== "string") {
+      return [];
+    }
+    return [{
+      id: item.id,
+      name: safeName(item.name),
+      mediaType: typeof item.mimetype === "string"
+        ? item.mimetype
+        : "application/octet-stream",
+      ...(Number.isSafeInteger(item.size) ? { sizeBytes: item.size as number } : {}),
+      privateUrl: item.url_private_download,
+    }];
   });
 }
 
-function safeName(value: string): string { const result = value.replaceAll("\\", "/").split("/").at(-1)?.replace(/[\u0000-\u001f\u007f]/gu, "_").trim() ?? "attachment"; return (result || "attachment").slice(0, 255); }
-function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+function safeName(value: string): string {
+  const result = value
+    .replaceAll("\\", "/")
+    .split("/")
+    .at(-1)
+    ?.replace(/[\u0000-\u001f\u007f]/gu, "_")
+    .trim() ?? "attachment";
+  return (result || "attachment").slice(0, 255);
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 async function boundedJson(response: Response, max: number): Promise<unknown> {
   const declared = response.headers.get("content-length");
   if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > max)) {

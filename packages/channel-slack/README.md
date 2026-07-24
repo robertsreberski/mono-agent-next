@@ -24,7 +24,9 @@ live-input, cancellation, AskUser, per-thread runtime controls, and transient
 assistant status, publish configured App Home actions, dispatch configured
 global/message shortcuts, and provide idempotent proactive Slack delivery. The
 selected instance contributes `SlackSendMessage` under Core's ordinary tool
-policy without widening its configured channel allowlist.
+policy without widening its configured channel allowlist. Bot/app-authored
+message events are ignored, and inbound files share one aggregate per-message
+byte budget in addition to the per-file bound.
 
 ## Install / Usage
 
@@ -80,15 +82,21 @@ consumer unhealthy.
 ### Data flow
 
 Socket Mode envelope -> exact authorization -> owner-private atomic inbox ->
-acknowledgement -> serial queued processing -> normalized request -> Core ->
-final-only thread reply. Supported Core controls route `/cancel`, live steering,
-and bounded AskUser action/free-text answers. `/model` and `/effort` maintain
+acknowledgement -> bounded primary/control processing -> normalized request ->
+Core -> final-only thread reply. One primary lane remains globally serial. One
+control lane may only resolve AskUser, cancellation, or same-conversation live
+input while Core is blocking the primary turn; it never dispatches a second
+turn. AskUser renders every validated choice and token-routes threadless action
+answers back to their synthetic conversation. `/model` and `/effort` maintain
 bounded, process-local per-thread overrides. Activity uses
 `assistant.threads.setStatus` in assistant threads and falls back to one eyes
 reaction in ordinary channels. Activity entries remain a transient in-memory
 ledger and are never posted as durable chat messages. Shortcut/App Home
 envelopes pass through the same durable admission boundary before a configured
-prompt runs. Core proactive delivery -> durable Core/state receipt -> exact
+prompt runs. A Slack reply, attachment, reaction, or Ask render failure after
+dispatch is logged without poisoning the channel; an Ask render failure also
+aborts/cancels its turn so Core cannot remain blocked. Core proactive delivery
+-> durable Core/state receipt -> exact
 channel/thread -> fingerprint-guarded Web API send. The instance-bound
 `SlackSendMessage` contribution prepares that same outbound contract; a thread
 keeps its exact history identity, while a new top-level post resolves
@@ -104,9 +112,12 @@ The selected channel instance owns a schema-versioned inbox inside its Core
 `dataDirectory`. A new authorized envelope is atomically written and directory-
 synced before Socket Mode acknowledges it. Pending work survives a clean
 restart, completed envelope identifiers are retained in a bounded deduplication
-window, and processing is serial. A crash or error after processing starts is
-not blindly replayed: the record remains explicitly blocked and channel health
-becomes `unhealthy`, because provider or Slack side effects may be ambiguous.
+window, and turn dispatch is serial. At most one durable primary record and one
+durable control record may be processing. A control probe that Core cannot
+apply is atomically returned to its original pending position and becomes
+primary-only. A crash or error after either lane starts is not blindly replayed:
+the processing record remains explicitly blocked and channel health becomes
+`unhealthy`, because Core or Slack side effects may be ambiguous.
 
 The inbox is owner-private (`0700` directory, `0600` files), bounded, and fails
 closed on corruption, unsafe links/modes, queue overflow, or an uncertain
@@ -120,13 +131,20 @@ the next start creates an empty v1 inbox. There is no online purge.
 
 | Source | Responsibility |
 | --- | --- |
+| `index.ts` | Stable public entrypoint. |
+| `channel.ts` | Module lifecycle, bounded primary/control execution, capabilities, and health. |
+| `event-processor.ts` | Authorized event control routing, normalized dispatch, and best-effort Slack presentation. |
+| `ask.ts` | Ask rendering, token routing, answer state, and replacement-safe cleanup. |
 | `config.ts` | Strict env-only credentials, allowlists, shortcuts, and App Home actions. |
 | `socket.ts` | Injectable single-consumer Socket Mode lifecycle and interaction normalization. |
-| `inbox.ts` | Owner-private atomic admission queue and bounded envelope dedupe. |
+| `inbox.ts` | Owner-private atomic admission queue, lane state, and bounded envelope dedupe. |
+| `inbox-values.ts` | Immutable event cloning and strict persisted inbox value validation helpers. |
 | `client.ts` | Bounded Slack Web API and attachment operations. |
 | `delivery.ts` | Exact-destination idempotent delivery. |
+| `limits.ts` | Shared aggregate attachment byte bound. |
+| `presentation.ts` | App Home and transient activity projection. |
+| `runtime-control.ts` | Bounded per-thread model and effort overrides. |
 | `send-tools.ts` | Strict message-tool schema and receipt-backed destination resolution. |
-| `index.ts` | Normalization, module lifecycle, capabilities, and health. |
 
 ## Public API
 
