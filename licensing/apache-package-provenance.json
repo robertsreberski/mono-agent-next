@@ -63,7 +63,7 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/compliance.test.ts",
-      "sha256": "5cd2a9b5f5a302ba42aa81500c157067296b513d0818b644d71ec46092b92164",
+      "sha256": "7be3b815f87979ba315b7dc5343fe01fdaa0a64cca05b214029805db29ad0302",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -171,7 +171,7 @@
     },
     {
       "path": "packages/module-sdk/src/testing.ts",
-      "sha256": "2e766b9fb95c43ab16e19ccbe76b471a514d2dce2beb71658962137f95d091c5",
+      "sha256": "357396a7dc4d34bf9d8115b874bf6069b7e745416c7e792bf4a8cc509c566e3c",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",

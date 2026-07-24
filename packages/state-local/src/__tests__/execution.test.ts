@@ -29,6 +29,10 @@ describe("state-local execution ownership", () => {
     expect(store.toolContributions).toEqual([
       expect.objectContaining({ name: "RunHistory", effects: [] }),
     ]);
+    expect(Object.isFrozen(store.toolContributions)).toBe(true);
+    expect(Object.isFrozen(store.toolContributions[0])).toBe(true);
+    expect(Object.isFrozen(store.toolContributions[0]?.effects)).toBe(true);
+    expect(Object.isFrozen(store.toolContributions[0]?.inputSchema)).toBe(true);
     expect(Object.getOwnPropertyDescriptor(store, "toolContributions"))
       .toMatchObject({ value: store.toolContributions });
     const protocol = await perform<{

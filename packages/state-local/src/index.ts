@@ -44,7 +44,7 @@ export const monoAgentModule = Object.freeze({
     packageVersion: "0.15.0",
     apiVersion: 1,
     kind: "state",
-    responsibility: "Provides owner-private CAS state, durable transcript/run records, idempotency, and presence publication.",
+    responsibility: "Provides owner-private CAS state, durable transcript/run records, RunHistory, idempotency, and presence publication.",
     capabilities: Object.freeze([
       "state.local",
       "state.cas",

@@ -106,9 +106,10 @@ Loading proceeds in a fail-closed order:
    schema paths reject inline values.
 6. Import `monoAgentModule`, verify its exported metadata again, parse its exact
    schema, and validate cross-slot references and required capabilities.
-7. Only then instantiate and start the selected modules.
-8. Snapshot any bounded module-owned tool descriptors, but expose them only for
-   selected instances whose startup succeeded.
+7. Only then instantiate each selected module and snapshot any bounded
+   module-owned tool descriptors.
+8. Start that instance and expose its descriptor snapshot only after startup
+   succeeds.
 
 There is no automatic package installation, path loading, hidden registry, or
 compatibility fallback.
@@ -130,12 +131,13 @@ blindly replayed. Cancellation, live input, AskUser answers, health, delivery,
 and module commands cross typed host interfaces rather than implementation
 imports.
 
-An instance may offer a model tool only through Module SDK's narrow
+A non-channel instance may offer a model tool only through Module SDK's narrow
 `toolContributions` seam when the behavior is inseparable from that selected
-module's data and lifecycle. This is not discovery or registration: importing
-or installing a package contributes nothing, and no new config key exists.
-Core builds one deterministic catalog across Core, instruction, module, MCP,
-and channel tools; it owns final names, policy, approval, sandbox eligibility,
+module's data and lifecycle. Channel instances retain their existing typed
+`sendTools` contract. This is not discovery or registration: importing or
+installing a package contributes nothing, and no new config key exists. Core
+builds one deterministic catalog across Core, instruction, module, MCP, and
+channel tools; it owns final names, policy, approval, sandbox eligibility,
 timeouts, cancellation, normalization, and turn-level disposal. Ordinary
 project and domain tools remain `.mcp.json` services.
 

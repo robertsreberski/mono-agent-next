@@ -187,6 +187,35 @@ describe("public compliance assertions", () => {
       execute() {},
       dispose() {},
     })).toThrow("contains unsupported property dispose");
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: { default: undefined },
+    }])).toThrow("must contain only JSON values");
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: { maximum: Number.POSITIVE_INFINITY },
+    }])).toThrow("must contain only finite numbers");
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: new Proxy({}, {}),
+    }])).toThrow("must not be a Proxy");
+
+    let tooDeep: Record<string, unknown> = {};
+    for (let depth = 0; depth < 32; depth += 1) tooDeep = { nested: tooDeep };
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: tooDeep,
+    }])).toThrow("exceeds JSON depth 32");
+
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
+      inputSchema: {
+        enum: Array.from(
+          { length: 10_000 },
+          (_value, index) => index,
+        ),
+      },
+    }])).toThrow("exceeds 10000 JSON items");
   });
 
   it("rejects getter-backed and exotic module tool contributions without invoking accessors", () => {
@@ -205,7 +234,7 @@ describe("public compliance assertions", () => {
       },
     });
     expect(() => assertModuleToolContributionsCompliance([getterBacked]))
-      .toThrow(".description must be a data property");
+      .toThrow(".description must be an enumerable data property");
     expect(descriptorReads).toBe(0);
 
     let collectionReads = 0;
@@ -221,14 +250,63 @@ describe("public compliance assertions", () => {
       .toThrow("toolContributions must be an own data property");
     expect(collectionReads).toBe(0);
 
-    const exotic = Object.assign(Object.create({ inherited: true }), getterBacked, {
+    const exotic = Object.assign(Object.create({ inherited: true }), {
+      name: "Lookup",
       description: "safe",
+      inputSchema: {},
+      effects: [],
+      bind: () => ({ execute() {} }),
     });
     expect(() => assertModuleToolContributionsCompliance([exotic]))
       .toThrow("must be a plain object");
+    expect(descriptorReads).toBe(0);
     expect(() => assertModuleToolContributionsCompliance(
       Object.assign(Object.create(Array.prototype), []),
     )).toThrow("must be an ordinary array");
+
+    let effectReads = 0;
+    const effects = ["read"];
+    Object.defineProperty(effects, "0", {
+      enumerable: true,
+      get() {
+        effectReads += 1;
+        return "read";
+      },
+    });
+    expect(() => assertModuleToolContributionsCompliance([{
+      name: "Lookup",
+      description: "safe",
+      inputSchema: {},
+      effects,
+      bind: () => ({ execute() {} }),
+    }])).toThrow("effects.0 must be a data property");
+    expect(effectReads).toBe(0);
+
+    const nonEnumerable = {
+      name: "Lookup",
+      description: "safe",
+      inputSchema: {},
+      effects: [],
+      bind: () => ({ execute() {} }),
+    };
+    Object.defineProperty(nonEnumerable, "description", {
+      value: "safe",
+      enumerable: false,
+    });
+    expect(() => assertModuleToolContributionsCompliance([nonEnumerable]))
+      .toThrow(".description must be an enumerable data property");
+
+    const proxied = new Proxy({
+      name: "Lookup",
+      description: "safe",
+      inputSchema: {},
+      effects: [],
+      bind: () => ({ execute() {} }),
+    }, {});
+    expect(() => assertModuleToolContributionsCompliance([proxied]))
+      .toThrow("must not be a Proxy");
+    expect(() => assertModuleToolContributionsCompliance(new Proxy([], {})))
+      .toThrow("must be an ordinary array");
   });
 
   it("rejects identity, API, capability, and reserved-directive drift", () => {

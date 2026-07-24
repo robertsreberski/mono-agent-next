@@ -177,8 +177,8 @@ contribution seam; this does not move ordinary project/domain tools out of MCP.
 These domains remain separate:
 
 - `@mono-agent/state-local` owns versioned CAS records, durable agent
-  conversations/runs, idempotency, presence publication, and its optional
-  effect-free `RunHistory` contribution.
+  conversations/runs, idempotency, presence publication, and its effect-free
+  `RunHistory` contribution.
 - `@mono-agent/memory-local` owns long-lived BuJo memory and its permanent
   first-run identity.
 - `@mono-agent/web` owns browser-product threads and messages in its own data

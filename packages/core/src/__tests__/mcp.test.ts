@@ -83,8 +83,8 @@ it("always reserves Core interaction and memory tool names against MCP impersona
     } finally {
       await host.stop();
     }
-    expect(names.filter((name) => name === "MemoryRecall")).toHaveLength(
-      recallTool === true ? 1 : 0,
+    expect(names.filter((name) => name === toolName)).toHaveLength(
+      toolName === "MemoryRecall" && recallTool === true ? 1 : 0,
     );
     expect(names.filter((name) => /^mcp__[A-Za-z0-9_-]{43}$/u.test(name))).toHaveLength(1);
   }

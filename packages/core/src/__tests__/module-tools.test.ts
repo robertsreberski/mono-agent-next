@@ -534,17 +534,21 @@ describe("selected-module tools", () => {
     );
   });
 
-  it("never catalogs a contribution from an instance whose startup fails", async () => {
+  it("aborts host creation before a failed-start instance can bind a contribution", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtimeName = `@fixture/runtime-module-start-failure-${suffix}`;
     const memoryName = `@fixture/memory-module-start-failure-${suffix}`;
     let bindings = 0;
+    let runtimeCalls = 0;
     let stops = 0;
     const project = await tracked([
       {
         name: runtimeName,
         kind: "runtime",
-        controller: runtimeController(() => completed("unused")),
+        controller: runtimeController(() => {
+          runtimeCalls += 1;
+          return completed("unused");
+        }),
       },
       {
         name: memoryName,
@@ -576,6 +580,7 @@ describe("selected-module tools", () => {
     }));
     await expect(createAgentHost(project.configPath)).rejects.toThrow("startup failed");
     expect(bindings).toBe(0);
+    expect(runtimeCalls).toBe(0);
     expect(stops).toBe(1);
   });
 });

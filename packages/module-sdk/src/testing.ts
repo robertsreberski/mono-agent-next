@@ -1,3 +1,5 @@
+import { isProxy } from "node:util/types";
+
 import {
   MODULE_API_VERSION,
   MODULE_TOOL_LIMITS,
@@ -175,10 +177,8 @@ export function assertModuleToolContributionsCompliance(
       readOwnDataProperty(tool, "inputSchema", toolLabel, true),
       `${toolLabel}.inputSchema`,
     );
+    assertBoundedModuleToolSchema(inputSchema, `${toolLabel}.inputSchema`);
     assertSchemaGraph(inputSchema);
-    if (jsonBytes(inputSchema, `${toolLabel}.inputSchema`) > MODULE_TOOL_LIMITS.inputSchemaBytes) {
-      fail(`${toolLabel}.inputSchema exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaBytes)} UTF-8 bytes`);
-    }
     const effects = requireOwnDataArray(
       readOwnDataProperty(tool, "effects", toolLabel, true),
       `${toolLabel}.effects`,
@@ -358,6 +358,7 @@ function assertOptionalFunction(value: unknown, label: string): void {
 }
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) fail(`${label} must be an object`);
+  if (isProxy(value)) fail(`${label} must not be a Proxy`);
   return value as Record<string, unknown>;
 }
 function requirePlainRecord(value: unknown, label: string): Record<string, unknown> {
@@ -367,11 +368,16 @@ function requirePlainRecord(value: unknown, label: string): Record<string, unkno
   return record;
 }
 function requireOwnDataArray(value: unknown, label: string, maximum: number): readonly unknown[] {
-  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+  if (!Array.isArray(value) || isProxy(value) || Object.getPrototypeOf(value) !== Array.prototype) {
     fail(`${label} must be an ordinary array`);
   }
-  if (value.length > maximum) fail(`${label} must contain at most ${String(maximum)} entries`);
-  const allowed = new Set<PropertyKey>(["length", ...value.map((_entry, index) => String(index))]);
+  const length = Object.getOwnPropertyDescriptor(value, "length")?.value;
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 0) {
+    fail(`${label}.length must be a non-negative safe integer`);
+  }
+  if (length > maximum) fail(`${label} must contain at most ${String(maximum)} entries`);
+  const allowed = new Set<PropertyKey>(["length"]);
+  for (let index = 0; index < length; index += 1) allowed.add(String(index));
   for (const key of Reflect.ownKeys(value)) {
     if (!allowed.has(key)) fail(`${label} contains an unsupported property`);
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
@@ -379,10 +385,10 @@ function requireOwnDataArray(value: unknown, label: string, maximum: number): re
       fail(`${label}.${String(key)} must be a data property`);
     }
   }
-  for (let index = 0; index < value.length; index += 1) {
+  for (let index = 0; index < length; index += 1) {
     const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-    if (descriptor === undefined || !("value" in descriptor)) {
-      fail(`${label}[${String(index)}] must be a data property`);
+    if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+      fail(`${label}[${String(index)}] must be an enumerable data property`);
     }
   }
   return value;
@@ -396,8 +402,8 @@ function assertExactOwnDataKeys(
   for (const key of Reflect.ownKeys(value)) {
     if (!allowed.has(key)) fail(`${label} contains unsupported property ${String(key)}`);
     const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined || !("value" in descriptor)) {
-      fail(`${label}.${String(key)} must be a data property`);
+    if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+      fail(`${label}.${String(key)} must be an enumerable data property`);
     }
   }
 }
@@ -418,15 +424,61 @@ function requireNonEmptyString(value: unknown, label: string): asserts value is 
 function utf8Bytes(value: string): number {
   return new TextEncoder().encode(value).byteLength;
 }
-function jsonBytes(value: unknown, label: string): number {
-  try {
-    const encoded = JSON.stringify(value);
-    if (encoded === undefined) fail(`${label} must be JSON serializable`);
-    return utf8Bytes(encoded);
-  } catch (error) {
-    if (error instanceof ModuleComplianceError) throw error;
-    fail(`${label} must be JSON serializable`);
+function assertBoundedModuleToolSchema(value: Record<string, unknown>, label: string): void {
+  let bytes = 0;
+  let items = 0;
+  const active = new Set<object>();
+  const charge = (amount: number): void => {
+    bytes += amount;
+    if (bytes > MODULE_TOOL_LIMITS.inputSchemaBytes) {
+      fail(`${label} exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaBytes)} UTF-8 bytes`);
+    }
+  };
+  const addItems = (amount: number): void => {
+    items += amount;
+    if (items > MODULE_TOOL_LIMITS.inputSchemaItems) {
+      fail(`${label} exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaItems)} JSON items`);
+    }
+  };
+  const visit = (current: unknown, path: string, depth: number): void => {
+    if (depth === 0) addItems(1);
+    if (current === null || typeof current === "boolean") { charge(8); return; }
+    if (typeof current === "number") {
+      if (!Number.isFinite(current)) fail(`${path} must contain only finite numbers`);
+      charge(16); return;
+    }
+    if (typeof current === "string") { charge(utf8Bytes(current)); return; }
+    if (current === null || typeof current !== "object") {
+      fail(`${path} must contain only JSON values`);
+    }
+    if (isProxy(current)) fail(`${path} must not contain a Proxy`);
+    if (depth >= MODULE_TOOL_LIMITS.inputSchemaDepth) {
+      fail(`${path} exceeds JSON depth ${String(MODULE_TOOL_LIMITS.inputSchemaDepth)}`);
+    }
+    if (active.has(current)) fail(`${path} must not contain cycles`);
+    const source = Array.isArray(current)
+      ? requireOwnDataArray(current, path, MODULE_TOOL_LIMITS.inputSchemaItems)
+      : requirePlainRecord(current, path);
+    const entries = Reflect.ownKeys(source)
+      .filter((key) => !Array.isArray(current) || key !== "length");
+    addItems(entries.length);
+    active.add(current);
+    try {
+      for (const key of entries) {
+        if (typeof key !== "string") fail(`${path} contains an unknown symbol key`);
+        if (UNSAFE_KEYS.has(key)) fail(`${path} contains unsafe key ${JSON.stringify(key)}`);
+        const descriptor = Object.getOwnPropertyDescriptor(source, key);
+        if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+          fail(`${path}.${key} must be an enumerable data property`);
+        }
+        if (!Array.isArray(current)) charge(utf8Bytes(key));
+        visit(descriptor.value, Array.isArray(current) ? `${path}[${key}]` : `${path}.${key}`, depth + 1);
+      }
+    } finally {
+      active.delete(current);
+    }
   }
+  visit(value, label, 0);
 }
 function fail(message: string): never {
   throw new ModuleComplianceError(message);

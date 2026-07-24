@@ -5,7 +5,7 @@ sidebar:
   order: 0
 ---
 
-V1 separates three concerns:
+V1 separates four concerns:
 
 | Concern | Authority |
 | --- | --- |
