@@ -305,6 +305,35 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     expect(fenceMarkers(pathologicalSearchHit.markdown)).toEqual(["```", "```"]);
   });
 
+  it("keeps shorter legal delimiters and links inside a clipped outer fence", () => {
+    const markdown = [
+      "# Fixture",
+      "",
+      "## Nested delimiters",
+      "",
+      "````md",
+      "a".repeat(7_000),
+      "```",
+      "[hidden](fixture.md)",
+      "```",
+      "b".repeat(7_000),
+      "````",
+    ].join("\n");
+    const nested = corpusFixture(markdown, markdown.indexOf("[hidden]"));
+    const reader = new MonoAgentDocsReader(nested.corpus);
+    const read = reader.read(`${MONO_AGENT_DOCS_CHUNK_URI_PREFIX}${nested.chunk.id}`);
+    expect("error" in read).toBe(false);
+    if ("error" in read) throw new Error(read.error.message);
+    expect(fenceMarkers(read.markdown)).toEqual(["```", "```"]);
+    expect(markdownLinks(read.markdown)).toEqual([]);
+    expect(read.internalLinks).toEqual([]);
+
+    const searchHit = reader.searchHit(nested.chunk, 1);
+    expect(fenceMarkers(searchHit.markdown)).toEqual(["```", "```"]);
+    expect(markdownLinks(searchHit.markdown)).toEqual([]);
+    expect(searchHit.internalLinks).toEqual([]);
+  });
+
   it("publishes only mono_agent_docs and gives MCP clients explicit search-to-read guidance", async () => {
     const server = createMonoAgentDocsMcpServer();
     const client = new Client({ name: "docs-mcp-test", version: "0.1.0" }, { capabilities: {} });
@@ -491,5 +520,5 @@ function corpusFixture(
 }
 
 function fenceMarkers(markdown: string): readonly string[] {
-  return markdown.match(/^\s{0,3}(?:`{3,}|~{3,})/gmu) ?? [];
+  return markdown.match(/^[ \t]{0,3}(?:`{3,}|~{3,})/gmu) ?? [];
 }

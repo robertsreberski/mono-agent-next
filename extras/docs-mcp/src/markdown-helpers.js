@@ -1,4 +1,8 @@
+// @ts-check
+
 import { posix } from "node:path";
+
+/** @typedef {{ readonly indent: string; readonly marker: string; readonly trailing: string }} MarkdownFence */
 
 /**
  * @param {readonly { readonly path: string; readonly route?: string }[]} documents
@@ -7,8 +11,8 @@ import { posix } from "node:path";
 export function assertUniqueDocumentLocations(documents) {
   assertUniqueValues(documents, (document) => document.path, "document path");
   assertUniqueValues(
-    documents.filter((document) => document.route !== undefined),
-    (document) => normalizeRoute(document.route),
+    documents.flatMap((document) => document.route === undefined ? [] : [document.route]),
+    (route) => normalizeRoute(route),
     "document route",
   );
 }
@@ -35,7 +39,9 @@ export function findDocumentByLogicalPath(path, documentsByPath) {
  * @returns {readonly { readonly label: string; readonly href: string }[]}
  */
 export function markdownLinks(markdown) {
+  /** @type {Array<{ readonly label: string; readonly href: string }>} */
   const links = [];
+  /** @type {string | undefined} */
   let fenceMarker;
   for (const line of markdown.split("\n")) {
     const fence = markdownFence(line);
@@ -51,7 +57,9 @@ export function markdownLinks(markdown) {
     }
     const pattern = /(?<!!)\[([^\]]+)\]\(\s*<?([^\s)>]+)>?(?:\s+["'][^"']*["'])?\s*\)/gu;
     for (const match of line.matchAll(pattern)) {
-      links.push({ label: match[1], href: match[2] });
+      const label = match[1];
+      const href = match[2];
+      if (label !== undefined && href !== undefined) links.push({ label, href });
     }
   }
   return links;
@@ -65,14 +73,39 @@ export function markdownLinks(markdown) {
  */
 export function balanceFences(markdown, startOffset, endOffset) {
   const openingAtStart = activeFence(markdown, startOffset);
-  const openingAtEnd = activeFence(markdown, endOffset);
-  const prefix = openingAtStart === undefined
-    ? ""
-    : `${syntheticFence(openingAtStart)}\n`;
-  const suffix = openingAtEnd === undefined
-    ? ""
-    : `\n${syntheticFence(openingAtEnd)}`;
-  return `${prefix}${markdown.slice(startOffset, endOffset)}${suffix}`;
+  /** @type {string | undefined} */
+  let openingMarker = openingAtStart?.marker;
+  const lines = markdown.slice(startOffset, endOffset).split("\n");
+  /** @type {string[]} */
+  const output = openingMarker === undefined ? [] : [syntheticFence(openingMarker)];
+  const startsAtLineBoundary = startOffset === 0 || markdown[startOffset - 1] === "\n";
+  const endsAtLineBoundary = endOffset === markdown.length || markdown[endOffset - 1] === "\n";
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const isCompleteLine = (index > 0 || startsAtLineBoundary)
+      && (index < lines.length - 1 || endsAtLineBoundary);
+    const fence = isCompleteLine ? markdownFence(line) : undefined;
+    if (openingMarker === undefined) {
+      if (fence === undefined) {
+        output.push(line);
+      } else {
+        openingMarker = fence.marker;
+        output.push(`${fence.indent}${syntheticFence(openingMarker)}${fence.trailing}`);
+      }
+      continue;
+    }
+    if (fence !== undefined && closesFence(fence, openingMarker)) {
+      output.push(`${fence.indent}${syntheticFence(openingMarker)}`);
+      openingMarker = undefined;
+    } else if (fence !== undefined && closesSyntheticFence(fence, openingMarker)) {
+      output.push(`    ${line}`);
+    } else {
+      output.push(line);
+    }
+  }
+  if (openingMarker !== undefined) output.push(syntheticFence(openingMarker));
+  return output.join("\n");
 }
 
 /**
@@ -118,11 +151,18 @@ function assertUniqueValues(records, keyFor, kind) {
 /**
  * @param {string} markdown
  * @param {number} offset
- * @returns {{ readonly line: string; readonly marker: string } | undefined}
+ * @returns {{ readonly marker: string } | undefined}
  */
 function activeFence(markdown, offset) {
+  /** @type {{ readonly marker: string } | undefined} */
   let active;
-  for (const line of markdown.slice(0, offset).split("\n")) {
+  const prefix = markdown.slice(0, offset);
+  const lines = prefix.split("\n");
+  const completeLineCount = offset === markdown.length || markdown[offset - 1] === "\n"
+    ? lines.length
+    : lines.length - 1;
+  for (let index = 0; index < completeLineCount; index += 1) {
+    const line = lines[index] ?? "";
     const fence = markdownFence(line);
     if (fence === undefined) continue;
     if (active === undefined) active = { marker: fence.marker };
@@ -133,11 +173,14 @@ function activeFence(markdown, offset) {
 
 /**
  * @param {string} line
- * @returns {{ readonly marker: string; readonly trailing: string } | undefined}
+ * @returns {MarkdownFence | undefined}
  */
 function markdownFence(line) {
-  const match = /^\s{0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
-  return match === null ? undefined : { marker: match[1], trailing: match[2] };
+  const match = /^(\s{0,3})(`{3,}|~{3,})(.*)$/u.exec(line);
+  const marker = match?.[2];
+  return marker === undefined
+    ? undefined
+    : { indent: match?.[1] ?? "", marker, trailing: match?.[3] ?? "" };
 }
 
 /**
@@ -152,9 +195,20 @@ function closesFence(candidate, openingMarker) {
 }
 
 /**
- * @param {{ readonly marker: string }} fence
+ * @param {MarkdownFence} candidate
+ * @param {string} openingMarker
+ * @returns {boolean}
+ */
+function closesSyntheticFence(candidate, openingMarker) {
+  return candidate.marker[0] === openingMarker[0]
+    && candidate.marker.length >= 3
+    && candidate.trailing.trim().length === 0;
+}
+
+/**
+ * @param {string} marker
  * @returns {string}
  */
-function syntheticFence(fence) {
-  return fence.marker.charAt(0).repeat(3);
+function syntheticFence(marker) {
+  return marker.charAt(0).repeat(3);
 }
