@@ -13,7 +13,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { loadDocsCorpus } from "../corpus.js";
 import type { DocsCorpus, DocsCorpusChunk, DocsCorpusDocument } from "../corpus.js";
-import { assertUniqueDocumentLocations } from "../markdown-helpers.js";
+import { assertUniqueDocumentLocations, markdownLinks } from "../markdown-helpers.js";
 import { MONO_AGENT_DOCS_CHUNK_URI_PREFIX, MonoAgentDocsReader } from "../reader.js";
 import { MonoAgentDocsSearchIndex } from "../search.js";
 import { createMonoAgentDocsMcpServer, MONO_AGENT_DOCS_TOOL_NAME } from "../server.js";
@@ -153,6 +153,18 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     await expect(access(outputDirectory)).rejects.toThrow();
   });
 
+  it("does not expose links after a fence-like line with trailing content", () => {
+    expect(markdownLinks([
+      "```md",
+      "```still-code",
+      "[hidden](docs/hidden.md)",
+      "```",
+      "[visible](docs/visible.md)",
+    ].join("\n"))).toEqual([
+      { label: "visible", href: "docs/visible.md" },
+    ]);
+  });
+
   it("finds paraphrased concepts and exact identifiers as expanded, section-deduplicated excerpts", async () => {
     const index = new MonoAgentDocsSearchIndex(await loadDocsCorpus(corpusDir));
     const exact = await index.search({ query: "routing fallbacks", limit: 5 });
@@ -286,11 +298,11 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     expect("error" in pathologicalResult).toBe(false);
     if ("error" in pathologicalResult) throw new Error(pathologicalResult.error.message);
     expect(pathologicalResult.markdown.length).toBeLessThanOrEqual(10_000);
-    expect(fenceMarkers(pathologicalResult.markdown).length % 2).toBe(0);
+    expect(fenceMarkers(pathologicalResult.markdown)).toEqual(["```", "```"]);
 
     const pathologicalSearchHit = pathologicalReader.searchHit(pathological.chunk, 1);
     expect(pathologicalSearchHit.markdown.length).toBeLessThanOrEqual(3_000);
-    expect(fenceMarkers(pathologicalSearchHit.markdown).length % 2).toBe(0);
+    expect(fenceMarkers(pathologicalSearchHit.markdown)).toEqual(["```", "```"]);
   });
 
   it("publishes only mono_agent_docs and gives MCP clients explicit search-to-read guidance", async () => {

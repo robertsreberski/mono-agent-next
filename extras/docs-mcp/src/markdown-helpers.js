@@ -38,15 +38,15 @@ export function markdownLinks(markdown) {
   const links = [];
   let fenceMarker;
   for (const line of markdown.split("\n")) {
-    const fence = /^\s{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
+    const fence = markdownFence(line);
     if (fenceMarker !== undefined) {
-      if (fence !== undefined && fence[0] === fenceMarker[0] && fence.length >= fenceMarker.length) {
+      if (fence !== undefined && closesFence(fence, fenceMarker)) {
         fenceMarker = undefined;
       }
       continue;
     }
     if (fence !== undefined) {
-      fenceMarker = fence;
+      fenceMarker = fence.marker;
       continue;
     }
     const pattern = /(?<!!)\[([^\]]+)\]\(\s*<?([^\s)>]+)>?(?:\s+["'][^"']*["'])?\s*\)/gu;
@@ -68,10 +68,10 @@ export function balanceFences(markdown, startOffset, endOffset) {
   const openingAtEnd = activeFence(markdown, endOffset);
   const prefix = openingAtStart === undefined
     ? ""
-    : `${boundedFenceOpening(openingAtStart)}\n`;
+    : `${syntheticFence(openingAtStart)}\n`;
   const suffix = openingAtEnd === undefined
     ? ""
-    : `\n${boundedFenceMarker(openingAtEnd)}`;
+    : `\n${syntheticFence(openingAtEnd)}`;
   return `${prefix}${markdown.slice(startOffset, endOffset)}${suffix}`;
 }
 
@@ -123,31 +123,38 @@ function assertUniqueValues(records, keyFor, kind) {
 function activeFence(markdown, offset) {
   let active;
   for (const line of markdown.slice(0, offset).split("\n")) {
-    const marker = /^\s{0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
-    if (marker === undefined) continue;
-    if (active === undefined) active = { line, marker };
-    else if (marker[0] === active.marker[0] && marker.length >= active.marker.length) active = undefined;
+    const fence = markdownFence(line);
+    if (fence === undefined) continue;
+    if (active === undefined) active = { marker: fence.marker };
+    else if (closesFence(fence, active.marker)) active = undefined;
   }
   return active;
 }
 
 /**
- * Preserve useful language metadata without allowing a pathological opening
- * fence line to consume the entire bounded read window.
- *
- * @param {{ readonly line: string; readonly marker: string }} fence
- * @returns {string}
+ * @param {string} line
+ * @returns {{ readonly marker: string; readonly trailing: string } | undefined}
  */
-function boundedFenceOpening(fence) {
-  return fence.line.length <= 160 ? fence.line : boundedFenceMarker(fence);
+function markdownFence(line) {
+  const match = /^\s{0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+  return match === null ? undefined : { marker: match[1], trailing: match[2] };
+}
+
+/**
+ * @param {{ readonly marker: string; readonly trailing: string }} candidate
+ * @param {string} openingMarker
+ * @returns {boolean}
+ */
+function closesFence(candidate, openingMarker) {
+  return candidate.marker[0] === openingMarker[0]
+    && candidate.marker.length >= openingMarker.length
+    && candidate.trailing.trim().length === 0;
 }
 
 /**
  * @param {{ readonly marker: string }} fence
  * @returns {string}
  */
-function boundedFenceMarker(fence) {
-  return fence.marker.length <= 160
-    ? fence.marker
-    : fence.marker.charAt(0).repeat(3);
+function syntheticFence(fence) {
+  return fence.marker.charAt(0).repeat(3);
 }
