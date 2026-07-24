@@ -106,6 +106,7 @@ failures expose only bounded, redacted, accessor-free `Error` cause snapshots.
 | `environment.ts` | Isolated HOME/XDG and process-owned deny/auth settings. |
 | `process.ts` | Bounded direct-process startup, version, and shutdown handling. |
 | `server.ts` | Authenticated HTTP/SSE protocol and deny-all assertions. |
+| `version.ts` | Shared strict and lenient version parsing and comparison. |
 | `runtime.ts` | Session serialization, quarantine, and event normalization. |
 | `index.ts` | Typed module definition. |
 

@@ -1,5 +1,7 @@
 import { envEligibleSchema } from "@mono-agent/module-sdk";
 
+import { parseStableVersion, versionAtLeast } from "./version.js";
+
 export interface RuntimeOpenCodeConfig {
   readonly binary: string;
   readonly environment: Readonly<Record<string, string>>;
@@ -12,25 +14,7 @@ export interface RuntimeOpenCodeConfig {
 
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const ENV_NAME = /^[A-Z_][A-Z0-9_]{0,127}$/;
-const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 export const OPEN_CODE_SECURE_SERVER_VERSION = "1.15.13";
-
-function versionTuple(value: string): readonly [number, number, number] {
-  const match = VERSION.exec(value);
-  if (match === null) throw new TypeError("runtime-opencode config.minimumVersion must be stable semver");
-  return [Number(match[1]), Number(match[2]), Number(match[3])];
-}
-
-function versionAtLeast(
-  actual: readonly [number, number, number],
-  minimum: readonly [number, number, number],
-): boolean {
-  for (let index = 0; index < 3; index += 1) {
-    if ((actual[index] ?? 0) > (minimum[index] ?? 0)) return true;
-    if ((actual[index] ?? 0) < (minimum[index] ?? 0)) return false;
-  }
-  return true;
-}
 
 function object(value: unknown, path: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`${path} must be an object`);
@@ -91,8 +75,15 @@ export function parseRuntimeOpenCodeConfig(input: unknown): RuntimeOpenCodeConfi
     OPEN_CODE_SECURE_SERVER_VERSION,
     "runtime-opencode config.minimumVersion",
   );
-  const minimumTuple = versionTuple(minimumVersion);
-  if (!versionAtLeast(minimumTuple, versionTuple(OPEN_CODE_SECURE_SERVER_VERSION))) {
+  const minimumTuple = parseStableVersion(minimumVersion);
+  if (minimumTuple === undefined) {
+    throw new TypeError("runtime-opencode config.minimumVersion must be stable semver");
+  }
+  const secureTuple = parseStableVersion(OPEN_CODE_SECURE_SERVER_VERSION);
+  if (
+    secureTuple === undefined
+    || !versionAtLeast(minimumTuple, secureTuple)
+  ) {
     throw new TypeError(
       `runtime-opencode config.minimumVersion must be >=${OPEN_CODE_SECURE_SERVER_VERSION} `
       + "because authenticated tool-free server containment is unavailable below that version",
