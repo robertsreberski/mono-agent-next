@@ -1,5 +1,18 @@
 import type { Bootstrap, Thread } from "./types";
 
+export const NOTIFICATIONS_STORAGE_KEY = "mono-agent-web-notifications-enabled";
+export const LEGACY_NOTIFICATIONS_STORAGE_KEY = "mono-agent.web.notifications-enabled";
+
+const ENABLED_STORAGE_VALUE = "1";
+const DISABLED_STORAGE_VALUE = "0";
+
+export type NotificationPreference =
+  | "unsupported"
+  | "prompt"
+  | "disabled"
+  | "enabled"
+  | "denied";
+
 export interface NotificationPayload {
   readonly title: string;
   readonly body: string;
@@ -49,12 +62,43 @@ export function responseNotifications(
   return payloads;
 }
 
+export function notificationPreference(): NotificationPreference {
+  const optedIn = readPersistedOptIn();
+  if (!notificationsSupported()) return "unsupported";
+  if (window.Notification.permission === "denied") return "denied";
+  if (window.Notification.permission === "default") return "prompt";
+  return optedIn ? "enabled" : "disabled";
+}
+
+export function notificationsSupported(): boolean {
+  return (
+    window.isSecureContext === true
+    && "Notification" in window
+    && typeof window.Notification.requestPermission === "function"
+    && "serviceWorker" in navigator
+  );
+}
+
+export function setNotificationOptIn(enabled: boolean): NotificationPreference {
+  writePersistedOptIn(
+    enabled && notificationsSupported() && window.Notification.permission === "granted",
+  );
+  return notificationPreference();
+}
+
+export async function toggleNotificationPreference(): Promise<NotificationPreference> {
+  const current = notificationPreference();
+  if (current === "enabled") return setNotificationOptIn(false);
+  if (current === "unsupported" || current === "denied") return current;
+  if (window.Notification.permission === "granted") return setNotificationOptIn(true);
+  await requestNotificationPermission();
+  return notificationPreference();
+}
+
 export async function showBackgroundNotification(payload: NotificationPayload): Promise<void> {
   if (
-    !("Notification" in window)
-    || Notification.permission !== "granted"
+    notificationPreference() !== "enabled"
     || (!document.hidden && document.hasFocus())
-    || !("serviceWorker" in navigator)
   ) {
     return;
   }
@@ -63,6 +107,70 @@ export async function showBackgroundNotification(payload: NotificationPayload): 
 }
 
 export async function requestNotificationPermission(): Promise<NotificationPermission> {
-  if (!("Notification" in window)) return "denied";
-  return Notification.requestPermission();
+  if (!notificationsSupported()) return "denied";
+  if (window.Notification.permission === "granted") {
+    writePersistedOptIn(true);
+    return "granted";
+  }
+  if (window.Notification.permission === "denied") {
+    writePersistedOptIn(false);
+    return "denied";
+  }
+  try {
+    const permission = await window.Notification.requestPermission();
+    writePersistedOptIn(permission === "granted");
+    return permission;
+  } catch {
+    return window.Notification.permission;
+  }
+}
+
+function readPersistedOptIn(): boolean {
+  try {
+    const current = window.localStorage.getItem(NOTIFICATIONS_STORAGE_KEY);
+    const legacy = window.localStorage.getItem(LEGACY_NOTIFICATIONS_STORAGE_KEY);
+    if (current === ENABLED_STORAGE_VALUE || current === DISABLED_STORAGE_VALUE) {
+      if (legacy !== null) {
+        try {
+          window.localStorage.removeItem(LEGACY_NOTIFICATIONS_STORAGE_KEY);
+        } catch {
+          // The canonical preference is already durable, so cleanup can retry later.
+        }
+      }
+      return current === ENABLED_STORAGE_VALUE;
+    }
+    if (legacy !== null) {
+      const enabled = legacy === ENABLED_STORAGE_VALUE;
+      try {
+        window.localStorage.setItem(
+          NOTIFICATIONS_STORAGE_KEY,
+          enabled ? ENABLED_STORAGE_VALUE : DISABLED_STORAGE_VALUE,
+        );
+      } catch {
+        // Preserve and honor the legacy preference when canonical persistence fails.
+        return enabled;
+      }
+      try {
+        window.localStorage.removeItem(LEGACY_NOTIFICATIONS_STORAGE_KEY);
+      } catch {
+        // The canonical preference is durable; legacy cleanup can retry later.
+      }
+      return enabled;
+    }
+  } catch {
+    // Treat unavailable browser storage as an explicit opt-out.
+  }
+  return false;
+}
+
+function writePersistedOptIn(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(
+      NOTIFICATIONS_STORAGE_KEY,
+      enabled ? ENABLED_STORAGE_VALUE : DISABLED_STORAGE_VALUE,
+    );
+    window.localStorage.removeItem(LEGACY_NOTIFICATIONS_STORAGE_KEY);
+  } catch {
+    // A browser that cannot persist the opt-in remains disabled.
+  }
 }

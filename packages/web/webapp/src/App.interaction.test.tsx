@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import { ConsoleProvider } from "./console";
@@ -63,12 +63,22 @@ Object.defineProperties(window, {
   sessionStorage: { configurable: true, value: memoryStorage() },
 });
 
+beforeEach(() => {
+  Element.prototype.scrollIntoView = vi.fn();
+  vi.stubGlobal("ResizeObserver", class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  });
+});
+
 afterEach(() => {
   document.body.textContent = "";
   window.localStorage.clear();
   window.sessionStorage.clear();
   window.history.replaceState(null, "", "/");
   Reflect.deleteProperty(window, "matchMedia");
+  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
@@ -95,7 +105,7 @@ describe("responsive console shell", () => {
         .getAttribute("aria-expanded"),
     ).toBe("false");
     const mobileNavigation = requiredElement<HTMLElement>(host, ".mobile-navigation");
-    const chat = requiredElement<HTMLElement>(host, ".chat");
+    const chat = requiredElement<HTMLElement>(host, ".chat-panel");
     expect(
       mobileNavigation.compareDocumentPosition(chat) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).not.toBe(0);
@@ -120,7 +130,12 @@ describe("responsive console shell", () => {
     expect(chat.getAttribute("aria-hidden")).toBe("true");
     expect(mobileNavigation.hasAttribute("inert")).toBe(true);
     expect(document.body.hasAttribute("data-console-modal-open")).toBe(true);
-    expect(host.querySelector(".drawer-scrim")?.getAttribute("aria-hidden")).toBe("true");
+    expect(
+      host.querySelector(".drawer-scrim")?.getAttribute("aria-hidden"),
+    ).toBe("true");
+    expect(
+      host.querySelector(".drawer-scrim")?.getAttribute("tabindex"),
+    ).toBe("-1");
 
     await act(async () => {
       document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
@@ -180,8 +195,92 @@ describe("responsive console shell", () => {
       onChange?.({ matches: true } as MediaQueryListEvent);
     });
     expect(host.querySelector('[role="dialog"][aria-label="Conversations"]')).toBeNull();
-    expect(requiredElement<HTMLElement>(host, ".chat").hasAttribute("inert")).toBe(false);
+    expect(requiredElement<HTMLElement>(host, ".chat-panel").hasAttribute("inert")).toBe(false);
     expect(document.body.hasAttribute("data-console-modal-open")).toBe(false);
+    await act(async () => root.unmount());
+  });
+
+  it("opens a roving command palette from the rail and the standard shortcut", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    await act(async () => {
+      root.render(
+        <ConsoleProvider>
+          <WebRuntimeProvider>
+            <App />
+          </WebRuntimeProvider>
+        </ConsoleProvider>,
+      );
+    });
+    await waitFor(() => host.querySelector(".console-shell"));
+    await act(async () => {
+      window.dispatchEvent(new CustomEvent("mono-agent:notice", {
+        detail: { message: "Retained notice" },
+      }));
+    });
+    const toast = await waitFor(() => host.querySelector<HTMLElement>(".shell-toast"));
+    const trigger = requiredElement<HTMLButtonElement>(
+      host,
+      'button[aria-label="Open command palette"]',
+    );
+
+    await act(async () => {
+      trigger.focus();
+      trigger.click();
+    });
+    const dialog = await waitFor(() =>
+      host.querySelector<HTMLElement>('[role="dialog"][aria-label="Command palette"]')
+    );
+    await act(async () => {
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+    });
+    expect(dialog.getAttribute("aria-modal")).toBe("true");
+    expect(document.activeElement?.getAttribute("role")).toBe("combobox");
+    expect(requiredElement<HTMLElement>(host, ".chat-panel").hasAttribute("inert")).toBe(true);
+    expect(toast.hasAttribute("inert")).toBe(true);
+    expect(toast.getAttribute("aria-hidden")).toBe("true");
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+      }));
+    });
+    expect(host.querySelector('[role="dialog"][aria-label="Command palette"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    document.body.dataset.consolePopover = "context-display-test";
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "k",
+        metaKey: true,
+        bubbles: true,
+      }));
+      window.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "o",
+        metaKey: true,
+        shiftKey: true,
+        bubbles: true,
+      }));
+    });
+    expect(host.querySelector('[role="dialog"][aria-label="Command palette"]')).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    delete document.body.dataset.consolePopover;
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "k",
+        metaKey: true,
+        bubbles: true,
+      }));
+    });
+    await waitFor(() =>
+      host.querySelector('[role="dialog"][aria-label="Command palette"]')
+    );
+
     await act(async () => root.unmount());
   });
 });

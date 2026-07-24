@@ -1,6 +1,22 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#111310"/>
-  <path d="M132 166h248v180H132z" fill="#d9ff70"/>
-  <path d="M174 210h164v24H174zm0 68h104v24H174z" fill="#111310"/>
-  <circle cx="326" cy="290" r="22" fill="#111310"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="mono-agent">
+  <defs>
+    <linearGradient id="surface" x1="72" y1="52" x2="438" y2="462" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#20241f"/>
+      <stop offset="1" stop-color="#0d0f0d"/>
+    </linearGradient>
+    <linearGradient id="signal" x1="151" y1="125" x2="368" y2="389" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#b9f35b"/>
+      <stop offset="1" stop-color="#76c833"/>
+    </linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+  </defs>
+  <rect width="512" height="512" fill="url(#surface)"/>
+  <circle cx="256" cy="256" r="147" fill="none" stroke="#343a32" stroke-width="2"/>
+  <circle cx="256" cy="256" r="106" fill="#1b2019" stroke="#394035" stroke-width="3"/>
+  <circle cx="350" cy="161" r="20" fill="#8ed944" opacity=".2" filter="url(#glow)"/>
+  <path d="M164 286c38-8 62-32 72-72 8 38 32 62 72 72-40 9-64 33-72 73-10-40-34-64-72-73Z" fill="#96df4a"/>
+  <circle cx="326" cy="186" r="18" fill="#b9f35b"/>
+  <path d="M150 187a151 151 0 0 1 42-48M362 323a151 151 0 0 1-42 48" fill="none" stroke="#96df4a" stroke-linecap="round" stroke-width="14"/>
 </svg>

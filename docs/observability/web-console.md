@@ -145,26 +145,40 @@ The embedded React/assistant-ui client is built and packed as an installable
 PWA. It keeps a bearer token in `sessionStorage` only in token mode;
 service-worker precaching excludes API and health responses.
 
+## Console experience
+
 The console keeps a compact agent rail, searchable conversation navigation,
 and a focused chat column on desktop; the first two surfaces become
-keyboard-contained drawers on narrow screens. assistant-ui owns thread,
-message, quote, composer, and selection behavior. Structured progress,
-tool-call/result, and compaction events are grouped into one **Activity**
-disclosure that stays open while a response is running and collapses when the
-turn settles. Exact context telemetry and capability-gated atomic
-runtime/model route and effort overrides stay in compact controls instead of
-occupying the transcript.
+keyboard-contained drawers on narrow screens. The desktop and mobile layouts
+both follow the operating system's light or dark color scheme through
+`prefers-color-scheme`; there is no separate in-app theme preference.
+
+The shell provides these shortcuts:
+
+| Shortcut | Action |
+| --- | --- |
+| `Cmd/Ctrl+K` | Open or close the searchable command palette. |
+| `Cmd/Ctrl+Shift+O` | Create a conversation for the selected online agent. |
+| `/` | Focus the composer when focus is not already in an editable control and mobile navigation is closed. |
+| `Escape` | Close the active palette, popover, or mobile drawer and return focus to its trigger. |
+
+assistant-ui owns thread, message, quote, composer, and selection behavior.
+Structured progress, tool calls and results, and compaction events are grouped
+into one polished **Activity** disclosure that stays open while a response is
+running and collapses into a reopenable summary when the turn settles. Exact
+context telemetry and capability-gated route and effort overrides stay in
+compact controls instead of occupying the transcript.
 
 Model choices are configured routes, not independent model hints. Each choice
 atomically carries its runtime instance and runtime-owned model id together
 with any verified label, context window, and per-model effort allowlist. A
-model selection changes the whole route. The effort control contains only
-values verified for that route; if an allowlist is absent or empty, the
-browser retains the configured/default effort and does not solicit an unknown
-value. Default route and effort selections stay implicit and do not author
-request-level overrides. If the same agent publishes a refreshed catalog, any
-authored route or effort no longer advertised is cleared before another
-submission.
+selection in the compact picker changes the whole runtime/model route. The
+effort control contains only values advertised and verified for that model; if
+an allowlist is absent or empty, the browser retains the configured/default
+effort and does not solicit an unknown value. Default route and effort
+selections stay implicit and do not author request-level overrides. If the same
+agent publishes a refreshed catalog, any authored route or effort no longer
+advertised is cleared before another submission.
 
 The context control reports `contextUsed` only from the latest trustworthy
 usage snapshot for the current turn. Starting a turn hides the previous
@@ -191,11 +205,35 @@ keeps that input in place. Confirming resets it and releases queued attachment
 state before navigation, so hidden files cannot consume the next conversation's
 upload allowance.
 
-Queued attachments can be sent without text. An accepted send leaves the
-composer cleared. If a new-turn or live-input submission fails, the exact text,
-quote, and attachment descriptors are restored for correction or retry and the
-failure is announced as an accessible alert instead of becoming an unhandled
-or silent loss. Failed AskUser submissions keep their selected answers.
+Selecting eligible message text opens assistant-ui's quote action and carries
+the authoritative source into a removable composer preview. AskUser presents
+one or more bounded questions with single-select, multi-select, and free-text
+fallback as advertised by the interaction. Failed submission keeps the
+selected answers available for retry.
+
+Attachments can be added through the picker, paste, or drag and drop. The
+composer shows preparation progress and removable previews, enforces the
+advertised file and encoded request bounds, and supports attachment-only sends.
+An accepted send leaves the composer cleared. If a new-turn or live-input
+submission fails, the exact text, quote, and attachment descriptors are
+restored for correction or retry and the failure is announced as an accessible
+alert instead of becoming an unhandled or silent loss.
+
+### Notification preference
+
+Response-arrival and explicitly marked proactive notifications require an
+explicit click on the notification bell. That bell action is the only path
+that requests browser notification permission. The opt-in or opt-out then
+persists for the browser origin; a granted browser permission without the
+persisted opt-in remains disabled. An enabled preference from the predecessor
+console is migrated once, while unsupported and browser-denied states remain
+visible instead of repeatedly prompting.
+
+Enabled notifications are posted through the service worker only while the
+console is hidden or unfocused. A focused console receives the same state
+update without an OS notification. Response notifications deduplicate by the
+authoritative last turn id, proactive titles retain their `cron` or `webhook`
+kind, and notification actions deep-link to the originating conversation.
 
 ## Durable state and turn ownership
 

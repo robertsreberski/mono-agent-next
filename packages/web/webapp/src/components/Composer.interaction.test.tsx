@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConsoleProvider, useConsole } from "../console";
 import { WebRuntimeProvider } from "../runtime";
 import type { Bootstrap, StartTurnInput, ThreadDetail } from "../types";
-import { Composer } from "./Composer";
+import { Composer, OPEN_RUN_SETTINGS_EVENT } from "./Composer";
 import { PopoverProvider } from "./Popover";
 
 const apiMocks = vi.hoisted(() => ({
@@ -80,8 +80,10 @@ afterEach(() => {
 describe("assistant-ui composer delivery", () => {
   it("sends an attachment-only turn from assistant-ui's native composer state", async () => {
     const view = await renderComposer();
-    const input = await waitFor(() => view.host.querySelector<HTMLInputElement>('input[type="file"]'));
-    await attach(input, new File(["hello"], "notes.txt", { type: "text/plain" }));
+    await chooseAttachment(
+      view.host,
+      new File(["hello"], "notes.txt", { type: "text/plain" }),
+    );
     await waitFor(() => view.host.textContent?.includes("notes.txt"));
 
     const send = requiredElement<HTMLButtonElement>(view.host, 'button[aria-label="Send message"]');
@@ -107,6 +109,25 @@ describe("assistant-ui composer delivery", () => {
     await view.unmount();
   });
 
+  it("accepts dropped files through the native dropzone and renders removable chips", async () => {
+    const view = await renderComposer();
+    const dropzone = requiredElement<HTMLElement>(view.host, ".composer-dropzone");
+    await drag(dropzone, "dragenter", [new File(["drop"], "drop.txt")]);
+    expect(dropzone.getAttribute("data-dragging")).toBe("true");
+
+    await drag(
+      dropzone,
+      "drop",
+      [new File(["drop"], "drop.txt", { type: "text/plain" })],
+    );
+    await waitFor(() => view.host.textContent?.includes("drop.txt"));
+    expect(dropzone.hasAttribute("data-dragging")).toBe(false);
+    expect(
+      requiredElement<HTMLButtonElement>(view.host, 'button[aria-label="Remove drop.txt"]'),
+    ).not.toBeNull();
+    await view.unmount();
+  });
+
   it("surfaces a failed send and restores text, quote, and attachments for retry", async () => {
     apiMocks.streamTurn.mockRejectedValue(new Error("Connection dropped."));
     const view = await renderComposer();
@@ -117,8 +138,10 @@ describe("assistant-ui composer delivery", () => {
     await act(async () => {
       requiredElement<HTMLButtonElement>(view.host, '[data-testid="set-quote"]').click();
     });
-    const input = requiredElement<HTMLInputElement>(view.host, 'input[type="file"]');
-    await attach(input, new File(["draft"], "draft.txt", { type: "text/plain" }));
+    await chooseAttachment(
+      view.host,
+      new File(["draft"], "draft.txt", { type: "text/plain" }),
+    );
     await waitFor(() => view.host.textContent?.includes("draft.txt"));
 
     await act(async () => {
@@ -138,7 +161,7 @@ describe("assistant-ui composer delivery", () => {
     await view.unmount();
   });
 
-  it("keeps defaults implicit and selects runtime/model as one catalog route", async () => {
+  it("requests header run settings from a slash command without sending command syntax", async () => {
     const base = bootstrap();
     apiMocks.bootstrap.mockResolvedValue({
       ...base,
@@ -151,57 +174,67 @@ describe("assistant-ui composer delivery", () => {
         defaults: {
           runtime: "pi",
           model: "provider:default",
-          effort: "medium",
         },
-        models: [
-          {
-            runtime: "pi",
-            id: "provider:default",
-            label: "Default model",
-            efforts: ["low", "medium", "high"],
-          },
-          {
-            runtime: "terra",
-            id: "provider:shared-id",
-            label: "Shared model",
-            efforts: ["high", "max"],
-          },
-        ],
+        models: [{
+          runtime: "pi",
+          id: "provider:default",
+          label: "Default model",
+          efforts: ["low", "high"],
+        }],
       }],
     });
     const view = await renderComposer();
+    const openSettings = vi.fn();
+    window.addEventListener(OPEN_RUN_SETTINGS_EVENT, openSettings);
+    const textarea = requiredElement<HTMLTextAreaElement>(
+      view.host,
+      'textarea[aria-label="Message"]',
+    );
+    await inputText(textarea, "/settings");
+    const option = await waitFor(() =>
+      document.querySelector<HTMLElement>('[role="option"]')
+    );
+    await act(async () => option.click());
 
-    expect(output(view.host, "runtime")).toBe("");
-    expect(output(view.host, "model")).toBe("");
-    expect(output(view.host, "effort")).toBe("");
-    await act(async () => {
-      requiredElement<HTMLButtonElement>(view.host, 'button[aria-label="Run settings"]').click();
+    expect(openSettings).toHaveBeenCalledOnce();
+    await waitFor(() => textarea.value === "");
+    expect(apiMocks.streamTurn).not.toHaveBeenCalled();
+    window.removeEventListener(OPEN_RUN_SETTINGS_EVENT, openSettings);
+    await view.unmount();
+  });
+
+  it("uses capability-gated live steering and stop presentation", async () => {
+    const base = bootstrap();
+    const runningThread = { ...thread(), status: "running" as const };
+    apiMocks.bootstrap.mockResolvedValue({
+      ...base,
+      agents: [{
+        ...base.agents[0]!,
+        capabilities: {
+          ...base.agents[0]!.capabilities,
+          liveInput: true,
+          cancellation: true,
+        },
+      }],
+      threads: [runningThread],
     });
-    const model = await waitFor(() =>
-      document.querySelector<HTMLSelectElement>('.composer-settings-panel label:first-child select')
+    apiMocks.thread.mockResolvedValue({
+      ...detail(),
+      thread: runningThread,
+    });
+    const view = await renderComposer();
+    const textarea = requiredElement<HTMLTextAreaElement>(
+      view.host,
+      'textarea[aria-label="Message"]',
     );
-    expect([...model.options].map((option) => option.textContent)).toContain(
-      "Shared model — terra",
-    );
-    expect(document.querySelector(".composer-settings-panel input")).toBeNull();
 
-    await changeSelect(model, JSON.stringify(["terra", "provider:shared-id"]));
-    expect(output(view.host, "runtime")).toBe("terra");
-    expect(output(view.host, "model")).toBe("provider:shared-id");
-    expect(output(view.host, "effort")).toBe("");
-    expect(document.querySelector(".composer-settings-panel")).not.toBeNull();
-    const effort = requiredElement<HTMLSelectElement>(
-      document,
-      ".composer-settings-panel label:nth-child(2) select",
-    );
-    expect([...effort.options].map((option) => option.value)).toEqual(["", "high", "max"]);
-    await changeSelect(effort, "high");
-    expect(output(view.host, "effort")).toBe("high");
-
-    await changeSelect(model, "");
-    expect(output(view.host, "runtime")).toBe("");
-    expect(output(view.host, "model")).toBe("");
-    expect(output(view.host, "effort")).toBe("");
+    expect(textarea.disabled).toBe(false);
+    expect(textarea.placeholder).toBe("Steer Personal Agent while it works…");
+    expect(
+      view.host.querySelector('button[aria-label="Send live follow-up"]'),
+    ).not.toBeNull();
+    expect(view.host.querySelector('button[aria-label="Stop response"]')).not.toBeNull();
+    expect(view.host.querySelector('button[aria-label="Attach files"]')).toBeNull();
     await view.unmount();
   });
 
@@ -219,38 +252,43 @@ describe("assistant-ui composer delivery", () => {
     );
     await inputText(textarea, "Keep this draft");
     await click(view.host, "set-quote");
-    const input = requiredElement<HTMLInputElement>(view.host, 'input[type="file"]');
     for (const name of ["one.txt", "two.txt", "three.txt"]) {
-      await attach(input, new File([name], name, { type: "text/plain" }));
+      await chooseAttachment(
+        view.host,
+        new File([name], name, { type: "text/plain" }),
+      );
     }
-    await waitFor(() => view.host.querySelectorAll(".pending-files li").length === 3);
+    await waitFor(() => view.host.querySelectorAll(".pending-files .attachment-chip").length === 3);
 
     await click(view.host, "retry-console");
     await waitFor(() => apiMocks.bootstrap.mock.calls.length >= 2);
     expect(confirm).not.toHaveBeenCalled();
     expect(textarea.value).toBe("Keep this draft");
-    expect(view.host.querySelectorAll(".pending-files li")).toHaveLength(3);
+    expect(view.host.querySelectorAll(".pending-files .attachment-chip")).toHaveLength(3);
 
     await click(view.host, "open-thread-2");
     await waitFor(() => confirm.mock.calls.length === 1);
     expect(output(view.host, "selected-thread")).toBe("thread-1");
     expect(textarea.value).toBe("Keep this draft");
-    expect(view.host.querySelectorAll(".pending-files li")).toHaveLength(3);
+    expect(view.host.querySelectorAll(".pending-files .attachment-chip")).toHaveLength(3);
     expect(view.host.textContent).toContain("selected fragment");
 
     confirm.mockReturnValue(true);
     await click(view.host, "open-thread-2");
     await waitFor(() => output(view.host, "selected-thread") === "thread-2");
     await waitFor(() => textarea.value === "");
-    expect(view.host.querySelectorAll(".pending-files li")).toHaveLength(0);
+    expect(view.host.querySelectorAll(".pending-files .attachment-chip")).toHaveLength(0);
     expect(view.host.textContent).not.toContain("selected fragment");
 
     await click(view.host, "open-thread-1");
     await waitFor(() => output(view.host, "selected-thread") === "thread-1");
     for (const name of ["four.txt", "five.txt", "six.txt"]) {
-      await attach(input, new File([name], name, { type: "text/plain" }));
+      await chooseAttachment(
+        view.host,
+        new File([name], name, { type: "text/plain" }),
+      );
     }
-    await waitFor(() => view.host.querySelectorAll(".pending-files li").length === 3);
+    await waitFor(() => view.host.querySelectorAll(".pending-files .attachment-chip").length === 3);
     expect(output(view.host, "error")).not.toContain("at most 3 files");
     await view.unmount();
   });
@@ -276,18 +314,20 @@ describe("assistant-ui composer delivery", () => {
       () => view.host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]'),
     );
     await inputText(textarea, "Delete only after discarding this draft");
-    const input = requiredElement<HTMLInputElement>(view.host, 'input[type="file"]');
     for (const name of ["one.txt", "two.txt", "three.txt"]) {
-      await attach(input, new File([name], name, { type: "text/plain" }));
+      await chooseAttachment(
+        view.host,
+        new File([name], name, { type: "text/plain" }),
+      );
     }
-    await waitFor(() => view.host.querySelectorAll(".pending-files li").length === 3);
+    await waitFor(() => view.host.querySelectorAll(".pending-files .attachment-chip").length === 3);
 
     await click(view.host, "delete-selected");
     await waitFor(() => confirm.mock.calls.length === 1);
     expect(apiMocks.deleteThread).not.toHaveBeenCalled();
     expect(output(view.host, "selected-thread")).toBe("thread-1");
     expect(textarea.value).toBe("Delete only after discarding this draft");
-    expect(view.host.querySelectorAll(".pending-files li")).toHaveLength(3);
+    expect(view.host.querySelectorAll(".pending-files .attachment-chip")).toHaveLength(3);
 
     confirm.mockReturnValue(true);
     await click(view.host, "delete-selected");
@@ -295,13 +335,15 @@ describe("assistant-ui composer delivery", () => {
     await waitFor(() => textarea.value === "");
     expect(apiMocks.deleteThread).toHaveBeenCalledOnce();
     expect(confirm).toHaveBeenCalledTimes(2);
-    expect(view.host.querySelectorAll(".pending-files li")).toHaveLength(0);
+    expect(view.host.querySelectorAll(".pending-files .attachment-chip")).toHaveLength(0);
 
-    const nextInput = requiredElement<HTMLInputElement>(view.host, 'input[type="file"]');
     for (const name of ["four.txt", "five.txt", "six.txt"]) {
-      await attach(nextInput, new File([name], name, { type: "text/plain" }));
+      await chooseAttachment(
+        view.host,
+        new File([name], name, { type: "text/plain" }),
+      );
     }
-    await waitFor(() => view.host.querySelectorAll(".pending-files li").length === 3);
+    await waitFor(() => view.host.querySelectorAll(".pending-files .attachment-chip").length === 3);
     expect(output(view.host, "error")).not.toContain("at most 3 files");
     await view.unmount();
   });
@@ -429,7 +471,7 @@ describe("assistant-ui composer delivery", () => {
       await waitFor(() => output(view.host, "selected-thread") === "thread-2");
       expect(confirm).toHaveBeenCalledTimes(2);
       expect(abortSpy).toHaveBeenCalledTimes(2);
-      expect(view.host.querySelectorAll(".pending-files li")).toHaveLength(0);
+      expect(view.host.querySelectorAll(".pending-files .attachment-chip")).toHaveLength(0);
       expect(output(view.host, "error")).toBe("");
     } finally {
       consoleError.mockRestore();
@@ -465,7 +507,7 @@ describe("assistant-ui composer delivery", () => {
       await waitFor(() => output(view.host, "selected-thread") === "thread-2");
       expect(confirm).toHaveBeenCalledOnce();
       expect(abortSpy).toHaveBeenCalledOnce();
-      expect(view.host.querySelectorAll(".pending-files li")).toHaveLength(0);
+      expect(view.host.querySelectorAll(".pending-files .attachment-chip")).toHaveLength(0);
       expect(output(view.host, "error")).toBe("");
     } finally {
       consoleError.mockRestore();
@@ -596,9 +638,6 @@ function TestControls() {
         Reset
       </button>
       <output data-testid="error" role="alert">{consoleState.error ?? ""}</output>
-      <output data-testid="runtime">{consoleState.runtime}</output>
-      <output data-testid="model">{consoleState.model}</output>
-      <output data-testid="effort">{consoleState.effort}</output>
       <output data-testid="selected-thread">{consoleState.selectedThreadId ?? ""}</output>
       <output data-testid="selected-agent">{consoleState.selectedAgentId ?? ""}</output>
       <button
@@ -676,7 +715,16 @@ async function renderComposer(): Promise<{
   };
 }
 
-async function attach(input: HTMLInputElement, file: File): Promise<void> {
+async function chooseAttachment(host: ParentNode, file: File): Promise<void> {
+  await act(async () => {
+    requiredElement<HTMLButtonElement>(
+      host,
+      'button[aria-label="Attach files"]',
+    ).click();
+  });
+  const input = await waitFor(() =>
+    document.body.querySelector<HTMLInputElement>('input[type="file"]')
+  );
   Object.defineProperty(input, "files", {
     configurable: true,
     value: [file],
@@ -697,6 +745,19 @@ async function paste(input: HTMLTextAreaElement, file: File): Promise<void> {
   });
 }
 
+async function drag(
+  target: HTMLElement,
+  type: "dragenter" | "drop",
+  files: readonly File[],
+): Promise<void> {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", {
+    configurable: true,
+    value: { files },
+  });
+  await act(async () => target.dispatchEvent(event));
+}
+
 async function click(host: ParentNode, testId: string): Promise<void> {
   await act(async () => {
     requiredElement<HTMLButtonElement>(host, `[data-testid="${testId}"]`).click();
@@ -711,17 +772,6 @@ async function inputText(input: HTMLTextAreaElement, value: string): Promise<voi
     )?.set;
     setter?.call(input, value);
     input.dispatchEvent(new Event("input", { bubbles: true }));
-  });
-}
-
-async function changeSelect(select: HTMLSelectElement, value: string): Promise<void> {
-  await act(async () => {
-    const setter = Object.getOwnPropertyDescriptor(
-      HTMLSelectElement.prototype,
-      "value",
-    )?.set;
-    setter?.call(select, value);
-    select.dispatchEvent(new Event("change", { bubbles: true }));
   });
 }
 

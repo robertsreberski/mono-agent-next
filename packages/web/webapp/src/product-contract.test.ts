@@ -5,30 +5,32 @@ import { describe, expect, it } from "vitest";
 describe("packed assistant-ui PWA contract", () => {
   it("composes messages, activity, quotes, threads, and mobile navigation from the native primitives", async () => {
     const messages = await readFile(new URL("./components/Messages.tsx", import.meta.url), "utf8");
-    const composer = await readFile(new URL("./components/Composer.tsx", import.meta.url), "utf8");
     const activity = await readFile(new URL("./components/Activity.tsx", import.meta.url), "utf8");
     const app = await readFile(new URL("./App.tsx", import.meta.url), "utf8");
+    const agentRail = await readFile(new URL("./components/AgentRail.tsx", import.meta.url), "utf8");
+    const threadSidebar = await readFile(new URL("./components/ThreadSidebar.tsx", import.meta.url), "utf8");
+    const quote = await readFile(new URL("./components/assistant-ui/Quote.tsx", import.meta.url), "utf8");
 
     expect(messages).toContain("MessagePrimitive.GroupedParts");
-    expect(messages).toContain("SelectionToolbarPrimitive.Quote");
+    expect(quote).toContain("SelectionToolbarPrimitive.Quote");
     expect(messages).toContain("ACTIVITY_GROUP_BY");
     expect(messages).not.toContain("thoughtText");
-    expect(composer).toContain("ComposerPrimitive.QuoteText");
-    expect(composer).toContain("ComposerPrimitive.QuoteDismiss");
+    expect(quote).toContain("ComposerPrimitive.QuoteText");
+    expect(quote).toContain("ComposerPrimitive.QuoteDismiss");
     expect(activity).toContain("groupPartByType");
     expect(activity).toContain("ActivityDisclosure");
     expect(activity).toContain("data-streaming");
     expect(activity).toContain("CompactionActivity");
     expect(activity).toContain("OrphanResultActivity");
 
-    expect(app).toContain("ThreadListPrimitive.Root");
-    expect(app).toContain("ThreadListPrimitive.Items");
-    expect(app).toContain("ThreadListPrimitive.New");
-    expect(app).toContain("ThreadListItemPrimitive.Trigger");
-    expect(app).toContain("ThreadListItemPrimitive.Archive");
-    expect(app).toContain("ThreadListItemPrimitive.Unarchive");
-    expect(app).toContain("Collapse agent rail");
-    expect(app).toContain("Expand agent rail");
+    expect(threadSidebar).toContain("ThreadListPrimitive.Root");
+    expect(threadSidebar).toContain("ThreadListPrimitive.Items");
+    expect(threadSidebar).toContain("ThreadListPrimitive.New");
+    expect(threadSidebar).toContain("ThreadListItemPrimitive.Trigger");
+    expect(threadSidebar).toContain("ThreadListItemPrimitive.Archive");
+    expect(threadSidebar).toContain("ThreadListItemPrimitive.Unarchive");
+    expect(agentRail).toContain("Collapse agent rail");
+    expect(agentRail).toContain("Expand agent rail");
     expect(app).toContain("mobile-navigation");
     expect(app).toContain("mobile-drawer");
     expect(app).toContain("aria-modal=\"true\"");

@@ -1,5 +1,4 @@
 import {
-  AttachmentPrimitive,
   ComposerPrimitive,
   useAui,
   useAuiState,
@@ -14,14 +13,75 @@ import {
 } from "react";
 
 import { useConsole } from "../console";
-import { isInlineAttachmentAbort } from "../inline-attachments";
 import {
   useAttachmentPreparation,
   useFailedComposerDraft,
 } from "../runtime";
 import type { Ask, AskQuestion } from "../types";
+import {
+  AttachmentErrorListener,
+  ComposerAttachments,
+} from "./Attachments";
+import {
+  ComposerTriggerPopover,
+  type ComposerTriggerCommand,
+} from "./assistant-ui/ComposerTriggerPopover";
+import { ComposerQuotePreview } from "./assistant-ui/Quote";
 import { Icon } from "./Icon";
-import { Popover } from "./Popover";
+
+export const OPEN_RUN_SETTINGS_EVENT = "mono-agent:run-settings";
+
+interface BuildComposerCommandsOptions {
+  readonly attachmentCount: number;
+  readonly canCancel: boolean;
+  readonly canCreateConversation: boolean;
+  readonly hasRunSettings: boolean;
+  readonly isRunning: boolean;
+  readonly createConversation: () => void;
+  readonly openRunSettings: () => void;
+  readonly stopResponse: () => void;
+}
+
+export function buildComposerCommands({
+  attachmentCount,
+  canCancel,
+  canCreateConversation,
+  hasRunSettings,
+  isRunning,
+  createConversation,
+  openRunSettings,
+  stopResponse,
+}: BuildComposerCommandsOptions): readonly ComposerTriggerCommand[] {
+  return [
+    ...(!isRunning && hasRunSettings
+      ? [{
+          id: "settings",
+          label: "Run settings",
+          description: "Choose the model and reasoning effort",
+          icon: "settings" as const,
+          execute: openRunSettings,
+        }]
+      : []),
+    ...(isRunning && canCancel
+      ? [{
+          id: "stop",
+          label: "Stop response",
+          description: "Cancel the current agent run",
+          icon: "stop" as const,
+          execute: stopResponse,
+        }]
+      : []),
+    ...(!isRunning && canCreateConversation && attachmentCount === 0
+      ? [{
+          id: "new",
+          label: "New conversation",
+          description: "Start a clean conversation with this agent",
+          icon: "spark" as const,
+          execute: createConversation,
+        }]
+      : []),
+  ];
+}
 
 function AskUser() {
   const consoleState = useConsole();
@@ -148,105 +208,6 @@ function AskQuestionField({
   );
 }
 
-function QuotePreview() {
-  return (
-    <ComposerPrimitive.Quote className="composer-quote">
-      <Icon name="quote" size={14} />
-      <ComposerPrimitive.QuoteText className="composer-quote-text" />
-      <ComposerPrimitive.QuoteDismiss
-        className="composer-quote-dismiss"
-        aria-label="Remove quote"
-        title="Remove quote"
-      >
-        <Icon name="close" size={13} />
-      </ComposerPrimitive.QuoteDismiss>
-    </ComposerPrimitive.Quote>
-  );
-}
-
-function RunSettings({ disabled }: { readonly disabled: boolean }) {
-  const consoleState = useConsole();
-  const models = consoleState.selectedAgent?.models;
-  const selectedRuntime =
-    consoleState.runtime || consoleState.selectedAgent?.defaults?.runtime || "";
-  const selectedModel =
-    consoleState.model || consoleState.selectedAgent?.defaults?.model || "";
-  const model = models?.find((candidate) =>
-    candidate.runtime === selectedRuntime && candidate.id === selectedModel
-  );
-  const efforts = model?.efforts ?? [];
-  const selectedRoute = consoleState.runtime && consoleState.model
-    ? routeKey(consoleState.runtime, consoleState.model)
-    : "";
-  if (consoleState.selectedAgent?.capabilities.runtimeOverrides !== true) return null;
-  return (
-    <Popover
-      id="run-settings"
-      triggerLabel="Run settings"
-      triggerClassName="composer-settings-trigger"
-      panelClassName="composer-settings-panel"
-      placement="top-start"
-      trigger={(
-        <>
-          <Icon name="settings" size={16} />
-          <span>Run settings</span>
-          <Icon name="chevron" size={13} />
-        </>
-      )}
-    >
-      {() => (
-        <>
-          <label>
-            <span>Model</span>
-            <select
-              disabled={disabled || models === undefined}
-              value={selectedRoute}
-              onChange={(event) => {
-                const route = models?.find(
-                  (candidate) => routeKey(candidate.runtime, candidate.id) === event.target.value,
-                );
-                consoleState.setRuntime(route?.runtime ?? "");
-                consoleState.setModel(route?.id ?? "");
-                consoleState.setEffort("");
-              }}
-            >
-              <option value="">
-                {models === undefined ? "Model catalog unavailable" : "Default model"}
-              </option>
-              {models?.map((option) => (
-                <option
-                  key={routeKey(option.runtime, option.id)}
-                  value={routeKey(option.runtime, option.id)}
-                >
-                  {option.label ?? option.id} — {option.runtime}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>Reasoning effort</span>
-            <select
-              disabled={disabled || efforts.length === 0}
-              value={consoleState.effort}
-              onChange={(event) => consoleState.setEffort(event.target.value)}
-            >
-              <option value="">Default effort</option>
-              {efforts.map((effort) => (
-                <option key={effort} value={effort}>{effort}</option>
-              ))}
-            </select>
-          </label>
-          {disabled && <p>Run settings are locked while this response is active.</p>}
-        </>
-      )}
-    </Popover>
-  );
-}
-
-function routeKey(runtime: string, model: string): string {
-  return JSON.stringify([runtime, model]);
-}
-
 function FailedDraftRecovery() {
   const consoleState = useConsole();
   const aui = useAui();
@@ -322,39 +283,15 @@ function FailedDraftRecovery() {
   );
 }
 
-function PendingAttachments() {
-  const count = useAuiState((state) => state.composer.attachments.length);
-  return count === 0 ? null : (
-    <ul className="pending-files" aria-label="Files ready to upload">
-      <ComposerPrimitive.Attachments>
-        {({ attachment }) => (
-          <AttachmentPrimitive.Root asChild>
-            <li>
-              <Icon name="attach" size={13} />
-              <span><AttachmentPrimitive.Name /></span>
-              <AttachmentPrimitive.Remove
-                aria-label={`Remove ${attachment.name}`}
-                title={`Remove ${attachment.name}`}
-              >
-                <Icon name="close" size={12} />
-              </AttachmentPrimitive.Remove>
-            </li>
-          </AttachmentPrimitive.Root>
-        )}
-      </ComposerPrimitive.Attachments>
-    </ul>
-  );
-}
-
 export function Composer() {
   const consoleState = useConsole();
   const aui = useAui();
   const attachmentPreparation = useAttachmentPreparation();
   const composerGeneration = useRef(0);
   const composerResetPending = useRef(false);
-  const fileInput = useRef<HTMLInputElement>(null);
   const isRunning = useAuiState((state) => state.thread.isRunning);
   const canSend = useAuiState((state) => state.composer.canSend);
+  const attachmentCount = useAuiState((state) => state.composer.attachments.length);
   const composerSignature = useAuiState((state) => JSON.stringify({
     text: state.composer.text,
     attachments: state.composer.attachments.map((attachment) => attachment.id),
@@ -420,94 +357,108 @@ export function Composer() {
     () => consoleState.registerNavigationBlocker(navigationBlocker),
     [consoleState.registerNavigationBlocker, navigationBlocker],
   );
-  const addFiles = useCallback(async (files: FileList) => {
-    for (const file of Array.from(files)) {
-      try {
-        await aui.composer().addAttachment(file);
-      } catch (cause) {
-        if (isInlineAttachmentAbort(cause)) continue;
-        consoleState.reportError(
-          cause instanceof Error && cause.message.trim()
-            ? cause.message
-            : `Could not attach ${file.name}.`,
-        );
-      }
-    }
-  }, [aui, consoleState]);
+  const commands = useMemo(() => buildComposerCommands({
+    attachmentCount,
+    canCancel,
+    canCreateConversation: consoleState.selectedAgent?.online === true,
+    hasRunSettings:
+      consoleState.selectedAgent?.capabilities.runtimeOverrides === true,
+    isRunning,
+    createConversation: () => {
+      void consoleState.createThread();
+    },
+    openRunSettings: () => {
+      window.dispatchEvent(new Event(OPEN_RUN_SETTINGS_EVENT));
+    },
+    stopResponse: () => {
+      void consoleState.cancel();
+    },
+  }), [
+    attachmentCount,
+    canCancel,
+    consoleState.cancel,
+    consoleState.createThread,
+    consoleState.selectedAgent,
+    isRunning,
+  ]);
   const placeholder = useMemo(() => {
-    if (isRunning && canSteer) return "Steer the active run…";
+    const agentLabel = consoleState.selectedAgent?.label ?? "the agent";
+    if (consoleState.selectedAgent?.online === false) return `${agentLabel} is offline`;
+    if (isRunning && canSteer) return `Steer ${agentLabel} while it works…`;
     if (isRunning) return "The agent is working…";
-    return "Message the agent…";
-  }, [canSteer, isRunning]);
+    return `Message ${agentLabel}…`;
+  }, [canSteer, consoleState.selectedAgent, isRunning]);
 
   return (
     <div className="composer-area">
       <AskUser />
-      <ComposerPrimitive.Root className="composer">
-        <FailedDraftRecovery />
-        <QuotePreview />
-        <PendingAttachments />
-        <ComposerPrimitive.Input
-          id="composer-input"
-          className="composer-input"
-          placeholder={placeholder}
-          rows={1}
-          submitMode="enter"
-          aria-label="Message"
-          disabled={isRunning && !canSteer}
-          unstable_focusOnRunStart={false}
-          unstable_focusOnScrollToBottom={false}
-          unstable_focusOnThreadSwitched={false}
-        />
-        <div className="composer-toolbar">
-          <div className="composer-tools">
-            {canAttach && (
-              <>
-                <input
-                  ref={fileInput}
-                  type="file"
-                  multiple
-                  hidden
-                  onChange={(event) => {
-                    if (event.target.files) void addFiles(event.target.files);
-                    event.target.value = "";
-                  }}
-                />
-                <button
-                  type="button"
-                  className="composer-tool"
-                  onClick={() => fileInput.current?.click()}
-                  title="Attach files"
-                  aria-label="Attach files"
+      <ComposerPrimitive.Unstable_TriggerPopoverRoot>
+        <ComposerPrimitive.Root className="composer composer-root">
+          <ComposerTriggerPopover commands={commands} />
+          <FailedDraftRecovery />
+          <ComposerQuotePreview />
+          <ComposerPrimitive.AttachmentDropzone
+            className="composer-dropzone"
+            disabled={!canAttach}
+          >
+            <AttachmentErrorListener />
+            <ComposerAttachments />
+            <div className="composer-input-row">
+              <ComposerPrimitive.Input
+                id="composer-input"
+                className="composer-input"
+                placeholder={placeholder}
+                rows={1}
+                submitMode="enter"
+                aria-label="Message"
+                disabled={isRunning && !canSteer}
+                addAttachmentOnPaste={canAttach}
+                unstable_insertNewlineOnTouchEnter
+                unstable_focusOnRunStart={false}
+                unstable_focusOnScrollToBottom={false}
+                unstable_focusOnThreadSwitched={false}
+              />
+            </div>
+            <div className="composer-toolbar">
+              <div className="composer-tools">
+                {canAttach && (
+                  <ComposerPrimitive.AddAttachment
+                    className="icon-button composer-tool"
+                    aria-label="Attach files"
+                    title="Attach files"
+                    multiple
+                  >
+                    <Icon name="attach" size={17} />
+                  </ComposerPrimitive.AddAttachment>
+                )}
+                <span className="composer-hint">
+                  {isRunning
+                    ? canSteer ? "Enter to steer this run" : "Live input unavailable"
+                    : "Enter to send · / for commands"}
+                </span>
+              </div>
+              <div className="composer-actions">
+                <ComposerPrimitive.Send
+                  className="send-button composer-send"
+                  aria-label={isRunning ? "Send live follow-up" : "Send message"}
+                  disabled={!canSend || (isRunning && !canSteer)}
                 >
-                  <Icon name="attach" size={16} />
-                </button>
-              </>
-            )}
-            <RunSettings disabled={isRunning} />
-            <span className="composer-hint">
-              {isRunning
-                ? canSteer ? "Enter to steer this run" : "Live input unavailable"
-                : "Enter to send · Shift+Enter for a new line"}
-            </span>
-          </div>
-          <div className="composer-actions">
-            <ComposerPrimitive.Send
-              className="send-button"
-              aria-label={isRunning ? "Send live input" : "Send message"}
-              disabled={!canSend || (isRunning && !canSteer)}
-            >
-              <Icon name="send" size={16} />
-            </ComposerPrimitive.Send>
-            {canCancel && (
-              <ComposerPrimitive.Cancel className="stop-button" aria-label="Stop response">
-                <Icon name="stop" size={14} />
-                <span>Stop</span>
-              </ComposerPrimitive.Cancel>
-            )}
-          </div>
-        </div>
-      </ComposerPrimitive.Root>
+                  <Icon name="send" size={16} />
+                </ComposerPrimitive.Send>
+                {canCancel && (
+                  <ComposerPrimitive.Cancel
+                    className="stop-button composer-stop"
+                    aria-label="Stop response"
+                  >
+                    <Icon name="stop" size={14} />
+                    <span>Stop</span>
+                  </ComposerPrimitive.Cancel>
+                )}
+              </div>
+            </div>
+          </ComposerPrimitive.AttachmentDropzone>
+        </ComposerPrimitive.Root>
+      </ComposerPrimitive.Unstable_TriggerPopoverRoot>
     </div>
   );
 }

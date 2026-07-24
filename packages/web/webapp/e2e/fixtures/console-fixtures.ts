@@ -10,12 +10,18 @@ import type {
   ThreadDetail,
 } from "../../src/types";
 
-export type VisualScenario = "interactive" | "running" | "settled";
+export type VisualScenario =
+  | "archived"
+  | "empty"
+  | "interactive"
+  | "running"
+  | "settled";
 
 export interface FixtureOptions {
   readonly askFailure?: string;
   readonly denseTranscript?: boolean;
   readonly effortMetadata?: "complete" | "missing";
+  readonly pendingAsk?: boolean;
   readonly priorCompletedTelemetry?: boolean;
   readonly threadResponseDelays?: Readonly<Record<string, number>>;
   readonly turnFailure?: string;
@@ -32,12 +38,16 @@ export interface FixtureHarness {
 }
 
 export const scenarioThreadIds = {
+  archived: "thread-archived",
+  empty: "thread-empty",
   interactive: "thread-interactive",
   running: "thread-running",
   settled: "thread-settled",
 } as const satisfies Readonly<Record<VisualScenario, string>>;
 
 export const scenarioTitles = {
+  archived: "Archived architecture notes",
+  empty: "Fresh conversation",
   interactive: "Approve launch notes",
   running: "Preparing migration summary",
   settled: "Beta architecture review",
@@ -165,9 +175,45 @@ const threads = [
     lastTurnId: "turn-scheduled",
     updatedAt: "2026-07-24T08:30:00.000Z",
   }),
+  thread({
+    id: scenarioThreadIds.empty,
+    title: scenarioTitles.empty,
+    status: "complete",
+    updatedAt: "2026-07-24T09:57:00.000Z",
+  }),
+  thread({
+    id: scenarioThreadIds.archived,
+    title: scenarioTitles.archived,
+    status: "complete",
+    archivedAt: "2026-07-24T09:20:00.000Z",
+    lastTurnId: "turn-archived",
+    updatedAt: "2026-07-24T09:20:00.000Z",
+  }),
 ] as const satisfies readonly Thread[];
 
 const details = {
+  archived: {
+    thread: threads[5],
+    messages: [
+      message({
+        id: "archived-request",
+        turnId: "turn-archived",
+        role: "user",
+        text: "Retain the architecture decision for the migration record.",
+      }),
+      message({
+        id: "archived-response",
+        operatorMessageId: "operator-archived-response",
+        turnId: "turn-archived",
+        role: "assistant",
+        text: "The architecture decision is retained with its verification evidence.",
+      }),
+    ],
+  },
+  empty: {
+    thread: threads[4],
+    messages: [],
+  },
   interactive: {
     thread: threads[0],
     messages: [
@@ -309,7 +355,7 @@ export async function openFixtureConsole(
   options: FixtureOptions = {},
 ): Promise<FixtureHarness> {
   const turnRequests: FixtureTurnRequest[] = [];
-  await installDeterministicBrowserState(page);
+  await installDeterministicBrowserState(page, scenario === "archived");
   await page.unroute("**/api/v1/**");
   await page.route(
     "**/api/v1/**",
@@ -323,14 +369,102 @@ export async function openFixtureConsole(
   return { turnRequests };
 }
 
-async function installDeterministicBrowserState(page: Page): Promise<void> {
-  await page.addInitScript(({ fixtureToken, fixtureNow }) => {
+export async function openFixtureLogin(page: Page): Promise<void> {
+  await page.addInitScript(({ fixtureNow }) => {
+    window.sessionStorage.removeItem("mono-agent-web-token");
+    window.localStorage.clear();
+    Date.now = () => fixtureNow;
+  }, { fixtureNow: nowMs });
+  await page.unroute("**/api/v1/**");
+  await page.route(
+    "**/api/v1/**",
+    (route) => respondToApi(route, "settled", {}, []),
+  );
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await expect(page.getByLabel("Web token")).toBeVisible();
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+  });
+}
+
+async function installDeterministicBrowserState(
+  page: Page,
+  showArchived: boolean,
+): Promise<void> {
+  await page.addInitScript(({ fixtureToken, fixtureNow, archived, readyEvent }) => {
     window.sessionStorage.setItem("mono-agent-web-token", fixtureToken);
     window.localStorage.setItem("mono-agent-web-show-offline", "false");
-    window.localStorage.setItem("mono-agent-web-show-archived", "false");
+    window.localStorage.setItem("mono-agent-web-show-archived", String(archived));
     window.localStorage.setItem("mono-agent-web-agent-rail", "collapsed");
     Date.now = () => fixtureNow;
-  }, { fixtureToken: token, fixtureNow: nowMs });
+
+    const nativeFetch = window.fetch.bind(window);
+    const eventFrame = new TextEncoder().encode(
+      `id: 42\ndata: ${JSON.stringify(readyEvent)}\n\n`,
+    );
+    window.fetch = async (input, init) => {
+      const requestUrl = new URL(
+        typeof input === "string" || input instanceof URL ? input.toString() : input.url,
+        window.location.href,
+      );
+      if (requestUrl.pathname !== "/api/v1/events") return nativeFetch(input, init);
+
+      const requestHeaders = new Headers(input instanceof Request ? input.headers : undefined);
+      new Headers(init?.headers).forEach((value, key) => requestHeaders.set(key, value));
+      if (requestHeaders.get("authorization") !== `Bearer ${fixtureToken}`) {
+        return new Response(
+          JSON.stringify({
+            error: { code: "unauthorized", message: "Fixture token required." },
+          }),
+          {
+            status: 401,
+            headers: { "content-type": "application/json" },
+          },
+        );
+      }
+
+      const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
+      let removeAbortListener = () => {};
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const abort = () => {
+            removeAbortListener();
+            controller.error(
+              signal?.reason ?? new DOMException("The operation was aborted.", "AbortError"),
+            );
+          };
+          removeAbortListener = () => signal?.removeEventListener("abort", abort);
+          if (signal?.aborted === true) {
+            abort();
+            return;
+          }
+          signal?.addEventListener("abort", abort, { once: true });
+          controller.enqueue(eventFrame);
+        },
+        cancel() {
+          removeAbortListener();
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "cache-control": "no-store",
+          "content-type": "text/event-stream",
+        },
+      });
+    };
+  }, {
+    fixtureToken: token,
+    fixtureNow: nowMs,
+    archived: showArchived,
+    readyEvent: {
+      id: "fixture-ready",
+      version: 1,
+      revision: 42,
+      type: "ready",
+      at: now,
+    },
+  });
 }
 
 async function respondToApi(
@@ -350,29 +484,10 @@ async function respondToApi(
       version: 1,
       revision: 42,
       agents: fixtureAgents(options),
-      threads,
+      threads: fixtureThreads(options),
       newProactiveThreadIds: [],
     } satisfies Bootstrap;
     await json(route, 200, bootstrap);
-    return;
-  }
-  if (request.method() === "GET" && url.pathname === "/api/v1/events") {
-    await route.fulfill({
-      status: 200,
-      headers: {
-        "cache-control": "no-store",
-        "content-type": "text/event-stream",
-      },
-      body:
-        `id: 42\n` +
-        `data: ${JSON.stringify({
-          id: "fixture-ready",
-          version: 1,
-          revision: 42,
-          type: "ready",
-          at: now,
-        })}\n\n`,
-    });
     return;
   }
   const threadMatch = /^\/api\/v1\/threads\/([^/]+)$/u.exec(url.pathname);
@@ -447,6 +562,11 @@ function fixtureAgents(options: FixtureOptions): readonly Agent[] {
   }));
 }
 
+function fixtureThreads(options: FixtureOptions): readonly Thread[] {
+  if (options.pendingAsk !== false) return threads;
+  return threads.map((candidate) => withoutPendingAsk(candidate));
+}
+
 function fixtureDetail(
   threadId: string,
   options: FixtureOptions,
@@ -454,6 +574,15 @@ function fixtureDetail(
   const detail = Object.values(details).find((candidate) => candidate.thread.id === threadId);
   if (detail === undefined) return undefined;
   let result: ThreadDetail = detail;
+  if (
+    options.pendingAsk === false
+    && threadId === scenarioThreadIds.interactive
+  ) {
+    result = {
+      ...result,
+      thread: withoutPendingAsk(result.thread),
+    };
+  }
   if (options.denseTranscript === true && threadId === scenarioThreadIds.settled) {
     result = {
       ...result,
@@ -497,6 +626,11 @@ function fixtureDetail(
   return result;
 }
 
+function withoutPendingAsk(threadValue: Thread): Thread {
+  const { pendingAsk: _pendingAsk, ...withoutAsk } = threadValue;
+  return withoutAsk;
+}
+
 async function json(route: Route, status: number, body: unknown): Promise<void> {
   await route.fulfill({
     status,
@@ -528,7 +662,11 @@ function message(input: Omit<Message, "createdAt" | "status" | "threadId" | "upd
       ? scenarioThreadIds.settled
       : input.id.startsWith("running")
         ? scenarioThreadIds.running
-        : scenarioThreadIds.interactive,
+        : input.id.startsWith("archived")
+          ? scenarioThreadIds.archived
+          : input.id.startsWith("empty")
+            ? scenarioThreadIds.empty
+            : scenarioThreadIds.interactive,
     createdAt: "2026-07-24T09:58:30.000Z",
     updatedAt: "2026-07-24T09:59:00.000Z",
     status: "complete",

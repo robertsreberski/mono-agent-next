@@ -9,6 +9,10 @@ import {
   useState,
 } from "react";
 
+import {
+  readAgentRailExpandedPreference,
+  writeAgentRailExpandedPreference,
+} from "./agent-rail-layout";
 import { api, ApiError, readToken, saveToken, streamTurn, subscribeEvents } from "./api";
 import { responseNotifications, showBackgroundNotification } from "./notifications";
 import type {
@@ -23,7 +27,6 @@ import type {
 
 const OFFLINE_KEY = "mono-agent-web-show-offline";
 const ARCHIVE_KEY = "mono-agent-web-show-archived";
-const RAIL_KEY = "mono-agent-web-agent-rail";
 
 interface Selection {
   readonly agentId?: string;
@@ -72,11 +75,15 @@ interface CreateThreadIntent {
 
 type LoadResult = "applied" | "blocked" | "superseded";
 
+type ConsoleConnection = "connecting" | "connected" | "reconnecting" | "offline";
+
 interface ConsoleState {
   readonly authenticated: boolean;
   readonly tokenAuthentication: boolean;
   readonly loading: boolean;
   readonly refreshing: boolean;
+  /** Browser-to-console event-stream connectivity, independent of agent availability. */
+  readonly connection: ConsoleConnection;
   /** True while the selected conversation's message request is in flight. */
   readonly submitting: boolean;
   /** True until the selected conversation reports trustworthy current-turn context. */
@@ -132,6 +139,9 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   const [tokenAuthentication, setTokenAuthentication] = useState(readToken().length > 0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [connection, setConnection] = useState<ConsoleConnection>(
+    navigator.onLine === false ? "offline" : "connecting",
+  );
   const [error, setError] = useState<string>();
   const [bootstrap, setBootstrap] = useState<Bootstrap>();
   const [selection, setSelection] = useState<Selection>({});
@@ -143,7 +153,9 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   );
   const [showOffline, setShowOfflineState] = useState(window.localStorage.getItem(OFFLINE_KEY) === "true");
   const [showArchived, setShowArchivedState] = useState(window.localStorage.getItem(ARCHIVE_KEY) === "true");
-  const [railExpanded, setRailExpandedState] = useState(window.localStorage.getItem(RAIL_KEY) === "expanded");
+  const [railExpanded, setRailExpandedState] = useState(() =>
+    readAgentRailExpandedPreference(window.localStorage)
+  );
   const [runOverrides, setRunOverridesState] = useState<RunOverrides>(EMPTY_RUN_OVERRIDES);
   const bootstrapRef = useRef<Bootstrap | undefined>(undefined);
   const selectionRef = useRef<Selection>({});
@@ -507,9 +519,11 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
 
   useEffect(() => {
     if (!authenticated) return;
-    const controller = new AbortController();
+    let streamController: AbortController | undefined;
     let retryTimer: number | undefined;
+    let onlineWaiter: (() => void) | undefined;
     let stopped = false;
+    let hasAttemptedConnection = false;
     const scheduleRefresh = () => {
       if (refreshTimerRef.current !== undefined) return;
       refreshTimerRef.current = window.setTimeout(() => {
@@ -517,6 +531,25 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
         void load().catch(() => undefined);
       }, 60);
     };
+    const handleOffline = () => {
+      if (stopped) return;
+      setConnection("offline");
+      streamController?.abort();
+    };
+    const handleOnline = () => {
+      if (stopped) return;
+      setConnection(hasAttemptedConnection ? "reconnecting" : "connecting");
+      onlineWaiter?.();
+      onlineWaiter = undefined;
+    };
+    const waitUntilOnline = async (): Promise<void> => {
+      if (navigator.onLine !== false || stopped) return;
+      await new Promise<void>((resolve) => {
+        onlineWaiter = resolve;
+      });
+    };
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
     const run = async () => {
       try {
         await load(true);
@@ -524,20 +557,43 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
         if (loadError instanceof ApiError && loadError.status === 401) return;
       }
       while (!stopped) {
+        if (navigator.onLine === false) {
+          setConnection("offline");
+          await waitUntilOnline();
+          if (stopped) return;
+        }
+        setConnection(hasAttemptedConnection ? "reconnecting" : "connecting");
+        hasAttemptedConnection = true;
+        const attemptController = new AbortController();
+        streamController = attemptController;
         try {
           await subscribeEvents(
             bootstrapRef.current?.revision,
             (event) => {
-              if (event.type === "ready") return;
+              if (
+                streamController !== attemptController
+                || attemptController.signal.aborted
+                || stopped
+                || navigator.onLine === false
+              ) {
+                return;
+              }
+              // A resumed stream may begin with replayed invalidations or a
+              // reset rather than a ready control frame. Receiving any valid
+              // frame proves this specific stream attempt is live.
+              setConnection("connected");
+              if (event.type === "ready") {
+                return;
+              }
               if (bootstrapRef.current !== undefined) {
                 bootstrapRef.current = { ...bootstrapRef.current, revision: event.revision };
               }
               scheduleRefresh();
             },
-            controller.signal,
+            attemptController.signal,
           );
         } catch (streamError) {
-          if (controller.signal.aborted) return;
+          if (stopped) return;
           if (streamError instanceof ApiError && streamError.status === 401) {
             saveToken("");
             setAuthenticated(false);
@@ -545,7 +601,12 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
             setError(streamError.message);
             return;
           }
+        } finally {
+          if (streamController === attemptController) streamController = undefined;
         }
+        if (stopped) return;
+        if (navigator.onLine === false) continue;
+        setConnection("reconnecting");
         await new Promise<void>((resolve) => {
           retryTimer = window.setTimeout(resolve, 1_000);
         });
@@ -554,7 +615,10 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     void run();
     return () => {
       stopped = true;
-      controller.abort();
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("online", handleOnline);
+      streamController?.abort();
+      onlineWaiter?.();
       if (retryTimer !== undefined) window.clearTimeout(retryTimer);
       if (refreshTimerRef.current !== undefined) window.clearTimeout(refreshTimerRef.current);
     };
@@ -565,6 +629,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     setTokenAuthentication(true);
     setAuthenticated(true);
     setLoading(true);
+    setConnection(navigator.onLine === false ? "offline" : "connecting");
   }, []);
 
   const logout = useCallback(() => {
@@ -1001,7 +1066,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     setShowArchivedState(value);
   }, []);
   const setRailExpanded = useCallback((value: boolean) => {
-    window.localStorage.setItem(RAIL_KEY, value ? "expanded" : "collapsed");
+    writeAgentRailExpandedPreference(window.localStorage, value);
     setRailExpandedState(value);
   }, []);
   const setRuntime = useCallback((value: string) => {
@@ -1056,6 +1121,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     tokenAuthentication,
     loading,
     refreshing,
+    connection,
     submitting,
     sending,
     ...(error === undefined ? {} : { error }),
@@ -1096,7 +1162,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     setEffort,
     registerNavigationBlocker,
   }), [
-    authenticated, tokenAuthentication, loading, refreshing, submitting, sending, error, bootstrap, detail, selectedAgentId,
+    authenticated, tokenAuthentication, loading, refreshing, connection, submitting, sending, error, bootstrap, detail, selectedAgentId,
     selectedThreadId, selectedAgent, selectedThread, visibleAgents, visibleThreads,
     hiddenOfflineCount, showOffline, showArchived, railExpanded,
     runtime, model, effort, login, logout, retry, selectAgent, selectThread,

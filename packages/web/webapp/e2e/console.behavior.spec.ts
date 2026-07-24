@@ -67,19 +67,16 @@ test.describe("assistant-ui console behavior contract", () => {
 
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Run settings" }).click();
-    await page.getByLabel("Model").selectOption({
-      label: "Codex shared route — codex-app-server",
-    });
-    await page.keyboard.press("Escape");
+    await selectModelRoute(page, "Codex shared route");
     await page.addStyleTag({
       content: `
-        .composer-settings-panel > label:first-child {
+        .model-selector__search-wrapper {
           visibility: hidden !important;
         }
       `,
     });
     await page.getByRole("button", { name: "Run settings" }).click();
-    await expect(page.getByLabel("Reasoning effort")).toBeFocused();
+    await expect(page.getByRole("radio", { name: "Automatic" })).toBeFocused();
   });
 
   test("run settings waits for the initial model control", async ({ page }, testInfo) => {
@@ -90,7 +87,7 @@ test.describe("assistant-ui console behavior contract", () => {
     await openFixtureConsole(page, "settled");
 
     await page.getByRole("button", { name: "Run settings" }).click();
-    await expect(page.getByLabel("Model")).toBeFocused();
+    await expect(page.getByRole("combobox", { name: "Search models" })).toBeFocused();
   });
 
   test("run settings remain actionable without covering the latest response", async (
@@ -111,8 +108,72 @@ test.describe("assistant-ui console behavior contract", () => {
     await expectReceivesPointerEvents(panel);
     await expectNoIntersection(panel, lastResponse);
     await expectInsideViewport(page, panel);
-    await page.getByLabel("Model").click({ trial: true });
-    await page.getByLabel("Reasoning effort").click({ trial: true });
+    await page.getByRole("combobox", { name: "Search models" }).click({ trial: true });
+    await page.getByRole("radiogroup", { name: "Reasoning effort" })
+      .getByText("Automatic", { exact: true })
+      .click({ trial: true });
+  });
+
+  test("mobile context and run settings preserve the latest response", async (
+    { page },
+    testInfo,
+  ) => {
+    test.skip(testInfo.project.name !== "chromium-mobile");
+    await openFixtureConsole(page, "settled");
+
+    const latestResponse = page.locator(".message-assistant").last();
+    const contextTrigger = page.getByRole("button", { name: "Context usage" });
+    await contextTrigger.click();
+    const contextPanel = page.getByRole("dialog", { name: "Context usage" });
+    await expect(contextPanel).toBeVisible();
+    await expect(latestResponse).toBeInViewport();
+    await expectNoIntersection(contextPanel, latestResponse);
+    await expectInsideViewport(page, contextPanel);
+    await page.keyboard.press("Escape");
+    await expect(contextTrigger).toBeFocused();
+
+    const runSettingsTrigger = page.getByRole("button", { name: "Run settings" });
+    await runSettingsTrigger.click();
+    const runSettingsPanel = page.getByRole("dialog", { name: "Run settings" });
+    await expect(runSettingsPanel).toBeVisible();
+    await expectPageScrollOrigin(page);
+    await expectInsideViewport(page, page.locator(".chat-header"));
+    await expectInsideViewport(
+      page,
+      page.getByRole("button", { name: "Beta architecture review" }),
+    );
+    await expectInsideViewport(
+      page,
+      page.getByRole("status", { name: "Agent status: Ready" }),
+    );
+    await expect(latestResponse).toBeInViewport();
+    await expectNoIntersection(runSettingsPanel, latestResponse);
+    await expectInsideViewport(page, runSettingsPanel);
+  });
+
+  test("tablet context preserves navigation, title, and horizontal origin", async (
+    { page },
+    testInfo,
+  ) => {
+    test.skip(testInfo.project.name !== "chromium-tablet");
+    await openFixtureConsole(page, "settled");
+
+    const contextTrigger = page.getByRole("button", { name: "Context usage" });
+    await contextTrigger.click();
+    const contextPanel = page.getByRole("dialog", { name: "Context usage" });
+    await expect(contextPanel).toBeVisible();
+    await expectPageScrollOrigin(page);
+    await expectInsideViewport(page, page.locator(".chat-header"));
+    await expectInsideViewport(
+      page,
+      page.getByRole("button", { name: "Beta architecture review" }),
+    );
+    await expectInsideViewport(page, page.getByRole("button", { name: "Choose agent" }));
+    await expectInsideViewport(
+      page,
+      page.getByRole("button", { name: "Open conversations" }),
+    );
+    await expectInsideViewport(page, contextPanel);
   });
 
   test("model routes and effort choices submit as one atomic override", async (
@@ -123,20 +184,25 @@ test.describe("assistant-ui console behavior contract", () => {
     const fixture = await openFixtureConsole(page, "settled");
 
     await page.getByRole("button", { name: "Run settings" }).click();
-    const model = page.getByLabel("Model");
-    const effort = page.getByLabel("Reasoning effort");
-
-    await expect(model).toHaveValue("");
-    await expect(effort).toHaveValue("");
+    const modelSearch = page.getByRole("combobox", { name: "Search models" });
+    await expect(modelSearch).toHaveValue("");
+    await expect(
+      page.locator(".model-selector__item[data-model-selected='true']"),
+    ).toContainText("Automatic");
     await expect(page.getByLabel("Runtime ID")).toHaveCount(0);
-    await model.selectOption({ label: "Codex shared route — codex-app-server" });
-    await expect(effort.locator("option")).toHaveText([
-      "Default effort",
-      "low",
-      "medium",
-      "high",
-    ]);
-    await effort.selectOption("high");
+    await selectModelRoute(page, "Codex shared route");
+
+    await page.getByRole("button", { name: "Run settings" }).click();
+    const effort = page.getByRole("radiogroup", { name: "Reasoning effort" });
+    await expect(effort.getByRole("radio")).toHaveCount(4);
+    await expect(effort.getByRole("radio", { name: "Automatic" })).toBeChecked();
+    await expect(effort.getByRole("radio", { name: "Low", exact: true })).toBeVisible();
+    await expect(effort.getByRole("radio", { name: "Medium", exact: true })).toBeVisible();
+    await expect(effort.getByRole("radio", { name: "High", exact: true })).toBeVisible();
+    await expect(effort.getByRole("radio", { name: /none|minimal|xhigh|max/iu })).toHaveCount(0);
+    await effort.getByText("High", { exact: true }).click();
+    await expect(effort.getByRole("radio", { name: "High", exact: true })).toBeChecked();
+    await page.keyboard.press("Escape");
 
     await messageInput(page).fill("Use the selected route.");
     await page.getByRole("button", { name: "Send message" }).click();
@@ -160,8 +226,14 @@ test.describe("assistant-ui console behavior contract", () => {
     const fixture = await openFixtureConsole(page, "settled");
 
     await page.getByRole("button", { name: "Run settings" }).click();
-    await expect(page.getByLabel("Model")).toHaveValue("");
-    await expect(page.getByLabel("Reasoning effort")).toHaveValue("");
+    await expect(
+      page.locator(".model-selector__item[data-model-selected='true']"),
+    ).toContainText("Automatic");
+    await expect(
+      page.getByRole("radiogroup", { name: "Reasoning effort" })
+        .getByRole("radio", { name: "Automatic" }),
+    ).toBeChecked();
+    await page.keyboard.press("Escape");
     await messageInput(page).fill("Use configured defaults.");
     await page.getByRole("button", { name: "Send message" }).click();
 
@@ -180,11 +252,9 @@ test.describe("assistant-ui console behavior contract", () => {
     await openFixtureConsole(page, "settled", { effortMetadata: "missing" });
 
     await page.getByRole("button", { name: "Run settings" }).click();
-    const effort = page.getByLabel("Reasoning effort");
-    await expect(effort).toHaveCount(1);
-    await expect(effort).toHaveJSProperty("tagName", "SELECT");
-    await expect(effort.locator("option")).toHaveText(["Default effort"]);
-    await expect(effort).toHaveValue("");
+    await expect(page.getByRole("radiogroup", { name: "Reasoning effort" })).toHaveCount(0);
+    await expect(page.getByRole("textbox", { name: /effort/iu })).toHaveCount(0);
+    await expect(page.getByRole("combobox", { name: "Search models" })).toBeVisible();
   });
 
   test("mobile navigation is first in keyboard order", async ({ page }, testInfo) => {
@@ -244,7 +314,9 @@ test.describe("assistant-ui console behavior contract", () => {
     await settledActivity.click();
     await expect(page.getByText("CheckArchitecture", { exact: true })).toBeVisible();
     await expect(page.getByText("Context compacted", { exact: true })).toBeVisible();
-    await expect(page.getByText("18.4k → 7.2k tokens", { exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("status", { name: /Context compacted/iu }),
+    ).toContainText("18.4k → 7.2k tokens");
   });
 
   test("out-of-order thread loads cannot replace the current conversation", async (
@@ -427,12 +499,14 @@ test.describe("assistant-ui console behavior contract", () => {
       viewport.scrollTop = 0;
       viewport.dispatchEvent(new Event("scroll", { bubbles: true }));
     });
-    const scrollToLatest = page.getByRole("button", { name: "Scroll to latest" });
+    const scrollToLatest = page.getByRole("button", { name: "Scroll to latest message" });
     await expect(scrollToLatest).toBeVisible();
     const bounds = await scrollToLatest.boundingBox();
     expect(bounds).not.toBeNull();
-    expect(bounds?.width).toBe(34);
-    expect(bounds?.height).toBe(34);
+    expect(bounds?.width).toBe(bounds?.height);
+    expect(bounds?.width).toBeGreaterThanOrEqual(
+      testInfo.project.name === "chromium-mobile" ? 44 : 34,
+    );
     await scrollToLatest.click({ trial: true });
   });
 
@@ -505,6 +579,224 @@ test.describe("assistant-ui console behavior contract", () => {
     await expect(dialog).toBeHidden();
     await expect(trigger).toBeFocused();
   });
+
+  test("searchable model picker uses roving keyboard selection and restores focus", async (
+    { page },
+    testInfo,
+  ) => {
+    test.skip(testInfo.project.name !== "chromium-desktop");
+    await openFixtureConsole(page, "settled");
+
+    const trigger = page.getByRole("button", { name: "Run settings" });
+    await trigger.focus();
+    await trigger.click();
+    const search = page.getByRole("combobox", { name: "Search models" });
+    await expect(search).toBeFocused();
+    await search.fill("Codex");
+    const codex = page.locator(".model-selector__item").filter({
+      has: page.getByText("Codex shared route", { exact: true }),
+    });
+    await expect(codex).toHaveCount(1);
+    await expect(codex).toHaveAttribute("data-selected", "true");
+    await page.keyboard.press("Enter");
+    await expect(trigger).toContainText("Codex shared route");
+
+    await trigger.click();
+    await expect(page.getByRole("combobox", { name: "Search models" })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(trigger).toBeFocused();
+  });
+
+  test("command palette has roving keyboard selection and restores focus", async (
+    { page },
+    testInfo,
+  ) => {
+    test.skip(testInfo.project.name !== "chromium-desktop");
+    await openFixtureConsole(page, "settled");
+
+    const trigger = page.getByRole("button", { name: "Open command palette" });
+    await trigger.focus();
+    await trigger.click();
+    const palette = page.getByRole("dialog", { name: "Command palette" });
+    const search = page.getByRole("combobox", { name: "Command palette" });
+    await expect(palette).toBeVisible();
+    await expect(search).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(search).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(search).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(trigger).toBeFocused();
+
+    await page.keyboard.press("Control+k");
+    await expect(palette).toBeVisible();
+    await search.fill("focus message composer");
+    const focusCommand = page.locator("[cmdk-item]").filter({
+      hasText: "Focus message composer",
+    });
+    await expect(focusCommand).toHaveCount(1);
+    await expect(focusCommand).toHaveAttribute("data-selected", "true");
+    await page.keyboard.press("Enter");
+    await expect(messageInput(page)).toBeFocused();
+  });
+
+  test("effort choices expose a visible keyboard focus indicator", async (
+    { page },
+    testInfo,
+  ) => {
+    test.skip(testInfo.project.name !== "chromium-desktop");
+    await openFixtureConsole(page, "settled");
+
+    await page.getByRole("button", { name: "Run settings" }).click();
+    await expect(page.getByRole("combobox", { name: "Search models" })).toBeFocused();
+    const effort = page.getByRole("radio", { name: "Automatic" });
+    await effort.focus();
+    await page.keyboard.press("ArrowRight");
+    const focusedEffort = page.getByRole("radiogroup", { name: "Reasoning effort" })
+      .locator("input:focus");
+    await expect(focusedEffort).toHaveCount(1);
+    await expect.poll(() => focusedEffort.evaluate((input) =>
+      input.matches(":focus-visible")
+    )).toBe(true);
+    const focusRing = await focusedEffort.locator("..").evaluate((label) => {
+      const style = getComputedStyle(label);
+      return {
+        color: style.outlineColor,
+        style: style.outlineStyle,
+        width: Number.parseFloat(style.outlineWidth),
+      };
+    });
+    expect(focusRing.style).not.toBe("none");
+    expect(focusRing.width).toBeGreaterThanOrEqual(2);
+    expect(focusRing.color).not.toBe("rgba(0, 0, 0, 0)");
+  });
+
+  test("touch Activity, tool, effort, archive, recovery, and error actions are 44px", async (
+    { page },
+    testInfo,
+  ) => {
+    test.skip(!isTouchLane(testInfo.project.name));
+    await openFixtureConsole(page, "settled");
+
+    const activity = page.getByRole("button", { name: /^Activity/u }).last();
+    await expectMinimumTarget(activity, 44);
+    await activity.click();
+    const toolSummaries = page.locator(".tool-call summary");
+    await expect(toolSummaries.first()).toBeVisible();
+    for (let index = 0; index < await toolSummaries.count(); index += 1) {
+      await expectMinimumTarget(toolSummaries.nth(index), 44);
+    }
+
+    await page.getByRole("button", { name: "Run settings" }).click();
+    const effortChoices = page.locator(".model-selector__effort-option");
+    await expect(effortChoices.first()).toBeVisible();
+    for (let index = 0; index < await effortChoices.count(); index += 1) {
+      await expectMinimumTarget(effortChoices.nth(index), 44);
+    }
+    await page.keyboard.press("Escape");
+
+    await page.getByRole("button", { name: "Conversation actions" }).click();
+    await expectMinimumTarget(
+      page.getByRole("menuitem", { name: "Archive" }),
+      44,
+    );
+    await page.keyboard.press("Escape");
+
+    await openFixtureConsole(page, "archived");
+    await expectMinimumTarget(
+      page.getByRole("button", { name: "Restore to continue" }),
+      44,
+    );
+
+    await openFixtureConsole(page, "interactive");
+    await expectMinimumTarget(
+      page.getByRole("button", { name: "Submit answer" }),
+      44,
+    );
+
+    await openFixtureConsole(page, "settled", {
+      turnFailure: "The fixture transport rejected this touch turn.",
+    });
+    await messageInput(page).fill("Exercise recovery geometry.");
+    await page.getByRole("button", { name: "Send message" }).click();
+    await expect(page.getByRole("alert")).toContainText(
+      "The fixture transport rejected this touch turn.",
+    );
+    await expectMinimumTarget(page.getByRole("button", { name: "Retry" }), 44);
+  });
+
+  test("mobile run status remains visible and the composer cannot trigger input zoom", async (
+    { page },
+    testInfo,
+  ) => {
+    test.skip(testInfo.project.name !== "chromium-mobile");
+    await openFixtureConsole(page, "settled");
+
+    await expect(page.getByRole("status", { name: "Agent status: Ready" })).toBeVisible();
+    const composerFontSize = await messageInput(page).evaluate((input) =>
+      Number.parseFloat(getComputedStyle(input).fontSize)
+    );
+    expect(composerFontSize).toBeGreaterThanOrEqual(16);
+    const viewport = await page.locator('meta[name="viewport"]').getAttribute("content");
+    expect(viewport).toContain("initial-scale=1");
+    expect(viewport).toContain("viewport-fit=cover");
+  });
+
+  test("staging a mobile attachment keeps the chat header in the page viewport", async (
+    { page },
+    testInfo,
+  ) => {
+    test.skip(testInfo.project.name !== "chromium-mobile");
+    await openFixtureConsole(page, "interactive", { pendingAsk: false });
+
+    await stageFixtureFile(page, "fixture-report.pdf");
+    const header = page.locator(".chat-header");
+    await expect(header).toBeVisible();
+    await expect(page.getByRole("status", { name: "Agent status: Ready" })).toBeVisible();
+    await expectInsideViewport(page, header);
+    await expect.poll(() => page.evaluate(() => ({
+      body: document.body.scrollTop,
+      document: document.documentElement.scrollTop,
+      window: window.scrollY,
+    }))).toEqual({ body: 0, document: 0, window: 0 });
+  });
+
+  test("reduced motion and safe-area layout contracts are active", async (
+    { page },
+    testInfo,
+  ) => {
+    test.skip(
+      !["chromium-desktop", "chromium-mobile"].includes(testInfo.project.name),
+    );
+    await openFixtureConsole(page, "settled");
+
+    expect(await page.evaluate(() =>
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    )).toBe(true);
+    expect(await page.evaluate(() =>
+      CSS.supports("padding-bottom", "env(safe-area-inset-bottom)")
+    )).toBe(true);
+    const safeAreaGeometry = await page.locator(".chat-header").evaluate((header) => {
+      const headerStyle = getComputedStyle(header);
+      const rootStyle = getComputedStyle(document.documentElement);
+      return {
+        headerLeft: Number.parseFloat(headerStyle.paddingLeft),
+        headerRight: Number.parseFloat(headerStyle.paddingRight),
+        headerTop: Number.parseFloat(headerStyle.paddingTop),
+        rootHeight: Number.parseFloat(rootStyle.height),
+      };
+    });
+    expect(safeAreaGeometry.headerLeft).toBeGreaterThanOrEqual(0);
+    expect(safeAreaGeometry.headerRight).toBeGreaterThanOrEqual(0);
+    expect(safeAreaGeometry.headerTop).toBeGreaterThanOrEqual(0);
+    expect(safeAreaGeometry.rootHeight).toBeGreaterThan(0);
+    const transitionDurations = await page.locator(".composer-root").evaluate((element) =>
+      getComputedStyle(element).transitionDuration
+        .split(",")
+        .map((value) => Number.parseFloat(value) || 0)
+    );
+    expect(Math.max(...transitionDurations)).toBeLessThanOrEqual(0.001);
+  });
 });
 
 async function expectReceivesPointerEvents(locator: Locator): Promise<void> {
@@ -532,7 +824,10 @@ async function expectNoIntersection(first: Locator, second: Locator): Promise<vo
     && firstBounds.x + firstBounds.width > secondBounds.x
     && firstBounds.y < secondBounds.y + secondBounds.height
     && firstBounds.y + firstBounds.height > secondBounds.y;
-  expect(intersects).toBe(false);
+  expect(
+    intersects,
+    `Expected non-overlapping bounds; first=${JSON.stringify(firstBounds)} second=${JSON.stringify(secondBounds)}`,
+  ).toBe(false);
 }
 
 async function expectInsideViewport(page: Page, locator: Locator): Promise<void> {
@@ -546,6 +841,24 @@ async function expectInsideViewport(page: Page, locator: Locator): Promise<void>
     );
   });
   expect(inside).toBe(true);
+}
+
+async function expectPageScrollOrigin(page: Page): Promise<void> {
+  await expect.poll(() => page.evaluate(() => ({
+    bodyX: document.body.scrollLeft,
+    bodyY: document.body.scrollTop,
+    documentX: document.documentElement.scrollLeft,
+    documentY: document.documentElement.scrollTop,
+    windowX: window.scrollX,
+    windowY: window.scrollY,
+  }))).toEqual({
+    bodyX: 0,
+    bodyY: 0,
+    documentX: 0,
+    documentY: 0,
+    windowX: 0,
+    windowY: 0,
+  });
 }
 
 async function expectInsideContainer(container: Locator, child: Locator): Promise<void> {
@@ -630,6 +943,18 @@ async function stageQuote(page: Page): Promise<void> {
   await expect(quote).toBeVisible();
   await quote.click();
   await expect(page.getByRole("button", { name: "Remove quote" })).toBeVisible();
+}
+
+async function selectModelRoute(page: Page, modelName: string): Promise<void> {
+  const search = page.getByRole("combobox", { name: "Search models" });
+  await expect(search).toBeFocused();
+  await search.fill(modelName);
+  const option = page.locator(".model-selector__item").filter({
+    has: page.getByText(modelName, { exact: true }),
+  });
+  await expect(option).toHaveCount(1);
+  await option.click();
+  await expect(page.getByRole("dialog", { name: "Run settings" })).toBeHidden();
 }
 
 async function selectText(locator: Locator, start: number, end: number): Promise<void> {

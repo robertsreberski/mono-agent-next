@@ -127,6 +127,39 @@ console.log(server.url);
 await server.stop();
 ```
 
+### Browser console
+
+The installed PWA uses the same polished three-surface layout on desktop and
+keyboard-contained agent and conversation drawers on narrow screens. Both
+desktop and mobile layouts follow the operating system's light or dark color
+scheme; there is no separate theme setting to keep in sync.
+
+The primary keyboard shortcuts are:
+
+| Shortcut | Action |
+| --- | --- |
+| `Cmd/Ctrl+K` | Open or close the command palette. |
+| `Cmd/Ctrl+Shift+O` | Create a conversation for the selected online agent. |
+| `/` | Focus the message composer when focus is not already in an editable control. |
+| `Escape` | Close the active palette, popover, or mobile drawer and restore focus. |
+
+The compact route picker treats runtime instance and model as one atomic
+choice. Its effort control contains only the values advertised for that model;
+the console never asks the operator to guess which effort levels a model
+supports. Structured **Activity** remains expanded while a response is running
+and becomes a reopenable summary after settlement. AskUser renders bounded
+single- or multi-select questions with free-text fallback, while assistant-ui
+owns selection quotes and attachment picker, paste, drop, preview, progress,
+removal, and attachment-only sends.
+
+Browser notifications are disabled until the notification bell is used to opt
+in. That action is the only place the console asks for browser permission, and
+the enabled or disabled choice persists for the browser origin. Browser
+permission by itself is not an opt-in. Unsupported and browser-blocked states
+remain visible, and enabled notifications are delivered through the service
+worker only while the console is in the background. Response and proactive
+notifications deep-link to the originating conversation.
+
 ## Architecture
 
 ### Data flow
@@ -361,6 +394,7 @@ bounds, bearer auth, cross-origin rejection, real shared-client turn
 streaming, cancellation,
 AskUser/live-input routing, text and attachment-only turns, failed-send draft
 recovery, uploads/quotes, proactive import and dismissal,
-browser view routes, v1/v2-to-v3 migration, telemetry rendering and restart
+browser view routes, responsive shell behavior, persisted notification opt-in,
+v1/v2-to-v3 migration, telemetry rendering and restart
 persistence, deletion, exclusive ownership,
 atomic recovery, corruption preservation, modes, and symlink rejection.

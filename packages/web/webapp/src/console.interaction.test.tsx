@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ConsoleProvider, useConsole } from "./console";
-import type { Bootstrap, StreamFrame, ThreadDetail } from "./types";
+import type { Bootstrap, StreamFrame, ThreadDetail, WebEvent } from "./types";
 
 const apiMocks = vi.hoisted(() => ({
   bootstrap: vi.fn(),
@@ -59,12 +59,23 @@ Object.defineProperties(window, {
 });
 
 beforeEach(() => {
+  Object.defineProperty(window.navigator, "onLine", {
+    configurable: true,
+    value: true,
+  });
   apiMocks.bootstrap.mockResolvedValue(bootstrap());
   apiMocks.createThread.mockResolvedValue(thread("new-thread"));
   apiMocks.deleteThread.mockResolvedValue(undefined);
   apiMocks.thread.mockImplementation(async (threadId: string) => detail(threadId));
   apiMocks.liveInput.mockResolvedValue(undefined);
   apiMocks.streamTurn.mockResolvedValue(undefined);
+  apiMocks.subscribeEvents.mockImplementation(
+    async (
+      _revision: number | undefined,
+      _onEvent: (event: WebEvent) => void,
+      signal: AbortSignal,
+    ) => await waitForAbort(signal),
+  );
   navigationMocks.discardDraft.mockResolvedValue(undefined);
 });
 
@@ -78,6 +89,139 @@ afterEach(() => {
 });
 
 describe("console conversation isolation", () => {
+  it("reports a failed event stream as reconnecting until a ready event proves recovery", async () => {
+    const firstStream = deferred<void>();
+    let recoveredEvent: ((event: WebEvent) => void) | undefined;
+    apiMocks.subscribeEvents
+      .mockImplementationOnce(async () => await firstStream.promise)
+      .mockImplementationOnce(async (
+        _revision: number | undefined,
+        onEvent: (event: WebEvent) => void,
+        signal: AbortSignal,
+      ) => {
+        recoveredEvent = onEvent;
+        await waitForAbort(signal);
+      });
+    const view = await renderConsole();
+    await waitFor(() => apiMocks.subscribeEvents.mock.calls.length === 1);
+    expect(text(view.host, "connection")).toBe("connecting");
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        firstStream.reject(new Error("stream dropped"));
+        await Promise.resolve();
+      });
+      expect(text(view.host, "connection")).toBe("reconnecting");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(apiMocks.subscribeEvents).toHaveBeenCalledTimes(2);
+
+      await act(async () => recoveredEvent?.(readyEvent(2)));
+      expect(text(view.host, "connection")).toBe("connected");
+    } finally {
+      await view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["replayed invalidation", "threads.changed" as const],
+    ["reset", "reset" as const],
+  ])("accepts a %s as proof that a resumed event stream is connected", async (
+    _label,
+    eventType,
+  ) => {
+    const firstStream = deferred<void>();
+    let initialEvent: ((event: WebEvent) => void) | undefined;
+    let resumedEvent: ((event: WebEvent) => void) | undefined;
+    apiMocks.subscribeEvents
+      .mockImplementationOnce(async (
+        _revision: number | undefined,
+        onEvent: (event: WebEvent) => void,
+      ) => {
+        initialEvent = onEvent;
+        await firstStream.promise;
+      })
+      .mockImplementationOnce(async (
+        _revision: number | undefined,
+        onEvent: (event: WebEvent) => void,
+        signal: AbortSignal,
+      ) => {
+        resumedEvent = onEvent;
+        await waitForAbort(signal);
+      });
+    const view = await renderConsole();
+    await waitFor(() => initialEvent !== undefined);
+    await act(async () => initialEvent?.(readyEvent(1)));
+    expect(text(view.host, "connection")).toBe("connected");
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        firstStream.resolve();
+        await Promise.resolve();
+      });
+      expect(text(view.host, "connection")).toBe("reconnecting");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(apiMocks.subscribeEvents).toHaveBeenCalledTimes(2);
+
+      await act(async () => resumedEvent?.(webEvent(eventType, 2)));
+      expect(text(view.host, "connection")).toBe("connected");
+    } finally {
+      await view.unmount();
+      vi.useRealTimers();
+    }
+  });
+
+  it("marks the console offline immediately and requires a fresh ready event after reconnecting", async () => {
+    const eventCallbacks: Array<(event: WebEvent) => void> = [];
+    apiMocks.subscribeEvents.mockImplementation(async (
+      _revision: number | undefined,
+      onEvent: (event: WebEvent) => void,
+      signal: AbortSignal,
+    ) => {
+      eventCallbacks.push(onEvent);
+      await waitForAbort(signal);
+    });
+    const view = await renderConsole();
+    await waitFor(() => eventCallbacks.length === 1);
+    await act(async () => eventCallbacks[0]?.(readyEvent(1)));
+    expect(text(view.host, "connection")).toBe("connected");
+
+    Object.defineProperty(window.navigator, "onLine", {
+      configurable: true,
+      value: false,
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event("offline"));
+      await Promise.resolve();
+    });
+    expect(text(view.host, "connection")).toBe("offline");
+    await act(async () => eventCallbacks[0]?.(readyEvent(99)));
+    expect(text(view.host, "connection")).toBe("offline");
+
+    Object.defineProperty(window.navigator, "onLine", {
+      configurable: true,
+      value: true,
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event("online"));
+      await Promise.resolve();
+    });
+    expect(text(view.host, "connection")).toBe("reconnecting");
+    await waitFor(() => eventCallbacks.length === 2);
+
+    await act(async () => eventCallbacks[1]?.(readyEvent(2)));
+    expect(text(view.host, "connection")).toBe("connected");
+    await view.unmount();
+  });
+
   it("does not let an older delayed thread navigation replace the newer selection", async () => {
     const firstDiscard = deferred<void>();
     navigationMocks.discardDraft
@@ -710,6 +854,7 @@ function Probe() {
         {consoleState.detail?.messages.map((message) => message.text).join("|") ?? ""}
       </output>
       <output data-testid="error">{consoleState.error ?? ""}</output>
+      <output data-testid="connection">{consoleState.connection}</output>
       <output data-testid="submitting">{consoleState.submitting ? "yes" : "no"}</output>
       <output data-testid="context-pending">{consoleState.sending ? "yes" : "no"}</output>
       <output data-testid="runtime">{consoleState.runtime}</output>
@@ -966,6 +1111,27 @@ function deferred<Value>(): {
     rejectValue = reject;
   });
   return { promise, resolve: resolveValue, reject: rejectValue };
+}
+
+function readyEvent(revision: number): WebEvent {
+  return webEvent("ready", revision);
+}
+
+function webEvent(type: WebEvent["type"], revision: number): WebEvent {
+  return {
+    id: String(revision),
+    version: 1,
+    revision,
+    type,
+    at: timestamp,
+  };
+}
+
+async function waitForAbort(signal: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve) => {
+    if (signal.aborted) resolve();
+    else signal.addEventListener("abort", () => resolve(), { once: true });
+  });
 }
 
 function memoryStorage(): Storage {

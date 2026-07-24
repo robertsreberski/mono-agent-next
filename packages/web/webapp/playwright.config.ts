@@ -44,6 +44,16 @@ export default defineConfig({
       },
     },
     {
+      name: "chromium-desktop-light",
+      testMatch: /console\.visual\.spec\.ts/u,
+      use: {
+        ...devices["Desktop Chrome"],
+        colorScheme: "light",
+        deviceScaleFactor: 1,
+        viewport: { width: 1_440, height: 900 },
+      },
+    },
+    {
       name: "chromium-mobile",
       use: {
         ...devices["Desktop Chrome"],
@@ -55,7 +65,6 @@ export default defineConfig({
     },
     {
       name: "chromium-compact-desktop",
-      testMatch: /console\.behavior\.spec\.ts/u,
       use: {
         ...devices["Desktop Chrome"],
         deviceScaleFactor: 1,
@@ -75,7 +84,6 @@ export default defineConfig({
     },
     {
       name: "chromium-tablet",
-      testMatch: /console\.behavior\.spec\.ts/u,
       use: {
         ...devices["Desktop Chrome"],
         deviceScaleFactor: 1,
