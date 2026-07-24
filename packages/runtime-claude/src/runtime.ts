@@ -41,6 +41,36 @@ type RuntimeState = "created" | "running" | "draining" | "stopped";
 const SAFE_CAUSE_MESSAGE_CHARS = 4_096;
 const SAFE_CAUSE_IDENTITY_CHARS = 128;
 
+interface ActiveTurn {
+  readonly abortController: AbortController;
+  readonly settled: Promise<void>;
+  resolveSettled(): void;
+  control: ClaudeTransportControl | undefined;
+  interruption: Promise<void> | undefined;
+}
+
+function activeTurn(): ActiveTurn {
+  let resolveSettled!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
+  return {
+    abortController: new AbortController(),
+    settled,
+    resolveSettled,
+    control: undefined,
+    interruption: undefined,
+  };
+}
+
+function interruptTurn(turn: ActiveTurn): Promise<void> {
+  if (turn.interruption === undefined && turn.control !== undefined) {
+    const control = turn.control;
+    turn.interruption = Promise.resolve().then(async () => control.interrupt());
+  }
+  return turn.interruption ?? Promise.resolve();
+}
+
 function failureMessage(value: unknown): string {
   const ownMessage = ownDataValue(value, "message");
   if (typeof ownMessage === "string") return ownMessage;
@@ -203,7 +233,7 @@ function assertSessionLinkage(
 
 export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtime {
   let state: RuntimeState = "created";
-  const active = new Set<ClaudeTransportControl>();
+  const active = new Set<ActiveTurn>();
   const transport = options.config.mode === "sdk"
     ? options.sdkTransport ?? createClaudeSdkTransport()
     : options.cliTransport ?? createClaudeCliTransport({
@@ -229,8 +259,16 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
     async stop(_context: ModuleStopContext) {
       if (state === "stopped") return;
       state = "draining";
-      await Promise.allSettled([...active].map(async (control) => control.interrupt()));
-      active.clear();
+      const turns = [...active];
+      for (const turn of turns) {
+        turn.abortController.abort(
+          new DOMException("runtime-claude stopped", "AbortError"),
+        );
+      }
+      await Promise.allSettled(turns.map(async (turn) => {
+        await Promise.allSettled([interruptTurn(turn), turn.settled]);
+        await interruptTurn(turn).catch(() => undefined);
+      }));
       state = "stopped";
     },
 
@@ -264,7 +302,14 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
       let control: ClaudeTransportControl | undefined;
       let nativeSessionId = request.session?.id;
       let unregisterLiveInput: (() => void) | undefined;
+      const currentTurn = activeTurn();
+      const turnSignal = AbortSignal.any([
+        request.signal,
+        currentTurn.abortController.signal,
+      ]);
+      active.add(currentTurn);
       try {
+        if (turnSignal.aborted) return { status: "cancelled" };
         const authoredSystemPrompt = systemPrompt(request.messages);
         const result = await transport.run({
           model: request.model,
@@ -276,7 +321,7 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
           ...(request.options?.responseSchema === undefined ? {} : { responseSchema: request.options.responseSchema }),
           cwd: options.workspaceDirectory,
           env: claudeEnvironment(options.config.auth),
-          signal: request.signal,
+          signal: turnSignal,
         }, {
           async text(delta) { await context.emit({ type: "text-delta", delta }); },
           async thinking(delta) { await context.emit({ type: "thinking-delta", delta }); },
@@ -296,17 +341,25 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
           async usage(value) { await context.emit({ type: "usage", usage: value }); },
           control(value) {
             control = value;
-            active.add(value);
-            if (context.registerLiveInput !== undefined && value.sendInput !== undefined) {
+            currentTurn.control = value;
+            if (currentTurn.abortController.signal.aborted) {
+              void interruptTurn(currentTurn).catch(() => undefined);
+            }
+            if (
+              !turnSignal.aborted
+              && state === "running"
+              && context.registerLiveInput !== undefined
+              && value.sendInput !== undefined
+            ) {
               unregisterLiveInput = context.registerLiveInput(async (input) => {
-                if (request.signal.aborted || control?.sendInput === undefined) return "requeue";
+                if (turnSignal.aborted || control?.sendInput === undefined) return "requeue";
                 return await control.sendInput(input.text, input.receivedAt) ? "applied" : "requeue";
               });
             }
           },
         });
         nativeSessionId = result.sessionId;
-        if (request.signal.aborted) {
+        if (turnSignal.aborted) {
           return {
             status: "cancelled",
             session: linkedSession(
@@ -338,7 +391,7 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
           } as JsonObject,
         };
       } catch (error) {
-        if (request.signal.aborted) {
+        if (turnSignal.aborted) {
           return {
             status: "cancelled",
             ...(nativeSessionId === undefined
@@ -373,7 +426,8 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
         });
       } finally {
         unregisterLiveInput?.();
-        if (control !== undefined) active.delete(control);
+        active.delete(currentTurn);
+        currentTurn.resolveSettled();
       }
     },
   };

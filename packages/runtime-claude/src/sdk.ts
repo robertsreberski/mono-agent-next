@@ -88,7 +88,20 @@ export function createClaudeSdkTransport(options: ClaudeSdkTransportOptions = {}
       const input = new InputQueue();
       input.push(userMessage(request.prompt));
       const abortController = new AbortController();
-      let query: QueryLike;
+      let query: QueryLike | undefined;
+      let interruptPromise: Promise<unknown> | undefined;
+      const interruptQuery = async (): Promise<void> => {
+        if (query === undefined) return;
+        interruptPromise ??= query.interrupt();
+        await interruptPromise;
+      };
+      const onAbort = (): void => {
+        abortController.abort(request.signal.reason);
+        input.close();
+        void interruptQuery().catch(() => undefined);
+      };
+      request.signal.addEventListener("abort", onAbort, { once: true });
+      if (request.signal.aborted) onAbort();
       try {
         query = await createQuery({
           prompt: input,
@@ -109,22 +122,24 @@ export function createClaudeSdkTransport(options: ClaudeSdkTransportOptions = {}
           },
         });
       } catch (error) {
+        request.signal.removeEventListener("abort", onAbort);
+        input.close();
         if (isClaudeSessionUnavailable(error, request.sessionId)) {
           throw new ClaudeSessionUnavailableError();
         }
         throw error;
       }
+      if (request.signal.aborted) {
+        await interruptQuery().catch(() => undefined);
+        request.signal.removeEventListener("abort", onAbort);
+        input.close();
+        query.close();
+        throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
       events.control({
-        async interrupt() { await query.interrupt(); },
+        interrupt: interruptQuery,
         async sendInput(text, receivedAt) { return input.push(userMessage(text, receivedAt)); },
       });
-      const onAbort = (): void => {
-        abortController.abort(request.signal.reason);
-        input.close();
-        void query.interrupt().catch(() => undefined);
-      };
-      request.signal.addEventListener("abort", onAbort, { once: true });
-      if (request.signal.aborted) onAbort();
 
       let streamed = "";
       let finalText = "";

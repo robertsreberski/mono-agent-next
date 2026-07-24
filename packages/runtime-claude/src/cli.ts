@@ -152,9 +152,18 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
         void next.catch((error: unknown) => rejectRun(error));
       };
       let forceTimer: NodeJS.Timeout | undefined;
+      let processClosed = false;
+      let resolveTermination!: () => void;
+      const termination = new Promise<void>((resolve) => {
+        resolveTermination = resolve;
+      });
       const terminate = (): void => {
+        if (processClosed) return;
         child.kill("SIGTERM");
-        forceTimer ??= setTimeout(() => child.kill("SIGKILL"), 1_000);
+        forceTimer ??= setTimeout(() => {
+          child.kill("SIGKILL");
+          resolveTermination();
+        }, 1_000);
         forceTimer.unref?.();
       };
       let rejectExit!: (error: unknown) => void;
@@ -191,15 +200,24 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
           const bytes = Buffer.byteLength(stderr);
           if (bytes > options.maxStderrBytes) stderr = Buffer.from(stderr).subarray(bytes - options.maxStderrBytes).toString("utf8");
         });
+        child.stdout.on("error", rejectRun);
+        child.stderr.on("error", rejectRun);
         child.once("error", rejectRun);
         child.once("close", (code, signal) => {
+          processClosed = true;
           if (forceTimer !== undefined) clearTimeout(forceTimer);
+          resolveTermination();
           resolve({ code: code ?? 1, signal });
         });
       }).finally(async () => promptFile.cleanup());
       child.stdin.on("error", rejectRun);
       try {
-        events.control({ async interrupt() { child.kill("SIGTERM"); } });
+        events.control({
+          async interrupt() {
+            rejectRun(new DOMException("Claude CLI interrupted", "AbortError"));
+            await Promise.all([exit.catch(() => undefined), termination]);
+          },
+        });
       } catch (error) {
         rejectRun(error);
         await exit.catch(() => undefined);

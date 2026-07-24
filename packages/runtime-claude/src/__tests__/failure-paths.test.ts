@@ -27,10 +27,15 @@ class ControlledClaudeProcess extends EventEmitter implements ProcessLike {
   readonly stderr = new PassThrough();
   readonly stdin: NodeJS.WritableStream;
   readonly signals: NodeJS.Signals[] = [];
+  readonly #onKill: ((signal: NodeJS.Signals) => void) | undefined;
   prompt = "";
 
-  constructor(stdin?: NodeJS.WritableStream) {
+  constructor(
+    stdin?: NodeJS.WritableStream,
+    onKill?: (signal: NodeJS.Signals) => void,
+  ) {
     super();
+    this.#onKill = onKill;
     this.stdin = stdin ?? new Writable({
       write: (chunk, _encoding, callback) => {
         this.prompt += String(chunk);
@@ -41,6 +46,7 @@ class ControlledClaudeProcess extends EventEmitter implements ProcessLike {
 
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
     this.signals.push(signal);
+    this.#onKill?.(signal);
     return true;
   }
 
@@ -136,6 +142,28 @@ describe("runtime-claude failure paths", () => {
       .rejects.toMatchObject({ code: "EPIPE", message: "write EPIPE" });
     expect(child.signals).toContain("SIGTERM");
   });
+
+  it.each(["stdout", "stderr"] as const)(
+    "contains a CLI %s stream error to the failed turn",
+    async (stream) => {
+      const child = new ControlledClaudeProcess();
+      let didLaunch!: () => void;
+      const launched = new Promise<void>((resolve) => {
+        didLaunch = resolve;
+      });
+      const transport = createClaudeCliTransport(cliOptions(() => {
+        didLaunch();
+        return child;
+      }));
+      const pending = transport.run(transportRequest(), transportEvents);
+      const rejected = expect(pending).rejects.toThrow(`${stream} pipe failed`);
+
+      await launched;
+      child[stream].emit("error", new Error(`${stream} pipe failed`));
+      await rejected;
+      expect(child.signals).toContain("SIGTERM");
+    },
+  );
 
   it("cli transport escalates SIGTERM then SIGKILL on timeout", async () => {
     vi.useFakeTimers();
@@ -330,6 +358,36 @@ describe("runtime-claude failure paths", () => {
     }
   });
 
+  it("SDK transport aborts while query creation is pending", async () => {
+    let didStartQuery!: () => void;
+    const startedQuery = new Promise<void>((resolve) => {
+      didStartQuery = resolve;
+    });
+    const transport = createClaudeSdkTransport({
+      async query(input) {
+        const abortController = input.options.abortController as AbortController;
+        didStartQuery();
+        await new Promise<void>((resolve) => {
+          if (abortController.signal.aborted) resolve();
+          else abortController.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+        throw abortController.signal.reason;
+      },
+    });
+    const controller = new AbortController();
+    const pending = transport.run(
+      transportRequest(controller.signal),
+      transportEvents,
+    );
+    const rejected = expect(pending).rejects.toThrow("cancel query creation");
+
+    await startedQuery;
+    controller.abort(new Error("cancel query creation"));
+    await rejected;
+  });
+
   it("normalizes cached-token usage identically for CLI and SDK", async () => {
     const providerUsage = {
       input_tokens: 10,
@@ -373,7 +431,7 @@ describe("runtime-claude failure paths", () => {
     expect(cliResult.usage).toEqual({
       inputTokens: 10,
       outputTokens: 4,
-      totalTokens: 14,
+      totalTokens: 23,
       cacheReadTokens: 7,
       cacheWriteTokens: 2,
     });
@@ -438,13 +496,13 @@ describe("runtime-claude failure paths", () => {
     const signal = new AbortController().signal;
     await runtime.start?.({ signal });
     const inFlight = runtime.runTurn(turnRequest(), runtimeContext);
-    const rejectedInFlight = expect(inFlight).rejects.toMatchObject({
-      code: "PROVIDER_FAILED",
+    const settledInFlight = expect(inFlight).resolves.toMatchObject({
+      status: "cancelled",
     });
     await registeredControl;
 
     await runtime.stop?.({ signal, reason: "shutdown" });
-    await rejectedInFlight;
+    await settledInFlight;
     expect(interrupt).toHaveBeenCalledOnce();
     expect(await runtime.health?.({ signal })).toMatchObject({
       details: { state: "stopped", activeTurns: 0 },
@@ -464,5 +522,130 @@ describe("runtime-claude failure paths", () => {
     await expect(drainingRuntime.runTurn(turnRequest(), runtimeContext))
       .rejects.toMatchObject({ code: "RUNTIME_NOT_RUNNING" });
     expect(drainingTransport).not.toHaveBeenCalled();
+  });
+
+  it("stop owns a turn before transport control registers", async () => {
+    let didStartTransport!: () => void;
+    const startedTransport = new Promise<void>((resolve) => {
+      didStartTransport = resolve;
+    });
+    let didInterrupt!: () => void;
+    const interrupted = new Promise<void>((resolve) => {
+      didInterrupt = resolve;
+    });
+    const interrupt = vi.fn(async () => {
+      didInterrupt();
+    });
+    const transport: ClaudeTransport = {
+      async run(request, events) {
+        didStartTransport();
+        await new Promise<void>((resolve) => {
+          if (request.signal.aborted) resolve();
+          else request.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+        events.control({ interrupt });
+        await interrupted;
+        return { text: "must be cancelled", sessionId: "late-session" };
+      },
+    };
+    const runtime = createRuntimeClaude({
+      config: parseRuntimeClaudeConfig({ mode: "sdk" }),
+      instanceId: "claude-runtime",
+      workspaceDirectory: process.cwd(),
+      sdkTransport: transport,
+    });
+    const signal = new AbortController().signal;
+    await runtime.start?.({ signal });
+    const inFlight = runtime.runTurn(turnRequest(), runtimeContext);
+    const settledInFlight = expect(inFlight).resolves.toMatchObject({
+      status: "cancelled",
+    });
+    await startedTransport;
+    expect(await runtime.health?.({ signal })).toMatchObject({
+      details: { state: "running", activeTurns: 1 },
+    });
+
+    await runtime.stop?.({ signal, reason: "shutdown" });
+    await settledInFlight;
+    expect(interrupt).toHaveBeenCalledOnce();
+    expect(await runtime.health?.({ signal })).toMatchObject({
+      details: { state: "stopped", activeTurns: 0 },
+    });
+  });
+
+  it("CLI stop escalates to SIGKILL and waits for prompt cleanup", async () => {
+    vi.useFakeTimers();
+    try {
+      let child!: ControlledClaudeProcess;
+      child = new ControlledClaudeProcess(undefined, (signal) => {
+        if (signal === "SIGKILL") child.emit("close", null, "SIGKILL");
+      });
+      let promptPath: string | undefined;
+      let didLaunch!: () => void;
+      const launched = new Promise<void>((resolve) => {
+        didLaunch = resolve;
+      });
+      const runtime = createRuntimeClaude({
+        config: parseRuntimeClaudeConfig({ mode: "cli", timeoutMs: 5_000 }),
+        instanceId: "claude-runtime",
+        workspaceDirectory: process.cwd(),
+        spawnProcess(_command, args) {
+          promptPath = args[args.indexOf("--system-prompt-file") + 1];
+          didLaunch();
+          return child;
+        },
+      });
+      const signal = new AbortController().signal;
+      await runtime.start?.({ signal });
+      const inFlight = runtime.runTurn({
+        ...turnRequest(),
+        messages: [
+          {
+            role: "system",
+            content: [{ type: "text", text: "private instructions" }],
+          },
+          {
+            role: "user",
+            content: [{ type: "text", text: "hello" }],
+          },
+        ],
+      }, runtimeContext);
+      const settledInFlight = expect(inFlight).resolves.toMatchObject({
+        status: "cancelled",
+      });
+      await launched;
+      expect(promptPath).toBeDefined();
+      expect(existsSync(promptPath as string)).toBe(true);
+
+      let didStop = false;
+      const stopping = Promise.resolve(
+        runtime.stop?.({ signal, reason: "shutdown" }),
+      )
+        .then(() => {
+          didStop = true;
+        });
+      await Promise.resolve();
+      expect(didStop).toBe(false);
+      expect(child.signals).toEqual(["SIGTERM"]);
+      expect(await runtime.health?.({ signal })).toMatchObject({
+        details: { state: "draining" },
+      });
+
+      await vi.advanceTimersByTimeAsync(999);
+      expect(didStop).toBe(false);
+      expect(child.signals).toEqual(["SIGTERM"]);
+      await vi.advanceTimersByTimeAsync(1);
+      await stopping;
+      await settledInFlight;
+      expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+      expect(existsSync(promptPath as string)).toBe(false);
+      expect(await runtime.health?.({ signal })).toMatchObject({
+        details: { state: "stopped", activeTurns: 0 },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

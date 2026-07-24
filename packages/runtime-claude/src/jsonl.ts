@@ -15,15 +15,18 @@ export function usage(value: unknown): RuntimeUsage | undefined {
   }
   const cacheRead = Number(item.cache_read_input_tokens ?? 0);
   const cacheWrite = Number(item.cache_creation_input_tokens ?? 0);
+  const cacheReadTokens = Number.isFinite(cacheRead) && cacheRead > 0
+    ? cacheRead
+    : undefined;
+  const cacheWriteTokens = Number.isFinite(cacheWrite) && cacheWrite > 0
+    ? cacheWrite
+    : undefined;
   return {
     inputTokens,
     outputTokens,
-    totalTokens: inputTokens + outputTokens,
-    ...(Number.isFinite(cacheRead) && cacheRead > 0
-      ? { cacheReadTokens: cacheRead }
-      : {}),
-    ...(Number.isFinite(cacheWrite) && cacheWrite > 0
-      ? { cacheWriteTokens: cacheWrite }
-      : {}),
+    totalTokens: inputTokens + outputTokens
+      + (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0),
+    ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
+    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
   };
 }
