@@ -64,10 +64,53 @@ Fallback may advance only from a typed retryable failure that proves no side
 effects, before text, tools, interactions, live input, or a result commit.
 Provider/runtime failures remain visible; there is no fake success fallback.
 
-MCP servers receive only their configured stdio environment or HTTP headers.
-V1 has no continuation host grant or request-scoped child-run host capability.
-Independent durable work belongs in an external service and re-enters through
-an explicit channel or webhook.
+Ordinary MCP servers receive only their configured stdio environment or HTTP
+headers. `context.mcp.requestContextServers` is the one default-off exception
+for the admitted Personal transcription consumer: every selected name must
+resolve to a direct stdio transport, and only that transport receives immutable
+`com.mono-agent/request-context` version 1 metadata for the current call.
+
+Core stages current-request attachments as exclusive no-follow, owner-private,
+single-link files and pins their path/device/inode identities. The grant also
+names one per-run output directory and projects bounded, redacted progress as
+transient channel activity. It is never sent to HTTP MCP, inherited as
+process-start environment, or accepted from model arguments. Cleanup checks the
+exact identity and never unlinks a replacement.
+Grant `dev` and `ino` values are canonical unsigned-decimal strings, never JSON
+numbers. Personal transcription selects a staged file by `attachment_id`;
+`file_path` is default-deny. Legacy local paths require the bounded static
+`TRANSCRIBE_LOCAL_PATH_ROOTS` absolute-directory allowlist, which cannot select
+Core's managed attachments root.
+This limits mono-agent-supplied context; it does not sandbox the configured
+command. A stdio command may use SSH, containers, proxies, or its own network
+access, so selection is not proof of locality. Treat it as trusted code.
+Persistent selected processes can observe all selected calls and deliberately
+mix runs or race paths. Device/inode checks and private cleanup claims provide
+best-effort routing and replacement safety, not cryptographic provenance or
+same-UID adversarial isolation; unprovable cleanup is retained and degrades host
+health. Plain-string paths and configured secrets are redacted from results,
+errors, progress, previews, and offloaded envelopes, but encoded or binary
+exfiltration cannot be detected reliably.
+
+Normal completion, failure, and cancellation clean staged runs. A `SIGKILL`,
+power loss, or host crash may leave owner-only residue. Restart does not use
+PID/age guesses and performs no automatic stale deletion without a
+cross-process lease. Pre-GA lease-backed recovery remains required. Interim
+maintenance is permitted only after all project hosts are proven stopped, for
+explicit exact run ids whose targets are verified owner-owned non-symlink
+directories; broad roots, globs, recursive discovery, and age selection are
+outside this contract.
+
+Current-run file delivery remains host-bound. A channel tool may request one
+safe basename through `readCurrentRunOutput`; Core performs the stable bounded
+read and returns normalized bytes. The channel never receives an arbitrary
+path, directory handle, or ambient filesystem authority. A producer result may
+include the safe basename plus bounded identifiers and metadata, but no
+absolute-path field.
+
+V1 still has no continuation or child-run spawn/observe/cancel grant. Independent
+durable work belongs in an external service and re-enters through an explicit
+channel or webhook.
 
 ## Sandbox
 

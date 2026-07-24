@@ -84,7 +84,12 @@ function composeLoadedAgentConfigSchema(loaded: LoadedAgentConfig): JsonSchema {
         },
         ["roots"],
       ),
-      mcp: objectSchema({ configPath: nonEmptyStringSchema() }, ["configPath"]),
+      mcp: objectSchema({
+        configPath: nonEmptyStringSchema(),
+        requestContextServers: {
+          type: "array", items: nonEmptyStringSchema(), maxItems: 32, uniqueItems: true,
+        },
+      }, ["configPath"]),
     }),
     channels: moduleMap("channels"),
     triggers: moduleMap("triggers"),

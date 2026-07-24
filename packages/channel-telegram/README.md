@@ -59,10 +59,12 @@ switch is true:
 without an authorization header; use a trusted endpoint. Quiet hours preserve
 delivery but request silent Telegram notifications.
 
-`TelegramSendFile` accepts one canonical base64 document or photo. Its
+`TelegramSendFile` accepts exactly one canonical base64 payload or one
+`output_name` safe basename from the current run's host-owned output root. Its
 model-visible inline payload is capped at the smaller of the configured
-attachment limit and 180 KiB so the complete runtime tool call remains inside
-the shared boundary. Filenames must be safe basenames; photos require an image
+attachment limit and 180 KiB; current-run output is capped by both the
+configured attachment limit and Core's hard bound. Filesystem paths are never
+accepted or exposed. Filenames must be safe basenames; photos require an image
 media type. `TelegramSendMessage.reply_options` contains two to eight
 non-blocking labels and remains distinct from AskUser.
 

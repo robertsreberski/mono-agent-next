@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -28,6 +29,34 @@ import { MemoryStateStore } from "./durable-state-fixture.js";
 
 const projects: FixtureProject[] = [];
 const hosts: AgentHost[] = [];
+const EMPTY_MCP_SERVER_SOURCE = String.raw`
+let buffer = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  while (buffer.includes("\n")) {
+    const index = buffer.indexOf("\n");
+    const line = buffer.slice(0, index);
+    buffer = buffer.slice(index + 1);
+    if (!line.trim()) continue;
+    const message = JSON.parse(line);
+    if (message.id === undefined) continue;
+    const result = message.method === "initialize"
+      ? {
+          protocolVersion: message.params.protocolVersion,
+          capabilities: { tools: {} },
+          serverInfo: { name: "empty-staging", version: "1.0.0" },
+        }
+      : message.method === "tools/list"
+        ? { tools: [] }
+        : undefined;
+    const response = result === undefined
+      ? { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "unknown" } }
+      : { jsonrpc: "2.0", id: message.id, result };
+    process.stdout.write(JSON.stringify(response) + "\n");
+  }
+});
+`;
 
 afterEach(async () => {
   await Promise.allSettled(hosts.splice(0).reverse().map((host) => host.stop()));
@@ -150,6 +179,98 @@ describe("durable AgentHost execution", () => {
       text: "answer:second",
     });
     expect(providerCalls).toBe(2);
+  });
+
+  it("settles duplicate-attachment staging failure and replays its durable failure", async () => {
+    const state = new MemoryStateStore();
+    let providerCalls = 0;
+    const runtime = runtimeController(async () => {
+      providerCalls += 1;
+      return completedResult("must not run");
+    });
+    const project = await durableProject({
+      state,
+      runtimes: { main: runtime },
+      config: {
+        context: {
+          mcp: {
+            configPath: "./.mcp.json",
+            requestContextServers: ["staging"],
+          },
+        },
+      },
+    });
+    await writeFile(join(project.root, "empty-mcp.mjs"), EMPTY_MCP_SERVER_SOURCE);
+    await project.writeMcp({
+      mcpServers: {
+        staging: {
+          type: "stdio",
+          command: process.execPath,
+          args: ["./empty-mcp.mjs"],
+        },
+      },
+    });
+    const first = await trackedHost(project);
+    const duplicate = {
+      id: "duplicate",
+      kind: "audio" as const,
+      name: "voice.ogg",
+      mediaType: "audio/ogg",
+      sizeBytes: 1,
+      data: Uint8Array.of(1),
+    };
+    const input = {
+      requestId: "staging-failure-request",
+      conversationId: "staging-failure-conversation",
+      text: "transcribe",
+      attachments: [duplicate, { ...duplicate, name: "other.ogg" }],
+    } as const;
+
+    const firstError = await rejectionOf(first.submit(input));
+    expect(firstError).toMatchObject({
+      name: "RunExecutionError",
+      status: "failed",
+      failureCode: "core-execution-failed",
+      requestId: input.requestId,
+    });
+    expect(providerCalls).toBe(0);
+    const runs = await first.listRuns();
+    expect(runs.runs).toHaveLength(1);
+    expect(runs.runs[0]).toMatchObject({
+      requestId: input.requestId,
+      conversationId: input.conversationId,
+      status: "failed",
+      failureCode: "core-execution-failed",
+    });
+    const runId = runs.runs[0]!.runId;
+    expect(firstError).toMatchObject({ runId });
+    await expect(first.replay(input.conversationId)).resolves.toEqual({
+      conversationId: input.conversationId,
+      messages: [],
+    });
+    await expect(first.submit(input)).rejects.toMatchObject({
+      name: "RunExecutionError",
+      status: "failed",
+      failureCode: "core-execution-failed",
+      requestId: input.requestId,
+      runId,
+    });
+    expect(providerCalls).toBe(0);
+    await first.stop();
+
+    const restarted = await trackedHost(project);
+    await expect(restarted.submit(input)).rejects.toMatchObject({
+      name: "RunExecutionError",
+      status: "failed",
+      failureCode: "core-execution-failed",
+      requestId: input.requestId,
+      runId,
+    });
+    expect(providerCalls).toBe(0);
+    await expect(restarted.replay(input.conversationId)).resolves.toEqual({
+      conversationId: input.conversationId,
+      messages: [],
+    });
   });
 
   it("settles a returned runtime result even when caller cancellation races the return", async () => {
@@ -1554,6 +1675,15 @@ function lastUserText(request: RuntimeTurnRequest): string {
   const message = [...request.messages].reverse().find((entry) => entry.role === "user");
   const part = message?.content.find((entry) => entry.type === "text");
   return part?.type === "text" ? part.text : "";
+}
+
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  throw new Error("Expected promise to reject");
 }
 
 function deferred<T>(): {

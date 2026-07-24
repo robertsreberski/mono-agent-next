@@ -32,6 +32,8 @@ afterEach(async () => {
 describe("memory-local", () => {
   it("strictly validates bounded configuration", () => {
     expect(parseMemoryLocalConfig(undefined).capture.enabled).toBe(false);
+    expect(parseMemoryLocalConfig(undefined).recallTool.enabled).toBe(true);
+    expect(parseMemoryLocalConfig({ recallTool: { enabled: false } }).recallTool.enabled).toBe(false);
     expect(() => parseMemoryLocalConfig({ unknown: true })).toThrow(/unknown field/u);
     expect(() => parseMemoryLocalConfig({ maxBytes: 0 })).toThrow(/maxBytes/u);
     expect(() => parseMemoryLocalConfig({ capture: { enabled: true } })).toThrow(/model/u);
@@ -47,6 +49,19 @@ describe("memory-local", () => {
         dimensions: 768,
       },
     })).toThrow(/literal-loopback/u);
+  });
+
+  it("projects model-visible recall enablement as an immutable capability", async () => {
+    const { root, directory } = await fixture();
+    const memory = await openMemoryLocal(options(root, directory, {
+      recallTool: { enabled: false },
+    }));
+    try {
+      expect(memory.capabilities).toEqual({ capture: true, forget: true, recallTool: false });
+      expect(Object.isFrozen(memory.capabilities)).toBe(true);
+    } finally {
+      await memory.stop();
+    }
   });
 
   it("creates an owner-private permanent store and performs deterministic recall, capture, and forget", async () => {

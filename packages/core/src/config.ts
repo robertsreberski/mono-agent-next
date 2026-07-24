@@ -89,6 +89,13 @@ export async function loadAgentConfig(
   const paths = resolveAgentPaths(raw, configDirectory);
   const environment = snapshotEnvironment(options.environment ?? process.env);
   const projectMcp = await loadProjectMcpSnapshot(paths.mcpConfig, environment);
+  const requestContextIssues = validateMcpRequestContextServers(raw, projectMcp.config);
+  if (requestContextIssues.length > 0) {
+    throw new AgentConfigError(
+      `Configured MCP request-context servers are invalid: ${absoluteConfigPath}`,
+      requestContextIssues,
+    );
+  }
   const selections = collectModuleSelections(raw);
   let modules: readonly LoadedAgentModule[];
   try {
@@ -362,8 +369,20 @@ function validateContext(value: unknown, issues: AgentConfigIssue[]): void {
     }
   }
   if (value.mcp !== undefined && expectRecord(value.mcp, "context.mcp", issues)) {
-    rejectUnknown(value.mcp, new Set(["configPath"]), "context.mcp", issues);
+    rejectUnknown(value.mcp, new Set(["configPath", "requestContextServers"]), "context.mcp", issues);
     expectNonEmptyString(value.mcp.configPath, "context.mcp.configPath", issues);
+    if (value.mcp.requestContextServers !== undefined
+      && expectStringArray(value.mcp.requestContextServers, "context.mcp.requestContextServers", issues)) {
+      if (value.mcp.requestContextServers.length > 32) {
+        issue(issues, "context.mcp.requestContextServers", "must contain at most 32 server names", "limit");
+      }
+      const seen = new Set<string>();
+      value.mcp.requestContextServers.forEach((name, index) => {
+        if (typeof name === "string" && seen.has(name))
+          issue(issues, `context.mcp.requestContextServers.${index}`, "must be unique", "duplicate");
+        else if (typeof name === "string") seen.add(name);
+      });
+    }
   }
 }
 function validateObservability(value: unknown, issues: AgentConfigIssue[]): void {
@@ -569,6 +588,22 @@ async function loadProjectMcpSnapshot(
     source: snapshot.source,
     config: deepFreeze(parseProjectMcpConfig(candidate, environment, path)),
   };
+}
+function validateMcpRequestContextServers(
+  config: AgentConfig,
+  mcp: ProjectMcpConfig,
+): readonly AgentConfigIssue[] {
+  const issues: AgentConfigIssue[] = [];
+  for (const [index, name] of (config.context?.mcp?.requestContextServers ?? []).entries()) {
+    const path = `context.mcp.requestContextServers.${index}`;
+    const server = mcp.mcpServers[name];
+    if (server === undefined) {
+      issue(issues, path, `references unconfigured MCP server ${JSON.stringify(name)}`, "reference");
+    } else if (server.type !== "stdio") {
+      issue(issues, path, "request context is allowed only for direct stdio MCP transports", "transport");
+    }
+  }
+  return issues;
 }
 function deepFreeze<T>(value: T): T {
   if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;

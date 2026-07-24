@@ -379,18 +379,12 @@ function isModuleDefinition(value: unknown): value is GenericModuleDefinition {
 }
 
 function assertLoadedModuleDefinitionCompliance(
-  value: unknown,
-  preflight: PreflightedModule,
+  value: unknown, preflight: PreflightedModule,
 ): asserts value is GenericModuleDefinition {
   try {
-    if (!isModuleDefinition(value)) {
+    if (!isModuleDefinition(value))
       throw new TypeError("monoAgentModule does not satisfy the module definition contract");
-    }
-    if (
-      preflight.selection.slot === "runtime"
-      || preflight.selection.slot === "channel"
-      || preflight.selection.slot === "memory"
-    ) {
+    if (preflight.selection.slot === "runtime" || preflight.selection.slot === "channel" || preflight.selection.slot === "memory") {
       assertModuleDefinitionCompliance(value, {
         expectedKind: preflight.selection.slot,
         expectedPackageName: preflight.packageName,
@@ -447,22 +441,17 @@ function assertReservedModuleManifestCompliance(definition: GenericModuleDefinit
   if (manifest.responsibility.trim().length === 0) throw new TypeError("manifest.responsibility must be non-empty");
   const seen = new Set<string>();
   for (const [index, capability] of manifest.capabilities.entries()) {
-    if (capability.trim().length === 0) {
+    if (capability.trim().length === 0)
       throw new TypeError(`manifest.capabilities[${index}] must be non-empty`);
-    }
-    if (seen.has(capability)) {
+    if (seen.has(capability))
       throw new TypeError(`manifest.capabilities contains duplicate ${capability}`);
-    }
     seen.add(capability);
   }
 }
 
 function resolveEnvironmentDirectivesFromSchemas(
-  value: unknown,
-  options: SchemaOptions,
-  environment: Readonly<Record<string, string | undefined>>,
-  path: string,
-  resolvedEnvironmentValues: Set<string>,
+  value: unknown, options: SchemaOptions, environment: Readonly<Record<string, string | undefined>>,
+  path: string, resolvedEnvironmentValues: Set<string>,
 ): unknown {
   const activeOptions = applicableSchemaOptions(options, value);
   const activeSchemas = activeOptions.flat();
@@ -503,33 +492,23 @@ function resolveEnvironmentDirectivesFromSchemas(
   }
   if (Array.isArray(value)) {
     return value.map((entry, index) => resolveEnvironmentDirectivesFromSchemas(
-      entry,
-      activeOptions.map(childSchemasForItems),
-      environment,
-      `${path}.${index}`,
-      resolvedEnvironmentValues,
+      entry, activeOptions.map(childSchemasForItems), environment, `${path}.${index}`, resolvedEnvironmentValues,
     ));
   }
   if (!isRecord(value)) return value;
   const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   for (const [key, entry] of Object.entries(value)) {
     output[key] = resolveEnvironmentDirectivesFromSchemas(
-      entry,
-      activeOptions.map((schemas) => childSchemasForProperty(schemas, key)),
-      environment,
-      `${path}.${key}`,
-      resolvedEnvironmentValues,
+      entry, activeOptions.map((schemas) => childSchemasForProperty(schemas, key)),
+      environment, `${path}.${key}`, resolvedEnvironmentValues,
     );
   }
   return output;
 }
 
 function visitModuleReferencesFromSchemas(
-  value: unknown,
-  schemas: readonly JsonSchema[],
-  path: string,
-  modules: readonly LoadedAgentModule[],
-  issues: AgentConfigIssue[],
+  value: unknown, schemas: readonly JsonSchema[], path: string,
+  modules: readonly LoadedAgentModule[], issues: AgentConfigIssue[],
 ): void {
   const activeSchemas = applicableSchemas(schemas, value);
   for (const schema of activeSchemas) {
@@ -570,20 +549,8 @@ function applicableSchemas(schemas: readonly JsonSchema[], value: unknown): read
   const output: JsonSchema[] = [];
   const visit = (schema: JsonSchema): void => {
     output.push(schema);
-    const allOf = schemaArray(schema.allOf);
-    for (const branch of allOf) visit(branch);
-    const oneOf = schemaArray(schema.oneOf);
-    const oneOfStatuses = oneOf.map((branch) => schemaBranchApplicability(branch, value));
-    const possibleOneOf = oneOf.filter((_, index) => oneOfStatuses[index] !== "no");
-    for (const branch of possibleOneOf) visit(branch);
-    const anyOf = schemaArray(schema.anyOf).filter((branch) =>
-      schemaBranchApplicability(branch, value) !== "no");
-    for (const branch of anyOf) visit(branch);
-    if (schema.if !== undefined) {
-      const status = schemaConditionApplicability(schema.if, value);
-      if (status !== "no" && isRecord(schema.then)) visit(schema.then);
-      if (status !== "match" && isRecord(schema.else)) visit(schema.else);
-    }
+    for (const group of applicableBranchGroups(schema, value))
+      for (const branch of group) if (branch !== undefined) visit(branch);
   };
   for (const schema of schemas) visit(schema);
   return output;
@@ -593,12 +560,9 @@ export type SchemaApplicability = "match" | "no" | "unknown";
 type SchemaOptions = readonly (readonly JsonSchema[])[];
 const MAX_SCHEMA_OPTIONS = 256;
 const MAX_SCHEMAS_PER_OPTION = 4_096;
+const ALTERNATIVE_SCHEMA_KEYS = [["oneOf", 1], ["anyOf", Infinity]] as const;
 
-export function schemaConditionApplicability(
-  schema: unknown,
-  value: unknown,
-  acceptMaterializedEnvironment = false,
-): SchemaApplicability {
+export function schemaConditionApplicability(schema: unknown, value: unknown, acceptMaterializedEnvironment = false): SchemaApplicability {
   return schema === true ? "match" : schema === false ? "no" : isRecord(schema)
     ? schemaBranchApplicability(schema, value, acceptMaterializedEnvironment) : "unknown";
 }
@@ -612,42 +576,40 @@ function applicableSchemaOptions(options: SchemaOptions, value: unknown): Schema
 }
 
 function schemaExpansionOptions(
-  schema: JsonSchema,
-  value: unknown,
-  seen: ReadonlySet<JsonSchema> = new Set(),
+  schema: JsonSchema, value: unknown, seen: ReadonlySet<JsonSchema> = new Set(),
 ): readonly JsonSchema[][] {
   if (seen.has(schema)) return [[schema]];
   const nextSeen = new Set(seen).add(schema);
   let output: JsonSchema[][] = [[schema]];
-  for (const branch of schemaArray(schema.allOf))
-    output = crossSchemaOptions(output, schemaExpansionOptions(branch, value, nextSeen));
-  for (const keyword of ["oneOf", "anyOf"] as const) {
-    const branches = schemaArray(schema[keyword]).filter((branch) =>
-      schemaBranchApplicability(branch, value) !== "no");
-    if (branches.length > 0) output = crossSchemaOptions(
-      output,
-      boundedExpansionChoices(branches, value, nextSeen),
-    );
-  }
-  if (schema.if !== undefined) {
-    const status = schemaConditionApplicability(schema.if, value);
-    const candidates = status === "match" ? [schema.then] : status === "no"
-      ? [schema.else] : [schema.then, schema.else];
-    const choices = candidates.map((branch) =>
-      isRecord(branch) ? schemaExpansionOptions(branch, value, nextSeen) : [[]]).flat();
-    output = crossSchemaOptions(output, choices);
-  }
+  for (const group of applicableBranchGroups(schema, value))
+    output = crossSchemaOptions(output, boundedExpansionChoices(group, value, nextSeen));
   return output;
 }
 
+function applicableBranchGroups(
+  schema: JsonSchema, value: unknown,
+): readonly (readonly (JsonSchema | undefined)[])[] {
+  const groups: (JsonSchema | undefined)[][] = schemaArray(schema.allOf).map((branch) => [branch]);
+  for (const [key] of ALTERNATIVE_SCHEMA_KEYS) {
+    const branches = schemaArray(schema[key]).filter((branch) =>
+      schemaBranchApplicability(branch, value) !== "no");
+    if (branches.length > 0) groups.push(branches);
+  }
+  if (schema.if !== undefined) {
+    const status = schemaConditionApplicability(schema.if, value);
+    groups.push(status === "match" ? [isRecord(schema.then) ? schema.then : undefined]
+      : status === "no" ? [isRecord(schema.else) ? schema.else : undefined]
+        : [isRecord(schema.then) ? schema.then : undefined, isRecord(schema.else) ? schema.else : undefined]);
+  }
+  return groups;
+}
+
 function boundedExpansionChoices(
-  branches: readonly JsonSchema[],
-  value: unknown,
-  seen: ReadonlySet<JsonSchema>,
+  branches: readonly (JsonSchema | undefined)[], value: unknown, seen: ReadonlySet<JsonSchema>,
 ): JsonSchema[][] {
   const output: JsonSchema[][] = [];
   for (const branch of branches)
-    for (const option of schemaExpansionOptions(branch, value, seen)) {
+    for (const option of branch === undefined ? [[]] : schemaExpansionOptions(branch, value, seen)) {
       if (output.length >= MAX_SCHEMA_OPTIONS)
         throw new AgentModuleError("Module schema applicability exceeds the bounded complexity limit");
       output.push(option);
@@ -656,8 +618,7 @@ function boundedExpansionChoices(
 }
 
 function crossSchemaOptions(
-  left: readonly (readonly JsonSchema[])[],
-  right: readonly (readonly JsonSchema[])[],
+  left: readonly (readonly JsonSchema[])[], right: readonly (readonly JsonSchema[])[],
 ): JsonSchema[][] {
   if (left.length * right.length > MAX_SCHEMA_OPTIONS
     || left.some((first) => right.some((second) =>
@@ -675,26 +636,28 @@ const KNOWN_SCHEMA_KEYS = new Set([
   "additionalProperties", "items", "allOf", "anyOf", "oneOf", "not", "if", "then", "else",
   "x-mono-agent-env-eligible", "x-mono-agent-secret", "x-mono-agent-slot-reference",
 ]);
+type NumericRule = readonly [key: string, direction: -1 | 1, inclusive?: true];
+const LENGTH_RULES = [["minLength", -1], ["maxLength", 1]] as const satisfies readonly NumericRule[];
+const ITEM_RULES = [["minItems", -1], ["maxItems", 1]] as const satisfies readonly NumericRule[];
+const PROPERTY_RULES = [["minProperties", -1], ["maxProperties", 1]] as const satisfies readonly NumericRule[];
+const NUMBER_RULES = [
+  ["minimum", -1], ["maximum", 1], ["exclusiveMinimum", -1, true], ["exclusiveMaximum", 1, true],
+] as const satisfies readonly NumericRule[];
 
-export function schemaBranchApplicability(
-  schema: JsonSchema,
-  value: unknown,
-  acceptMaterializedEnvironment = false,
-): SchemaApplicability {
+export function schemaBranchApplicability(schema: JsonSchema, value: unknown, acceptMaterializedEnvironment = false): SchemaApplicability {
   const materializedValue = acceptMaterializedEnvironment && typeof value === "string"
     ? materializedEnvironmentValueSchema(schema) : undefined;
   if (materializedValue !== undefined)
     return schemaBranchApplicability(materializedValue, value, acceptMaterializedEnvironment);
-  if (
-    acceptMaterializedEnvironment
-    && typeof value === "string"
-    && isMaterializedEnvironmentReferenceSchema(schema)
-  ) return "match";
+  if (acceptMaterializedEnvironment && typeof value === "string"
+    && isMaterializedEnvironmentReferenceSchema(schema)) return "match";
   let result: SchemaApplicability = Object.keys(schema).some((key) => !KNOWN_SCHEMA_KEYS.has(key))
     ? "unknown" : "match";
-  const typeStatus = schemaTypeApplicability(schema.type, value);
-  if (typeStatus === "no") return "no";
-  if (typeStatus === "unknown") result = "unknown";
+  const accepts = (status: SchemaApplicability): boolean => {
+    if (status === "unknown") result = "unknown";
+    return status !== "no";
+  };
+  if (!accepts(schemaTypeApplicability(schema.type, value))) return "no";
   if (!acceptMaterializedEnvironment && isEnvironmentReference(value)) return "unknown";
   if (Object.hasOwn(schema, "const")) {
     const equal = jsonSchemaEqual(schema.const, value);
@@ -702,47 +665,32 @@ export function schemaBranchApplicability(
     if (equal === undefined) result = "unknown";
   }
   if (schema.enum !== undefined) {
-    if (!Array.isArray(schema.enum)) result = "unknown";
-    else {
-      const equalities = schema.enum.map((entry) => jsonSchemaEqual(entry, value));
-      if (!equalities.includes(true)) {
-        if (!equalities.includes(undefined)) return "no";
-        result = "unknown";
-      }
+    const equalities = Array.isArray(schema.enum)
+      ? schema.enum.map((entry) => jsonSchemaEqual(entry, value)) : [undefined];
+    if (!equalities.includes(true)) {
+      if (!equalities.includes(undefined)) return "no";
+      result = "unknown";
     }
   }
   if (typeof value === "string") {
-    const length = [...value].length;
-    if (numericKeywordFails(schema, "minLength", length, (actual, limit) => actual < limit)
-      || numericKeywordFails(schema, "maxLength", length, (actual, limit) => actual > limit)) return "no";
+    if (numericKeywordsFail(schema, [...value].length, LENGTH_RULES)) return "no";
     if (schema.pattern !== undefined) {
-      if (typeof schema.pattern !== "string") result = "unknown";
-      else {
-        const matches = boundedPatternMatches(schema.pattern, value);
-        if (matches === false) return "no";
-        if (matches === undefined) result = "unknown";
-      }
+      const matches = typeof schema.pattern === "string"
+        ? boundedPatternMatches(schema.pattern, value) : undefined;
+      if (matches === false) return "no";
+      if (matches === undefined) result = "unknown";
     }
   }
-  if (typeof value === "number") {
-    if (numericKeywordFails(schema, "minimum", value, (actual, limit) => actual < limit)
-      || numericKeywordFails(schema, "maximum", value, (actual, limit) => actual > limit)
-      || numericKeywordFails(schema, "exclusiveMinimum", value, (actual, limit) => actual <= limit)
-      || numericKeywordFails(schema, "exclusiveMaximum", value, (actual, limit) => actual >= limit)) return "no";
-  }
+  if (typeof value === "number" && numericKeywordsFail(schema, value, NUMBER_RULES)) return "no";
   const items = schema.items;
   if (Array.isArray(value)) {
-    if (numericKeywordFails(schema, "minItems", value.length, (actual, limit) => actual < limit)
-      || numericKeywordFails(schema, "maxItems", value.length, (actual, limit) => actual > limit)) return "no";
+    if (numericKeywordsFail(schema, value.length, ITEM_RULES)) return "no";
     if (isRecord(items) && !Object.hasOwn(schema, "prefixItems")) for (const entry of value) {
-      const child = schemaBranchApplicability(items, entry, acceptMaterializedEnvironment);
-      if (child === "no") return "no";
-      if (child === "unknown") result = "unknown";
+      if (!accepts(schemaBranchApplicability(items, entry, acceptMaterializedEnvironment))) return "no";
     }
   }
   if (isRecord(value)) {
-    if (numericKeywordFails(schema, "minProperties", Object.keys(value).length, (actual, limit) => actual < limit)
-      || numericKeywordFails(schema, "maxProperties", Object.keys(value).length, (actual, limit) => actual > limit)) return "no";
+    if (numericKeywordsFail(schema, Object.keys(value).length, PROPERTY_RULES)) return "no";
     const required = Array.isArray(schema.required)
       ? schema.required.filter((entry): entry is string => typeof entry === "string")
       : [];
@@ -760,30 +708,21 @@ export function schemaBranchApplicability(
     }
     for (const [key, child] of Object.entries(properties)) {
       if (!Object.hasOwn(value, key) || !isRecord(child)) continue;
-      const applicability = schemaBranchApplicability(child, value[key], acceptMaterializedEnvironment);
-      if (applicability === "no") return "no";
-      if (applicability === "unknown") result = "unknown";
+      if (!accepts(schemaBranchApplicability(child, value[key], acceptMaterializedEnvironment))) return "no";
     }
   }
-  const oneOf = schemaArray(schema.oneOf);
-  if (oneOf.length > 0) {
-    const statuses = oneOf.map((branch) =>
+  for (const [key, maxMatches] of ALTERNATIVE_SCHEMA_KEYS) {
+    const branches = schemaArray(schema[key]);
+    if (branches.length === 0) continue;
+    const statuses = branches.map((branch) =>
       schemaBranchApplicability(branch, value, acceptMaterializedEnvironment));
     const matches = statuses.filter((status) => status === "match").length;
-    if (matches > 1 || (matches === 0 && !statuses.includes("unknown"))) return "no";
-    if (statuses.includes("unknown")) result = "unknown";
-  }
-  const anyOf = schemaArray(schema.anyOf);
-  if (anyOf.length > 0) {
-    const statuses = anyOf.map((branch) =>
-      schemaBranchApplicability(branch, value, acceptMaterializedEnvironment));
-    if (!statuses.includes("match") && !statuses.includes("unknown")) return "no";
-    if (!statuses.includes("match")) result = "unknown";
+    const unknown = statuses.includes("unknown");
+    if (matches > maxMatches || (matches === 0 && !unknown)) return "no";
+    if (unknown && (key === "oneOf" || matches === 0)) result = "unknown";
   }
   for (const branch of schemaArray(schema.allOf)) {
-    const status = schemaBranchApplicability(branch, value, acceptMaterializedEnvironment);
-    if (status === "no") return "no";
-    if (status === "unknown") result = "unknown";
+    if (!accepts(schemaBranchApplicability(branch, value, acceptMaterializedEnvironment))) return "no";
   }
   if (isRecord(schema.not)) {
     const status = schemaBranchApplicability(schema.not, value, acceptMaterializedEnvironment);
@@ -799,25 +738,23 @@ export function schemaBranchApplicability(
       if (outcomes.every((outcome) => outcome === "no")) return "no";
       if (!outcomes.every((outcome) => outcome === "match")) result = "unknown";
     } else {
-      const selected = condition === "match" ? schema.then : condition === "no" ? schema.else : undefined;
-      if (selected !== undefined) {
-        const outcome = schemaConditionApplicability(selected, value, acceptMaterializedEnvironment);
-        if (outcome === "no") return "no";
-        if (outcome === "unknown") result = "unknown";
-      }
+      const selected = condition === "match" ? schema.then : schema.else;
+      if (selected !== undefined
+        && !accepts(schemaConditionApplicability(selected, value, acceptMaterializedEnvironment))) return "no";
     }
   }
   return result;
 }
 
-function numericKeywordFails(
-  schema: JsonSchema,
-  key: string,
-  actual: number,
-  fails: (actual: number, limit: number) => boolean,
+function numericKeywordsFail(
+  schema: JsonSchema, actual: number, rules: readonly NumericRule[],
 ): boolean {
-  const limit = schema[key];
-  return typeof limit === "number" && Number.isFinite(limit) && fails(actual, limit);
+  return rules.some(([key, direction, inclusive]) => {
+    const limit = schema[key];
+    const difference = typeof limit === "number" && Number.isFinite(limit)
+      ? (actual - limit) * direction : -1;
+    return inclusive ? difference >= 0 : difference > 0;
+  });
 }
 
 function boundedPatternMatches(pattern: string, value: string): boolean | undefined {
@@ -877,22 +814,14 @@ function schemaTypeApplicability(type: unknown, value: unknown): SchemaApplicabi
   if (typeof type !== "string") return "unknown";
   if (isEnvironmentReference(value)) return type === "string" ? "match" : "no";
   switch (type) {
-    case "null":
-      return value === null ? "match" : "no";
-    case "boolean":
-      return typeof value === "boolean" ? "match" : "no";
-    case "string":
-      return typeof value === "string" ? "match" : "no";
-    case "number":
-      return typeof value === "number" && Number.isFinite(value) ? "match" : "no";
-    case "integer":
-      return typeof value === "number" && Number.isInteger(value) ? "match" : "no";
-    case "array":
-      return Array.isArray(value) ? "match" : "no";
-    case "object":
-      return isRecord(value) ? "match" : "no";
-    default:
-      return "unknown";
+    case "null": return value === null ? "match" : "no";
+    case "boolean": return typeof value === "boolean" ? "match" : "no";
+    case "string": return typeof value === "string" ? "match" : "no";
+    case "number": return typeof value === "number" && Number.isFinite(value) ? "match" : "no";
+    case "integer": return typeof value === "number" && Number.isInteger(value) ? "match" : "no";
+    case "array": return Array.isArray(value) ? "match" : "no";
+    case "object": return isRecord(value) ? "match" : "no";
+    default: return "unknown";
   }
 }
 

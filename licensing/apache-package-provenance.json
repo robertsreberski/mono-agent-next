@@ -38,7 +38,7 @@
     },
     {
       "path": "packages/module-sdk/README.md",
-      "sha256": "8797e151ab0b7c2501d4e7149928b43ab7b1cce3da9d5b1503cc3fb46fc73c70",
+      "sha256": "9366920f02e27739461b3f08f9b7386ac480a22d2e680c028902be220f23a088",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -63,7 +63,7 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/compliance.test.ts",
-      "sha256": "708f05f2bb288bd19d3978dc16f1f85174b37a300036ee74553e0e300243022a",
+      "sha256": "3f9a3dc528337801eb48c55f1bcc0b323dede5aaf63bbf284cfa8d4789a7906b",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -87,7 +87,7 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/contracts.test.ts",
-      "sha256": "a4faaa651eaeb611d74ee6565d91609f1430fc0e3af41eb45ee3dcbde1b1b612",
+      "sha256": "85f111daede0828b6db7369de0862b64c5a8b273abcdd36c9ff09e4d457e28e7",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -135,7 +135,7 @@
     },
     {
       "path": "packages/module-sdk/src/index.ts",
-      "sha256": "6caeb26f12a9a57d4efb6f0269c2289c34c02e1cf17f6ddce52032ac2933489b",
+      "sha256": "04068da880ab7739336ac03bb1e93479e1fda1812637baff279f03e567985eb9",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -171,7 +171,7 @@
     },
     {
       "path": "packages/module-sdk/src/testing.ts",
-      "sha256": "41a5ba818db68d7b891e84cf5d7fd3e3ed5172050cd95e19c15e91b94c3b9d53",
+      "sha256": "af10ac67f0ca72c8b2854d8054c4748a27b48e936d8f3b22215d9fb43c8b150a",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",

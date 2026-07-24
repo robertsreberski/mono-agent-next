@@ -66,7 +66,13 @@ pnpm add @mono-agent/memory-local
 Omit `root` to use Core's instance data directory. Relative roots resolve from
 the agent-config directory. Set `capture.enabled` to `false` and omit
 `capture.model` to keep an existing store recall-only. `recallTool.enabled`
-controls model-visible recall; it does not disable host-side recall.
+controls the module's immutable `capabilities.recallTool` declaration; Core
+then exposes `MemoryRecall({ query, limit? })` with a default limit of 8 and a
+maximum of 50. Core bounds the trimmed query to 64 KiB UTF-8 and projects
+matches to text-only records plus an untrusted-evidence warning, so local
+record metadata remains private. Global and request-local tool policy govern
+visibility, while this read-only Core tool needs no effect approval. Disabling
+it does not disable host-side automatic recall.
 
 The Ollama endpoint must use HTTPS or literal-loopback HTTP. Vector failures
 open a bounded circuit breaker and recall degrades to FTS instead of returning

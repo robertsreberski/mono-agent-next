@@ -121,6 +121,56 @@ Unknown envelope fields and unknown core directives fail validation. A module
 schema controls its own exact options; extensible maps exist only where that
 schema declares them. There is no implicit `.env` loading.
 
+## MCP request context and current-run output
+
+Project tools remain ordinary `.mcp.json` servers. Most receive only their
+configured stdio environment or HTTP headers. The admitted Personal
+transcription consumer uses the sole narrow exception:
+`context.mcp.requestContextServers` names an existing direct stdio transport that
+may receive immutable per-call input/output/progress context. The field defaults
+off and accepts at most 32 unique names; missing, duplicate, or HTTP server
+references fail validation.
+
+Core stages only current-request attachments into an owner-private run
+directory and dispatches namespaced schema-versioned metadata with current
+conversation/run identity, attachment ids, exact path/device/inode allowlists,
+and one per-run output directory. Device and inode values are canonical
+unsigned-decimal strings rather than JSON numbers. Model arguments cannot
+override the reserved metadata. MCP progress is bounded, redacted, transient,
+and subject to both an idle timeout and a non-resettable hard deadline.
+
+Personal transcription uses `attachment_id`; `file_path` is default-deny.
+Legacy local paths require a bounded static `TRANSCRIBE_LOCAL_PATH_ROOTS`
+absolute-directory allowlist that cannot select the managed attachments root.
+
+A producing MCP returns one safe output basename, never a path capability. A
+channel send tool asks Core to read that basename through
+`ChannelSendToolContext.readCurrentRunOutput`. Core performs the no-follow,
+regular, single-link, identity-stable bounded read from the current run and
+returns normalized attachment bytes. The producer may return bounded ids and
+metadata with the basename, but never an absolute-path field. No HTTP-transport
+MCP, arbitrary filesystem path, ambient channel capability, process-start
+environment grant, continuation, or child-run spawn/observe/cancel authority
+follows from this exception.
+The exception narrows mono-agent-supplied context; it does not sandbox the
+configured command or prove locality. That command may proxy remotely, use the
+network, forward the grant, or exfiltrate it. A persistent selected process sees
+all selected calls. Result/error/progress strings are redacted before model
+delivery and artifact offload, but binary or encoded leakage is not detectable.
+Identity-bound reads and private cleanup claims fail closed for trusted-code
+mistakes and static replacement; they are not cryptographic provenance or
+isolation from deliberate same-UID races. Unprovable cleanup is retained and
+reported as degraded health, and safe source-path restoration can still be
+impossible after an adversarial race.
+
+Cleanup runs on normal, failed, and cancelled turns. `SIGKILL`, power loss, or
+host crash can retain owner-only run residue. Restart intentionally avoids
+unsafe PID/age staleness inference and automatic deletion until a
+cross-process-lease-backed recovery path lands before GA. Interim maintenance
+requires all project hosts proven stopped plus exact, explicitly selected run
+ids and owner/non-symlink/directory verification; roots, globs, discovered
+ranges, and age-based removal are forbidden.
+
 ## CLI and authoring boundary
 
 The CLI is intentionally small:
@@ -172,6 +222,13 @@ Core owns bounded admission, per-conversation ordering, cancellation, live
 input, AskUser answer routing, normalized history, tool policy, delivery,
 health, drain, and stop. Runtime modules own native request construction,
 protocol parsing, provider sessions, and attempt-local failure classification.
+When the active direct or channel interaction surface supports it, Core adds a
+reserved, policy-filtered `AskUser` request tool. The model supplies one to
+three questions under the shared module-sdk bounds; Core supplies interaction
+identity, routes and validates the answer with the exact attempt signal, and
+returns the structured result so the runtime can continue. Because this is a
+Core-mediated interaction rather than an external effect, it never creates a
+second approval prompt. MCP and channel tools cannot claim the reserved name.
 
 Failures are not converted to fake responses. An attempt that may have committed
 a side effect is not blindly replayed on another route.
@@ -243,6 +300,9 @@ record; it never receives the bearer-token value.
 
 - Ingress bodies, attachments, streams, concurrency, deadlines, redirects, and
   shutdown are bounded by the owning module.
+- The opt-in selected-stdio MCP request-context grant is immutable per call,
+  namespaced, current-run scoped, and never sent through remote transport or
+  process-start environment.
 - Operator transport is authenticated and literal-loopback only.
 - Remote OTLP export requires HTTPS; HTTP is allowed only for literal loopback.
   Redirect targets are revalidated and configured credentials are stripped on
@@ -254,6 +314,10 @@ record; it never receives the bearer-token value.
 - State, memory, discovery, and web roots are owner-private. Existing symlinks,
   hard links, wrong owners, permissive modes, non-regular files, device/inode
   swaps, corrupt payloads, and unknown versions are rejected without mutation.
+- MCP request attachments and current-run outputs use owner-private directories,
+  no-follow regular single-link files, exact device/inode checks, bounded reads,
+  and replacement-safe cleanup. Channels receive normalized bytes rather than
+  path authority.
 - State records use atomic same-directory replacement, directory synchronization,
   compare-and-swap versions, deterministic listing, and a process writer lease.
   Ambiguous post-rename durability poisons the open store until reopen.

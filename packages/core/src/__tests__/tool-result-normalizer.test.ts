@@ -160,6 +160,35 @@ describe("normalizeToolResult", () => {
     expect(result.content.some((part) => part.type === "artifact")).toBe(true);
   });
 
+  it("transforms every string surface before measuring, previewing, and offloading", async () => {
+    const privatePath = "/private/core/run/outbound";
+    const marker = "[REDACTED_PATH]";
+    const writes: ToolResultArtifactWrite[] = [];
+    const existing = artifactRef(Buffer.from("existing"), "text/plain", privatePath);
+    const result = await normalizeToolResult({
+      content: [
+        { type: "text", text: `${privatePath}:${"x".repeat(270_000)}` },
+        { type: "json", value: { [`key:${privatePath}`]: { nested: privatePath } } },
+        { type: "file", mediaType: "text/plain", data: privatePath, name: privatePath },
+        { type: "artifact", ref: existing, preview: `preview:${privatePath}` },
+        { type: "resource", resource: { uri: `file://${privatePath}`, text: privatePath } },
+      ],
+    }, {
+      artifactSink: recordingSink(writes),
+      transformString: (value) => value.replaceAll(privatePath, marker),
+    });
+
+    expect(writes).toHaveLength(1);
+    const durable = Buffer.from(writes[0]!.data).toString("utf8");
+    expect(durable).not.toContain(privatePath);
+    expect(durable).toContain(marker);
+    expect(JSON.stringify(result)).not.toContain(privatePath);
+    expect(result.content[1]).toMatchObject({
+      type: "artifact",
+      preview: expect.not.stringContaining(privatePath),
+    });
+  });
+
   it("fails closed on excessive parts, JSON depth, JSON items, and cycles", async () => {
     const tooManyParts = Array.from(
       { length: TOOL_RESULT_MAX_PARTS + 1 },

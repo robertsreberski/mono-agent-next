@@ -95,8 +95,14 @@ never contain keys, tokens, or raw provider/storage errors.
 
 This runtime reports `approvals: true`, `structuredOutput: true`,
 `maxOutputTokens: true`, and `sandbox: false`, both globally and for exact
-model routes. Core-owned tools still execute through Core. Nine runtime-owned
-tools are advertised before ordinary provider dispatch:
+model routes. Core-owned tools, including an enabled `MemoryRecall`, are
+forwarded to Pi unchanged and still execute through Core. This includes the
+policy-filtered `AskUser` tool whenever the active Core attempt has an
+interaction bridge. Pi can call it, wait while Core routes the canonical
+one-to-three-question interaction, receive the bounded structured answer as its
+tool result, and continue the same provider turn without a separate approval
+prompt. Nine runtime-owned tools are advertised before ordinary provider
+dispatch:
 
 - `NodeRepl`: `read`, `write`, `execute`, and `network`;
 - `Read`: `read`;
@@ -202,7 +208,8 @@ model's own maximum.
    incomplete forks are deleted while the caller's prior committed session
    remains immutable.
 7. Pi text, thinking, tools, usage, compaction, live steering, and session
-   linkage are normalized into module-sdk contracts.
+   linkage are normalized into module-sdk contracts; Core-owned AskUser calls
+   block and resume through the same request-tool continuation.
 
 Native session ids are accepted only with the exact runtime-instance, model,
 and canonical-conversation binding that created them. A mismatch is rejected

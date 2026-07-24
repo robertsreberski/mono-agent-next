@@ -44,7 +44,12 @@ Stable v1 must prove all of the following:
 - a minimal Pi + webhook agent installs no unselected channel, UI, memory, exporter, service, or native module and completes one real turn;
 - every configured capability names its exact package through `$use` and fails validation when the package is absent, the package kind is wrong, or its API version is incompatible;
 - `config explain` identifies the owning schema, effective source, and safe remediation for every resolved value;
-- one project-owned MCP integration works without a core change, first-party catalog edit, or custom mono-agent module;
+- one ordinary project-owned MCP integration works without a core change,
+  first-party catalog edit, or custom mono-agent module;
+- the admitted Personal transcription MCP proves the one narrow exception:
+  an explicitly named direct stdio transport receives immutable current-request
+  input/output/progress context while the grant conveys no arbitrary-path,
+  process-start-environment, channel, continuation, or child-run authority;
 - Pi and Claude SDK can coexist, with routing expressed as explicit `runtime` and runtime-owned `model` fields;
 - TUI and web produce equivalent operator domain state and available actions from shared fixtures while retaining platform-native presentation;
 - the sanitized Personal Agent fixture preserves the current runtime policy, local providers, BuJo memory, channels, cron, project MCP wiring, state, and Phoenix export without selecting products in its agent config;
@@ -114,7 +119,18 @@ Project authors should not create a mono-agent module for ordinary integrations:
 
 A stdio MCP child may be started and stopped by the configured harness. A remote MCP server owns its own process lifecycle. Mono-agent does not turn MCP into a generic daemon manager.
 
-Model-visible tool names and orchestration UX remain MCP-owned. First-party v1 grants no privileged host capability to an MCP server. The broader child-run capability family is deliberately deferred; section 12.3 records the old design only as archive/revival material that requires a new consumer and ADR before admission.
+Model-visible tool names and orchestration UX remain MCP-owned. Ordinary MCP
+servers receive only their configured stdio environment or HTTP headers. The
+admitted Personal transcription consumer is the sole narrow exception:
+`context.mcp.requestContextServers` may name an existing direct stdio transport to
+receive immutable per-call current-request input/output/progress context. The
+grant carries current conversation/run identity, Core-staged attachment
+descriptors pinned by path plus device/inode identity, and one per-run output
+directory. It is off by default, is never delivered through process-start
+environment, and grants no HTTP-transport MCP, arbitrary-path, continuation, or
+spawn/observe/cancel authority. The broader child-run capability family remains
+deferred. The transport selection is not proof of locality: the trusted,
+unsandboxed command may proxy remotely or forward/exfiltrate the grant.
 
 ### 2.4 Product boundaries
 
@@ -141,7 +157,9 @@ The following do not exist in first-party v1:
   config, environment, schema, validation, CLI, and discovery surface;
 - historical backfill/resend;
 - a generic plugin registry, tool-plugin kind, extension-plugin kind, package self-registration, or single-file path plugin;
-- request-scoped child-run host capabilities (`request.context`, `request.progress`, `agent.run.spawn/observe/cancel`) — designed but deferred, with the design recorded in section 12.3;
+- remote or generic MCP host-grant planes and every child-run
+  `agent.run.spawn/observe/cancel` capability; the only request-scoped
+  exception is the named selected-stdio transcription grant in section 5.6;
 - the v0 second persona file (`context.soulPath`) — identity remains a single instructions file;
 - user-facing compaction tuning knobs — compaction policy is runtime-owned;
 - the `append-host-summary` memory write mode — `capture` and disabled remain;
@@ -434,7 +452,7 @@ Runtime-neutral history commits user-visible input, settled output, AskUser evid
 
 ### 5.5 Channel and trigger contracts
 
-Channels validate/redact their config; emit normalized inbound requests; manage reply streams; declare attachment, live-input, AskUser, proactive, and runtime-control capabilities; enforce allowlists/auth; expose bounded health; and stop idempotently. A channel advertising proactive capability may also contribute model-visible send tools — message and file delivery bound to its configured instance and recorded in destination history — exposed under normal tool policy.
+Channels validate/redact their config; emit normalized inbound requests; manage reply streams; declare attachment, live-input, AskUser, proactive, and runtime-control capabilities; enforce allowlists/auth; expose bounded health; and stop idempotently. A channel advertising proactive capability may also contribute model-visible send tools — message and file delivery bound to its configured instance and recorded in destination history — exposed under normal tool policy. When a send tool must deliver an artifact created in the current run, it asks the host to read one safe output basename through `ChannelSendToolContext.readCurrentRunOutput`; channels never receive an arbitrary path or ambient filesystem authority.
 
 Configuration, authentication, and structural failures fail closed. Transport failure is visible degradation with bounded recovery and does not crash an otherwise healthy agent. A degraded channel never reports healthy.
 
@@ -442,9 +460,70 @@ Triggers initiate runs but are not communication channels. trigger-cron owns job
 
 ### 5.6 MCP and detached-work boundary
 
-Model-visible tool names and orchestration UX remain MCP-owned. First-party v1
-does not grant an MCP server privileged host capabilities, and an MCP must not
-shell out to a human CLI or import core internals to reach host behavior.
+Model-visible tool names and orchestration UX remain MCP-owned. Ordinary MCP
+servers receive only their configured stdio environment or HTTP headers. The
+Personal transcription consumer admits one bounded exception:
+
+- `context.mcp.requestContextServers` is off by default, accepts at most 32
+  unique names, and may name only existing direct `stdio` transports from the
+  referenced MCP configuration; missing names, duplicates, and HTTP-transport
+  entries fail validation;
+- Core stages only current-request attachments into owner-private per-run
+  storage, opens files exclusively with no-follow semantics, requires regular
+  single-link `0600` files under `0700` directories, and records the exact path,
+  device, and inode identities;
+- immediately before a selected server call, Core supplies immutable
+  `_meta["com.mono-agent/request-context"]` schema version 1 with current
+  conversation/run identity, the per-run input/output roots, attachment ids and
+  descriptors, and the attachment allowlist. Device and inode members are
+  canonical unsigned-decimal strings, never JSON numbers. Model arguments
+  cannot inject, replace, or widen that metadata;
+- the MCP SDK progress callback is capped at 256 events and 256 KiB per call,
+  then request-context paths and configured secrets are redacted before
+  whitespace/control normalization and the 16 KiB activity bound. Progress is
+  projected only as transient channel activity, resets the 120-second idle
+  timeout but never the 45-minute hard total deadline, and never enters
+  canonical transcript history; and
+- the grant supplies no arbitrary-path read, process-start environment,
+  HTTP-transport MCP, channel-destination, continuation, or
+  `agent.run.spawn/observe/cancel` authority. Cleanup unlinks only the exact
+  staged identities and never a path-swapped replacement.
+
+The matching output path remains host-bound. A channel send tool may call
+`ChannelSendToolContext.readCurrentRunOutput({ name, maxBytes })` with one safe
+basename; Core caps the request at 25,000,000 bytes and performs a stable
+no-follow, regular, single-link read from that same run's output directory.
+The MCP returns an `outputName`, not a path capability, and the channel receives
+only normalized attachment bytes. The result may also carry bounded ids and
+metadata, but no absolute-path field.
+
+Personal transcription accepts `attachment_id` for staged request files and
+denies `file_path` by default. Legacy local paths require the bounded static
+`TRANSCRIBE_LOCAL_PATH_ROOTS` absolute-directory allowlist, which cannot select
+the managed attachments root and cannot serve as fallback for a rejected staged
+identity.
+
+Selected results, errors, progress, previews, and artifact envelopes redact
+plain request-context paths and configured secrets before model delivery or
+durable offload. Binary, encoded, and deliberately obfuscated values cannot be
+recognized reliably. A persistent selected process observes all selected calls
+and can deliberately mix runs or race paths. Device/inode binding and private
+random cleanup claims prove Core routing and protect against trusted-code
+mistakes or static replacement; they are not cryptographic provenance or
+isolation from a malicious same-UID process. Cleanup retains unprovable entries,
+degrades host health, and may leave a source path relocated when safe
+no-overwrite restoration cannot be proved.
+
+Normal completion, failure, and cancellation clean staged runs. `SIGKILL`,
+power loss, or host crash can retain owner-only run residue. Source beta does
+not infer staleness from PID or age and does not auto-delete without a
+cross-process lease. Until lease-backed recovery lands before GA, maintenance
+requires all project hosts proven stopped, exact explicitly selected run ids,
+and owner/non-symlink/directory verification; root, glob, recursive-discovery,
+and age-based deletion are forbidden.
+
+An MCP must not shell out to a human CLI or import core internals to reach host
+behavior.
 
 Work that outlives its originating turn belongs to a separately operated
 durable service with its own auth, state, retry, and recovery. It can re-enter
@@ -638,7 +717,10 @@ This is the full agent-process config, not a maximal first-party showcase. It pr
       "maxBytes": 96000
     },
     "mcp": {
-      "configPath": "./.mcp.json"
+      "configPath": "./.mcp.json",
+      "requestContextServers": [
+        "transcribe"
+      ]
     }
   },
   "memory": {
@@ -785,7 +867,17 @@ This is the full agent-process config, not a maximal first-party showcase. It pr
 }
 ```
 
-The fixture intentionally omits Slack, native sandboxing, TUI, web, docs-mcp, and service-macos because the live Personal Agent process does not select those capabilities. A2A, continuations, and host-capability grants are v1 cuts. It intentionally includes the local Ollama provider because the live config registers one. The non-loopback webhook requires both a strong bearer key and an independent signature secret; this is the tightened admission contract exercised by the generated fixture. Phoenix exports metadata by default; exporting prompts, replies, tool arguments/results, or system instructions is a separate explicit opt-in for a trusted collector.
+The fixture intentionally omits Slack, native sandboxing, TUI, web, docs-mcp,
+and service-macos because the live Personal Agent process does not select those
+capabilities. A2A, continuations, generic host-capability grants, and child-run
+authority are v1 cuts. The explicitly named selected-stdio transcription server
+receives only the bounded request-context exception in section 5.6. It
+intentionally includes the local Ollama provider because the live config
+registers one. The non-loopback webhook requires both a strong bearer key and
+an independent signature secret; this is the tightened admission contract
+exercised by the generated fixture. Phoenix exports metadata by default;
+exporting prompts, replies, tool arguments/results, or system instructions is a
+separate explicit opt-in for a trusted collector.
 
 ### 6.4 Multi-runtime addition
 
@@ -858,9 +950,25 @@ The agent config references the standard MCP file; it does not copy custom serve
 ```
 
 The framework has no package knowledge of the tools these servers expose.
-Skills explain their use. An MCP receives no privileged mono-agent host grant.
-If its work must outlive the originating call, the separately operated service
-owns durability and re-enters through a configured webhook or channel.
+Skills explain their use. Ordinary MCPs receive no mono-agent host grant.
+Personal transcription explicitly lists `transcribe` under
+`context.mcp.requestContextServers`, so that one direct stdio transport receives the
+bounded per-call request context defined in section 5.6. The list does not
+activate a server, does not grant a configured HTTP server anything, and cannot
+be supplied through `.mcp.json` or process environment.
+
+The transcribe tool accepts `attachment_id` selecting one staged
+`attachments[].id` instead of an arbitrary path, writes only beneath the
+supplied per-run output directory, and returns an `outputName` basename. A
+host-bound channel send tool may then deliver that
+current-run output without exposing a filesystem path to the channel. If MCP
+work must outlive the originating call, the separately operated service owns
+durability and re-enters through a configured webhook or channel.
+Device and inode values are canonical unsigned-decimal strings. `file_path` is
+default-deny; legacy local paths require a bounded static
+`TRANSCRIBE_LOCAL_PATH_ROOTS` absolute-directory allowlist that cannot select
+the managed attachments root. Producer results permit a safe basename plus
+bounded ids and metadata, never an absolute-path field.
 
 A scheduled job references stable runtime and channel instance ids:
 
@@ -963,7 +1071,14 @@ TUI needs no persistent product config for the common case; it discovers an agen
 
 One executable schema per core section or selected typed module is the only handwritten definition. Types, validation, defaults, composed JSON Schema, editor completion, redaction, explain output, setup prompts, and reference docs derive from it.
 
-Runtime routes reference configured `runtimes` only. Memory capture routes use the same `{ runtime, model }` shape. Trigger notification references configured proactive channels only. MCP server names reference entries present in `.mcp.json`; no MCP host-grant section exists in v1. Wrong-kind, missing, incompatible, over-broad, and cyclic references fail with both source paths.
+Runtime routes reference configured `runtimes` only. Memory capture routes use
+the same `{ runtime, model }` shape. Trigger notification references configured
+proactive channels only. MCP server names reference entries present in
+`.mcp.json`. `context.mcp.requestContextServers` is a closed, bounded list whose
+members must resolve to configured direct stdio transports; a missing name,
+duplicate, or HTTP transport is invalid. No generic MCP host-grant section exists
+in v1. Wrong-kind, missing, incompatible, over-broad, and cyclic references fail
+with both source paths.
 
 The CLI discovers optional diagnostics/auth/maintenance commands only from modules explicitly named by `$use`. It never scans dependencies or a first-party catalog. Runtime and lifecycle commands remain optional frontends over public APIs; programmatic consumers can load, validate, run, inspect, and reconcile the relevant product without spawning a human CLI.
 
@@ -1096,6 +1211,9 @@ The inventory below is a discovery seed, not the final atomic row count.
 - deterministic identity/instruction/skill composition, disclosure, and byte limits (the v0 second persona file `soulPath` is a cut row: no fleet config sets it);
 - request/reply/AskUser/attachment normalization;
 - MCP and tool policy intersection without privilege widening;
+- opt-in selected-stdio request-context staging, immutable namespaced per-call
+  metadata, bounded transient progress, exact-identity cleanup, and host-bound
+  current-run output reads without arbitrary path authority;
 - concurrency, pending admission, cancellation, backpressure, and settlement;
 - per-run turn ceiling (`maxTurns`) with honest rejection where a runtime cannot enforce it;
 - oversized tool-output offloading into run artifacts with bounded inline summaries;
@@ -1152,7 +1270,11 @@ Every channel proves normalization, allowlist/auth, advertised AskUser/live-inpu
 
 **Telegram**
 
-Polling, media, voice transcription, adversarial filenames, in-place activity, steering, runtime controls, commands, quiet hours, status reactions, non-blocking tappable reply options distinct from blocking AskUser, model-invoked message and file sending, exact chat authorization, and final delivery.
+Polling, media, voice transcription, adversarial filenames, in-place activity,
+steering, runtime controls, commands, quiet hours, status reactions,
+non-blocking tappable reply options distinct from blocking AskUser,
+model-invoked message and file sending including host-bound current-run output,
+exact chat authorization, and final delivery.
 
 **Slack**
 
@@ -1224,7 +1346,18 @@ SRT off/native/network/integrity behavior.
 
 - named standard MCP config loading;
 - custom MCP without mono-agent package/catalog changes;
-- no privileged host grant or hidden core import for project MCPs;
+- no ambient, remote, process-start-environment, or hidden-core host grant for
+  project MCPs;
+- default-off named selected-stdio request context with immutable
+  `com.mono-agent/request-context` version 1 metadata, Core-staged attachment
+  ids and inode allowlists, a per-run output directory, and bounded transient
+  progress;
+- config-reference rejection for missing, duplicate, or non-stdio grant
+  selections;
+- adversarial proof for model metadata spoofing, traversal, symlink/hard-link
+  inputs and outputs, device/inode swaps, cross-run/cross-request access,
+  replacement-safe cleanup, oversize progress/output, timeout/cancellation, and
+  concurrent-call isolation;
 - detached work owned externally and re-entering only through an explicit configured channel or webhook;
 - skills as the instruction boundary;
 - remote MCP process independence;
@@ -1292,7 +1425,21 @@ by V1-048. A repository checkout, tarball that was not the verified registry
 artifact, mutable dist-tag without resolved-version proof, or unpublished local
 build is not a cutover candidate.
 
-Personal Agent shadow uses separate service ids and ports with Telegram delivery disabled. Cutover occurs at a session rollover boundary. The sanitized section 6.3 fixture is the review artifact for behavior coverage; the live file supplies exact private paths and identifiers.
+Personal Agent shadow uses separate service ids and ports with Telegram delivery
+disabled. Cutover occurs at a session rollover boundary. The sanitized section
+6.3 fixture is the review artifact for behavior coverage; the live file supplies
+exact private paths and identifiers. Before that shadow can satisfy its
+capability matrix, the real Personal `transcribe` stdio server must accept only
+the namespaced per-call grant, resolve an attachment id through the staged
+inode allowlist, publish bounded progress as transient activity, write beneath
+the current run output directory, return an `outputName` basename, and have that
+output delivered through the host-bound channel tool. The proof includes a real
+audio attachment plus the adversarial grant/input/output cases above; a
+process-start environment shim or arbitrary local path is not equivalent.
+The proof also covers canonical unsigned-decimal device/inode strings,
+default-deny `file_path`, the bounded static `TRANSCRIBE_LOCAL_PATH_ROOTS`
+absolute-directory allowlist excluding the managed attachments root, and
+outputName-only results without absolute-path fields.
 
 After Personal Agent passes rollback proof and a 24-hour soak, the active
 `~/agents/a8c-assistant` migrates as a distinct consumer with Slack, webhook,
@@ -1361,11 +1508,11 @@ or leaves unowned work.
 | V1-012 | G1 | V1-011 | Implement strict agent/runtimes/routing/context/capability/policy schema with `$use`, inline leaf config, references, provenance | Minimal/Personal/multi-runtime fixtures; error/redaction tests |
 | V1-013 | G1 | V1-011, V1-012 | Implement exact direct-dependency/lockfile module loader; reject aliases, paths, scans, wrong kinds | Resolution/digest/dependency negatives; no lifecycle/install side effects |
 | V1-014 | G1 | V1-011 | Implement secure-fs and shared HTTP lifecycle helpers; replace install-skill and cleanup race surfaces plus redirect checking | Transactional/no-clobber owner-only filesystem and checked-redirect adversarial contracts |
-| V1-015 | G1 | V1-011, V1-012, V1-013 | Implement host lifecycle, bounds, settlement, health, shutdown, monotonic tool policy, response redaction, safe JSON normalization, and own-property tool aliases with no MCP privileged-host grant plane | Lifecycle/crash/backpressure, policy non-widening, redaction/prototype, alias, and MCP-boundary negatives |
+| V1-015 | G1 | V1-011, V1-012, V1-013 | Implement host lifecycle, bounds, settlement, health, shutdown, monotonic tool policy, response redaction, safe JSON normalization, own-property tool aliases, and the sole default-off named-selected-stdio request-context exception with staged attachment identities, per-run output, transient progress, and no generic MCP grant plane | Lifecycle/crash/backpressure, policy non-widening, redaction/prototype, alias, missing/duplicate/HTTP-transport reference rejection, metadata-spoof/traversal/link/swap/cross-run/cleanup/bounds/cancel/concurrency MCP negatives |
 | V1-016 | G1 | V1-012, V1-015 | Implement load/validate/create/inspect APIs and thin CLI validate/schema/explain/diagnostic routing | Programmatic/CLI parity; exit/JSON compatibility; read-only load |
 | V1-017 | G1 | V1-012, V1-016 | Land schema-derived minimal and selected-stack scaffolds; delete presets/wizard/config reference and generic merge-patch settings writer | Packed snapshots, exact closure, names-only secret example, concurrent transactional failure |
 | V1-018 | G1 | V1-011, V1-016 | Convert doctor inventory to core + selected-module diagnostics; delete old orchestration | Every v0 check mapped or cut |
-| V1-019 | G1 | V1-013, V1-015 | Complete real Pi + webhook vertical slice and project MCP fixture; delete app-controller/config glue | Packed clean-project turn and minimal closure |
+| V1-019 | G1 | V1-013, V1-015 | Complete real Pi + webhook vertical slice, ordinary project MCP fixture, and the Personal transcription MCP request-context/progress path; delete app-controller/config glue | Packed clean-project turn and minimal closure; real Personal transcribe attachment id, bounded progress, current-run output basename, and no-fallback proof |
 | V1-020 | G2 | V1-011 | Extract operator protocol, one strict NDJSON client, and turn/stream/AskUser/capability/directory domain state | Golden valid/malformed wire/frame/disconnect tests; deterministic reducer/action fixtures |
 | V1-022 | G2 | V1-015, V1-020 | Extract channel-operator typed module | Protocol compliance and disconnect abort |
 | V1-023 | G2 | V1-020, V1-022 | Migrate TUI as standalone operator product; delete local interpretations/config-mode UI | TUI parity and interactive smoke |
@@ -1377,7 +1524,7 @@ or leaves unowned work.
 | V1-029 | G3 | V1-015, V1-025 | Extract OpenCode app-server and stable-version guard | Version/failure live smoke |
 | V1-030 | G3 | V1-026, V1-027, V1-028, V1-029 | Implement `{ runtime, model }` routing, runtime-owned model validation, capability negotiation, same/cross-runtime fallback | Full fallback matrix and policy monotonicity |
 | V1-031 | G4 | V1-011, V1-014, V1-015 | Finalize channel contract and shared compliance | Fixture channel passes all advertised rows |
-| V1-032 | G4 | V1-031 | Extract Telegram; delete composition glue | Poll/media/voice/steering/proactive smoke |
+| V1-032 | G4 | V1-031 | Extract Telegram, including host-bound current-run output delivery through `ChannelSendToolContext.readCurrentRunOutput`; delete composition glue | Poll/media/voice/steering/proactive smoke; inline/current-run file one-of validation and traversal/link/swap/cross-run/oversize output negatives |
 | V1-033 | G4 | V1-031 | Extract Slack; delete composition glue | Single Socket consumer/thread/status/command smoke |
 | V1-034 | G4 | V1-019, V1-031 | Finish webhook module and directory-defined routes | Auth/timeout/status/bounds tests |
 | V1-035 | G4 | V1-014, V1-031 | Extract OpenAI API channel and delete Express-only bootstrap | Open WebUI, SSE/JSON termination |
@@ -1428,8 +1575,10 @@ Non-goals:
 - malicious-module sandboxing;
 - hosted marketplace;
 - generic plugin registry, path plugins, package self-registration, or dynamic package installation;
-- remote MCP receipt of privileged host capabilities in v1;
-- child-run host-capability grants (request context/progress, spawn/observe/cancel) in v1;
+- HTTP-transport MCP receipt of privileged host capabilities in v1;
+- generic MCP or child-run host-capability grants, including every
+  spawn/observe/cancel surface; the bounded selected-stdio transcription
+  request-context/progress exception is not a child-run plane;
 - a core-owned model-visible Agent/subagent tool;
 - a universal provider abstraction across runtimes;
 - one configuration file for agent and every product;
@@ -1462,7 +1611,17 @@ The exact successor `refs/tags/archive/v0-final-full` clean-history source map s
 - historical resend as a standalone operations tool;
 - alternative memory algorithms as separate memory modules, never modes mixed into memory-local.
 
-Separately from archive revival, a possible child-run capability plane is recorded only as future research: `request.context` (read-only origin identity and run metadata), `request.progress` (bounded progress publication), and `agent.run.spawn/observe/cancel` with maximum depth, children per run, concurrency, duration, runtime allowlist, output bounds, narrow-only child policy and sandbox inheritance, and parent-cancellation cascade. A post-1.0 amendment may admit it only when a real consuming MCP exists and must design a new grant transport and threat model rather than assuming the archived continuation transport.
+Separately from archive revival, a possible child-run capability plane remains
+future research: `agent.run.spawn/observe/cancel` with maximum depth, children
+per run, concurrency, duration, runtime allowlist, output bounds, narrow-only
+child policy and sandbox inheritance, and parent-cancellation cascade. The
+Personal transcription grant admitted in section 5.6 supplies only immutable
+current-request input/output/progress context to a named direct stdio tool. It
+does not establish a reusable generic host-grant transport or precedent for
+child-run authority. A post-1.0 child-run amendment still requires a current
+consumer, a new grant transport and threat model, and an ADR rather than
+assuming either the archived continuation transport or this narrow metadata
+envelope.
 
 Revival must use the capability ladder, public contracts, compliance suites, security rules, and budgets. It does not restore code to core.
 

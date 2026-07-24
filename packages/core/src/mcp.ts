@@ -2,23 +2,18 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
 import { dirname, isAbsolute, resolve } from "node:path";
-
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { FetchLike, Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
-
 import { AgentConfigError, errorMessage } from "./errors.js";
-import {
-  decodeAuthorityText,
-  readAuthorityFile,
-} from "./authority-read.js";
-
+import type { McpRequestContextV1 } from "./current-run-output.js";
 const MCP_CLOSE_TIMEOUT_MS = 1_000;
 const MCP_CONNECT_TIMEOUT_MS = 10_000;
 const MCP_CATALOG_TIMEOUT_MS = 10_000;
 const MCP_CALL_TIMEOUT_MS = 120_000;
 const MCP_CALL_TOTAL_TIMEOUT_MS = 900_000;
+const MCP_REQUEST_CONTEXT_CALL_TOTAL_TIMEOUT_MS = 2_700_000;
 const MCP_MAX_SERVERS = 32;
 const MCP_MAX_CATALOG_PAGES = 16;
 const MCP_MAX_TOOLS_PER_SERVER = 128;
@@ -29,13 +24,15 @@ const MCP_MAX_DESCRIPTION_BYTES = 16 * 1_024;
 const MCP_MAX_TOOL_SCHEMA_BYTES = 64 * 1_024;
 const MCP_MAX_CATALOG_BYTES = 512 * 1_024;
 const MCP_MAX_FRAME_BYTES = 1024 * 1024;
+const MCP_MAX_PROGRESS_EVENTS = 256;
+const MCP_MAX_PROGRESS_BYTES = 256 * 1024;
 const MCP_STDERR_CAPTURE_MAX_BYTES = 64 * 1024;
 const MCP_STDERR_DIAGNOSTIC_MAX_BYTES = 4 * 1024;
 const MCP_MAX_REDIRECTS = 3;
 const MCP_STDIO_CLOSE_STEP_MS = 250;
 const MCP_PORTABLE_TOOL_NAME = /^[a-zA-Z0-9_-]{1,64}$/u;
 const MCP_RESERVED_TOOL_PREFIXES = ["core__", "runtime__"] as const;
-
+export const MCP_REQUEST_CONTEXT_META_KEY = "com.mono-agent/request-context";
 export type McpServerConfig =
   | {
       readonly type: "stdio";
@@ -49,53 +46,34 @@ export type McpServerConfig =
       readonly url: string;
       readonly headers?: Readonly<Record<string, McpConfigValue>>;
     };
-
 export type McpConfigValue = string | { readonly $env: string };
-
 export interface ProjectMcpConfig {
   readonly mcpServers: Readonly<Record<string, McpServerConfig>>;
 }
-
 export interface CoreRuntimeTool {
   readonly name: string;
   /** The raw MCP name when it is safe to retain as the model-visible alias. */
   readonly rawAlias?: string;
   readonly description: string;
   readonly inputSchema: Readonly<Record<string, unknown>>;
+  readonly requestContextResult?: boolean;
   readonly source:
     | { readonly kind: "mcp"; readonly server: string; readonly tool: string }
     | { readonly kind: "channel"; readonly instanceId: string; readonly tool: string }
-    | { readonly kind: "core"; readonly capability: "skills.read" | "run-history.read" };
-  execute(input: unknown, options?: { readonly signal?: AbortSignal; readonly callId?: string }): Promise<unknown>;
+    | { readonly kind: "core"; readonly capability: "skills.read" | "run-history.read" | "memory.recall" | "interaction.ask-user" };
+  execute(input: unknown, options?: {
+    readonly signal?: AbortSignal;
+    readonly callId?: string;
+    readonly requestContext?: McpRequestContextV1;
+    readonly onActivity?: (text: string) => void;
+  }): Promise<unknown>;
 }
-
 export interface ConnectedMcpTools {
   readonly tools: readonly CoreRuntimeTool[];
   /** Raw source names that cannot be used safely in tool policy. */
   readonly ambiguousAliases?: readonly string[];
   close(): Promise<void>;
 }
-
-export async function loadProjectMcpConfig(
-  path: string | undefined,
-  environment: Readonly<Record<string, string | undefined>> = process.env,
-): Promise<ProjectMcpConfig> {
-  if (path === undefined) return { mcpServers: {} };
-  let candidate: unknown;
-  try {
-    const snapshot = await readAuthorityFile(path, {
-      maxBytes: 1_000_000,
-      requireSingleLink: true,
-    });
-    candidate = JSON.parse(decodeAuthorityText(snapshot)) as unknown;
-  } catch (error) {
-    throw new AgentConfigError(`Could not read project MCP config ${path}`, [
-      { path: "context.mcp.configPath", message: errorMessage(error), code: "mcp_config" },
-    ]);
-  }
-  return parseProjectMcpConfig(candidate, environment, path);
-}
-
 /**
  * Parse bytes already read through Core's authority-safe configuration path.
  * This function is pure and never opens the source path.
@@ -128,7 +106,6 @@ export function parseProjectMcpConfig(
   if (issues.length > 0) throw new AgentConfigError(`Invalid project MCP config ${sourcePath}`, issues);
   return candidate as unknown as ProjectMcpConfig;
 }
-
 export async function connectProjectMcpTools(
   config: ProjectMcpConfig,
   options: {
@@ -140,17 +117,25 @@ export async function connectProjectMcpTools(
     readonly catalogTimeoutMs?: number;
     readonly callTimeoutMs?: number;
     readonly callTotalTimeoutMs?: number;
+    readonly requestContextServers?: readonly string[];
   },
 ): Promise<ConnectedMcpTools> {
   const connected: { readonly server: string; readonly client: Client; readonly transport: Transport }[] = [];
   const connectTimeoutMs = positiveTimeout(options.connectTimeoutMs, MCP_CONNECT_TIMEOUT_MS, "MCP connect timeout");
   const catalogTimeoutMs = positiveTimeout(options.catalogTimeoutMs, MCP_CATALOG_TIMEOUT_MS, "MCP catalog timeout");
-  const callTimeoutMs = positiveTimeout(options.callTimeoutMs, MCP_CALL_TIMEOUT_MS, "MCP call timeout");
-  const callTotalTimeoutMs = positiveTimeout(
-    options.callTotalTimeoutMs,
-    MCP_CALL_TOTAL_TIMEOUT_MS,
-    "MCP call total timeout",
-  );
+  const callTimeoutMs = Math.min(positiveTimeout(options.callTimeoutMs, MCP_CALL_TIMEOUT_MS, "MCP call timeout"), MCP_CALL_TIMEOUT_MS);
+  const callTotalTimeoutMs = Math.min(positiveTimeout(options.callTotalTimeoutMs, MCP_CALL_TOTAL_TIMEOUT_MS, "MCP call total timeout"), MCP_CALL_TOTAL_TIMEOUT_MS);
+  const requestContextCallTotalTimeoutMs = Math.min(positiveTimeout(options.callTotalTimeoutMs, MCP_REQUEST_CONTEXT_CALL_TOTAL_TIMEOUT_MS, "MCP call total timeout"), MCP_REQUEST_CONTEXT_CALL_TOTAL_TIMEOUT_MS);
+  const requestContextServers = new Set(options.requestContextServers ?? []);
+  if (requestContextServers.size !== (options.requestContextServers?.length ?? 0)
+    || requestContextServers.size > MCP_MAX_SERVERS) {
+    throw new Error("MCP request-context server selection must be unique and bounded");
+  }
+  for (const server of requestContextServers) {
+    if (config.mcpServers[server]?.type !== "stdio") {
+      throw new Error(`MCP request-context server ${server} must be a configured stdio server`);
+    }
+  }
   try {
     const servers = Object.keys(config.mcpServers).sort();
     if (servers.length > MCP_MAX_SERVERS) {
@@ -199,27 +184,39 @@ export async function connectProjectMcpTools(
     const tools = catalog.map(({ server, client, tool }): CoreRuntimeTool => {
       const resolvedTool = resolvedBySource.get(sourceIdentity(server, tool.name));
       if (resolvedTool === undefined) throw new Error(`MCP tool identity resolution failed for ${server}:${tool.name}`);
+      const requestScoped = requestContextServers.has(server);
+      const totalTimeoutMs = requestScoped ? requestContextCallTotalTimeoutMs : callTotalTimeoutMs;
       return {
         name: resolvedTool.name,
         ...(resolvedTool.rawAlias === undefined ? {} : { rawAlias: resolvedTool.rawAlias }),
         description: tool.description ?? `${server}:${tool.name}`,
         inputSchema: tool.inputSchema,
+        ...(requestScoped ? { requestContextResult: true } : {}),
         source: { kind: "mcp", server, tool: tool.name },
         async execute(input, callOptions = {}) {
           if (callOptions.signal?.aborted) throw abortError(callOptions.signal.reason);
+          const requestContext = requestScoped ? callOptions.requestContext : undefined;
           return runWithDeadline(
             `MCP tool ${server}:${tool.name}`,
             callOptions.signal,
-            callTotalTimeoutMs,
-            (signal) => client.callTool(
-              { name: tool.name, arguments: isRecord(input) ? input : {} },
-              undefined,
-              {
-                signal,
-                timeout: Math.min(callTimeoutMs, callTotalTimeoutMs),
-                maxTotalTimeout: callTotalTimeoutMs,
-              },
-            ),
+            totalTimeoutMs,
+            (signal) => {
+              const progress = requestScoped ? createProgressBoundary(signal, callOptions.onActivity) : undefined;
+              const operation = client.callTool({
+                name: tool.name, arguments: isRecord(input) ? input : {},
+                ...(requestContext === undefined ? {} : {
+                  _meta: { [MCP_REQUEST_CONTEXT_META_KEY]: requestContext },
+                }),
+              }, undefined, {
+                signal: progress?.signal ?? signal,
+                timeout: Math.min(callTimeoutMs, totalTimeoutMs),
+                maxTotalTimeout: totalTimeoutMs + callTimeoutMs,
+                ...(progress === undefined ? {} : {
+                  resetTimeoutOnProgress: true, onprogress: progress.accept,
+                }),
+              });
+              return progress === undefined ? operation : Promise.race([operation, progress.violation]);
+            },
           );
         },
       };
@@ -238,25 +235,20 @@ export async function connectProjectMcpTools(
     throw error;
   }
 }
-
 type ListedMcpTool = Awaited<ReturnType<Client["listTools"]>>["tools"][number];
-
 interface PendingMcpTool {
   readonly server: string;
   readonly client: Client;
   readonly tool: ListedMcpTool;
 }
-
 interface McpToolSource {
   readonly server: string;
   readonly tool: string;
 }
-
 interface ResolvedMcpToolName extends McpToolSource {
   readonly name: string;
   readonly rawAlias?: string;
 }
-
 /**
  * Resolve names from a complete catalog. Exported only for focused security
  * verification; callers should use connectProjectMcpTools.
@@ -295,23 +287,19 @@ export function resolveMcpToolNames(
   }
   return { tools: resolved, ambiguousAliases };
 }
-
 function canonicalMcpToolName(source: McpToolSource): string {
   const digest = createHash("sha256")
     .update(sourceIdentity(source.server, source.tool), "utf8")
     .digest("base64url");
   return `mcp__${digest}`;
 }
-
 function sourceIdentity(server: string, tool: string): string {
   return `mcp-tool-v1\0${Buffer.byteLength(server, "utf8")}:${server}\0${Buffer.byteLength(tool, "utf8")}:${tool}`;
 }
-
 function isPortableRawToolName(name: string): boolean {
   return MCP_PORTABLE_TOOL_NAME.test(name)
     && !MCP_RESERVED_TOOL_PREFIXES.some((prefix) => name.startsWith(prefix));
 }
-
 async function listAllTools(
   server: string,
   client: Client,
@@ -349,7 +337,6 @@ async function listAllTools(
   }
   throw new Error(`MCP server ${server} exceeded ${MCP_MAX_CATALOG_PAGES} tools/list pages`);
 }
-
 function validateCatalogTool(server: string, tool: ListedMcpTool): number {
   const nameBytes = Buffer.byteLength(tool.name, "utf8");
   if (nameBytes === 0 || nameBytes > MCP_MAX_TOOL_NAME_BYTES) {
@@ -371,15 +358,49 @@ function validateCatalogTool(server: string, tool: ListedMcpTool): number {
   }
   return jsonByteLength(tool, `MCP tool ${server}:${tool.name} catalog entry`);
 }
-
 function comparePendingTools(left: PendingMcpTool, right: PendingMcpTool): number {
   return compareCodeUnits(left.server, right.server) || compareCodeUnits(left.tool.name, right.tool.name);
 }
-
 function compareCodeUnits(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
-
+type McpProgress = {
+  readonly progress: number;
+  readonly total?: number | undefined;
+  readonly message?: string | undefined;
+};
+function rawMcpProgress(progress: McpProgress): string {
+  const fallback = progress.total === undefined
+    ? `MCP progress ${String(progress.progress)}`
+    : `MCP progress ${String(progress.progress)} of ${String(progress.total)}`;
+  return progress.message ?? fallback;
+}
+function createProgressBoundary(
+  parentSignal: AbortSignal,
+  onActivity: ((text: string) => void) | undefined,
+): { readonly signal: AbortSignal; readonly violation: Promise<never>; readonly accept: (progress: McpProgress) => void } {
+  const controller = new AbortController();
+  let events = 0; let bytes = 0; let rejectViolation!: (error: Error) => void;
+  const violation = new Promise<never>((_resolve, reject) => { rejectViolation = reject; });
+  const fail = (error: Error): void => {
+    if (controller.signal.aborted) return;
+    rejectViolation(error); controller.abort(error);
+  };
+  return {
+    signal: AbortSignal.any([parentSignal, controller.signal]), violation,
+    accept(progress) {
+      if (controller.signal.aborted) return;
+      const text = rawMcpProgress(progress);
+      events += 1; bytes += Buffer.byteLength(text, "utf8");
+      if (events > MCP_MAX_PROGRESS_EVENTS || bytes > MCP_MAX_PROGRESS_BYTES) {
+        fail(new Error("MCP progress exceeds the per-call event or byte limit")); return;
+      }
+      try { onActivity?.(text); } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
+      }
+    },
+  };
+}
 function createTransport(
   config: McpServerConfig,
   options: {
@@ -405,7 +426,7 @@ function createTransport(
         },
       },
     );
-    return new BoundedMcpTransport(transport, MCP_MAX_FRAME_BYTES) as unknown as Transport;
+    return transport as unknown as Transport;
   }
   const base = options.configPath === undefined ? options.projectRoot : dirname(options.configPath);
   const cwd = config.cwd === undefined
@@ -427,7 +448,6 @@ function createTransport(
     redactionValues: Object.values(configuredEnv),
   }) as unknown as Transport;
 }
-
 function validateServer(
   name: string,
   value: unknown,
@@ -487,7 +507,6 @@ function validateServer(
   }
   issues.push({ path: `${path}.type`, message: "must be explicitly stdio or http", code: "enum" });
 }
-
 function rejectUnknown(
   value: Record<string, unknown>,
   allowed: ReadonlySet<string>,
@@ -498,7 +517,6 @@ function rejectUnknown(
     if (!allowed.has(key)) issues.push({ path: path === "$" ? key : `${path}.${key}`, message: "is not allowed", code: "unknown" });
   }
 }
-
 function nonEmptyString(
   value: unknown,
   path: string,
@@ -508,7 +526,6 @@ function nonEmptyString(
   issues.push({ path, message: "must be a non-empty string", code: "type" });
   return false;
 }
-
 function stringArray(
   value: unknown,
   path: string,
@@ -520,7 +537,6 @@ function stringArray(
   }
   value.forEach((entry, index) => nonEmptyString(entry, `${path}.${index}`, issues));
 }
-
 function configValueRecord(
   value: unknown,
   path: string,
@@ -563,7 +579,6 @@ function configValueRecord(
     }
   }
 }
-
 function isLiteralLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.startsWith("[") && hostname.endsWith("]")
     ? hostname.slice(1, -1)
@@ -573,7 +588,6 @@ function isLiteralLoopbackHostname(hostname: string): boolean {
   }
   return isIP(normalized) === 6 && normalized.toLowerCase() === "::1";
 }
-
 function isSecretBearingName(name: string, kind: "environment" | "header"): boolean {
   const normalized = name.toLowerCase();
   if (
@@ -586,7 +600,6 @@ function isSecretBearingName(name: string, kind: "environment" | "header"): bool
     normalized,
   );
 }
-
 function resolveMcpValues(
   values: Readonly<Record<string, McpConfigValue>>,
   kind: "environment" | "header",
@@ -609,7 +622,6 @@ function resolveMcpValues(
   }
   return output;
 }
-
 function assertSafeMcpHttpUrl(url: URL): void {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new Error("MCP HTTP transport requires an HTTP(S) URL");
@@ -621,7 +633,6 @@ function assertSafeMcpHttpUrl(url: URL): void {
     throw new Error("MCP plain HTTP transport requires a literal loopback IP address");
   }
 }
-
 /**
  * Fetch wrapper for MCP HTTP transports. Redirects are followed manually so
  * every hop is revalidated before configured headers can be forwarded.
@@ -634,6 +645,7 @@ export function createCheckedMcpFetch(
   assertSafeMcpHttpUrl(configuredUrl);
   const configuredOrigin = configuredUrl.origin;
   return async (input, init) => {
+    assertBoundedHttpRequestBody(init?.body);
     let current = new URL(input.toString());
     for (let redirects = 0; ; redirects += 1) {
       assertSafeMcpHttpUrl(current);
@@ -658,11 +670,22 @@ export function createCheckedMcpFetch(
     }
   };
 }
-
+function assertBoundedHttpRequestBody(body: RequestInit["body"] | undefined): void {
+  if (body === undefined || body === null) return;
+  let bytes: number;
+  if (typeof body === "string") bytes = Buffer.byteLength(body, "utf8");
+  else if (body instanceof URLSearchParams) bytes = Buffer.byteLength(body.toString(), "utf8");
+  else if (body instanceof Blob) bytes = body.size;
+  else if (body instanceof ArrayBuffer) bytes = body.byteLength;
+  else if (ArrayBuffer.isView(body)) bytes = body.byteLength;
+  else throw new Error("MCP HTTP transport rejects unsupported streaming request bodies");
+  if (bytes > MCP_MAX_FRAME_BYTES) {
+    throw new Error(`MCP HTTP request body exceeds ${MCP_MAX_FRAME_BYTES} bytes`);
+  }
+}
 function isRedirectStatus(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
-
 function boundedMcpResponse(response: Response): Response {
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
   const isEventStream = contentType.includes("text/event-stream");
@@ -688,7 +711,6 @@ function boundedMcpResponse(response: Response): Response {
     headers: response.headers,
   });
 }
-
 function boundedByteStream(maxBytes: number): TransformStream<Uint8Array, Uint8Array> {
   let total = 0;
   return new TransformStream<Uint8Array, Uint8Array>({
@@ -702,7 +724,6 @@ function boundedByteStream(maxBytes: number): TransformStream<Uint8Array, Uint8A
     },
   });
 }
-
 function boundedSseFrames(maxBytes: number): TransformStream<Uint8Array, Uint8Array> {
   let frameBytes = 0;
   let lineHasContent = false;
@@ -725,7 +746,6 @@ function boundedSseFrames(maxBytes: number): TransformStream<Uint8Array, Uint8Ar
     },
   });
 }
-
 function executionBaseline(environment: Readonly<Record<string, string | undefined>>): Record<string, string> {
   const output: Record<string, string> = Object.create(null) as Record<string, string>;
   for (const name of ["PATH", "HOME", "TMPDIR", "LANG", "SystemRoot", "ComSpec", "PATHEXT"]) {
@@ -734,11 +754,9 @@ function executionBaseline(environment: Readonly<Record<string, string | undefin
   }
   return output;
 }
-
 function isEnvironmentReference(value: unknown): value is { readonly $env: string } {
   return isRecord(value) && Object.keys(value).length === 1 && typeof value.$env === "string";
 }
-
 interface BoundedStdioMcpParameters {
   readonly command: string;
   readonly args: readonly string[];
@@ -747,7 +765,6 @@ interface BoundedStdioMcpParameters {
   /** Explicit configured values that must never appear in surfaced diagnostics. */
   readonly redactionValues?: readonly string[];
 }
-
 /**
  * Newline-delimited MCP transport that enforces the frame limit before UTF-8
  * decoding or JSON parsing. Exported only for focused transport verification.
@@ -769,7 +786,6 @@ export class BoundedStdioMcpTransport {
   #failed = false;
   #closed = false;
   #closePromise: Promise<void> | undefined;
-
   constructor(
     parameters: BoundedStdioMcpParameters,
     maxFrameBytes = MCP_MAX_FRAME_BYTES,
@@ -782,7 +798,6 @@ export class BoundedStdioMcpTransport {
       .filter((value) => value.length > 0)
       .sort((left, right) => right.length - left.length);
   }
-
   async start(): Promise<void> {
     if (this.#started) throw new Error("MCP stdio transport already started");
     this.#started = true;
@@ -1016,89 +1031,6 @@ async function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise
     }, timeoutMs);
     timer.unref();
   });
-}
-
-type McpTransportDelegate = {
-  start(): Promise<void>;
-  send(
-    message: Parameters<Transport["send"]>[0],
-    options?: Parameters<Transport["send"]>[1],
-  ): Promise<void>;
-  close(): Promise<void>;
-  onclose?: (() => void) | undefined;
-  onerror?: ((error: Error) => void) | undefined;
-  onmessage?: NonNullable<Transport["onmessage"]> | undefined;
-  readonly sessionId?: string | undefined;
-  setProtocolVersion?: ((version: string) => void) | undefined;
-};
-
-class BoundedMcpTransport {
-  onclose?: () => void;
-  onerror?: (error: Error) => void;
-  onmessage?: NonNullable<Transport["onmessage"]>;
-  readonly #delegate: McpTransportDelegate;
-  readonly #maxFrameBytes: number;
-  #closed = false;
-  #closePromise: Promise<void> | undefined;
-
-  constructor(delegate: McpTransportDelegate, maxFrameBytes: number) {
-    this.#delegate = delegate;
-    this.#maxFrameBytes = maxFrameBytes;
-  }
-
-  get sessionId(): string | undefined {
-    return this.#delegate.sessionId;
-  }
-
-  setProtocolVersion(version: string): void {
-    this.#delegate.setProtocolVersion?.(version);
-  }
-
-  async start(): Promise<void> {
-    this.#delegate.onclose = () => this.#notifyClose();
-    this.#delegate.onerror = (error) => this.onerror?.(error);
-    this.#delegate.onmessage = (message, extra) => {
-      try {
-        assertMcpFrameBound(message, this.#maxFrameBytes);
-        this.onmessage?.(message, extra);
-      } catch (error) {
-        const boundedError = error instanceof Error ? error : new Error(String(error));
-        this.onerror?.(boundedError);
-        void this.close();
-      }
-    };
-    await this.#delegate.start();
-  }
-
-  async send(
-    message: Parameters<Transport["send"]>[0],
-    options?: Parameters<Transport["send"]>[1],
-  ): Promise<void> {
-    assertMcpFrameBound(message, this.#maxFrameBytes);
-    await this.#delegate.send(message, options);
-  }
-
-  close(): Promise<void> {
-    this.#closePromise ??= (async () => {
-      try {
-        await this.#delegate.close();
-      } finally {
-        this.#notifyClose();
-      }
-    })();
-    return this.#closePromise;
-  }
-
-  #notifyClose(): void {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.onclose?.();
-  }
-}
-
-function assertMcpFrameBound(message: unknown, maxBytes: number): void {
-  const bytes = jsonByteLength(message, "MCP transport frame");
-  if (bytes > maxBytes) throw new Error(`MCP transport frame exceeds ${maxBytes} bytes`);
 }
 
 function jsonByteLength(value: unknown, label: string): number {

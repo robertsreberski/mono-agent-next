@@ -61,6 +61,18 @@ provider, schema, embedding, or timeout failure leaves bounded durable intake
 for explicit retry. Recall uses bounded FTS candidates and can combine matching
 Ollama vectors; embedding failure degrades to FTS, never invented matches.
 
+With `recallTool.enabled: true`, Core exposes
+`MemoryRecall({ "query": "...", "limit": 8 })` on tool-capable routes. `query`
+is required, trimmed, and bounded to 64 KiB UTF-8; `limit` defaults to 8 and is
+bounded from 1 through 50. Results contain text-only records plus an
+untrusted-evidence warning, never module-private record metadata. The tool is
+read-only, approval-free, subject to global and request-local tool policy, and
+bound to the active conversation and turn cancellation signal.
+Use active conversation history—not durable recall—for current or last-message
+questions. Setting the flag to `false` removes the model-visible tool while
+leaving automatic pre-turn recall available. Core always reserves the exact
+`MemoryRecall` name against MCP and channel impersonation.
+
 Audit, backup, consolidation, rebuild, forget preview/confirmation, and intake
 retry remain explicit package or `mono-agent memory` operations. `mono-agent
 doctor` performs read-only diagnostics and never captures, retries, rebuilds,

@@ -84,14 +84,14 @@ function turnContext(
   };
 }
 
-function fauxRuntime(options: { tokensPerSecond?: number; authPath?: string } = {}): {
+function fauxRuntime(options: { tokensPerSecond?: number; authPath?: string; attachments?: boolean } = {}): {
   runtime: Runtime;
   faux: ReturnType<typeof fauxProvider>;
   models: Models;
 } {
   const faux = fauxProvider({
     provider: "faux",
-    models: [{ id: "faux-model", reasoning: true, input: ["text"] }],
+    models: [{ id: "faux-model", reasoning: true, input: options.attachments ? ["text", "image"] : ["text"] }],
     ...(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond }),
   });
   const models = createModels();
@@ -183,6 +183,39 @@ describe("Pi-native runtime module", () => {
     await stop(runtime);
   });
 
+  it("labels normalized attachments with their trusted ids without inventing filesystem paths", async () => {
+    const { runtime, faux } = fauxRuntime({ attachments: true });
+    let providerMessages = "";
+    faux.setResponses([(context) => {
+      providerMessages = JSON.stringify(context.messages);
+      return fauxAssistantMessage([fauxText("attachments visible")]);
+    }]);
+    await start(runtime);
+    await runtime.runTurn(request("inspect", {
+      messages: [{
+        role: "user",
+        content: [{
+          type: "attachment",
+          attachment: {
+            id: "trusted-file", kind: "file", name: "notes.txt", mediaType: "text/plain",
+            sizeBytes: 3, data: new Uint8Array([111, 110, 101]),
+          },
+        }, {
+          type: "attachment",
+          attachment: {
+            id: "trusted-image", kind: "image", name: "scan.png", mediaType: "image/png",
+            sizeBytes: 3, data: new Uint8Array([1, 2, 3]),
+          },
+        }],
+      }],
+    }), turnContext().context);
+    expect(providerMessages).toContain("trusted-file");
+    expect(providerMessages).toContain("trusted-image");
+    expect(providerMessages).toContain("attachment_id=");
+    expect(providerMessages).not.toContain(".mono-agent/data/core/mcp-runs");
+    await stop(runtime);
+  });
+
   it("keeps provider-native tool order aligned with preflight authority", async () => {
     const { runtime, faux } = fauxRuntime();
     let providerToolNames: string[] = [];
@@ -203,37 +236,129 @@ describe("Pi-native runtime module", () => {
     await stop(runtime);
   });
 
-  it("delegates Pi tool calls through the host context and emits normalized tool events", async () => {
+  it("exposes Core-owned MemoryRecall through Pi and emits normalized tool events", async () => {
     const { runtime, faux } = fauxRuntime();
     faux.setResponses([
-      fauxAssistantMessage([fauxToolCall("Echo", { value: "hello" }, { id: "call-1" })]),
+      fauxAssistantMessage([fauxToolCall("MemoryRecall", { query: "durable preference" }, { id: "call-1" })]),
       fauxAssistantMessage([fauxText("tool complete")]),
     ]);
     const executeTool = vi.fn(async (call: RuntimeToolCall, _signal: AbortSignal) => ({
       callId: call.id,
-      content: [{ type: "text" as const, text: `echo:${(call.input as { value: string }).value}` }],
+      content: [{ type: "json" as const, value: { records: [{ text: "concise output" }] } }],
     }));
     const { context, events } = turnContext(executeTool);
     await start(runtime);
     const result = await runtime.runTurn(request("use the tool", {
       tools: [{
-        name: "Echo",
-        description: "Echo a value.",
+        name: "MemoryRecall",
+        description: "Recall durable memory.",
         inputSchema: {
           type: "object",
           additionalProperties: false,
-          required: ["value"],
-          properties: { value: { type: "string" } },
+          required: ["query"],
+          properties: { query: { type: "string" } },
         },
       }],
     }), context);
 
     expect(result.message?.content).toContainEqual({ type: "text", text: "tool complete" });
     expect(executeTool).toHaveBeenCalledTimes(1);
-    expect(executeTool.mock.calls[0]?.[0]).toEqual({ id: "call-1", name: "Echo", input: { value: "hello" } });
+    expect(executeTool.mock.calls[0]?.[0]).toEqual({
+      id: "call-1",
+      name: "MemoryRecall",
+      input: { query: "durable preference" },
+    });
     expect(executeTool.mock.calls[0]?.[1]).toBeInstanceOf(AbortSignal);
-    expect(events).toContainEqual({ type: "tool-call", call: { id: "call-1", name: "Echo", input: { value: "hello" } } });
+    expect(events).toContainEqual({
+      type: "tool-call",
+      call: {
+        id: "call-1",
+        name: "MemoryRecall",
+        input: { query: "durable preference" },
+      },
+    });
     expect(events.some((event) => event.type === "tool-result")).toBe(true);
+    await stop(runtime);
+  });
+
+  it("executes Core-owned AskUser through Pi and continues with its structured answer", async () => {
+    const { runtime, faux } = fauxRuntime();
+    const questions = [{
+      id: "tone",
+      prompt: "Which tone should I use?",
+      choices: [
+        { value: "concise", label: "Concise", description: "Keep it short." },
+        { value: "detailed", label: "Detailed" },
+      ],
+      allowFreeText: false,
+      multiple: false,
+    }, {
+      id: "notes",
+      prompt: "Any other constraints?",
+      allowFreeText: true,
+      multiple: false,
+    }];
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("AskUser", { questions }, { id: "ask-1" })]),
+      (providerContext) => fauxAssistantMessage([fauxText(
+        JSON.stringify(providerContext.messages).includes("No jargon.")
+          ? "structured answer observed"
+          : "structured answer missing",
+      )]),
+    ]);
+    const executeTool = vi.fn(async (call: RuntimeToolCall, signal: AbortSignal) => {
+      signal.throwIfAborted();
+      return {
+        callId: call.id,
+        content: [{
+          type: "json" as const,
+          value: {
+            interactionId: "interaction-1",
+            answers: { tone: ["concise"], notes: ["No jargon."] },
+            answeredAt: "2026-07-24T00:00:00.000Z",
+          },
+        }],
+      };
+    });
+    const { context, events } = turnContext(executeTool);
+    await start(runtime);
+    const result = await runtime.runTurn(request("ask before answering", {
+      tools: [{
+        name: "AskUser",
+        description: "Ask the user and wait for a structured answer.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["questions"],
+          properties: { questions: { type: "array", minItems: 1, maxItems: 3 } },
+        },
+      }],
+    }), context);
+
+    expect(result.message?.content).toContainEqual({ type: "text", text: "structured answer observed" });
+    expect(executeTool).toHaveBeenCalledWith({
+      id: "ask-1",
+      name: "AskUser",
+      input: { questions },
+    }, expect.any(AbortSignal));
+    expect(events).toContainEqual({
+      type: "tool-call",
+      call: { id: "ask-1", name: "AskUser", input: { questions } },
+    });
+    expect(events).toContainEqual({
+      type: "tool-result",
+      result: {
+        callId: "ask-1",
+        content: [{
+          type: "json",
+          value: {
+            interactionId: "interaction-1",
+            answers: { tone: ["concise"], notes: ["No jargon."] },
+            answeredAt: "2026-07-24T00:00:00.000Z",
+          },
+        }],
+      },
+    });
     await stop(runtime);
   });
 

@@ -218,14 +218,14 @@ function textAndImages(parts: readonly TurnContentPart[]): { text: string; image
         });
       } else text.push(filePartText(part));
     } else if (part.type === "attachment") {
+      text.push(`[Attached file attachment_id=${JSON.stringify(part.attachment.id)} `
+        + `name=${JSON.stringify(part.attachment.name)} media_type=${JSON.stringify(part.attachment.mediaType)}]`);
       if (part.attachment.kind === "image") {
         images.push({
           type: "image",
           data: Buffer.from(part.attachment.data).toString("base64"),
           mimeType: part.attachment.mediaType,
         });
-      } else {
-        text.push(`[Attached file ${JSON.stringify(part.attachment.name)} (${part.attachment.mediaType})]`);
       }
     }
   }

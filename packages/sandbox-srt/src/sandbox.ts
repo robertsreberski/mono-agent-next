@@ -462,6 +462,7 @@ function boundNodeLaunch(
   return Object.freeze({
     command: process.execPath,
     arguments: Object.freeze([
+      "--disable-warning=DEP0205",
       "--import",
       registrationUrl,
       "--input-type=module",

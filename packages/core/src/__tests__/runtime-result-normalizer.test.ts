@@ -368,6 +368,19 @@ describe("runtime live boundary", () => {
     }, boundary)).toThrow(/already violated/u);
   });
 
+  it("accepts bounded transient activity and poisons oversized activity", () => {
+    const boundary = createRuntimeTurnEventBoundary();
+    expect(normalizeEvent({ type: "activity", text: "Transcribed 25%" }, boundary)).toEqual({
+      type: "activity",
+      text: "Transcribed 25%",
+    });
+    expect(() => normalizeEvent({
+      type: "activity",
+      text: "x".repeat(16 * 1024 + 1),
+    }, boundary)).toThrow(/text.*byte boundary/u);
+    expect(boundary.violation).toBeInstanceOf(Error);
+  });
+
   it("poisons an event stream after a single, cumulative-byte, or count violation", () => {
     const oversized = createRuntimeTurnEventBoundary();
     expect(() => normalizeEvent({

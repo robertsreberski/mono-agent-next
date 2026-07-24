@@ -93,6 +93,84 @@ settings such as `NODE_ENV`, `Accept`, or tenant identifiers:
 }
 ```
 
+Ordinary MCP servers receive only those configured environment values or
+headers. The sole request-context exception is explicit in agent config:
+
+```json
+{
+  "context": {
+    "mcp": {
+      "configPath": "./.mcp.json",
+      "requestContextServers": ["transcribe"]
+    }
+  }
+}
+```
+
+At most 32 unique names may be selected, and each must resolve to an existing
+direct `stdio` transport; omitted is off, while missing, duplicate, and HTTP
+transport selections fail validation. Core stages current-request attachments into
+owner-private per-run storage and adds immutable
+`_meta["com.mono-agent/request-context"]` schema version 1 only at dispatch. It
+contains current conversation/run identity, attachment ids and exact
+path/device/inode allowlists, and the current run's output directory. A tool
+uses `attachment_id` to select one staged `attachments[].id`; every `dev` and
+`ino` is a canonical unsigned-decimal string, never a JSON number. Model
+arguments cannot inject or widen the reserved metadata. Personal transcription
+rejects `file_path` by default. Its legacy path mode requires the bounded,
+static `TRANSCRIBE_LOCAL_PATH_ROOTS` absolute-directory allowlist, which cannot
+select Core's managed attachments root.
+
+MCP progress is capped at 256 events and 256 KiB, then redacted and normalized
+to a 16 KiB transient activity. It resets only the 120-second idle timeout,
+never the 45-minute hard total deadline, and does not enter canonical history.
+The grant supplies no arbitrary path, process-start environment, HTTP transport,
+continuation, channel-destination, or child-run authority.
+It is not a sandbox or locality proof for the configured command: that command
+may proxy remotely, use the network, or forward/exfiltrate the grant. A
+persistent selected process sees all selected calls and can race or mix runs.
+Core redacts plain request-context paths and configured secrets from results,
+errors, progress, previews, and artifact envelopes before model delivery, but
+cannot identify encoded or binary leakage. Device/inode binding and private
+cleanup claims protect trusted-code routing and static replacement, not
+cryptographic provenance or malicious same-UID races. Unprovable cleanup is
+retained, degrades host health (currently a status-only public signal), and can
+leave a source path relocated when safe no-overwrite restoration is impossible.
+Normal completion, failure, and cancellation clean staged runs, but `SIGKILL`,
+power loss, or host crash may retain owner-only residue. Restart does not infer
+staleness from PID or age and never auto-deletes without a cross-process lease.
+Until lease-backed recovery lands before GA, maintenance requires all project
+hosts proven stopped, an explicit exact run id, and owner/non-symlink/directory
+verification; broad roots, globs, discovery, and age-based deletion are
+forbidden.
+
+A selected producer returns one safe `outputName` basename, optionally with
+bounded identifiers and metadata, but no absolute-path field. Host-bound
+channel delivery resolves only that basename inside the current run.
+
+When selected memory advertises `capabilities.recallTool: true`, Core offers the
+read-only `MemoryRecall` tool to ordinary runtime requests subject to global
+and request-local tool policy. As a read-only Core operation it never requires
+effect approval. It accepts a required, trimmed natural-language `query` of at
+most 64 KiB UTF-8 plus an optional `limit` from 1 through 50 (default 8), binds
+recall to the current conversation and turn signal, and returns at most that
+many text-only records with an untrusted-evidence warning. Module-private
+record metadata never crosses the tool boundary. Disabling the tool does not
+disable Core's separate automatic pre-turn recall, and `MemoryRecall` remains
+reserved against MCP/channel impersonation even when no model-visible recall
+tool is active.
+
+When a direct interaction handler or the originating channel exposes AskUser,
+Core also offers a reserved `AskUser` request tool. Global and request-local
+tool policy can remove it; approval policy cannot add a second prompt because
+the tool is itself an effect-free Core-mediated interaction. The model supplies
+one to three canonical questions with bounded choices and/or free text, while
+Core generates interaction identity and time, validates the shared
+module-sdk request and answer contracts, binds the active attempt signal, and
+returns the structured answer for provider continuation. The name remains
+reserved against MCP and channel impersonation even when no interaction bridge
+is available.
+
 ## Architecture
 
 ### Data flow
@@ -126,6 +204,14 @@ Selected channels receive assistant and transient-thinking deltas separately.
 Tool calls and results cross that boundary only after Core recursively redacts
 known secrets and replaces file/artifact bodies with bounded omission text;
 provider thoughts and tool internals remain outside canonical durable replay.
+
+When an MCP produces a file under its supplied current-run output directory, it
+returns a safe basename rather than a path capability. A channel send tool may
+request that basename through
+`ChannelSendToolContext.readCurrentRunOutput({ name, maxBytes })`. Core caps
+the request at 25,000,000 bytes, performs a stable no-follow regular
+single-link read from that run only, and returns normalized attachment bytes.
+Channels receive no ambient filesystem authority.
 
 Eligibility is derived from the submitted request as well as explicit
 requirements: attachments, structured-output schemas, `maxTurns`, and
@@ -163,12 +249,12 @@ resent.
 | `authority-read.ts` | Bounded descriptor reads, stable file identity, UTF-8 decoding, and source digests. |
 | `module-loader.ts` | Dependency, lockfile, manifest, kind, and API checks. |
 | `schema.ts` | Exact schema composition and redacted explanation. |
-| `mcp.ts` | Ordinary project stdio and HTTP MCP clients plus Core tool identity. |
+| `mcp.ts` | Ordinary project stdio and HTTP MCP clients, opt-in selected-stdio per-call request context, and Core tool identity. |
 | `native-tool-policy.ts` | Runtime-owned tool, approval, request-narrowing, and sandbox-policy intersection. |
 | `state-execution-client.ts` | Typed, bounded, fail-closed client for the state module's opaque execution protocol. Durable storage formats remain state-owned. |
 | `bounded-value.ts` | Shared descriptor-safe snapshots and exact object/array boundary checks. |
 | `run-history-tool.ts` | Conversation-scoped, redacted, untrusted historical run evidence for capable runtimes. |
-| `host.ts` | Admission, serialized turns, exact sessions, safe fallback, settlement, lifecycle, and health. |
+| `host.ts` | Admission, serialized turns, exact sessions, safe fallback, model-visible memory recall and AskUser, settlement, lifecycle, and health. |
 
 ## Public API
 
@@ -282,6 +368,7 @@ management, and product configuration remain outside core.
 
 - [V1 architecture](../../docs/reference/v1-architecture.md)
 - [Capability ladder](../../docs/reference/capability-ladder.md)
+- [Project MCP](../../docs/tools/mcp.md)
 
 ## Verification
 
@@ -290,4 +377,6 @@ tests cover strict config rejection, dependency and package preflight, lifecycle
 ordering and unwind, atomic request deduplication and restart replay, stale-run
 classification, exact session continuation, append-only transcripts,
 interaction evidence, delivery idempotency, fallback policy, redaction, and
-MCP.
+MCP, including request-context reference validation, staged-file identity,
+metadata spoofing, transient progress, cleanup, bounds, cancellation, and
+current-run output isolation.
