@@ -44,9 +44,9 @@ export function markdownLinks(markdown) {
   /** @type {string | undefined} */
   let fenceMarker;
   for (const line of markdown.split("\n")) {
-    const fence = markdownFence(line);
+    const fence = parseMarkdownFence(line);
     if (fenceMarker !== undefined) {
-      if (fence !== undefined && closesFence(fence, fenceMarker)) {
+      if (fence !== undefined && closesMarkdownFence(fence, fenceMarker)) {
         fenceMarker = undefined;
       }
       continue;
@@ -88,7 +88,7 @@ export function balanceFences(markdown, startOffset, endOffset) {
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
     const isCompleteLine = completeSliceLine(index, lines.length, startsAtLineBoundary, endsAtLineBoundary);
-    const fence = isCompleteLine ? markdownFence(line) : undefined;
+    const fence = isCompleteLine ? parseMarkdownFence(line) : undefined;
     if (openingMarker === undefined) {
       if (fence === undefined) {
         output.push(line);
@@ -106,7 +106,7 @@ export function balanceFences(markdown, startOffset, endOffset) {
       }
       continue;
     }
-    if (fence !== undefined && closesFence(fence, openingMarker)) {
+    if (fence !== undefined && closesMarkdownFence(fence, openingMarker)) {
       output.push(`${fence.indent}${renderMarker ?? syntheticFence(openingMarker)}`);
       openingMarker = undefined;
       renderMarker = undefined;
@@ -173,10 +173,10 @@ function activeFence(markdown, offset) {
     : lines.length - 1;
   for (let index = 0; index < completeLineCount; index += 1) {
     const line = lines[index] ?? "";
-    const fence = markdownFence(line);
+    const fence = parseMarkdownFence(line);
     if (fence === undefined) continue;
     if (active === undefined) active = { marker: fence.marker };
-    else if (closesFence(fence, active.marker)) active = undefined;
+    else if (closesMarkdownFence(fence, active.marker)) active = undefined;
   }
   return active;
 }
@@ -185,7 +185,7 @@ function activeFence(markdown, offset) {
  * @param {string} line
  * @returns {MarkdownFence | undefined}
  */
-function markdownFence(line) {
+export function parseMarkdownFence(line) {
   const match = /^(\s{0,3})(`{3,}|~{3,})(.*)$/u.exec(line);
   const marker = match?.[2];
   return marker === undefined
@@ -198,7 +198,7 @@ function markdownFence(line) {
  * @param {string} openingMarker
  * @returns {boolean}
  */
-function closesFence(candidate, openingMarker) {
+export function closesMarkdownFence(candidate, openingMarker) {
   return candidate.marker[0] === openingMarker[0]
     && candidate.marker.length >= openingMarker.length
     && candidate.trailing.trim().length === 0;
@@ -228,10 +228,10 @@ function safeSyntheticFence(
   let longestBacktick = 2;
   let longestTilde = 2;
   for (let index = startIndex; index < lines.length; index += 1) {
-    const fence = markdownFence(lines[index] ?? "");
+    const fence = parseMarkdownFence(lines[index] ?? "");
     if (fence === undefined) continue;
     const isCompleteLine = completeSliceLine(index, lines.length, startsAtLineBoundary, endsAtLineBoundary);
-    if (isCompleteLine && closesFence(fence, openingMarker)) break;
+    if (isCompleteLine && closesMarkdownFence(fence, openingMarker)) break;
     if (fence.trailing.trim().length !== 0) continue;
     if (fence.marker[0] === "`") longestBacktick = Math.max(longestBacktick, fence.marker.length);
     else longestTilde = Math.max(longestTilde, fence.marker.length);

@@ -153,7 +153,7 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     await expect(access(outputDirectory)).rejects.toThrow();
   });
 
-  it("does not expose links after a fence-like line with trailing content", () => {
+  it("keeps fence-like lines with trailing content inside code across runtime and corpus parsing", async () => {
     expect(markdownLinks([
       "```md",
       "```still-code",
@@ -163,6 +163,37 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     ].join("\n"))).toEqual([
       { label: "visible", href: "docs/visible.md" },
     ]);
+
+    const root = await mkdtemp(join(tmpdir(), "mono-agent-docs-fence-parser-"));
+    temporaryDirectories.push(root);
+    const docsRoot = join(root, "docs");
+    const outputDirectory = join(root, "output");
+    await mkdir(docsRoot, { recursive: true });
+    await writeFile(join(docsRoot, "fixture.md"), [
+      "# Fixture",
+      "```md",
+      "```still-code",
+      "## Hidden heading",
+      "[hidden](docs/hidden.md)",
+      "```",
+      "## Visible heading",
+    ].join("\n"), "utf8");
+
+    await execFileAsync(process.execPath, [
+      join(packageRoot, "scripts", "generate-corpus.mjs"),
+      "--docs-root",
+      docsRoot,
+      "--output-directory",
+      outputDirectory,
+    ], { cwd: packageRoot });
+    const documents = JSON.parse(await readFile(join(outputDirectory, "documents.json"), "utf8")) as Array<{
+      headings: Array<{ text: string }>;
+    }>;
+    const chunks = JSON.parse(await readFile(join(outputDirectory, "chunks.json"), "utf8")) as Array<{
+      headingPath: string[];
+    }>;
+    expect(documents[0]?.headings.map((heading) => heading.text)).toEqual(["Fixture", "Visible heading"]);
+    expect(chunks.every((chunk) => !chunk.headingPath.includes("Hidden heading"))).toBe(true);
   });
 
   it("finds paraphrased concepts and exact identifiers as expanded, section-deduplicated excerpts", async () => {

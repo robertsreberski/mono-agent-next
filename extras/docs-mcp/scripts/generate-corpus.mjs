@@ -8,9 +8,11 @@ import GithubSlugger from "github-slugger";
 
 import {
   assertUniqueDocumentLocations,
+  closesMarkdownFence,
   findDocumentByLogicalPath,
   markdownLinks,
   normalizeRoute,
+  parseMarkdownFence,
   safeDecode,
 } from "../src/markdown-helpers.js";
 
@@ -199,9 +201,9 @@ function parseDocument(source) {
   };
 
   for (const line of markdownLines(markdown)) {
-    const fence = /^\s{0,3}(`{3,}|~{3,})/u.exec(line.text)?.[1];
+    const fence = parseMarkdownFence(line.text);
     if (fenceMarker !== undefined) {
-      if (fence !== undefined && fence[0] === fenceMarker[0] && fence.length >= fenceMarker.length) {
+      if (fence !== undefined && closesMarkdownFence(fence, fenceMarker)) {
         flushBlock(line.endOffset, "fence");
         fenceMarker = undefined;
       }
@@ -209,7 +211,7 @@ function parseDocument(source) {
     }
     if (fence !== undefined) {
       flushBlock(line.startOffset);
-      fenceMarker = fence;
+      fenceMarker = fence.marker;
       blockStart = line.startOffset;
       blockHeadingPath = [...headingPath];
       blockAnchor = currentAnchor;
@@ -303,11 +305,13 @@ function chunkDocument(document, blocks) {
 function splitOversizedBlock(block) {
   if (block.text.length <= MAX_CHUNK_CHARACTERS) return [block];
   const lines = block.text.split("\n");
-  const openingFence = /^\s{0,3}(`{3,}|~{3,})/u.exec(lines[0] ?? "")?.[1];
+  const openingFence = parseMarkdownFence(lines[0] ?? "");
   const closingLine = openingFence === undefined ? undefined : lines.at(-1);
-  const closesFence = openingFence !== undefined && closingLine !== undefined
-    && new RegExp(`^\\s{0,3}${escapeRegExp(openingFence[0])}{${openingFence.length},}\\s*$`, "u").test(closingLine);
-  if (openingFence !== undefined && closesFence) {
+  const closingFence = closingLine === undefined ? undefined : parseMarkdownFence(closingLine);
+  const hasClosingFence = openingFence !== undefined
+    && closingFence !== undefined
+    && closesMarkdownFence(closingFence, openingFence.marker);
+  if (openingFence !== undefined && hasClosingFence) {
     const openingLine = lines[0];
     const bodyStart = block.startOffset + openingLine.length + 1;
     const body = lines.slice(1, -1).join("\n");
@@ -524,8 +528,4 @@ function sha256(bytes) {
 
 function toPosixPath(path) {
   return path.split(sep).join("/");
-}
-
-function escapeRegExp(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
