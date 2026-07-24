@@ -202,7 +202,7 @@ async function main() {
       },
     );
     const scenarioProof = assertScenarioOutput(scenario.stdout);
-    assertProviderRequests(provider.requests);
+    assertProviderRequests(provider.requests, scenarioProof);
     assertOtlpRequests(otlpReceiver.requests);
     assertDeliveryRequests(
       deliveryReceiver.requests,
@@ -1489,9 +1489,11 @@ import {
   createOperatorClientForEntry,
   discoverOperators,
 } from "@mono-agent/operator";
+import { startWebServer } from "@mono-agent/web";
 
 const EXPECTED_REPLY = "mono-agent-next durable provider fact 7d3f9c";
 const MEMORY_QUERY = "packed-memory-query-a41c";
+const WEB_TOKEN = "packed-system-web-token-0000000000000001";
 const configPath = resolve(process.argv[2] ?? "mono-agent.config.json");
 const configDirectory = dirname(configPath);
 const webhookSecret = requiredEnvironment("SYSTEM_WEBHOOK_TOKEN");
@@ -1499,6 +1501,7 @@ const operatorSecret = requiredEnvironment("SYSTEM_OPERATOR_TOKEN");
 const deliverySecret = requiredEnvironment("SYSTEM_DELIVERY_TOKEN");
 let firstHost;
 let secondHost;
+let webServer;
 
 try {
   firstHost = await createAgentHost(configPath, { drainTimeoutMs: 5000, lifecycleTimeoutMs: 5000 });
@@ -1536,6 +1539,24 @@ try {
   assert.equal(completed.finalMessage.text, EXPECTED_REPLY);
   const recalledReplay = await persisted.client.getReplay("packed-memory-recall");
   assert.equal(recalledReplay.messages.length, 2);
+  assert.equal(typeof completed.finalMessage.id, "string");
+  assert.equal(completed.finalMessage.id, recalledReplay.messages.at(-1).id);
+
+  webServer = await startWebServer({
+    config: {
+      configVersion: 1,
+      listen: { host: "127.0.0.1", port: 0 },
+      auth: { token: WEB_TOKEN },
+      dataDirectory: resolve(configDirectory, ".mono-agent", "web-system-proof"),
+      agentRegistries: [resolve(configDirectory, ".mono-agent", "trace-sources")],
+      externalOrigins: [],
+      sourcePath: resolve(configDirectory, "web-system-proof.config.json"),
+    },
+    environment: process.env,
+  });
+  const webQuoteProof = await proveWebQuoteIdentity(webServer, persisted.client);
+  await webServer.stop();
+  webServer = undefined;
 
   const duplicate = await secondHost.runModuleCommand("cron", "trigger-cron:invoke", {
     jobId: "packed-system",
@@ -1573,8 +1594,10 @@ try {
     firstCron: firstCron.value,
     duplicateCron: duplicate.value,
     operatorFrames: operatorFrames.map((frame) => frame.type),
+    webQuoteProof,
   }) + "\n");
 } finally {
+  if (webServer !== undefined) await within(webServer.stop(), 5000, "web server failure cleanup").catch(() => undefined);
   if (firstHost !== undefined) await within(firstHost.stop(), 5000, "first host failure cleanup").catch(() => undefined);
   if (secondHost !== undefined) await within(secondHost.stop(), 5000, "second host failure cleanup").catch(() => undefined);
 }
@@ -1650,6 +1673,100 @@ async function proveOperatorSurfaces(endpoint, conversationId, expectedMessages)
   return { client, info, replay, config, health };
 }
 
+async function proveWebQuoteIdentity(server, operator) {
+  const createdResponse = await webFetch(server, "api/v1/threads", {
+    method: "POST",
+    json: { agentId: "packed-system", title: "Authoritative quote identity" },
+  });
+  const createdBody = await createdResponse.text();
+  assert.equal(createdResponse.status, 201, createdBody);
+  const thread = JSON.parse(createdBody);
+  assert.equal(typeof thread.operatorConversationId, "string");
+
+  const firstTurn = await webFetch(
+    server,
+    "api/v1/threads/" + encodeURIComponent(thread.id) + "/turns",
+    { method: "POST", json: { text: "prove authoritative quote identity" } },
+  );
+  const firstFrames = await firstTurn.text();
+  assert.equal(firstTurn.status, 200, firstFrames);
+  assert.equal(parseNdjson(firstFrames).at(-1)?.type, "done");
+
+  const firstDetail = await webJson(
+    server,
+    "api/v1/threads/" + encodeURIComponent(thread.id),
+  );
+  const firstAssistant = lastAssistant(firstDetail);
+  assert.equal(typeof firstAssistant.operatorMessageId, "string");
+  const firstReplay = await operator.getReplay(thread.operatorConversationId);
+  assert.equal(firstAssistant.operatorMessageId, firstReplay.messages.at(-1)?.id);
+
+  const quotedTurn = await webFetch(
+    server,
+    "api/v1/threads/" + encodeURIComponent(thread.id) + "/turns",
+    {
+      method: "POST",
+      json: {
+        text: "quote the prior answer",
+        quote: {
+          conversationId: thread.operatorConversationId,
+          messageId: firstAssistant.operatorMessageId,
+          text: firstAssistant.text,
+        },
+      },
+    },
+  );
+  const quotedFrames = await quotedTurn.text();
+  assert.equal(quotedTurn.status, 200, quotedFrames);
+  assert.equal(parseNdjson(quotedFrames).at(-1)?.type, "done");
+
+  const quotedDetail = await webJson(
+    server,
+    "api/v1/threads/" + encodeURIComponent(thread.id),
+  );
+  const quotedAssistant = lastAssistant(quotedDetail);
+  assert.equal(typeof quotedAssistant.operatorMessageId, "string");
+  assert.notEqual(quotedAssistant.operatorMessageId, firstAssistant.operatorMessageId);
+  const quotedReplay = await operator.getReplay(thread.operatorConversationId);
+  assert.equal(quotedAssistant.operatorMessageId, quotedReplay.messages.at(-1)?.id);
+  return {
+    conversationId: thread.operatorConversationId,
+    firstMessageId: firstAssistant.operatorMessageId,
+    quotedMessageId: quotedAssistant.operatorMessageId,
+  };
+}
+
+async function webFetch(server, path, options = {}) {
+  const headers = new Headers({ authorization: "Bearer " + WEB_TOKEN });
+  let body;
+  if (options.json !== undefined) {
+    headers.set("content-type", "application/json");
+    body = JSON.stringify(options.json);
+  }
+  return fetch(new URL(path, server.url), {
+    method: options.method ?? "GET",
+    headers,
+    ...(body === undefined ? {} : { body }),
+  });
+}
+
+async function webJson(server, path) {
+  const response = await webFetch(server, path);
+  const body = await response.text();
+  assert.equal(response.status, 200, path + " returned " + String(response.status) + ": " + body);
+  return JSON.parse(body);
+}
+
+function parseNdjson(body) {
+  return body.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function lastAssistant(detail) {
+  const message = detail?.messages?.filter((entry) => entry.role === "assistant").at(-1);
+  assert.ok(message, "web thread has no assistant message");
+  return message;
+}
+
 async function stopHost(host, label) {
   await within(host.drain(), 5000, label + " drain");
   await within(host.stop(), 5000, label + " stop");
@@ -1709,10 +1826,22 @@ function assertScenarioOutput(stdout) {
   if (!parsed.operatorFrames?.includes("completed")) {
     throw new Error(`Packed scenario did not complete an operator turn: ${stdout}`);
   }
-  return { expectedCronKey: expectedKey };
+  if (
+    typeof parsed.webQuoteProof?.conversationId !== "string"
+    || typeof parsed.webQuoteProof?.firstMessageId !== "string"
+    || typeof parsed.webQuoteProof?.quotedMessageId !== "string"
+    || parsed.webQuoteProof.firstMessageId === parsed.webQuoteProof.quotedMessageId
+  ) {
+    throw new Error(`Packed scenario did not prove authoritative web quote identities: ${stdout}`);
+  }
+  return {
+    expectedCronKey: expectedKey,
+    webConversationId: parsed.webQuoteProof.conversationId,
+    firstWebMessageId: parsed.webQuoteProof.firstMessageId,
+  };
 }
 
-function assertProviderRequests(requests) {
+function assertProviderRequests(requests, scenarioProof) {
   for (const request of requests) {
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
       throw new Error(`Unexpected provider request: ${JSON.stringify(request)}`);
@@ -1723,9 +1852,9 @@ function assertProviderRequests(requests) {
   }
   const captureRequests = requests.filter((request) => isStructuredCaptureRequest(request.parsed));
   const userRequests = requests.filter((request) => !isStructuredCaptureRequest(request.parsed));
-  if (captureRequests.length !== 3 || userRequests.length !== 7) {
+  if (captureRequests.length !== 5 || userRequests.length !== 9) {
     throw new Error(
-      `Fake provider expected seven agent turns and three memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
+      `Fake provider expected nine agent turns and five memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
     );
   }
   const userInputs = userRequests.map((request) => finalProviderUserText(request.parsed));
@@ -1737,9 +1866,24 @@ function assertProviderRequests(requests) {
     MEMORY_QUERY,
     "Run the packed system cron proof.",
     MEMORY_QUERY,
+    "prove authoritative quote identity",
   ];
-  if (JSON.stringify(userInputs) !== JSON.stringify(expectedInputs)) {
-    throw new Error(`Packed provider user inputs must be ${JSON.stringify(expectedInputs)}; found ${JSON.stringify(userInputs)}`);
+  if (JSON.stringify(userInputs.slice(0, expectedInputs.length)) !== JSON.stringify(expectedInputs)) {
+    throw new Error(`Packed provider user inputs must begin ${JSON.stringify(expectedInputs)}; found ${JSON.stringify(userInputs)}`);
+  }
+  const projectedQuote = /^Quoted message \(verified from conversation replay\):\n(.+)\n\nUser message:\nquote the prior answer$/u
+    .exec(userInputs.at(-1) ?? "");
+  if (projectedQuote === null) {
+    throw new Error(`Packed web quote was not projected into the provider input: ${JSON.stringify(userInputs.at(-1))}`);
+  }
+  const quote = JSON.parse(projectedQuote[1]);
+  if (
+    quote.conversationId !== scenarioProof.webConversationId
+    || quote.messageId !== scenarioProof.firstWebMessageId
+    || quote.role !== "assistant"
+    || quote.text !== EXPECTED_REPLY
+  ) {
+    throw new Error(`Packed web quote projection did not preserve authoritative replay identity: ${projectedQuote[1]}`);
   }
   for (const personalRequest of [userRequests[1], userRequests[2]]) {
     if (!JSON.stringify(personalRequest.parsed.tools ?? []).includes("project_status")) {

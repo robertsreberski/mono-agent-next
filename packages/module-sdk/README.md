@@ -117,6 +117,12 @@ working directory.
 5. The resulting kind-specific instance participates in host lifecycle,
    health, diagnostics, and normalized turn, delivery, or memory operations.
 
+For channel-dispatched completions, `ChannelTurnResult.messageId` is Core's
+bounded assistant transcript identity, not a provider-native message id. It is
+non-empty, NUL-free, and at most 522 UTF-8 bytes. A channel may carry it into a
+transport's reply/quote primitive so a later request can be verified against
+Core replay.
+
 `RuntimeSession` is provider-private continuation state with one exact public
 authority envelope: `{ id, conversationId, route: { runtimeInstanceId, model },
 createdAt?, expiresAt?, metadata? }`. A runtime must emit that exact
@@ -175,8 +181,8 @@ There is no generic plugin hook or discovery registry.
 | Declare compatible module metadata | `MODULE_API_VERSION`, `ModuleManifest`, `ModuleSchema` |
 | Implement a runtime | `defineRuntimeModule`, `Runtime`, `RuntimeTurnRequest`, `RuntimeTurnContext`, `RuntimeTurnResult`, `RuntimeTurnError` |
 | Snapshot a typed runtime failure safely | `snapshotRuntimeTurnError`, `RuntimeTurnErrorSnapshot` |
-| Stream usage, compaction, sessions, and live input | `RuntimeTurnEvent`, `RuntimeUsage`, `RuntimeSession`, `RuntimeLiveInputHandler` |
-| Implement a channel | `defineChannelModule`, `Channel`, `ChannelHost`, `ChannelInboundRequest`, `ChannelReplySink`, `ChannelCapabilities`, `ChannelSendTool` |
+| Stream text, transient thinking, tool activity, usage, compaction, sessions, and live input | `RuntimeTurnEvent`, `RuntimeUsage`, `RuntimeSession`, `RuntimeLiveInputHandler` |
+| Implement a channel | `defineChannelModule`, `Channel`, `ChannelHost`, `ChannelInboundRequest`, `ChannelReplyEvent`, `ChannelReplySink`, `ChannelCapabilities`, `ChannelSendTool` |
 | Normalize attachments and blocking questions | `NormalizedAttachment`, `AskUserRequest`, `AskUserAnswer` |
 | Implement memory | `defineMemoryModule`, `Memory`, `MemoryRecallRequest`, `MemoryRecallResult`, `MemoryRuntimeCaptureGrant` |
 | Report lifecycle and health | `ModuleInstance`, `ModuleHealth`, `ModuleDiagnostic`, `ModuleCommand` |
@@ -195,6 +201,10 @@ from a definitive rejection, while `reason` is display-only and may be redacted.
 
 Runtime-owned `RuntimeSession.id` and transport-owned
 `ChannelDeliveryResult.messageId` values are each bounded to 512 UTF-8 bytes.
+`ChannelReplyEvent` keeps transient thinking distinct from assistant text and
+keeps tool calls, tool results, and compaction structured. A host must redact
+tool activity before emitting it across a user-facing channel; thinking is a
+live presentation signal and must not be treated as durable conversation text.
 For an exact empty adapter-owned default request, a selected channel may use
 `resolveDefaultDeliveryConversationId()` to return its canonical non-empty
 destination before durable delivery admission; explicit destinations still
@@ -265,6 +275,7 @@ ChannelReplySessionEvictedEvent
 ChannelReplySink
 ChannelReplyTextDeltaEvent
 ChannelReplyTextReplaceEvent
+ChannelReplyThinkingDeltaEvent
 ChannelReplyToolCallEvent
 ChannelReplyToolResultEvent
 ChannelReplyUsageEvent

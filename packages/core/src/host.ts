@@ -1211,6 +1211,10 @@ class AgentHostImplementation implements AgentHost {
       }));
     }
     if (module.slot === "channel" && declaresHostCapability(module, "operator.identity.v1")) {
+      const configuredModels = [...new Set([
+        this.config.raw.routing.primary,
+        ...this.config.raw.routing.fallbacks,
+      ].map((route) => route.model))].map((model) => Object.freeze({ id: model }));
       capabilityValues.set("operator.identity.v1", Object.freeze({
         agent: Object.freeze({ id: this.config.raw.agent.id, label: this.config.raw.agent.name }),
         process: Object.freeze({ pid: process.pid }),
@@ -1219,6 +1223,7 @@ class AgentHostImplementation implements AgentHost {
           model: this.config.raw.routing.primary.model,
           ...(this.config.raw.routing.effort === undefined ? {} : { effort: this.config.raw.routing.effort }),
         }),
+        models: Object.freeze(configuredModels),
         configPath: this.config.configPath,
         projectRoot: this.config.projectRoot,
       }));
@@ -1385,7 +1390,8 @@ class AgentHostImplementation implements AgentHost {
           if (event.type === "text-delta") {
             emittedText = true;
             await reply.emit({ type: "text-delta", delta: event.delta });
-          } else if (event.type === "usage") {
+          } else if (event.type === "thinking-delta") await reply.emit({ type: "thinking-delta", delta: event.delta });
+          else if (event.type === "usage") {
             await reply.emit({ type: "usage", usage: event.usage });
             if (!emittedCompaction && event.usage.compaction !== undefined) {
               emittedCompaction = true;
@@ -1423,6 +1429,7 @@ class AgentHostImplementation implements AgentHost {
             sourceChannel: channelInstanceId,
             sourceConversationId: request.conversationId,
             sourceRequestId: request.requestId,
+            ...deliveryTriggerKind(request.metadata),
           },
         }, request.signal);
         if (outcome.result.status !== "delivered" && outcome.result.status !== "duplicate") {
@@ -1430,7 +1437,8 @@ class AgentHostImplementation implements AgentHost {
         }
       }
       if (!emittedText && response.text.length > 0) await reply.emit({ type: "text-replace", text: response.text });
-      return { status: response.status === "completed" ? "completed" : "cancelled", text: response.text };
+      return { status: response.status === "completed" ? "completed" : "cancelled", text: response.text,
+        ...(response.message === undefined ? {} : { messageId: `${response.runId}:assistant` }) };
     } catch (error) {
       if (isAbort(error)) return { status: "cancelled" };
       const conflict = error instanceof AgentAdmissionError && error.code === "request_conflict";
@@ -2883,6 +2891,9 @@ class AgentHostImplementation implements AgentHost {
       this.#loadedConversations.add(input.conversationId);
     } else {
       const history = this.#history.get(input.conversationId) ?? [];
+      const assistantEntryId = entries.find((entry) => entry.kind === "message" && entry.role === "assistant")?.entryId;
+      if (result.message !== undefined && assistantEntryId === undefined)
+        throw new Error("completed assistant message lacks a canonical transcript identity");
       const user: TurnMessage = {
         role: "user",
         content: [
@@ -2897,7 +2908,9 @@ class AgentHostImplementation implements AgentHost {
       this.#history.set(input.conversationId, immutableClone([
         ...history,
         user,
-        ...(result.message === undefined ? [] : [result.message]),
+        ...(result.message === undefined
+          ? []
+          : [{ ...result.message, id: assistantEntryId! }]),
       ]));
       this.#loadedConversations.add(input.conversationId);
     }
@@ -3182,7 +3195,11 @@ class AgentHostImplementation implements AgentHost {
           conversationId: destination,
           text: response.text,
           idempotencyKey: event.id,
-          metadata: { triggerId: event.id, sourceConversationId: conversationId },
+          metadata: {
+            triggerId: event.id,
+            sourceConversationId: conversationId,
+            ...deliveryTriggerKind(event.metadata),
+          },
         });
         if (delivery.status !== "delivered" && delivery.status !== "duplicate") {
           throw new Error(`Trigger delivery ended with ${delivery.status}`);
@@ -4291,6 +4308,13 @@ function deliveryFingerprint(
 function deliveryHistoryText(message: ChannelOutboundMessage): string {
   return [message.text, ...(message.attachments ?? []).map((item) =>
     `[sent attachment: ${item.name}]`)].filter((part) => part.length > 0).join("\n");
+}
+
+function deliveryTriggerKind(metadata: JsonObject | undefined): JsonObject {
+  const triggerKind = metadata?.triggerKind;
+  return triggerKind === "cron" || triggerKind === "webhook"
+    ? Object.freeze({ triggerKind })
+    : Object.freeze({});
 }
 function normalizeCompletionDelivery(value: unknown): ChannelCompletionDelivery | undefined {
   if (value === undefined) return undefined;

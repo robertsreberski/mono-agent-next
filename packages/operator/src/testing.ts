@@ -40,6 +40,30 @@ export const VALID_TURN_FRAMES: readonly OperatorFrame[] = Object.freeze([
   { type: "activity", turnId: "fixture-turn", text: "Calling a fixture tool" },
   { type: "delta", turnId: "fixture-turn", target: "thought", text: "Checking " },
   { type: "delta", turnId: "fixture-turn", target: "thought", text: "the fixture." },
+  {
+    type: "tool_call",
+    turnId: "fixture-turn",
+    call: {
+      id: "fixture-tool-call",
+      name: "fixture_tool",
+      input: { query: "fixture" },
+      inputOmitted: false,
+    },
+  },
+  {
+    type: "tool_result",
+    turnId: "fixture-turn",
+    result: {
+      callId: "fixture-tool-call",
+      content: [{ type: "json", value: { found: true } }],
+      contentOmitted: false,
+    },
+  },
+  {
+    type: "compaction",
+    turnId: "fixture-turn",
+    compaction: { compacted: true, tokensBefore: 20, tokensAfter: 12 },
+  },
   { type: "delta", turnId: "fixture-turn", target: "assistant", text: "Hello" },
   { type: "delta", turnId: "fixture-turn", target: "assistant", text: "Hello fixture", mode: "replace" },
   { type: "usage", turnId: "fixture-turn", usage: { inputTokens: 12, outputTokens: 3, contextWindow: 128_000, contextUsed: 15, compacted: false, sessionEvicted: false } },
@@ -101,6 +125,8 @@ export const MULTI_QUESTION_ASK_USER_ANSWER: OperatorAskAnswerRequest = Object.f
 export const MALFORMED_OPERATOR_FRAMES: readonly unknown[] = Object.freeze([
   { type: "unknown", turnId: "fixture-turn" },
   { type: "delta", turnId: "fixture-turn", target: "assistant", text: "ok", extra: true },
+  { type: "tool_call", turnId: "fixture-turn", call: { id: "call", name: "tool", inputOmitted: false } },
+  { type: "tool_result", turnId: "fixture-turn", result: { callId: "call", content: [], contentOmitted: true } },
   { type: "completed", turnId: "fixture-turn", finalMessage: { role: "user", text: "wrong role" }, finishedAt: "not-a-date", stopReason: "completed" },
 ]);
 

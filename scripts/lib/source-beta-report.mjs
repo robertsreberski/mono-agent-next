@@ -1038,6 +1038,13 @@ export function classifySourcePath(path) {
     return "production";
   }
 
+  if (path.startsWith("packages/web/webapp/src/")) {
+    if (/\.test\.(?:ts|tsx)$/u.test(path)) return "test";
+    return "production";
+  }
+  if (path === "packages/web/webapp/public/notification-sw.js") return "production";
+  if (path === "packages/web/webapp/vite.config.ts") return "tooling";
+
   if (path.startsWith("website/src/") || path === "website/astro.config.mjs") {
     return "production";
   }

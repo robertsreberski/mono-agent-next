@@ -19,7 +19,8 @@ Catalog responsibility: Runs the standalone pi-tui renderer over the shared oper
 
 This package owns terminal layout, keyboard input, and rendering. It connects
 to an already-running agent through the shared operator client, shows streamed
-assistant text and activity, and lets the operator cancel or select eligible
+assistant text, transient reasoning status, structured tool activity, and
+compaction, and lets the operator cancel or select eligible
 model and effort overrides. Capability-gated commands expose replay, redacted
 config, health, bounded attachments, and quotes without a second decoder or
 action policy. Closing the renderer never stops the agent.
@@ -95,11 +96,12 @@ await handle.waitUntilExit();
 
 1. `startMonoAgentTui` creates the shared `OperatorClient`, directly or from
    a shared-directory selection.
-2. Discovered connections bind registry id, PID, and start time to `/v1/info`
+2. Discovered connections bind registry id, PID, and start time to `/v2/info`
    at startup and immediately before every turn.
 3. A submitted prompt calls `OperatorClient.streamTurn`.
 4. Every normalized frame passes through `reduceOperatorFrame`; the renderer
-   never parses NDJSON or invents domain state.
+   never parses NDJSON or invents domain state. Tool and compaction activity is
+   rendered as bounded terminal text, while reasoning remains transient status.
 5. Cancel, live-input, AskUser, attachment, quote, model/effort, and view
    controls are gated by `availableOperatorActions`.
 6. `MonoAgentTuiApp` makes C0/C1 and bidi controls visible and inert before

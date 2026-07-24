@@ -9,9 +9,13 @@ import type {
 
 import type {
   AnswerWebAskInput,
+  PatchWebAgentInput,
+  PatchWebThreadInput,
   StartWebTurnInput,
   WebAgent,
   WebBootstrap,
+  WebEvent,
+  WebEventType,
   WebThread,
   WebThreadDetail,
 } from "./contracts.js";
@@ -31,6 +35,7 @@ export interface WebProactiveConversation {
   readonly agentId: string;
   readonly conversationId: string;
   readonly title?: string;
+  readonly triggerKind?: "cron" | "webhook";
   readonly updatedAt: string;
   readonly messages: OperatorReplayResponse["messages"];
 }
@@ -72,11 +77,15 @@ interface ActiveTurn {
 
 export interface WebServiceOptions {
   readonly shutdownTimeoutMs?: number;
+  readonly eventReplayLimit?: number;
 }
 
 export class WebService {
   private readonly active = new Map<string, ActiveTurn>();
   private readonly shutdownTimeoutMs: number;
+  private readonly eventReplayLimit: number;
+  private readonly events: WebEvent[] = [];
+  private readonly subscribers = new Set<(event: WebEvent) => boolean | void>();
   private stopped = false;
 
   constructor(
@@ -85,6 +94,7 @@ export class WebService {
     options: WebServiceOptions = {},
   ) {
     this.shutdownTimeoutMs = boundedTimeout(options.shutdownTimeoutMs ?? 1_000);
+    this.eventReplayLimit = boundedEventReplayLimit(options.eventReplayLimit ?? 256);
   }
 
   async bootstrap(): Promise<WebBootstrap> {
@@ -94,11 +104,18 @@ export class WebService {
         continue;
       }
       const imported = await this.store.importProactiveConversation(conversation);
-      if (imported.created) newProactiveThreadIds.push(imported.thread.id);
+      if (imported.created) {
+        newProactiveThreadIds.push(imported.thread.id);
+      }
+      // The queued store operation may observe an import won by a concurrent
+      // bootstrap after this request's optimistic pre-check. It still advances
+      // the durable revision, so publish one invalidation either way.
+      this.publish("threads.changed", imported.thread.id);
     }
     return {
       version: WEB_API_VERSION,
-      agents: await this.gateway.listAgents(),
+      revision: this.store.revision(),
+      agents: await this.agents(),
       threads: this.store.listThreads(),
       newProactiveThreadIds,
     };
@@ -108,7 +125,9 @@ export class WebService {
     const agent = (await this.gateway.listAgents()).find((candidate) => candidate.id === agentId);
     if (agent === undefined) throw new WebProductError("agent_not_found", "Agent not found.", 404);
     if (!agent.online) throw new WebProductError("agent_offline", "Agent is offline.", 409);
-    return this.store.createThread(agentId, title);
+    const thread = await this.store.createThread(agentId, title);
+    this.publish("threads.changed", thread.id);
+    return thread;
   }
 
   thread(id: string): WebThreadDetail {
@@ -123,6 +142,46 @@ export class WebService {
       throw new WebProductError("turn_active", "Cancel the active turn before deleting this conversation.", 409);
     }
     await this.store.deleteThread(id);
+    this.publish("threads.changed", id);
+  }
+
+  async patchAgent(id: string, input: PatchWebAgentInput): Promise<WebAgent> {
+    const agent = (await this.gateway.listAgents()).find((candidate) => candidate.id === id);
+    if (agent === undefined) throw new WebProductError("agent_not_found", "Agent not found.", 404);
+    await this.store.setAgentPinned(id, input.pinned);
+    this.publish("agents.changed");
+    return { ...agent, pinned: input.pinned };
+  }
+
+  async patchThread(id: string, input: PatchWebThreadInput): Promise<WebThread> {
+    const thread = await this.store.patchThread(id, input);
+    this.publish("thread.changed", id);
+    return thread;
+  }
+
+  openEventStream(
+    afterRevision: number | undefined,
+    callback: (event: WebEvent) => boolean | void,
+  ): () => void {
+    if (this.stopped) throw new WebProductError("web_stopping", "The web product is stopping.", 409);
+    const current = this.store.revision();
+    this.subscribers.add(callback);
+    const send = (event: WebEvent): void => {
+      if (callback(event) === false) this.subscribers.delete(callback);
+    };
+    if (afterRevision === undefined || afterRevision === current) {
+      send(this.controlEvent("ready", current));
+    } else if (afterRevision > current) {
+      send(this.controlEvent("reset", current));
+    } else {
+      const replay = this.events.filter((event) => event.revision > afterRevision);
+      const complete = replay.length > 0
+        && replay[0]!.revision === afterRevision + 1
+        && replay.at(-1)!.revision === current;
+      if (!complete) send(this.controlEvent("reset", current));
+      else replay.forEach(send);
+    }
+    return () => this.subscribers.delete(callback);
   }
 
   async answerAsk(threadId: string, input: AnswerWebAskInput): Promise<OperatorAskAnswerResponse> {
@@ -140,7 +199,10 @@ export class WebService {
       operatorConversationId(detail.thread),
       input,
     );
-    if (result.status === "accepted") await this.store.clearPendingAsk(threadId);
+    if (result.status === "accepted") {
+      await this.store.clearPendingAsk(threadId);
+      this.publish("thread.changed", threadId);
+    }
     return result;
   }
 
@@ -212,6 +274,7 @@ export class WebService {
     // commit. Cancel and stop can now see the turn even if renderer delivery
     // blocks forever.
     this.active.set(threadId, active);
+    this.publish("thread.changed", threadId);
 
     const worker = async (): Promise<WebThreadDetail> => {
       try {
@@ -230,6 +293,7 @@ export class WebService {
           onText: async (text) => {
             if (active.settled) return;
             await this.store.updateAssistant(threadId, turnId, text, undefined);
+            this.publish("thread.changed", threadId);
             await notify(onUpdate, this.thread(threadId));
           },
           onState: async (state) => {
@@ -241,7 +305,9 @@ export class WebService {
               state.pendingAsk,
               state.finalMessage?.id,
               state.usage,
+              state.activities,
             );
+            this.publish("thread.changed", threadId);
             await notify(onUpdate, this.thread(threadId));
           },
         });
@@ -299,6 +365,7 @@ export class WebService {
         }
       }
     } finally {
+      this.subscribers.clear();
       await this.store.close();
     }
   }
@@ -316,6 +383,7 @@ export class WebService {
     const settlement = (async () => {
       try {
         await this.store.finishTurn(active.threadId, active.turnId, status, error);
+        this.publish("thread.changed", active.threadId);
       } catch (settleError) {
         active.settled = false;
         active.settlement = undefined;
@@ -337,6 +405,46 @@ export class WebService {
     const detail = this.thread(active.threadId);
     active.resolve(detail);
     return detail;
+  }
+
+  private async agents(): Promise<readonly WebAgent[]> {
+    return (await this.gateway.listAgents()).map((agent) => ({
+      ...agent,
+      pinned: this.store.isAgentPinned(agent.id),
+    }));
+  }
+
+  private publish(type: Exclude<WebEventType, "ready" | "reset">, threadId?: string): void {
+    const revision = this.store.revision();
+    const event: WebEvent = Object.freeze({
+      id: String(revision),
+      version: WEB_API_VERSION,
+      revision,
+      type,
+      at: new Date().toISOString(),
+      ...(threadId === undefined ? {} : { threadId }),
+    });
+    this.events.push(event);
+    if (this.events.length > this.eventReplayLimit) {
+      this.events.splice(0, this.events.length - this.eventReplayLimit);
+    }
+    for (const subscriber of this.subscribers) {
+      try {
+        if (subscriber(event) === false) this.subscribers.delete(subscriber);
+      } catch {
+        this.subscribers.delete(subscriber);
+      }
+    }
+  }
+
+  private controlEvent(type: "ready" | "reset", revision: number): WebEvent {
+    return Object.freeze({
+      id: String(revision),
+      version: WEB_API_VERSION,
+      revision,
+      type,
+      at: new Date().toISOString(),
+    });
   }
 }
 
@@ -372,6 +480,13 @@ function errorCode(error: unknown): string {
 function boundedTimeout(value: number): number {
   if (!Number.isSafeInteger(value) || value < 10 || value > 30_000) {
     throw new WebProductError("invalid_shutdown_timeout", "shutdownTimeoutMs must be an integer from 10 through 30000.");
+  }
+  return value;
+}
+
+function boundedEventReplayLimit(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 4_096) {
+    throw new WebProductError("invalid_event_replay_limit", "eventReplayLimit must be an integer from 1 through 4096.");
   }
   return value;
 }

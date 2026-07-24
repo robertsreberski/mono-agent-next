@@ -5,13 +5,11 @@ import { lstat, open, readdir } from "node:fs/promises";
 
 import { normalizeOperatorEndpoint, OperatorClient, type OperatorClientOptions } from "./client.js";
 import { parseRegistryDescriptor } from "./protocol.js";
-import type { DiscoveredOperator, OperatorRegistryDescriptor } from "./types.js";
+import { OPERATOR_REGISTRY_DETAILS_SCHEMA, OPERATOR_REGISTRY_SCHEMA, type DiscoveredOperator, type OperatorRegistryDescriptor } from "./types.js";
 
 const DEFAULT_STALE_AFTER_MS = 45_000;
 const MAX_REGISTRY_FILE_BYTES = 1_048_576;
 const STATE_PRESENCE_SCHEMA = "mono-agent.state-presence.v1";
-const OPERATOR_REGISTRY_DETAILS_SCHEMA = "mono-agent.operator-registry-details.v1";
-
 type UnknownRecord = Record<string, unknown>;
 
 interface StatePresenceEnvelope {
@@ -204,7 +202,7 @@ function parseStatePresenceOperatorDescriptor(value: unknown): OperatorRegistryD
   const processDetails = strictRecord(details.process, "presence.details.operatorRegistry.process");
   strictKeys(processDetails, ["pid", "startedAt"], "presence.details.operatorRegistry.process");
   return parseRegistryDescriptor({
-    schema: "mono-agent.operator-registry.v1",
+    schema: OPERATOR_REGISTRY_SCHEMA,
     agent: details.agent,
     operator: details.operator,
     pid: strictPid(processDetails.pid, "presence.details.operatorRegistry.process.pid"),

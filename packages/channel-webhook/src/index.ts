@@ -228,6 +228,7 @@ function toChannelInboundRequest(
     signal: request.abortSignal,
     metadata: {
       ...(request.metadata ?? {}),
+      triggerKind: "webhook",
       webhook: {
         ...(request.routeName === undefined ? {} : { route: request.routeName }),
         bodySha256: request.bodySha256,

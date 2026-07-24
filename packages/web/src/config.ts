@@ -50,6 +50,17 @@ export const webConfigJsonSchema = Object.freeze({
       items: { type: "string" },
       default: ["./.mono-agent/trace-sources"],
     },
+    externalOrigins: {
+      type: "array",
+      uniqueItems: true,
+      items: {
+        type: "string",
+        format: "uri",
+        pattern: "^https://",
+      },
+      default: [],
+      description: "Exact HTTPS origins accepted only through a loopback reverse proxy.",
+    },
   },
 } as const);
 
@@ -65,6 +76,7 @@ export interface WebConfig {
   readonly allowInsecureHttp: boolean;
   readonly dataDirectory: string;
   readonly agentRegistries: readonly string[];
+  readonly externalOrigins: readonly string[];
   readonly sourcePath: string;
 }
 
@@ -104,7 +116,16 @@ export interface ParseWebConfigOptions {
 }
 
 export function parseWebConfig(raw: unknown, options: ParseWebConfigOptions): WebConfig {
-  const root = object(raw, "$", ["$schema", "configVersion", "listen", "auth", "allowInsecureHttp", "dataDirectory", "agentRegistries"]);
+  const root = object(raw, "$", [
+    "$schema",
+    "configVersion",
+    "listen",
+    "auth",
+    "allowInsecureHttp",
+    "dataDirectory",
+    "agentRegistries",
+    "externalOrigins",
+  ]);
   if (root.configVersion !== 1) invalid("$.configVersion", "must equal 1");
   if (root.$schema !== undefined && typeof root.$schema !== "string") invalid("$.$schema", "must be a string");
 
@@ -136,6 +157,13 @@ export function parseWebConfig(raw: unknown, options: ParseWebConfigOptions): We
     : stringArray(root.agentRegistries, "$.agentRegistries").map((path, index) =>
         resolvePath(path, `$.agentRegistries[${index}]`, baseDirectory));
   if (registries.length === 0) invalid("$.agentRegistries", "must contain at least one directory");
+  const externalOrigins = root.externalOrigins === undefined
+    ? []
+    : stringArray(root.externalOrigins, "$.externalOrigins").map((origin, index) =>
+        externalOrigin(origin, `$.externalOrigins[${index}]`));
+  if (new Set(externalOrigins).size !== externalOrigins.length) {
+    invalid("$.externalOrigins", "must not contain duplicates");
+  }
 
   return Object.freeze({
     configVersion: 1,
@@ -144,6 +172,7 @@ export function parseWebConfig(raw: unknown, options: ParseWebConfigOptions): We
     allowInsecureHttp: root.allowInsecureHttp === true,
     dataDirectory,
     agentRegistries: Object.freeze(registries),
+    externalOrigins: Object.freeze(externalOrigins),
     sourcePath: resolve(options.sourcePath),
   });
 }
@@ -180,6 +209,30 @@ function resolvePath(raw: unknown, path: string, baseDirectory: string): string 
   const value = string(raw, path);
   if (value.length === 0 || value.includes("\0")) invalid(path, "must be a non-empty filesystem path");
   return resolve(baseDirectory, value);
+}
+
+function externalOrigin(value: string, path: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return invalid(path, "must be an absolute HTTPS origin");
+  }
+  if (
+    parsed.protocol !== "https:"
+    || parsed.username !== ""
+    || parsed.password !== ""
+    || parsed.pathname !== "/"
+    || parsed.search !== ""
+    || parsed.hash !== ""
+    || parsed.hostname.length === 0
+  ) {
+    invalid(path, "must be an exact HTTPS origin without credentials, path, query, or fragment");
+  }
+  if (value !== parsed.origin) {
+    invalid(path, `must use its canonical origin form ${JSON.stringify(parsed.origin)}`);
+  }
+  return parsed.origin;
 }
 
 function integer(raw: unknown, path: string, min: number, max: number): number {

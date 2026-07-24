@@ -975,6 +975,7 @@ describe("mono-agent channel module", () => {
       attachments: [],
       metadata: {
         source: "module-test",
+        triggerKind: "webhook",
         webhook: { route: "default", bodySha256: expect.stringMatching(/^[a-f0-9]{64}$/u) },
       },
       sender: { id: "webhook", displayName: "incoming" },
@@ -1221,6 +1222,7 @@ describe("mono-agent channel module", () => {
       completionDelivery: { channel: "telegram", destination: "telegram:42" },
       metadata: {
         source: "pager",
+        triggerKind: "webhook",
         webhook: { route: "triage", bodySha256: expect.stringMatching(/^[a-f0-9]{64}$/u) },
       },
     });

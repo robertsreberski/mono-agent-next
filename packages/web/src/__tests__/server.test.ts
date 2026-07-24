@@ -1,5 +1,5 @@
 import { createServer, request as httpRequest, type Server } from "node:http";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -52,9 +52,11 @@ describe("standalone web product", () => {
     };
     const server = await startWebServer({ config: config(join(root, "state")), operatorGateway: gateway });
     webServers.add(server);
-    const browserScript = await (await fetch(`${server.url}app.js`)).text();
-    expect(browserScript).toContain("maxAttachmentBytes = 524288");
-    expect(browserScript).toContain("Conversation replay");
+    const index = await (await fetch(server.url)).text();
+    expect(index).toContain("mono-agent Console");
+    const manifest = await fetch(`${server.url}manifest.webmanifest`);
+    expect(manifest.status).toBe(200);
+    expect(await manifest.text()).toContain("mono-agent Console");
     const thread = await json(server, "/api/v1/threads", {
       method: "POST", body: JSON.stringify({ agentId: "personal" }),
     }) as { id: string; operatorConversationId: string };
@@ -106,6 +108,9 @@ describe("standalone web product", () => {
     await expect(json(server, `/api/v1/threads/${thread.id}/replay`)).resolves.toMatchObject({ conversationId: thread.operatorConversationId });
     await expect(json(server, "/api/v1/agents/personal/config")).resolves.toMatchObject({ revision: "r1", redacted: true });
     await expect(json(server, "/api/v1/agents/personal/health")).resolves.toMatchObject({ status: "healthy" });
+    await expect(json(server, `/api/v1/threads/${thread.id}`, {
+      method: "PATCH", body: JSON.stringify({ archived: true }),
+    })).resolves.toMatchObject({ archivedAt: expect.any(String) });
     await expect(json(server, `/api/v1/threads/${thread.id}`, { method: "DELETE", body: "{}" })).resolves.toEqual({ deleted: true });
     const missing = await fetch(`${server.url}api/v1/threads/${thread.id}`, { headers: authHeaders() });
     expect(missing.status).toBe(404);
@@ -124,7 +129,7 @@ describe("standalone web product", () => {
     const page = await fetch(server.url);
     expect(page.status).toBe(200);
     expect(page.headers.get("content-security-policy")).toContain("script-src 'self'");
-    expect(await page.text()).toContain("mono-agent web");
+    expect(await page.text()).toContain("mono-agent Console");
 
     const forgedAuthority = `attacker.invalid:${server.port}`;
     expect(await getWithAuthority(server, "/", forgedAuthority, false)).toBe(421);
@@ -148,6 +153,158 @@ describe("standalone web product", () => {
       body: JSON.stringify({ agentId: "personal" }),
     });
     expect(simple.status).toBe(415);
+  });
+
+  it("applies guarded agent/thread patches and streams authenticated resumable revisions", async () => {
+    const root = await temporaryDirectory();
+    const server = await startWebServer({
+      config: config(join(root, "state")),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(server);
+
+    expect((await fetch(`${server.url}api/v1/events`)).status).toBe(401);
+    const controller = new AbortController();
+    const eventResponse = await fetch(`${server.url}api/v1/events`, {
+      headers: authHeaders(),
+      signal: controller.signal,
+    });
+    expect(eventResponse.status).toBe(200);
+    expect(eventResponse.headers.get("content-type")).toContain("text/event-stream");
+    const events = sseReader(eventResponse);
+    await expect(events.next()).resolves.toMatchObject({ type: "ready", revision: 0 });
+
+    const thread = await json(server, "/api/v1/threads", {
+      method: "POST",
+      body: JSON.stringify({ agentId: "personal" }),
+    }) as { readonly id: string };
+    await expect(events.next()).resolves.toMatchObject({
+      type: "threads.changed",
+      revision: 1,
+      threadId: thread.id,
+    });
+
+    const prematureDelete = await fetch(`${server.url}api/v1/threads/${thread.id}`, {
+      method: "DELETE",
+      headers: authHeaders({ "content-type": "application/json" }),
+      body: "{}",
+    });
+    expect(prematureDelete.status).toBe(409);
+    const titled = await json(server, `/api/v1/threads/${thread.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title: "Manual browser title" }),
+    });
+    expect(titled).toMatchObject({ title: "Manual browser title", titleManual: true });
+    const pinned = await json(server, "/api/v1/agents/personal", {
+      method: "PATCH",
+      body: JSON.stringify({ pinned: true }),
+    });
+    expect(pinned).toMatchObject({ id: "personal", pinned: true });
+    expect(await json(server, "/api/v1/bootstrap")).toMatchObject({
+      revision: 3,
+      agents: [{ id: "personal", pinned: true }],
+    });
+    await events.cancel();
+    controller.abort();
+
+    const replayResponse = await fetch(`${server.url}api/v1/events`, {
+      headers: authHeaders({ "last-event-id": "2" }),
+    });
+    const replay = sseReader(replayResponse);
+    await expect(replay.next()).resolves.toMatchObject({ type: "agents.changed", revision: 3 });
+    await replay.cancel();
+
+    const resetResponse = await fetch(`${server.url}api/v1/events`, {
+      headers: authHeaders({ "last-event-id": "999" }),
+    });
+    const reset = sseReader(resetResponse);
+    await expect(reset.next()).resolves.toMatchObject({ type: "reset", revision: 3 });
+    await reset.cancel();
+  });
+
+  it("trusts one exact external HTTPS authority only from its loopback proxy connection", async () => {
+    const root = await temporaryDirectory();
+    const externalOrigin = "https://console.example.test";
+    const server = await startWebServer({
+      config: config(join(root, "state"), { externalOrigins: [externalOrigin] }),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(server);
+
+    expect(await getWithAuthority(server, "/", "console.example.test", false)).toBe(200);
+    expect(await mutationWithExternalAuthority(
+      server,
+      "console.example.test",
+      externalOrigin,
+    )).toBe(201);
+    expect(await mutationWithExternalAuthority(
+      server,
+      "console.example.test",
+      "https://attacker.example.test",
+    )).toBe(403);
+    expect(await mutationWithExternalAuthority(
+      server,
+      "lookalike.console.example.test",
+      externalOrigin,
+    )).toBe(421);
+    expect(await getWithAuthority(
+      server,
+      "/",
+      `console.example.test:${server.port}`,
+      false,
+    )).toBe(421);
+  });
+
+  it("serves packed assets without treating API or health paths as SPA navigation", async () => {
+    const root = await temporaryDirectory();
+    const server = await startWebServer({
+      config: config(join(root, "state")),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(server);
+    const worker = await (await fetch(`${server.url}sw.js`)).text();
+    expect(worker).toContain("denylist:[/^\\/api");
+    expect(worker).toContain("/^\\/healthz$/");
+    expect(worker).not.toContain('url:"api');
+    expect(worker).not.toContain('url:"/api');
+    expect(worker).not.toContain('url:"healthz');
+    expect(worker).not.toContain('url:"/healthz');
+    expect((await fetch(`${server.url}api/not-a-route`, { headers: authHeaders() })).status).toBe(404);
+    expect((await fetch(`${server.url}healthz/not-a-route`)).status).toBe(404);
+  });
+
+  it("never serves bytes through static-file or static-directory symlinks", async () => {
+    const root = await temporaryDirectory();
+    const assets = join(root, "assets");
+    const outside = join(root, "outside");
+    await mkdir(assets);
+    await mkdir(outside);
+    await writeFile(join(assets, "index.html"), "<h1>safe application</h1>");
+    await writeFile(join(assets, "inside.txt"), "inside target");
+    await writeFile(join(outside, "secret.txt"), "outside secret");
+    await symlink(join(assets, "inside.txt"), join(assets, "inside-link.txt"));
+    await symlink(join(outside, "secret.txt"), join(assets, "outside-link.txt"));
+    await symlink(outside, join(assets, "outside-directory"));
+
+    const server = await startWebServer({
+      config: config(join(root, "state")),
+      operatorGateway: immediateGateway(),
+      staticDirectory: assets,
+    });
+    webServers.add(server);
+
+    const index = await fetch(server.url);
+    expect(index.status).toBe(200);
+    expect(await index.text()).toContain("safe application");
+    for (const path of [
+      "inside-link.txt",
+      "outside-link.txt",
+      "outside-directory/secret.txt",
+    ]) {
+      const response = await fetch(`${server.url}${path}`);
+      expect(response.status).toBe(404);
+      expect(await response.text()).not.toMatch(/inside target|outside secret/u);
+    }
   });
 
   it("discovers through operator, streams one real turn, and reloads durable state", async () => {
@@ -337,7 +494,13 @@ describe("standalone web product", () => {
 
 function config(
   dataDirectory: string,
-  overrides: { readonly host?: string; readonly token?: string; readonly allowInsecureHttp?: boolean; readonly agentRegistries?: readonly string[] } = {},
+  overrides: {
+    readonly host?: string;
+    readonly token?: string;
+    readonly allowInsecureHttp?: boolean;
+    readonly agentRegistries?: readonly string[];
+    readonly externalOrigins?: readonly string[];
+  } = {},
 ): WebConfig {
   return {
     configVersion: 1,
@@ -346,12 +509,20 @@ function config(
     allowInsecureHttp: overrides.allowInsecureHttp ?? false,
     dataDirectory,
     agentRegistries: overrides.agentRegistries ?? [join(dataDirectory, "missing-registry")],
+    externalOrigins: overrides.externalOrigins ?? [],
     sourcePath: join(dataDirectory, "web.config.json"),
   };
 }
 
 function agent(): WebAgent {
-  return { id: "personal", label: "Personal Agent", endpoint: "http://127.0.0.1:1", online: true, capabilities: capabilities() };
+  return {
+    id: "personal",
+    label: "Personal Agent",
+    endpoint: "http://127.0.0.1:1",
+    online: true,
+    pinned: false,
+    capabilities: capabilities(),
+  };
 }
 
 function immediateGateway(): WebOperatorGateway {
@@ -375,7 +546,7 @@ async function startOperatorFixture(): Promise<{ readonly url: string; readonly 
     if (request.headers.authorization !== `Bearer ${OPERATOR_TOKEN}`) {
       response.writeHead(401, { "content-type": "application/json" }); response.end('{"error":"unauthorized"}'); return;
     }
-    if (request.method === "POST" && request.url === "/v1/turns") {
+    if (request.method === "POST" && request.url === "/v2/turns") {
       const body = JSON.parse(await bodyText(request)) as { conversationId: string };
       const now = new Date().toISOString();
       const frames = [
@@ -392,7 +563,7 @@ async function startOperatorFixture(): Promise<{ readonly url: string; readonly 
     if (request.method === "POST" && request.url?.endsWith("/cancel")) {
       response.writeHead(200, { "content-type": "application/json" }); response.end('{"status":"accepted"}'); return;
     }
-    if (request.method === "GET" && request.url === "/v1/info") {
+    if (request.method === "GET" && request.url === "/v2/info") {
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ protocol: OPERATOR_PROTOCOL, agent: { id: "personal", label: "Personal Agent" }, process: { pid: process.pid, startedAt }, capabilities: capabilities() }));
       return;
@@ -438,6 +609,67 @@ function mutationWithAuthority(server: WebServerHandle, authority: string): Prom
     request.once("error", reject);
     request.end(body);
   });
+}
+
+function mutationWithExternalAuthority(
+  server: WebServerHandle,
+  authority: string,
+  origin: string,
+): Promise<number> {
+  const body = JSON.stringify({ agentId: "personal" });
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port: server.port,
+      path: "/api/v1/threads",
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${WEB_TOKEN}`,
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body),
+        host: authority,
+        origin,
+        "x-forwarded-host": "ignored.example.test",
+        "x-forwarded-proto": "http",
+      },
+    }, (response) => {
+      response.resume();
+      response.once("end", () => resolve(response.statusCode ?? 0));
+    });
+    request.once("error", reject);
+    request.end(body);
+  });
+}
+
+function sseReader(response: Response): {
+  readonly next: () => Promise<Record<string, unknown>>;
+  readonly cancel: () => Promise<void>;
+} {
+  if (response.body === null) throw new Error("Missing SSE body.");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let pending = "";
+  return {
+    async next() {
+      for (;;) {
+        const separator = pending.indexOf("\n\n");
+        if (separator >= 0) {
+          const block = pending.slice(0, separator);
+          pending = pending.slice(separator + 2);
+          const data = block.split("\n").find((line) => line.startsWith("data:"));
+          if (data !== undefined) return JSON.parse(data.slice(5).trim()) as Record<string, unknown>;
+          continue;
+        }
+        const { done, value } = await reader.read();
+        if (done) throw new Error("SSE ended before the next event.");
+        pending += decoder.decode(value, { stream: true }).replace(/\r\n/gu, "\n");
+      }
+    },
+    async cancel() {
+      await reader.cancel();
+      reader.releaseLock();
+    },
+  };
 }
 
 function getWithAuthority(

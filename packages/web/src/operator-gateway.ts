@@ -67,12 +67,33 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
 
   return {
     async listAgents(): Promise<readonly WebAgent[]> {
-      return (await entries()).map((entry) => ({
-        id: entry.id,
-        label: entry.label,
-        endpoint: entry.endpoint,
-        online: !entry.stale,
-        capabilities: capabilityRecord(entry.capabilities),
+      return Promise.all((await entries()).map(async (entry): Promise<WebAgent> => {
+        const base: WebAgent = {
+          id: entry.id,
+          label: entry.label,
+          endpoint: entry.endpoint,
+          online: !entry.stale,
+          pinned: false,
+          capabilities: capabilityRecord(entry.capabilities),
+        };
+        if (entry.stale) return base;
+        try {
+          const client = createOperatorClientForEntry(entry, {
+            env: options.environment,
+            ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+          });
+          const info = await client.getInfo();
+          assertIdentity(entry, info);
+          return {
+            ...base,
+            label: info.agent.label,
+            capabilities: capabilityRecord(info.capabilities),
+            ...(info.defaults === undefined ? {} : { defaults: info.defaults }),
+            ...(info.models === undefined ? {} : { models: info.models }),
+          };
+        } catch {
+          return { ...base, online: false };
+        }
       }));
     },
 
@@ -149,13 +170,14 @@ export function createOperatorGateway(options: CreateOperatorGatewayOptions): We
         if (!info.capabilities.proactive || !info.capabilities.replay) return [];
         const listed = await client.getConversations();
         return await Promise.all(listed.conversations
-          .filter((conversation) => conversation.id.startsWith("proactive:"))
+          .filter((conversation) => conversation.triggerKind !== undefined)
           .map(async (conversation) => {
             const replay = await client.getReplay(conversation.id);
             return {
               agentId: entry.id,
               conversationId: conversation.id,
               ...(conversation.title === undefined ? {} : { title: conversation.title }),
+              ...(conversation.triggerKind === undefined ? {} : { triggerKind: conversation.triggerKind }),
               updatedAt: conversation.updatedAt,
               messages: replay.messages,
             };

@@ -122,6 +122,11 @@ treated as committed effects. Core captures one bounded accessor-free error
 snapshot at the catch boundary and uses it for evidence, uncertainty, and
 fallback; raw runtime exception graphs never become public error causes.
 
+Selected channels receive assistant and transient-thinking deltas separately.
+Tool calls and results cross that boundary only after Core recursively redacts
+known secrets and replaces file/artifact bodies with bounded omission text;
+provider thoughts and tool internals remain outside canonical durable replay.
+
 Eligibility is derived from the submitted request as well as explicit
 requirements: attachments, structured-output schemas, `maxTurns`, and
 `maxOutputTokens` automatically require an honestly advertised route

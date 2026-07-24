@@ -1,8 +1,11 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { constants, type BigIntStats } from "node:fs";
+import { lstat, open, type FileHandle } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { isIP, type AddressInfo, type Socket } from "node:net";
 import { hostname as systemHostname } from "node:os";
-import { resolve } from "node:path";
+import { extname, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   OPERATOR_LIMITS,
@@ -16,16 +19,22 @@ import type {
   AnswerWebAskInput,
   CreateWebThreadInput,
   OfferWebLiveInput,
+  PatchWebAgentInput,
+  PatchWebThreadInput,
   StartWebTurnInput,
+  WebEvent,
 } from "./contracts.js";
 import { WebProductError } from "./errors.js";
 import { createOperatorGateway } from "./operator-gateway.js";
 import { WebService, type WebOperatorGateway } from "./service.js";
 import { DurableWebStore } from "./store.js";
-import { WEB_APP_JS, WEB_INDEX_HTML, WEB_STYLES } from "./ui.js";
 
 const MAX_BODY_BYTES = OPERATOR_LIMITS.requestBytes;
 const MAX_INLINE_ATTACHMENT_BYTES = 512 * 1_024;
+const MAX_STATIC_ASSET_BYTES = 16 * 1_024 * 1_024;
+const MAX_SSE_CLIENTS = 32;
+const SSE_HEARTBEAT_MS = 15_000;
+const DEFAULT_STATIC_DIRECTORY = fileURLToPath(new URL("../webapp/dist/", import.meta.url));
 
 export interface StartWebServerOptions {
   readonly config?: WebConfig;
@@ -33,6 +42,8 @@ export interface StartWebServerOptions {
   readonly environment?: Readonly<Record<string, string | undefined>>;
   readonly fetch?: typeof globalThis.fetch;
   readonly shutdownTimeoutMs?: number;
+  /** Prebuilt browser application root. Defaults to the packaged `webapp/dist`. */
+  readonly staticDirectory?: string;
   /** Deterministic embedding/test seam; normal products use the shared operator directory. */
   readonly operatorGateway?: WebOperatorGateway;
 }
@@ -69,11 +80,13 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
     throw error;
   }
   const sockets = new Set<Socket>();
+  const eventStreams = new Set<() => void>();
+  const staticDirectory = resolve(options.staticDirectory ?? DEFAULT_STATIC_DIRECTORY);
   let stopping = false;
   let stopPromise: Promise<void> | undefined;
   const server = createServer((request, response) => {
     setSecurityHeaders(response);
-    void handleRequest(request, response, config.auth.token, service).catch((error) => {
+    void handleRequest(request, response, config.auth.token, service, staticDirectory, eventStreams).catch((error) => {
       sendError(response, error);
     });
   });
@@ -100,6 +113,7 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
     if (stopPromise !== undefined) return stopPromise;
     stopping = true;
     stopPromise = (async () => {
+      for (const close of [...eventStreams]) close();
       const closing = closeServer(server);
       server.closeIdleConnections?.();
       const timer = setTimeout(() => {
@@ -135,39 +149,76 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
     response: ServerResponse,
     token: string,
     web: WebService,
+    assetsRoot: string,
+    streams: Set<() => void>,
   ): Promise<void> {
     if (stopping) throw new WebProductError("web_stopping", "Web product is stopping.", 503);
     const url = new URL(request.url ?? "/", "http://web.invalid");
-    validateRequestAuthority(request, config.listen.host, listeningPort(server));
-    if (request.method === "GET" && url.pathname === "/") return sendText(response, 200, "text/html; charset=utf-8", WEB_INDEX_HTML);
-    if (request.method === "GET" && url.pathname === "/app.js") return sendText(response, 200, "text/javascript; charset=utf-8", WEB_APP_JS);
-    if (request.method === "GET" && url.pathname === "/styles.css") return sendText(response, 200, "text/css; charset=utf-8", WEB_STYLES);
+    validateRequestAuthority(
+      request,
+      config.listen.host,
+      listeningPort(server),
+      config.externalOrigins,
+    );
     if (request.method === "GET" && url.pathname === "/healthz") return sendJson(response, 200, { status: "healthy" });
-    if (!url.pathname.startsWith("/api/v1/")) throw new WebProductError("not_found", "Not found.", 404);
+    if (
+      url.pathname === "/healthz/"
+      || url.pathname.startsWith("/healthz/")
+      || url.pathname === "/api"
+      || (url.pathname.startsWith("/api/") && !url.pathname.startsWith("/api/v1/"))
+    ) {
+      throw new WebProductError("not_found", "Not found.", 404);
+    }
+    if (!url.pathname.startsWith("/api/v1/")) {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        throw new WebProductError("not_found", "Not found.", 404);
+      }
+      return serveWebAsset(request, response, assetsRoot, url.pathname);
+    }
 
     authenticate(request, token);
     response.setHeader("cache-control", "no-store");
+    if (request.method === "GET" && url.pathname === "/api/v1/events") {
+      return openEventStream(request, response, web, streams);
+    }
     if (request.method === "GET" && url.pathname === "/api/v1/bootstrap") {
       return sendJson(response, 200, await web.bootstrap());
     }
     if (request.method === "POST" && url.pathname === "/api/v1/threads") {
-      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
       const input = parseCreateThread(await readJsonBody(request));
       return sendJson(response, 201, await web.createThread(input.agentId, input.title));
+    }
+    const agentMatch = /^\/api\/v1\/agents\/([^/]+)$/u.exec(url.pathname);
+    if (request.method === "PATCH" && agentMatch !== null) {
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
+      return sendJson(
+        response,
+        200,
+        await web.patchAgent(decodePath(agentMatch[1]!), parsePatchAgent(await readJsonBody(request))),
+      );
     }
     const detailMatch = /^\/api\/v1\/threads\/([^/]+)$/u.exec(url.pathname);
     if (request.method === "GET" && detailMatch !== null) {
       return sendJson(response, 200, web.thread(decodePath(detailMatch[1]!)));
     }
+    if (request.method === "PATCH" && detailMatch !== null) {
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
+      return sendJson(
+        response,
+        200,
+        await web.patchThread(decodePath(detailMatch[1]!), parsePatchThread(await readJsonBody(request))),
+      );
+    }
     if (request.method === "DELETE" && detailMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
       await readJsonBody(request);
       await web.deleteThread(decodePath(detailMatch[1]!));
       return sendJson(response, 200, { deleted: true });
     }
     const turnMatch = /^\/api\/v1\/threads\/([^/]+)\/turns$/u.exec(url.pathname);
     if (request.method === "POST" && turnMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
       const input = parseStartTurn(await readJsonBody(request));
       const threadId = decodePath(turnMatch[1]!);
       response.writeHead(200, {
@@ -197,19 +248,19 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
     }
     const cancelMatch = /^\/api\/v1\/threads\/([^/]+)\/cancel$/u.exec(url.pathname);
     if (request.method === "POST" && cancelMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
       await readJsonBody(request);
       return sendJson(response, 200, await web.cancel(decodePath(cancelMatch[1]!)));
     }
     const askMatch = /^\/api\/v1\/threads\/([^/]+)\/ask$/u.exec(url.pathname);
     if (request.method === "POST" && askMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
       const input = parseAnswerAsk(await readJsonBody(request, OPERATOR_LIMITS.askAnswerRequestBytes));
       return sendJson(response, 200, await web.answerAsk(decodePath(askMatch[1]!), input));
     }
     const liveInputMatch = /^\/api\/v1\/threads\/([^/]+)\/live-input$/u.exec(url.pathname);
     if (request.method === "POST" && liveInputMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server));
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
       const input = parseOfferLiveInput(await readJsonBody(request));
       return sendJson(response, 200, await web.offerLiveInput(decodePath(liveInputMatch[1]!), input.text));
     }
@@ -253,11 +304,21 @@ function authenticate(request: IncomingMessage, token: string): void {
   }
 }
 
-function requireMutationSafety(request: IncomingMessage, configuredHost: string, port: number): void {
+function requireMutationSafety(
+  request: IncomingMessage,
+  configuredHost: string,
+  port: number,
+  externalOrigins: readonly string[],
+): void {
   if (request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
     throw new WebProductError("unsupported_media_type", "Mutations require Content-Type: application/json.", 415);
   }
+  const trustedExternalOrigin = externalOriginForAuthority(request, externalOrigins);
   const origin = request.headers.origin;
+  if (trustedExternalOrigin !== undefined) {
+    if (origin !== trustedExternalOrigin) rejectOrigin();
+    return;
+  }
   if (origin === undefined) {
     const fetchSite = request.headers["sec-fetch-site"];
     if (fetchSite !== undefined && fetchSite !== "same-origin" && fetchSite !== "none") rejectOrigin();
@@ -279,7 +340,13 @@ function requireMutationSafety(request: IncomingMessage, configuredHost: string,
   if (!isAllowedProductHost(originHost, configuredHost)) rejectOrigin();
 }
 
-function validateRequestAuthority(request: IncomingMessage, configuredHost: string, port: number): void {
+function validateRequestAuthority(
+  request: IncomingMessage,
+  configuredHost: string,
+  port: number,
+  externalOrigins: readonly string[],
+): void {
+  if (externalOriginForAuthority(request, externalOrigins) !== undefined) return;
   const host = request.headers.host;
   if (host === undefined) rejectAuthority();
   let authority: URL;
@@ -287,6 +354,37 @@ function validateRequestAuthority(request: IncomingMessage, configuredHost: stri
   if (authority.username !== "" || authority.password !== "" || authority.pathname !== "/" || authority.search !== "" || authority.hash !== "") rejectAuthority();
   if (effectivePort(authority) !== port) rejectAuthority();
   if (!isAllowedProductHost(normalizeHostname(authority.hostname), configuredHost)) rejectAuthority();
+}
+
+function externalOriginForAuthority(
+  request: IncomingMessage,
+  externalOrigins: readonly string[],
+): string | undefined {
+  if (!isLoopbackPeer(request.socket.remoteAddress)) return undefined;
+  const host = request.headers.host;
+  if (host === undefined) return undefined;
+  let authority: URL;
+  try {
+    authority = new URL(`https://${host}`);
+  } catch {
+    return undefined;
+  }
+  if (
+    authority.username !== ""
+    || authority.password !== ""
+    || authority.pathname !== "/"
+    || authority.search !== ""
+    || authority.hash !== ""
+  ) {
+    return undefined;
+  }
+  return externalOrigins.find((origin) => new URL(origin).host === authority.host);
+}
+
+function isLoopbackPeer(address: string | undefined): boolean {
+  if (address === undefined) return false;
+  const normalized = address.toLowerCase().replace(/^::ffff:/u, "");
+  return normalized === "::1" || /^127(?:\.|$)/u.test(normalized);
 }
 
 function isAllowedProductHost(originHost: string, configuredHost: string): boolean {
@@ -356,8 +454,52 @@ async function readJsonBody(request: IncomingMessage, maximumBytes: number = MAX
 function parseCreateThread(raw: unknown): CreateWebThreadInput {
   const value = strictObject(raw, ["agentId", "title"]);
   if (typeof value.agentId !== "string" || value.agentId.length === 0 || value.agentId.length > 256) throw new WebProductError("invalid_request", "agentId is required.");
-  if (value.title !== undefined && (typeof value.title !== "string" || value.title.length > 120)) throw new WebProductError("invalid_request", "title is invalid.");
-  return { agentId: value.agentId, ...(value.title === undefined ? {} : { title: value.title as string }) };
+  if (
+    value.title !== undefined
+    && (
+      typeof value.title !== "string"
+      || value.title.trim().length === 0
+      || value.title.trim().length > 120
+    )
+  ) {
+    throw new WebProductError("invalid_request", "title is invalid.");
+  }
+  return {
+    agentId: value.agentId,
+    ...(value.title === undefined ? {} : { title: (value.title as string).trim() }),
+  };
+}
+
+function parsePatchAgent(raw: unknown): PatchWebAgentInput {
+  const value = strictObject(raw, ["pinned"]);
+  if (!Object.hasOwn(value, "pinned") || typeof value.pinned !== "boolean") {
+    throw new WebProductError("invalid_request", "pinned must be a boolean.");
+  }
+  return { pinned: value.pinned };
+}
+
+function parsePatchThread(raw: unknown): PatchWebThreadInput {
+  const value = strictObject(raw, ["title", "archived"]);
+  if (!Object.hasOwn(value, "title") && !Object.hasOwn(value, "archived")) {
+    throw new WebProductError("invalid_request", "Thread patch requires title or archived.");
+  }
+  if (
+    value.title !== undefined
+    && (
+      typeof value.title !== "string"
+      || value.title.trim().length === 0
+      || value.title.trim().length > 120
+    )
+  ) {
+    throw new WebProductError("invalid_request", "title is invalid.");
+  }
+  if (value.archived !== undefined && typeof value.archived !== "boolean") {
+    throw new WebProductError("invalid_request", "archived must be a boolean.");
+  }
+  return {
+    ...(value.title === undefined ? {} : { title: (value.title as string).trim() }),
+    ...(value.archived === undefined ? {} : { archived: value.archived as boolean }),
+  };
 }
 
 function parseStartTurn(raw: unknown): StartWebTurnInput {
@@ -442,6 +584,251 @@ function strictObject(raw: unknown, fields: readonly string[]): Record<string, u
   return value;
 }
 
+function openEventStream(
+  request: IncomingMessage,
+  response: ServerResponse,
+  service: WebService,
+  streams: Set<() => void>,
+): void {
+  if (streams.size >= MAX_SSE_CLIENTS) {
+    throw new WebProductError("event_capacity", "Too many live event subscribers.", 503);
+  }
+  const afterRevision = parseLastEventId(request.headers["last-event-id"]);
+  response.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-store, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no",
+  });
+  let unsubscribe = (): void => undefined;
+  let closed = false;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  const close = (): void => {
+    if (closed) return;
+    closed = true;
+    if (heartbeat !== undefined) clearInterval(heartbeat);
+    unsubscribe();
+    streams.delete(close);
+    if (!response.destroyed && !response.writableEnded) response.end();
+  };
+  streams.add(close);
+  request.once("aborted", close);
+  response.once("close", close);
+  unsubscribe = service.openEventStream(afterRevision, (event) => {
+    if (closed || response.destroyed || response.writableEnded) return false;
+    const accepted = response.write(formatEvent(event));
+    if (!accepted) queueMicrotask(close);
+    return accepted;
+  });
+  if (closed) {
+    unsubscribe();
+    return;
+  }
+  heartbeat = setInterval(() => {
+    if (closed || response.destroyed || response.writableEnded || !response.write(": keep-alive\n\n")) {
+      close();
+    }
+  }, SSE_HEARTBEAT_MS);
+  heartbeat.unref();
+}
+
+function parseLastEventId(header: string | string[] | undefined): number | undefined {
+  if (header === undefined || header === "") return undefined;
+  if (
+    typeof header !== "string"
+    || !/^(?:0|[1-9]\d*)$/u.test(header)
+    || !Number.isSafeInteger(Number(header))
+  ) {
+    throw new WebProductError("invalid_event_cursor", "Last-Event-ID must be a non-negative safe integer.");
+  }
+  return Number(header);
+}
+
+function formatEvent(event: WebEvent): string {
+  return `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+}
+
+async function serveWebAsset(
+  request: IncomingMessage,
+  response: ServerResponse,
+  staticDirectory: string,
+  pathname: string,
+): Promise<void> {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathname);
+  } catch {
+    throw new WebProductError("invalid_path", "Invalid URL path.");
+  }
+  if (decoded.includes("\0")) throw new WebProductError("invalid_path", "Invalid URL path.");
+  const directRelative = decoded === "/" ? "index.html" : decoded.replace(/^\/+/u, "");
+  const direct = safeStaticPath(staticDirectory, directRelative);
+  let asset = await readStaticAsset(staticDirectory, direct);
+  if (asset === undefined && extname(directRelative) === "") {
+    const index = safeStaticPath(staticDirectory, "index.html");
+    asset = await readStaticAsset(staticDirectory, index);
+  }
+  if (asset === undefined) throw new WebProductError("not_found", "Not found.", 404);
+  const cacheControl = asset.path.endsWith(`${sep}index.html`)
+    || asset.path.endsWith(`${sep}service-worker.js`)
+    || asset.path.endsWith(`${sep}manifest.webmanifest`)
+    ? "no-store"
+    : decoded.startsWith("/assets/")
+      ? "public, max-age=31536000, immutable"
+      : "no-cache";
+  response.writeHead(200, {
+    "content-type": contentType(asset.path),
+    "content-length": asset.body.byteLength,
+    "cache-control": cacheControl,
+  });
+  if (request.method === "HEAD") response.end();
+  else response.end(asset.body);
+}
+
+function safeStaticPath(root: string, relative: string): string {
+  const target = resolve(root, relative);
+  if (target !== root && !target.startsWith(`${root}${sep}`)) {
+    throw new WebProductError("invalid_path", "Invalid URL path.");
+  }
+  return target;
+}
+
+interface StaticAsset {
+  readonly path: string;
+  readonly body: Buffer;
+}
+
+/**
+ * Read a static asset only after every component below the configured root has
+ * been proven link-free. The final file is opened with O_NOFOLLOW and bytes are
+ * withheld until the descriptor and pathname chain still identify the same
+ * stable regular file.
+ */
+async function readStaticAsset(root: string, path: string): Promise<StaticAsset | undefined> {
+  if (typeof constants.O_NOFOLLOW !== "number") return undefined;
+  let beforePath: readonly BigIntStats[];
+  let handle: FileHandle | undefined;
+  try {
+    beforePath = await inspectStaticPath(root, path);
+    handle = await open(
+      path,
+      constants.O_RDONLY
+        | constants.O_NOFOLLOW
+        | (typeof constants.O_NONBLOCK === "number" ? constants.O_NONBLOCK : 0),
+    );
+    const before = await handle.stat({ bigint: true });
+    const expected = beforePath.at(-1);
+    if (
+      expected === undefined
+      || !before.isFile()
+      || !sameIdentity(expected, before)
+      || before.size > BigInt(MAX_STATIC_ASSET_BYTES)
+    ) {
+      return undefined;
+    }
+    const body = await readBoundedStaticFile(handle);
+    if (body === undefined) return undefined;
+    const after = await handle.stat({ bigint: true });
+    if (
+      !after.isFile()
+      || !sameFileSnapshot(before, after)
+      || after.size !== BigInt(body.byteLength)
+    ) {
+      return undefined;
+    }
+    const afterPath = await inspectStaticPath(root, path);
+    if (!samePathChain(beforePath, afterPath) || !sameIdentity(after, afterPath.at(-1)!)) {
+      return undefined;
+    }
+    return { path, body };
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function inspectStaticPath(root: string, path: string): Promise<readonly BigIntStats[]> {
+  const relativePath = relative(root, path);
+  if (
+    relativePath === ""
+    || relativePath === ".."
+    || relativePath.startsWith(`..${sep}`)
+    || resolve(root, relativePath) !== path
+  ) {
+    throw new Error("Static asset is outside its configured root.");
+  }
+  const segments = relativePath.split(sep).filter((segment) => segment.length > 0);
+  const snapshots: BigIntStats[] = [];
+  let cursor = root;
+  const rootInfo = await lstat(cursor, { bigint: true });
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) {
+    throw new Error("Static root must be a directory, not a link.");
+  }
+  snapshots.push(rootInfo);
+  for (const [index, segment] of segments.entries()) {
+    cursor = join(cursor, segment);
+    const info = await lstat(cursor, { bigint: true });
+    const final = index === segments.length - 1;
+    if (
+      info.isSymbolicLink()
+      || (final ? !info.isFile() : !info.isDirectory())
+    ) {
+      throw new Error("Static path components must not be links.");
+    }
+    snapshots.push(info);
+  }
+  return snapshots;
+}
+
+async function readBoundedStaticFile(handle: FileHandle): Promise<Buffer | undefined> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  while (total <= MAX_STATIC_ASSET_BYTES) {
+    const requested = Math.min(64 * 1_024, MAX_STATIC_ASSET_BYTES + 1 - total);
+    const chunk = Buffer.allocUnsafe(requested);
+    const { bytesRead } = await handle.read(chunk, 0, requested, null);
+    if (bytesRead === 0) break;
+    chunks.push(chunk.subarray(0, bytesRead));
+    total += bytesRead;
+  }
+  return total > MAX_STATIC_ASSET_BYTES ? undefined : Buffer.concat(chunks, total);
+}
+
+function sameIdentity(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameFileSnapshot(left: BigIntStats, right: BigIntStats): boolean {
+  return sameIdentity(left, right)
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs
+    && left.mode === right.mode
+    && left.nlink === right.nlink;
+}
+
+function samePathChain(left: readonly BigIntStats[], right: readonly BigIntStats[]): boolean {
+  return left.length === right.length
+    && left.every((entry, index) => sameIdentity(entry, right[index]!));
+}
+
+function contentType(path: string): string {
+  switch (extname(path)) {
+    case ".css": return "text/css; charset=utf-8";
+    case ".html": return "text/html; charset=utf-8";
+    case ".js":
+    case ".mjs": return "text/javascript; charset=utf-8";
+    case ".json":
+    case ".webmanifest": return "application/manifest+json; charset=utf-8";
+    case ".svg": return "image/svg+xml";
+    case ".png": return "image/png";
+    case ".ico": return "image/x-icon";
+    case ".woff2": return "font/woff2";
+    default: return "application/octet-stream";
+  }
+}
+
 function sendError(response: ServerResponse, error: unknown): void {
   const status = error instanceof WebProductError ? error.status : 500;
   const code = errorCode(error);
@@ -481,7 +868,7 @@ function setSecurityHeaders(response: ServerResponse): void {
   response.setHeader("x-content-type-options", "nosniff");
   response.setHeader("referrer-policy", "no-referrer");
   response.setHeader("x-frame-options", "DENY");
-  response.setHeader("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  response.setHeader("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; worker-src 'self'; manifest-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
   response.setHeader("permissions-policy", "camera=(), microphone=(), geolocation=()");
 }
 

@@ -12,6 +12,8 @@ import type {
   ChannelTurnResult,
   JsonObject,
   JsonValue,
+  RuntimeToolCall,
+  RuntimeToolResult,
   RuntimeUsage,
   TurnMessage,
 } from "@mono-agent/module-sdk";
@@ -24,6 +26,7 @@ import {
   parseLiveInputRequest,
   parseOperatorHealth,
   parseOperatorInfo,
+  parseOperatorFrame,
   parseTurnRequest,
   serializeOperatorFrame,
   type OperatorCancelResponse,
@@ -40,6 +43,9 @@ import {
   type OperatorConfigView,
   type OperatorLiveInputResponse,
   type OperatorMessage,
+  type OperatorModel,
+  type OperatorToolCall,
+  type OperatorToolResult,
   type OperatorUsage,
   type OperatorTurnRequest,
 } from "@mono-agent/operator";
@@ -55,6 +61,7 @@ const TERMINAL_FRAME_RESERVE_BYTES = 1_024;
 const CANCELLATION_MESSAGE = "The operator turn was cancelled.";
 const MAX_PENDING_ASKS = 1_000;
 const CORE_REPLAY_PAGE_LIMIT = 10_000;
+const CORE_ASSISTANT_MESSAGE_ID_MAX_BYTES = 522;
 
 export interface OperatorChannelStartInfo {
   readonly host: string;
@@ -92,6 +99,7 @@ export interface OperatorIdentityGrant {
   readonly agent: { readonly id: string; readonly label: string };
   readonly process: { readonly pid: number };
   readonly defaults: { readonly runtime: string; readonly model: string; readonly effort?: string };
+  readonly models?: readonly OperatorModel[];
   readonly configPath: string;
   readonly projectRoot: string;
 }
@@ -380,12 +388,21 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
             text += event.delta;
             await writer.write({ type: "delta", turnId, target: "assistant", text: event.delta, mode: "append" });
             break;
+          case "thinking-delta":
+            await writer.write({ type: "delta", turnId, target: "thought", text: event.delta, mode: "append" });
+            break;
           case "text-replace":
             text = event.text;
             await writer.write({ type: "delta", turnId, target: "assistant", text: event.text, mode: "replace" });
             break;
           case "activity":
             await writer.write({ type: "activity", turnId, text: event.text });
+            break;
+          case "tool-call":
+            await writer.write({ type: "tool_call", turnId, call: operatorToolCall(event.call) });
+            break;
+          case "tool-result":
+            await writer.write({ type: "tool_result", turnId, result: operatorToolResult(event.result) });
             break;
           case "attachment":
             unsupportedAttachment = true;
@@ -411,6 +428,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
                 sessionEvicted: false,
               },
             );
+            await writer.write({ type: "compaction", turnId, compaction: event.compaction });
             await writer.write({ type: "usage", turnId, usage: projectedUsage });
             break;
           case "session-evicted":
@@ -464,6 +482,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
           type: "completed",
           turnId,
           finalMessage: {
+            ...(result.messageId === undefined ? {} : { id: operatorMessageId(result.messageId) }),
             role: "assistant",
             text: result.text ?? text,
           },
@@ -569,11 +588,13 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
     const body: OperatorConversationList = {
       conversations: result.conversations.map((conversation) => {
         const activeTurnId = [...(activeByConversation.get(conversation.conversationId) ?? [])][0]?.turnId;
+        const triggerKind = operatorTriggerKind(conversation.metadata);
         return {
           id: conversation.conversationId,
           ...(conversation.title === undefined ? {} : { title: conversation.title }),
           updatedAt: conversation.updatedAt,
           ...(activeTurnId === undefined ? {} : { activeTurnId }),
+          ...(triggerKind === undefined ? {} : { triggerKind }),
         };
       }),
     };
@@ -683,6 +704,7 @@ function operatorInfo(
     },
     capabilities: operatorCapabilities(host),
     defaults: identity.defaults,
+    ...(identity.models === undefined ? {} : { models: identity.models }),
   });
 }
 
@@ -780,7 +802,7 @@ async function resolveOperatorQuote(
     throw new HttpError(503, "replay_unavailable", "Conversation replay is temporarily unavailable.");
   }
   const entry = replay.entries.find((candidate) =>
-    (candidate.message.id ?? candidate.turnId) === quote.messageId);
+    operatorMessageId(candidate.message.id ?? candidate.turnId) === quote.messageId);
   if (entry === undefined
     || (entry.message.role !== "user" && entry.message.role !== "assistant")) {
     throw new HttpError(422, "quote_not_found", "The quoted operator message does not exist in this conversation.");
@@ -824,10 +846,36 @@ function validateIdentityGrant(value: OperatorIdentityGrant): OperatorIdentityGr
     || !validGrantText(value.defaults?.runtime, 256)
     || !validGrantText(value.defaults.model, 256)
     || (value.defaults.effort !== undefined && !validGrantText(value.defaults.effort, 256))
+    || (value.models !== undefined && !validGrantModels(value.models))
     || !validGrantText(value.configPath, 4_096)
     || !validGrantText(value.projectRoot, 4_096)
   ) throw new TypeError("createOperatorChannel requires a valid operator.identity.v1 host grant.");
   return value;
+}
+
+function validGrantModels(value: unknown): value is readonly OperatorModel[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 1_000) return false;
+  const ids = new Set<string>();
+  return value.every((candidate) => {
+    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
+    const model = candidate as Record<string, unknown>;
+    if (Object.keys(model).some((field) =>
+      !["id", "label", "efforts", "contextWindow"].includes(field))) return false;
+    if (!validGrantText(model.id, 256) || ids.has(model.id)) return false;
+    ids.add(model.id);
+    if (model.label !== undefined && !validGrantText(model.label, 1_024)) return false;
+    if (model.contextWindow !== undefined
+      && (!Number.isSafeInteger(model.contextWindow) || Number(model.contextWindow) < 1)) return false;
+    if (model.efforts !== undefined) {
+      if (!Array.isArray(model.efforts) || model.efforts.length > 50) return false;
+      const efforts = new Set<string>();
+      for (const effort of model.efforts) {
+        if (!validGrantText(effort, 256) || efforts.has(effort)) return false;
+        efforts.add(effort);
+      }
+    }
+    return true;
+  });
 }
 
 function validGrantText(value: unknown, maximum: number): value is string {
@@ -836,6 +884,34 @@ function validGrantText(value: unknown, maximum: number): value is string {
     && value.length <= maximum
     && value === value.trim()
     && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function operatorTriggerKind(metadata: JsonObject | undefined): "cron" | "webhook" | undefined {
+  if (metadata?.source !== "operator-proactive") return undefined;
+  const kind = metadata?.triggerKind;
+  return kind === "cron" || kind === "webhook" ? kind : undefined;
+}
+
+function operatorMessageId(value: unknown): string {
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.includes("\0")
+    || Buffer.byteLength(value, "utf8") > CORE_ASSISTANT_MESSAGE_ID_MAX_BYTES
+  ) {
+    throw new TypeError("channel turn result messageId is invalid");
+  }
+  if (
+    value.length <= OPERATOR_LIMITS.identifierCharacters
+    && /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u.test(value)
+  ) {
+    return value;
+  }
+  const encoded = `message~u16:${Buffer.from(value, "utf16le").toString("base64url")}`;
+  if (encoded.length > OPERATOR_LIMITS.messageIdentifierCharacters) {
+    throw new TypeError("channel turn result messageId is invalid");
+  }
+  return encoded;
 }
 
 function toChannelAttachment(attachment: NonNullable<OperatorTurnRequest["input"]["attachments"]>[number]): ChannelAttachment {
@@ -862,7 +938,7 @@ function toOperatorMessage(message: TurnMessage, createdAt: string, fallbackId?:
     ? [{ id: part.attachment.id, name: part.attachment.name, mediaType: part.attachment.mediaType, sizeBytes: part.attachment.sizeBytes }]
     : []);
   return {
-    ...(id === undefined ? {} : { id }),
+    ...(id === undefined ? {} : { id: operatorMessageId(id) }),
     role: message.role === "assistant" ? "assistant" : "user",
     text,
     ...(attachments.length === 0 ? {} : { attachments }),
@@ -879,6 +955,65 @@ function operatorUsage(usage: RuntimeUsage): OperatorUsage {
     compacted: usage.compaction?.compacted ?? false,
     sessionEvicted: usage.sessionEvicted ?? false,
   };
+}
+
+function operatorToolCall(call: RuntimeToolCall): OperatorToolCall {
+  const id = boundedToolIdentifier(call.id, "call");
+  const name = boundedToolIdentifier(call.name, "tool");
+  const candidate = {
+    type: "tool_call",
+    turnId: "projection",
+    call: { id, name, input: call.input, inputOmitted: false },
+  } as const;
+  try {
+    const frame = parseOperatorFrame(candidate);
+    if (frame.type === "tool_call") return frame.call;
+  } catch {
+    // The payload can be valid at the runtime boundary but too large or carry
+    // JSON keys that the product protocol deliberately refuses to replay.
+  }
+  return { id, name, inputOmitted: true };
+}
+
+function operatorToolResult(result: RuntimeToolResult): OperatorToolResult {
+  const callId = boundedToolIdentifier(result.callId, "call");
+  const content = result.content.map((part) => part.type === "text"
+    ? { type: "text" as const, text: part.text }
+    : part.type === "json"
+      ? { type: "json" as const, value: part.value }
+      : { type: "text" as const, text: part.type === "file"
+          ? "[file result omitted]"
+          : "[artifact result omitted]" });
+  const candidate = {
+    type: "tool_result",
+    turnId: "projection",
+    result: {
+      callId,
+      content,
+      contentOmitted: false,
+      ...(result.isError === undefined ? {} : { isError: result.isError }),
+    },
+  } as const;
+  try {
+    const frame = parseOperatorFrame(candidate);
+    if (frame.type === "tool_result") return frame.result;
+  } catch {
+    // Keep correlation and outcome visible while omitting an unsafe payload.
+  }
+  return {
+    callId,
+    contentOmitted: true,
+    ...(result.isError === undefined ? {} : { isError: result.isError }),
+  };
+}
+
+function boundedToolIdentifier(value: string, prefix: "call" | "tool"): string {
+  return value.length > 0
+    && value.trim().length > 0
+    && !value.includes("\0")
+    && Buffer.byteLength(value, "utf8") <= OPERATOR_LIMITS.toolIdentifierBytes
+    ? value
+    : `${prefix}:${createHash("sha256").update(value).digest("hex")}`;
 }
 
 function mergeOperatorUsage(

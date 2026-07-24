@@ -54,10 +54,10 @@ Every route requires bearer authentication.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /v1/info` | Protocol, agent/process identity, and explicit capability flags. |
-| `GET /v1/health` | Bounded channel health for the current process. |
-| `POST /v1/turns` | Start one text turn and receive `application/x-ndjson`. |
-| `POST /v1/conversations/:id/cancel` | Cancel active turns for that exact conversation. |
+| `GET /v2/info` | Protocol, agent/process identity, and explicit capability flags. |
+| `GET /v2/health` | Bounded channel health for the current process. |
+| `POST /v2/turns` | Start one text turn and receive `application/x-ndjson`. |
+| `POST /v2/conversations/:id/cancel` | Cancel active turns for that exact conversation. |
 
 A turn begins with `accepted`, can emit assistant `delta` and `activity`
 frames, and ends with exactly one `completed` or `error` frame. The selected
@@ -65,12 +65,14 @@ Core/runtime remains authoritative for model and effort validation. Closing the
 client stream aborts the exact dispatch; explicit cancel, drain, and stop use
 the same request signal.
 
-The first runnable channel slice advertises cancellation, runtime overrides,
-and health. It reports attachments, quotes, live input, AskUser, proactive
-delivery, config view, and replay as unsupported. Those protocol fields exist
-in `@mono-agent/operator` so later channel implementations can add them without
-a second renderer-specific wire format; an unsupported capability must remain
-false and must not be simulated by a product.
+The current channel advertises only controls backed by Core host methods:
+cancellation, runtime overrides, attachments, replay-verified quotes, live
+input, AskUser, proactive delivery, redacted config, replay, and health. Its
+info response also exposes model hints derived only from strictly validated
+configured routes. Conversation summaries retain explicit whitelisted
+`cron`/`webhook` provenance from delivery metadata; renderers do not infer it
+from conversation ids. An unsupported capability remains false and is not
+simulated by a product.
 
 ## Protocol bounds and request security
 
@@ -95,7 +97,7 @@ authentication are both mandatory; the channel deliberately has no
 
 `channel-operator` returns its actual endpoint after `start()`, but it does not
 write a registry. The owning state/discovery lifecycle may publish an
-owner-private `mono-agent.operator-registry.v1` descriptor containing agent id,
+owner-private `mono-agent.operator-registry.v2` descriptor containing agent id,
 label, endpoint, token environment name, process id/start time, heartbeat, and
 capabilities. `@mono-agent/operator` rejects unsafe directory modes, symlinks,
 multi-link files, wrong ownership, and malformed descriptors. It marks stale

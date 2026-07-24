@@ -801,7 +801,7 @@ describe("agent host lifecycle", () => {
     type Dispatch = (
       request: Readonly<Record<string, unknown>>,
       reply: { emit(event: unknown): Promise<void> },
-    ) => Promise<{ status: string; text?: string }>;
+    ) => Promise<{ status: string; text?: string; messageId?: string }>;
     let dispatch: Dispatch | undefined;
     const project = await fixture([
       {
@@ -846,7 +846,13 @@ describe("agent host lifecycle", () => {
       signal: new AbortController().signal,
     }, { async emit() {} });
 
-    expect(response).toMatchObject({ status: "completed", text: "channel reply" });
+    expect(response).toMatchObject({
+      status: "completed",
+      text: "channel reply",
+      messageId: expect.stringMatching(/:assistant$/u),
+    });
+    const assistant = (await host.replay("channel-conversation")).messages.at(-1);
+    expect(response.messageId).toBe(assistant?.id);
     await expect(host.health()).resolves.toMatchObject({ pending: 0, active: 0 });
     await expect(host.drain()).resolves.toBeUndefined();
     await host.stop();
