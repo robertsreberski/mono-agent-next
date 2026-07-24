@@ -18,10 +18,26 @@ test.describe("assistant-ui console behavior contract", () => {
     await expect(contextDialog).toBeHidden();
     const actionsMenu = page.getByRole("menu", { name: "Conversation actions" });
     await expect(actionsMenu).toBeVisible();
-    await expect(actionsMenu.getByRole("menuitem", { name: "Rename" })).toBeVisible();
-    await actionsMenu.getByRole("menuitem", { name: "Rename" }).click({ trial: true });
-    await actionsMenu.getByRole("menuitem", { name: "Archive" }).click({ trial: true });
+    const renameAction = actionsMenu.getByRole("menuitem", { name: "Rename" });
+    const archiveAction = actionsMenu.getByRole("menuitem", { name: "Archive" });
+    await expect(renameAction).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(archiveAction).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(renameAction).toBeFocused();
+    await page.keyboard.press("ArrowUp");
+    await expect(archiveAction).toBeFocused();
+    await renameAction.click({ trial: true });
+    await archiveAction.click({ trial: true });
 
+    await page.keyboard.press("Tab");
+    await expect(actionsMenu).toBeHidden();
+    await expect(page.getByRole("button", { name: "Copy message" })).toBeFocused();
+
+    await actionsTrigger.focus();
+    await page.keyboard.press("ArrowUp");
+    await expect(actionsMenu).toBeVisible();
+    await expect(archiveAction).toBeFocused();
     await page.keyboard.press("Escape");
     await expect(actionsMenu).toBeHidden();
     await expect(actionsTrigger).toBeFocused();
@@ -30,6 +46,51 @@ test.describe("assistant-ui console behavior contract", () => {
     await expect(contextDialog).toBeVisible();
     await page.getByRole("heading", { name: "Beta architecture review" }).click();
     await expect(contextDialog).toBeHidden();
+  });
+
+  test("popover initial focus skips CSS-hidden descendants", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== "chromium-desktop");
+    await openFixtureConsole(page, "settled");
+    await page.addStyleTag({
+      content: `
+        .thread-menu-panel > [role="menuitem"]:first-child {
+          display: none !important;
+        }
+      `,
+    });
+
+    await page.getByRole("button", { name: "Conversation actions" }).click();
+    await expect(
+      page.getByRole("menu", { name: "Conversation actions" })
+        .getByRole("menuitem", { name: "Archive" }),
+    ).toBeFocused();
+
+    await page.keyboard.press("Escape");
+    await page.getByRole("button", { name: "Run settings" }).click();
+    await page.getByLabel("Model").selectOption({
+      label: "Codex shared route — codex-app-server",
+    });
+    await page.keyboard.press("Escape");
+    await page.addStyleTag({
+      content: `
+        .composer-settings-panel > label:first-child {
+          visibility: hidden !important;
+        }
+      `,
+    });
+    await page.getByRole("button", { name: "Run settings" }).click();
+    await expect(page.getByLabel("Reasoning effort")).toBeFocused();
+  });
+
+  test("run settings waits for the initial model control", async ({ page }, testInfo) => {
+    test.skip(
+      !["chromium-desktop", "chromium-mobile"].includes(testInfo.project.name),
+      "Desktop and mobile exercise the initial console-refresh focus path.",
+    );
+    await openFixtureConsole(page, "settled");
+
+    await page.getByRole("button", { name: "Run settings" }).click();
+    await expect(page.getByLabel("Model")).toBeFocused();
   });
 
   test("run settings remain actionable without covering the latest response", async (
@@ -391,6 +452,45 @@ test.describe("assistant-ui console behavior contract", () => {
     for (const control of controls) await expectMinimumTarget(control, 44);
   });
 
+  test("collapsed touch rail preserves the complete agent selection target", async (
+    { page },
+    testInfo,
+  ) => {
+    test.skip(testInfo.project.name !== "chromium-touch-desktop");
+    await openFixtureConsole(page, "settled");
+
+    const agent = page.getByRole("button", { name: /Personal Agent, online, pinned/iu });
+    const pin = page.getByRole("button", { name: "Unpin Personal Agent" });
+    await expect(agent).toBeVisible();
+    await expectMinimumTarget(agent, 48);
+    await expect(pin).toBeHidden();
+    await expect.poll(async () => agent.evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      const inset = 2;
+      return [
+        [bounds.left + bounds.width / 2, bounds.top + inset],
+        [bounds.right - inset, bounds.top + bounds.height / 2],
+        [bounds.left + bounds.width / 2, bounds.bottom - inset],
+        [bounds.left + inset, bounds.top + bounds.height / 2],
+        [bounds.left + bounds.width / 2, bounds.top + bounds.height / 2],
+      ].every(([x, y]) => {
+        const hit = document.elementFromPoint(x ?? 0, y ?? 0);
+        return hit === element || (hit !== null && element.contains(hit));
+      });
+    })).toBe(true);
+
+    await page.getByRole("button", { name: "Expand agent rail" }).click();
+    await expect(pin).toBeVisible();
+    const agentRow = agent.locator("..");
+    await expectMinimumTarget(agent, 44);
+    await expectMinimumTarget(pin, 44);
+    await expectNoIntersection(agent, pin);
+    await expectInsideContainer(agentRow, agent);
+    await expectInsideContainer(agentRow, pin);
+    await agent.click({ trial: true });
+    await pin.click({ trial: true });
+  });
+
   test("mobile drawer isolates background controls from focus", async ({ page }, testInfo) => {
     test.skip(!isTouchLane(testInfo.project.name));
     await openFixtureConsole(page, "settled");
@@ -446,6 +546,24 @@ async function expectInsideViewport(page: Page, locator: Locator): Promise<void>
     );
   });
   expect(inside).toBe(true);
+}
+
+async function expectInsideContainer(container: Locator, child: Locator): Promise<void> {
+  const [containerBounds, childBounds] = await Promise.all([
+    container.boundingBox(),
+    child.boundingBox(),
+  ]);
+  expect(containerBounds).not.toBeNull();
+  expect(childBounds).not.toBeNull();
+  if (containerBounds === null || childBounds === null) return;
+  expect(childBounds.x).toBeGreaterThanOrEqual(containerBounds.x);
+  expect(childBounds.y).toBeGreaterThanOrEqual(containerBounds.y);
+  expect(childBounds.x + childBounds.width).toBeLessThanOrEqual(
+    containerBounds.x + containerBounds.width,
+  );
+  expect(childBounds.y + childBounds.height).toBeLessThanOrEqual(
+    containerBounds.y + containerBounds.height,
+  );
 }
 
 async function expectMinimumTarget(locator: Locator, minimum: number): Promise<void> {

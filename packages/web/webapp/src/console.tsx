@@ -33,7 +33,18 @@ interface Selection {
 
 export interface ConversationNavigationBlocker {
   hasPending(): boolean;
+  /** Stable identity for the current pending work, used to scope one approval. */
+  pendingKey(): string;
   discard(): void | Promise<void>;
+}
+
+interface NavigationApproval {
+  readonly blockers: ReadonlyMap<ConversationNavigationBlocker, string>;
+  readonly pendingAskKey?: string;
+}
+
+interface ActiveDeletionApproval {
+  approval: NavigationApproval;
 }
 
 interface RunOverrides {
@@ -50,8 +61,16 @@ interface PendingContextBaseline {
 interface SelectionScope {
   readonly epoch: number;
   readonly agentId: string;
-  readonly threadId: string;
+  readonly threadId?: string;
 }
+
+interface CreateThreadIntent {
+  readonly epoch: number;
+  readonly agentId?: string;
+  readonly threadId?: string;
+}
+
+type LoadResult = "applied" | "blocked" | "superseded";
 
 interface ConsoleState {
   readonly authenticated: boolean;
@@ -136,6 +155,8 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   const detailRequestRef = useRef(0);
   const loadRequestRef = useRef(0);
   const refreshTimerRef = useRef<number | undefined>(undefined);
+  const createThreadOperationsRef = useRef(new Map<string, Promise<void>>());
+  const deletionApprovalsRef = useRef(new Map<string, ActiveDeletionApproval>());
 
   bootstrapRef.current = bootstrap;
   selectionRef.current = selection;
@@ -228,19 +249,45 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     };
   }, []);
 
-  const confirmNavigation = useCallback(async (): Promise<boolean> => {
-    const blockers = [...navigationBlockersRef.current].filter((blocker) => blocker.hasPending());
-    const hasPendingAsk = matchingDetail(selectionRef.current)?.thread.pendingAsk !== undefined;
-    if (blockers.length === 0 && !hasPendingAsk) return true;
-    if (!window.confirm("Discard the unsent message or pending response input for this conversation?")) {
-      return false;
+  const confirmNavigation = useCallback(async (
+    priorApproval?: NavigationApproval,
+  ): Promise<NavigationApproval | undefined> => {
+    const detail = matchingDetail(selectionRef.current);
+    const pendingAsk = detail?.thread.pendingAsk;
+    const pendingAskKey = detail === undefined || pendingAsk === undefined
+      ? undefined
+      : `${detail.thread.id}\u0000${pendingAsk.interactionId}`;
+    const blockers = [...navigationBlockersRef.current].filter((blocker) =>
+      blocker.hasPending()
+      && (
+        !priorApproval?.blockers.has(blocker)
+        || priorApproval.blockers.get(blocker) !== blocker.pendingKey()
+      )
+    );
+    const hasUnapprovedAsk =
+      pendingAsk !== undefined
+      && priorApproval?.pendingAskKey !== pendingAskKey;
+    if (blockers.length === 0 && !hasUnapprovedAsk) {
+      return priorApproval ?? { blockers: new Map() };
     }
+    if (!window.confirm("Discard the unsent message or pending response input for this conversation?")) {
+      return undefined;
+    }
+    const approvedBlockers = new Map(priorApproval?.blockers);
+    for (const blocker of blockers) approvedBlockers.set(blocker, blocker.pendingKey());
     try {
       for (const blocker of blockers) await blocker.discard();
-      return true;
+      return {
+        blockers: approvedBlockers,
+        ...(pendingAskKey === undefined
+          ? priorApproval?.pendingAskKey === undefined
+            ? {}
+            : { pendingAskKey: priorApproval.pendingAskKey }
+          : { pendingAskKey }),
+      };
     } catch (cause) {
       reportError(errorMessage(cause, "Could not discard the current draft."));
-      return false;
+      return undefined;
     }
   }, [reportError]);
 
@@ -297,10 +344,16 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
 
   const load = useCallback(async (
     initial = false,
-    errorScope?: SelectionScope,
-  ): Promise<void> => {
+    selectionScope?: SelectionScope,
+    navigationApproval?: NavigationApproval,
+  ): Promise<LoadResult> => {
     const loadRequest = loadRequestRef.current + 1;
     loadRequestRef.current = loadRequest;
+    const loadOrigin = selectionRef.current;
+    const loadOriginEpoch = selectionEpochRef.current;
+    const loadOriginApproval = deletionApprovalsRef.current.get(
+      selectionOperationKey(loadOriginEpoch, loadOrigin.agentId, loadOrigin.threadId),
+    );
     if (!initial) setRefreshing(true);
     try {
       let next: Bootstrap;
@@ -324,13 +377,75 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
         next = await api.bootstrap();
         setTokenAuthentication(readToken().length > 0);
       }
-      if (loadRequestRef.current !== loadRequest) return;
+      if (loadRequestRef.current !== loadRequest) return "superseded";
       if (initial) setError(undefined);
+      const current = selectionRef.current;
+      const currentEpoch = selectionEpochRef.current;
+      const preservedIdentity =
+        selectionScope !== undefined
+        && selectionMatches(
+          selectionScope.epoch,
+          selectionEpochRef.current,
+          selectionScope.threadId,
+          selectionScope.agentId,
+          current,
+        )
+        && next.agents.some((agent) => agent.id === selectionScope.agentId)
+        && (
+          selectionScope.threadId === undefined
+          || next.threads.some((thread) =>
+            thread.id === selectionScope.threadId
+            && thread.agentId === selectionScope.agentId
+          )
+        )
+          ? selectionIdentity(selectionScope.agentId, selectionScope.threadId)
+          : undefined;
+      const nextIdentity = preservedIdentity ?? chooseSelection(next);
+      const identityChanged =
+        current.agentId !== nextIdentity.agentId
+        || current.threadId !== nextIdentity.threadId;
+      if (identityChanged) {
+        const approvalKey = selectionOperationKey(
+          currentEpoch,
+          current.agentId,
+          current.threadId,
+        );
+        const originStillMatches = selectionMatches(
+            loadOriginEpoch,
+            currentEpoch,
+            loadOrigin.threadId,
+            loadOrigin.agentId,
+            current,
+          );
+        const activeApproval =
+          deletionApprovalsRef.current.get(approvalKey)
+          ?? (originStillMatches ? loadOriginApproval : undefined);
+        const enrichedApproval = await confirmNavigation(
+          navigationApproval ?? activeApproval?.approval,
+        );
+        if (enrichedApproval === undefined) return "blocked";
+        if (
+          activeApproval !== undefined
+          && deletionApprovalsRef.current.get(approvalKey) === activeApproval
+        ) {
+          activeApproval.approval = enrichedApproval;
+        }
+        if (
+          loadRequestRef.current !== loadRequest
+          || !selectionMatches(
+            currentEpoch,
+            selectionEpochRef.current,
+            current.threadId,
+            current.agentId,
+            selectionRef.current,
+          )
+        ) {
+          return "superseded";
+        }
+      }
       for (const payload of responseNotifications(bootstrapRef.current?.threads ?? [], next)) {
         void showBackgroundNotification(payload);
       }
-      const nextIdentity = chooseSelection(next);
-      const current = selectionRef.current;
       const nextAgent = next.agents.find((agent) => agent.id === nextIdentity.agentId);
       const reconciledOverrides = current.agentId === nextIdentity.agentId
         ? sanitizeRunOverrides(runOverridesRef.current, nextAgent)
@@ -340,9 +455,6 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
       }
       bootstrapRef.current = next;
       setBootstrap(next);
-      const identityChanged =
-        current.agentId !== nextIdentity.agentId
-        || current.threadId !== nextIdentity.threadId;
       const epoch = identityChanged
         ? beginSelection(nextIdentity.agentId, nextIdentity.threadId)
         : selectionEpochRef.current;
@@ -354,8 +466,9 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
       } else {
         await requestDetail(nextIdentity.threadId, epoch);
       }
+      return loadRequestRef.current === loadRequest ? "applied" : "superseded";
     } catch (loadError) {
-      if (loadRequestRef.current !== loadRequest) return;
+      if (loadRequestRef.current !== loadRequest) return "superseded";
       if (loadError instanceof ApiError && loadError.status === 401) {
         const attemptedTokenAuthentication = readToken().length > 0;
         saveToken("");
@@ -365,12 +478,12 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
         beginSelection(undefined, undefined);
         setError(attemptedTokenAuthentication ? loadError.message : undefined);
       } else if (
-        errorScope === undefined
+        selectionScope === undefined
         || selectionMatches(
-          errorScope.epoch,
+          selectionScope.epoch,
           selectionEpochRef.current,
-          errorScope.threadId,
-          errorScope.agentId,
+          selectionScope.threadId,
+          selectionScope.agentId,
           selectionRef.current,
         )
       ) {
@@ -388,6 +501,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     chooseSelection,
     commitRunOverrides,
     commitSelection,
+    confirmNavigation,
     requestDetail,
   ]);
 
@@ -471,14 +585,29 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     if (thread === undefined) return;
     const current = selectionRef.current;
     if (current.threadId === threadId && current.agentId === thread.agentId) return;
-    if (!await confirmNavigation()) return;
+    const originEpoch = selectionEpochRef.current;
+    if (await confirmNavigation() === undefined) return;
+    if (!selectionMatches(
+      originEpoch,
+      selectionEpochRef.current,
+      current.threadId,
+      current.agentId,
+      selectionRef.current,
+    )) {
+      return;
+    }
+    const currentThread = bootstrapRef.current?.threads.find((candidate) =>
+      candidate.id === threadId && candidate.agentId === thread.agentId
+    );
+    if (currentThread === undefined) return;
     setError(undefined);
-    const epoch = beginSelection(thread.agentId, threadId);
+    const epoch = beginSelection(currentThread.agentId, threadId);
     await requestDetail(threadId, epoch);
   }, [beginSelection, confirmNavigation, requestDetail]);
 
   const selectAgent = useCallback(async (agentId: string) => {
     const current = selectionRef.current;
+    const originEpoch = selectionEpochRef.current;
     const currentThread = bootstrapRef.current?.threads.find((candidate) =>
       candidate.id === current.threadId && candidate.agentId === agentId
     );
@@ -491,40 +620,117 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     ) {
       return;
     }
-    if (!await confirmNavigation()) return;
+    if (await confirmNavigation() === undefined) return;
+    if (!selectionMatches(
+      originEpoch,
+      selectionEpochRef.current,
+      current.threadId,
+      current.agentId,
+      selectionRef.current,
+    )) {
+      return;
+    }
+    if (!bootstrapRef.current?.agents.some((agent) => agent.id === agentId)) return;
+    const latestCurrentThread = bootstrapRef.current?.threads.find((candidate) =>
+      candidate.id === current.threadId && candidate.agentId === agentId
+    );
+    const latestThread = latestCurrentThread ?? bootstrapRef.current?.threads.find((candidate) =>
+      candidate.agentId === agentId && candidate.archivedAt === undefined
+    );
     setError(undefined);
-    if (thread !== undefined) {
-      const epoch = beginSelection(agentId, thread.id);
-      await requestDetail(thread.id, epoch);
+    if (latestThread !== undefined) {
+      const epoch = beginSelection(agentId, latestThread.id);
+      await requestDetail(latestThread.id, epoch);
     } else {
       beginSelection(agentId, undefined);
     }
   }, [beginSelection, confirmNavigation, requestDetail]);
 
-  const createThread = useCallback(async () => {
-    const agentId = selectionRef.current.agentId;
+  const createThreadOnce = useCallback(async (intent: CreateThreadIntent) => {
+    const agentId = intent.agentId;
     if (agentId === undefined) {
       reportError("Select an agent first.");
       return;
     }
-    if (!await confirmNavigation()) return;
+    const creationEpoch = intent.epoch;
+    const creationThreadId = intent.threadId;
+    const matchesCreation = () => selectionMatches(
+      creationEpoch,
+      selectionEpochRef.current,
+      creationThreadId,
+      agentId,
+      selectionRef.current,
+    );
+    if (await confirmNavigation() === undefined) return;
+    if (!matchesCreation()) return;
     setError(undefined);
     try {
       const thread = await api.createThread(agentId);
-      await load();
-      const catalogThread = bootstrapRef.current?.threads.find((candidate) =>
+      if (!matchesCreation()) return;
+      const creationScope: SelectionScope = {
+        epoch: creationEpoch,
+        agentId,
+        ...(creationThreadId === undefined ? {} : { threadId: creationThreadId }),
+      };
+      let catalogThread = bootstrapRef.current?.threads.find((candidate) =>
         candidate.id === thread.id && candidate.agentId === agentId
       );
+      for (
+        let refreshAttempt = 0;
+        catalogThread === undefined && refreshAttempt < 2;
+        refreshAttempt += 1
+      ) {
+        const loadResult = await load(false, creationScope);
+        if (!matchesCreation() || loadResult === "blocked") return;
+        catalogThread = bootstrapRef.current?.threads.find((candidate) =>
+          candidate.id === thread.id && candidate.agentId === agentId
+        );
+        // A superseding refresh may still be in flight. The next bounded load
+        // either consumes its applied catalog above or becomes the winning
+        // refresh itself; the already-created thread is never created twice.
+      }
       if (catalogThread === undefined) {
         reportError("The new conversation was created but is not available yet.");
+        return;
+      }
+      if (
+        await confirmNavigation() === undefined
+        || !matchesCreation()
+      ) {
         return;
       }
       const epoch = beginSelection(agentId, thread.id);
       await requestDetail(thread.id, epoch);
     } catch (cause) {
-      reportError(errorMessage(cause, "Could not create the conversation."));
+      if (matchesCreation()) {
+        reportError(errorMessage(cause, "Could not create the conversation."));
+      }
     }
   }, [beginSelection, confirmNavigation, load, reportError, requestDetail]);
+
+  const createThread = useCallback((): Promise<void> => {
+    const current = selectionRef.current;
+    const intent: CreateThreadIntent = {
+      epoch: selectionEpochRef.current,
+      ...(current.agentId === undefined ? {} : { agentId: current.agentId }),
+      ...(current.threadId === undefined ? {} : { threadId: current.threadId }),
+    };
+    const operationKey = JSON.stringify([
+      intent.epoch,
+      intent.agentId ?? null,
+      intent.threadId ?? null,
+    ]);
+    const activeOperation = createThreadOperationsRef.current.get(operationKey);
+    if (activeOperation !== undefined) return activeOperation;
+    const operation = createThreadOnce(intent);
+    createThreadOperationsRef.current.set(operationKey, operation);
+    void operation.finally(() => {
+      if (createThreadOperationsRef.current.get(operationKey) === operation) {
+        createThreadOperationsRef.current.delete(operationKey);
+      }
+    }).catch(() => undefined);
+    return operation;
+  }, [createThreadOnce]);
 
   const patchAgent = useCallback(async (agentId: string, pinned: boolean) => {
     setError(undefined);
@@ -560,17 +766,51 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
   }, [load, reportError]);
 
   const deleteThread = useCallback(async (threadId: string) => {
+    const current = selectionRef.current;
+    const deletingSelection = current.threadId === threadId;
+    const deletionEpoch = selectionEpochRef.current;
+    let navigationApproval: NavigationApproval | undefined;
+    let approvalKey: string | undefined;
+    let activeApproval: ActiveDeletionApproval | undefined;
+    if (deletingSelection) {
+      navigationApproval = await confirmNavigation();
+      if (navigationApproval === undefined) return;
+      if (!selectionMatches(
+        deletionEpoch,
+        selectionEpochRef.current,
+        threadId,
+        current.agentId,
+        selectionRef.current,
+      )) {
+        return;
+      }
+      approvalKey = selectionOperationKey(
+        deletionEpoch,
+        current.agentId,
+        threadId,
+      );
+      activeApproval = { approval: navigationApproval };
+      deletionApprovalsRef.current.set(approvalKey, activeApproval);
+    }
     setError(undefined);
     try {
       await api.deleteThread(threadId);
-      if (selectionRef.current.threadId === threadId) {
-        beginSelection(selectionRef.current.agentId, undefined);
-      }
+      // Keep the originating identity mounted until the refreshed catalog is
+      // ready. The generic load path can then detect any draft created while
+      // deletion was in flight and authorize the actual fallback selection.
       await load();
     } catch (cause) {
       reportError(errorMessage(cause, "Could not delete the conversation."));
+    } finally {
+      if (
+        approvalKey !== undefined
+        && activeApproval !== undefined
+        && deletionApprovalsRef.current.get(approvalKey) === activeApproval
+      ) {
+        deletionApprovalsRef.current.delete(approvalKey);
+      }
     }
-  }, [beginSelection, load, reportError]);
+  }, [confirmNavigation, load, reportError]);
 
   const cancel = useCallback(async () => {
     const { agentId, threadId } = selectionRef.current;
@@ -803,6 +1043,7 @@ export function ConsoleProvider({ children }: { readonly children: ReactNode }) 
     selectedThreadId !== undefined && pendingContextThreadIds.has(selectedThreadId);
   const { runtime, model, effort } = runOverrides;
   const retry = useCallback(async () => {
+    setError(undefined);
     try {
       await load();
     } catch {
@@ -951,8 +1192,8 @@ function sameRunOverrides(left: RunOverrides, right: RunOverrides): boolean {
 function selectionMatches(
   expectedEpoch: number,
   currentEpoch: number,
-  threadId: string,
-  agentId: string,
+  threadId: string | undefined,
+  agentId: string | undefined,
   selection: Selection,
 ): boolean {
   return (
@@ -960,6 +1201,14 @@ function selectionMatches(
     && selection.threadId === threadId
     && selection.agentId === agentId
   );
+}
+
+function selectionOperationKey(
+  epoch: number,
+  agentId: string | undefined,
+  threadId: string | undefined,
+): string {
+  return JSON.stringify([epoch, agentId ?? null, threadId ?? null]);
 }
 
 function hasTrustworthyCurrentContext(

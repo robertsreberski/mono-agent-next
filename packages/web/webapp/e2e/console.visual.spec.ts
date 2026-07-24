@@ -106,4 +106,5 @@ async function openRunSettings(page: Page): Promise<void> {
   await runSettings.first().click();
   await expect(page.getByLabel(/model/i).first()).toBeVisible();
   await expect(page.getByLabel(/reasoning effort/i).first()).toBeVisible();
+  await expect(page.getByLabel(/model/i).first()).toBeFocused();
 }

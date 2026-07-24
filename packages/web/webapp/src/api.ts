@@ -7,6 +7,7 @@ import type {
   ThreadDetail,
   WebEvent,
 } from "./types";
+import { serializeInlineTurnRequest } from "./inline-attachments";
 
 const TOKEN_KEY = "mono-agent-web-token";
 
@@ -124,6 +125,7 @@ export async function streamTurn(
   onFrame: (frame: StreamFrame) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  const body = serializeInlineTurnRequest(input);
   const response = await fetch(`/api/v1/threads/${encodeURIComponent(threadId)}/turns`, {
     method: "POST",
     headers: {
@@ -131,7 +133,7 @@ export async function streamTurn(
       ...authenticationHeader(),
       "content-type": "application/json",
     },
-    body: JSON.stringify(input),
+    body,
     ...(signal === undefined ? {} : { signal }),
   });
   if (!response.ok) throw await responseError(response);

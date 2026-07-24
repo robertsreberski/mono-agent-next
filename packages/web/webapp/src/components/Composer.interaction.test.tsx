@@ -19,6 +19,7 @@ const apiMocks = vi.hoisted(() => ({
   bootstrap: vi.fn(),
   thread: vi.fn(),
   createThread: vi.fn(),
+  deleteThread: vi.fn(),
   streamTurn: vi.fn(),
   subscribeEvents: vi.fn(
     async (
@@ -48,6 +49,7 @@ vi.mock("../api", async (importOriginal) => {
       bootstrap: apiMocks.bootstrap,
       thread: apiMocks.thread,
       createThread: apiMocks.createThread,
+      deleteThread: apiMocks.deleteThread,
     },
   };
 });
@@ -63,6 +65,7 @@ beforeEach(() => {
   apiMocks.bootstrap.mockResolvedValue(bootstrap());
   apiMocks.thread.mockResolvedValue(detail());
   apiMocks.createThread.mockResolvedValue(thread("new-thread"));
+  apiMocks.deleteThread.mockResolvedValue(undefined);
   apiMocks.streamTurn.mockResolvedValue(undefined);
 });
 
@@ -252,6 +255,226 @@ describe("assistant-ui composer delivery", () => {
     await view.unmount();
   });
 
+  it("confirms selected-thread deletion and releases its draft attachment quota", async () => {
+    const base = bootstrap();
+    const withTwoThreads = {
+      ...base,
+      threads: [thread("thread-1"), thread("thread-2")],
+    };
+    apiMocks.bootstrap.mockResolvedValue(withTwoThreads);
+    apiMocks.thread.mockImplementation(async (threadId: string) => detail(threadId));
+    apiMocks.deleteThread.mockImplementation(async () => {
+      apiMocks.bootstrap.mockResolvedValue({
+        ...withTwoThreads,
+        revision: 2,
+        threads: [thread("thread-2")],
+      });
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const view = await renderComposer();
+    const textarea = await waitFor(
+      () => view.host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]'),
+    );
+    await inputText(textarea, "Delete only after discarding this draft");
+    const input = requiredElement<HTMLInputElement>(view.host, 'input[type="file"]');
+    for (const name of ["one.txt", "two.txt", "three.txt"]) {
+      await attach(input, new File([name], name, { type: "text/plain" }));
+    }
+    await waitFor(() => view.host.querySelectorAll(".pending-files li").length === 3);
+
+    await click(view.host, "delete-selected");
+    await waitFor(() => confirm.mock.calls.length === 1);
+    expect(apiMocks.deleteThread).not.toHaveBeenCalled();
+    expect(output(view.host, "selected-thread")).toBe("thread-1");
+    expect(textarea.value).toBe("Delete only after discarding this draft");
+    expect(view.host.querySelectorAll(".pending-files li")).toHaveLength(3);
+
+    confirm.mockReturnValue(true);
+    await click(view.host, "delete-selected");
+    await waitFor(() => output(view.host, "selected-thread") === "thread-2");
+    await waitFor(() => textarea.value === "");
+    expect(apiMocks.deleteThread).toHaveBeenCalledOnce();
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(view.host.querySelectorAll(".pending-files li")).toHaveLength(0);
+
+    const nextInput = requiredElement<HTMLInputElement>(view.host, 'input[type="file"]');
+    for (const name of ["four.txt", "five.txt", "six.txt"]) {
+      await attach(nextInput, new File([name], name, { type: "text/plain" }));
+    }
+    await waitFor(() => view.host.querySelectorAll(".pending-files li").length === 3);
+    expect(output(view.host, "error")).not.toContain("at most 3 files");
+    await view.unmount();
+  });
+
+  it("requires a new deletion-refresh approval after identical text is retyped", async () => {
+    const deletion = deferred<void>();
+    const base = bootstrap();
+    const withTwoThreads = {
+      ...base,
+      threads: [thread("thread-1"), thread("thread-2")],
+    };
+    apiMocks.bootstrap.mockResolvedValue(withTwoThreads);
+    apiMocks.thread.mockImplementation(async (threadId: string) => detail(threadId));
+    apiMocks.deleteThread.mockImplementation(async () => await deletion.promise);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const view = await renderComposer();
+    const textarea = requiredElement<HTMLTextAreaElement>(
+      view.host,
+      'textarea[aria-label="Message"]',
+    );
+
+    await inputText(textarea, "same draft");
+    await click(view.host, "delete-selected");
+    await waitFor(() => apiMocks.deleteThread.mock.calls.length === 1);
+    await waitFor(() => textarea.value === "");
+    expect(confirm).toHaveBeenCalledOnce();
+
+    await inputText(textarea, "same draft");
+    apiMocks.bootstrap.mockResolvedValue({
+      ...withTwoThreads,
+      revision: 2,
+      threads: [thread("thread-2")],
+    });
+    await act(async () => deletion.resolve(undefined));
+
+    await waitFor(() => output(view.host, "selected-thread") === "thread-2");
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(textarea.value).toBe("");
+    await view.unmount();
+  });
+
+  it("requires a new deletion-refresh approval for a repeated AskUser answer", async () => {
+    const deletion = deferred<void>();
+    const base = bootstrap();
+    const pending = threadWithAsk();
+    const withTwoThreads = {
+      ...base,
+      threads: [pending, thread("thread-2")],
+    };
+    apiMocks.bootstrap.mockResolvedValue(withTwoThreads);
+    apiMocks.thread.mockImplementation(async (threadId: string) =>
+      threadId === "thread-1"
+        ? { ...detail(threadId), thread: pending }
+        : detail(threadId)
+    );
+    apiMocks.deleteThread.mockImplementation(async () => await deletion.promise);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const view = await renderComposer();
+    const choice = await waitFor(() =>
+      view.host.querySelector<HTMLInputElement>('.ask-card input[name="approval"]')
+    );
+
+    await act(async () => choice.click());
+    expect(choice.checked).toBe(true);
+    await click(view.host, "delete-selected");
+    await waitFor(() => apiMocks.deleteThread.mock.calls.length === 1);
+    await waitFor(() => choice.checked === false);
+    expect(confirm).toHaveBeenCalledOnce();
+
+    await act(async () => choice.click());
+    expect(choice.checked).toBe(true);
+    apiMocks.bootstrap.mockResolvedValue({
+      ...withTwoThreads,
+      revision: 2,
+      threads: [thread("thread-2")],
+    });
+    await act(async () => deletion.resolve(undefined));
+
+    await waitFor(() => output(view.host, "selected-thread") === "thread-2");
+    expect(confirm).toHaveBeenCalledTimes(2);
+    expect(view.host.querySelector(".ask-card")).toBeNull();
+    await view.unmount();
+  });
+
+  it("requires a new deletion-refresh approval for a later attachment preparation", async () => {
+    const readSpy = vi.spyOn(FileReader.prototype, "readAsDataURL")
+      .mockImplementation(() => undefined);
+    const abortSpy = vi.spyOn(FileReader.prototype, "abort")
+      .mockImplementation(() => undefined);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const deletion = deferred<void>();
+    const base = bootstrap();
+    const withTwoThreads = {
+      ...base,
+      threads: [thread("thread-1"), thread("thread-2")],
+    };
+    apiMocks.bootstrap.mockResolvedValue(withTwoThreads);
+    apiMocks.thread.mockImplementation(async (threadId: string) => detail(threadId));
+    apiMocks.deleteThread.mockImplementation(async () => await deletion.promise);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const view = await renderComposer();
+    try {
+      const textarea = requiredElement<HTMLTextAreaElement>(
+        view.host,
+        'textarea[aria-label="Message"]',
+      );
+      await paste(textarea, new File(["first"], "first.txt", { type: "text/plain" }));
+      await waitFor(() => readSpy.mock.calls.length === 1);
+
+      await click(view.host, "delete-selected");
+      await waitFor(() => apiMocks.deleteThread.mock.calls.length === 1);
+      await waitFor(() => abortSpy.mock.calls.length === 1);
+      expect(confirm).toHaveBeenCalledOnce();
+      expect(output(view.host, "selected-thread")).toBe("thread-1");
+
+      await paste(textarea, new File(["second"], "second.txt", { type: "text/plain" }));
+      await waitFor(() => readSpy.mock.calls.length === 2);
+      apiMocks.bootstrap.mockResolvedValue({
+        ...withTwoThreads,
+        revision: 2,
+        threads: [thread("thread-2")],
+      });
+      await act(async () => deletion.resolve(undefined));
+
+      await waitFor(() => output(view.host, "selected-thread") === "thread-2");
+      expect(confirm).toHaveBeenCalledTimes(2);
+      expect(abortSpy).toHaveBeenCalledTimes(2);
+      expect(view.host.querySelectorAll(".pending-files li")).toHaveLength(0);
+      expect(output(view.host, "error")).toBe("");
+    } finally {
+      consoleError.mockRestore();
+      abortSpy.mockRestore();
+      readSpy.mockRestore();
+      await view.unmount();
+    }
+  });
+
+  it("aborts a pasted file read before navigating away from its originating composer", async () => {
+    const readSpy = vi.spyOn(FileReader.prototype, "readAsDataURL")
+      .mockImplementation(() => undefined);
+    const abortSpy = vi.spyOn(FileReader.prototype, "abort")
+      .mockImplementation(() => undefined);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const base = bootstrap();
+    apiMocks.bootstrap.mockResolvedValue({
+      ...base,
+      threads: [thread("thread-1"), thread("thread-2")],
+    });
+    apiMocks.thread.mockImplementation(async (threadId: string) => detail(threadId));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const view = await renderComposer();
+    try {
+      const input = requiredElement<HTMLTextAreaElement>(
+        view.host,
+        'textarea[aria-label="Message"]',
+      );
+      await paste(input, new File(["delayed"], "pasted.txt", { type: "text/plain" }));
+      await waitFor(() => readSpy.mock.calls.length === 1);
+
+      await click(view.host, "open-thread-2");
+      await waitFor(() => output(view.host, "selected-thread") === "thread-2");
+      expect(confirm).toHaveBeenCalledOnce();
+      expect(abortSpy).toHaveBeenCalledOnce();
+      expect(view.host.querySelectorAll(".pending-files li")).toHaveLength(0);
+      expect(output(view.host, "error")).toBe("");
+    } finally {
+      consoleError.mockRestore();
+      abortSpy.mockRestore();
+      readSpy.mockRestore();
+      await view.unmount();
+    }
+  });
+
   it("guards direct agent and new-thread navigation for quote-only drafts", async () => {
     const base = bootstrap();
     apiMocks.bootstrap.mockResolvedValue({
@@ -399,6 +622,17 @@ function TestControls() {
       >
         Refresh
       </button>
+      <button
+        type="button"
+        data-testid="delete-selected"
+        onClick={() => {
+          if (consoleState.selectedThreadId !== undefined) {
+            void consoleState.deleteThread(consoleState.selectedThreadId);
+          }
+        }}
+      >
+        Delete
+      </button>
       <ThreadListPrimitive.Root>
         <ThreadListPrimitive.Items>
           {({ threadListItem }) => (
@@ -449,6 +683,17 @@ async function attach(input: HTMLInputElement, file: File): Promise<void> {
   });
   await act(async () => {
     input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+async function paste(input: HTMLTextAreaElement, file: File): Promise<void> {
+  const event = new Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "clipboardData", {
+    configurable: true,
+    value: { files: [file] },
+  });
+  await act(async () => {
+    input.dispatchEvent(event);
   });
 }
 
@@ -512,13 +757,16 @@ function requiredElement<ElementType extends Element>(
 
 function deferred<Value>(): {
   readonly promise: Promise<Value>;
+  readonly resolve: (value: Value) => void;
   readonly reject: (cause: unknown) => void;
 } {
+  let resolvePromise!: (value: Value) => void;
   let rejectPromise!: (cause: unknown) => void;
-  const promise = new Promise<Value>((_resolve, reject) => {
+  const promise = new Promise<Value>((resolve, reject) => {
+    resolvePromise = resolve;
     rejectPromise = reject;
   });
-  return { promise, reject: rejectPromise };
+  return { promise, resolve: resolvePromise, reject: rejectPromise };
 }
 
 function bootstrap(): Bootstrap {
@@ -567,6 +815,23 @@ function thread(id = "thread-1") {
     createdAt: timestamp,
     updatedAt: timestamp,
     status: "idle" as const,
+  };
+}
+
+function threadWithAsk() {
+  return {
+    ...thread("thread-1"),
+    pendingAsk: {
+      interactionId: "interaction-1",
+      requestedAt: timestamp,
+      questions: [{
+        id: "approval",
+        prompt: "Continue?",
+        choices: [{ value: "continue", label: "Continue" }],
+        allowFreeText: false,
+        multiple: false,
+      }],
+    },
   };
 }
 

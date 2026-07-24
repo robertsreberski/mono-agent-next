@@ -63,6 +63,17 @@ export default defineConfig({
       },
     },
     {
+      name: "chromium-touch-desktop",
+      testMatch: /console\.behavior\.spec\.ts/u,
+      grep: /collapsed touch rail preserves/u,
+      use: {
+        ...devices["Desktop Chrome"],
+        deviceScaleFactor: 1,
+        hasTouch: true,
+        viewport: { width: 1_440, height: 900 },
+      },
+    },
+    {
       name: "chromium-tablet",
       testMatch: /console\.behavior\.spec\.ts/u,
       use: {

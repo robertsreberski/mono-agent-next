@@ -2,8 +2,8 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { api, parseEventStream, saveToken } from "./api";
-import type { WebEvent } from "./types";
+import { api, parseEventStream, saveToken, streamTurn } from "./api";
+import type { Attachment, WebEvent } from "./types";
 
 describe("browser event protocol", () => {
   it("parses fragmented SSE data blocks and ignores heartbeats", async () => {
@@ -46,6 +46,28 @@ describe("browser event protocol", () => {
     expect(new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get("authorization"))
       .toBe("Bearer browser-token-0123456789");
     saveToken("");
+    fetchMock.mockRestore();
+  });
+
+  it("rejects an oversized serialized turn before opening a request", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const attachment = (name: string): Attachment => ({
+      id: name,
+      name,
+      mediaType: "application/octet-stream",
+      sizeBytes: 350 * 1_024,
+      url: `data:application/octet-stream;base64,${
+        "AAAA".repeat(Math.floor((350 * 1_024) / 3)) + "AAA="
+      }`,
+    });
+
+    await expect(streamTurn("thread-1", {
+      text: "x".repeat(100 * 1_024),
+      attachments: [attachment("first.bin"), attachment("second.bin")],
+    }, vi.fn())).rejects.toThrow(
+      "Message content and attachments exceed the 1 MiB request limit.",
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
     fetchMock.mockRestore();
   });
 });

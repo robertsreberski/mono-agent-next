@@ -343,6 +343,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .agent-rail.is-mobile { border-right: 0; box-shadow: var(--shadow-lg); }
 @media (hover: none), (pointer: coarse) {
   .agent-pin { opacity: 1; }
+  .agent-rail:not(.is-expanded) .agent-pin { display: none; }
+  .agent-rail.is-expanded .agent-item {
+    min-height: 48px;
+    padding-inline-end: 48px;
+  }
+  .agent-rail.is-expanded .agent-pin {
+    top: 2px;
+    right: 0;
+    width: 44px;
+    height: 44px;
+  }
 }
 
 .thread-sidebar {

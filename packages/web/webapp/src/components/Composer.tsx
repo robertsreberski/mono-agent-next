@@ -14,7 +14,11 @@ import {
 } from "react";
 
 import { useConsole } from "../console";
-import { useFailedComposerDraft } from "../runtime";
+import { isInlineAttachmentAbort } from "../inline-attachments";
+import {
+  useAttachmentPreparation,
+  useFailedComposerDraft,
+} from "../runtime";
 import type { Ask, AskQuestion } from "../types";
 import { Icon } from "./Icon";
 import { Popover } from "./Popover";
@@ -28,13 +32,26 @@ function AskUser() {
 function AskUserForm({ ask }: { readonly ask: Ask }) {
   const consoleState = useConsole();
   const [answers, setAnswers] = useState<Record<string, readonly string[]>>({});
+  const answersRef = useRef<Record<string, readonly string[]>>({});
+  const answerGeneration = useRef(0);
   const [submitting, setSubmitting] = useState(false);
+  const setQuestionAnswers = useCallback((questionId: string, values: readonly string[]) => {
+    const next = { ...answersRef.current, [questionId]: values };
+    answersRef.current = next;
+    answerGeneration.current += 1;
+    setAnswers(next);
+  }, []);
+  const clearAnswers = useCallback(() => {
+    answersRef.current = {};
+    setAnswers({});
+  }, []);
   const navigationBlocker = useMemo(() => ({
-    // Keeping the server-side question visible is itself pending work. This
-    // deliberately guards even before the first local choice is made.
-    hasPending: () => true,
-    discard: () => setAnswers({}),
-  }), []);
+    // The server interaction itself is keyed separately by ConsoleProvider.
+    // This blocker owns only locally authored answer occurrences.
+    hasPending: () => Object.values(answersRef.current).some((values) => values.length > 0),
+    pendingKey: () => String(answerGeneration.current),
+    discard: clearAnswers,
+  }), [clearAnswers]);
   useEffect(
     () => consoleState.registerNavigationBlocker(navigationBlocker),
     [consoleState.registerNavigationBlocker, navigationBlocker],
@@ -45,7 +62,7 @@ function AskUserForm({ ask }: { readonly ask: Ask }) {
     if (!valid) return;
     setSubmitting(true);
     try {
-      if (await consoleState.answerAsk(answers)) setAnswers({});
+      if (await consoleState.answerAsk(answers)) clearAnswers();
     } finally {
       setSubmitting(false);
     }
@@ -61,7 +78,7 @@ function AskUserForm({ ask }: { readonly ask: Ask }) {
           key={question.id}
           question={question}
           values={answers[question.id] ?? []}
-          onChange={(values) => setAnswers((current) => ({ ...current, [question.id]: values }))}
+          onChange={(values) => setQuestionAnswers(question.id, values)}
         />
       ))}
       <button className="primary" type="submit" disabled={!valid || submitting}>
@@ -332,9 +349,28 @@ function PendingAttachments() {
 export function Composer() {
   const consoleState = useConsole();
   const aui = useAui();
+  const attachmentPreparation = useAttachmentPreparation();
+  const composerGeneration = useRef(0);
+  const composerResetPending = useRef(false);
   const fileInput = useRef<HTMLInputElement>(null);
   const isRunning = useAuiState((state) => state.thread.isRunning);
   const canSend = useAuiState((state) => state.composer.canSend);
+  const composerSignature = useAuiState((state) => JSON.stringify({
+    text: state.composer.text,
+    attachments: state.composer.attachments.map((attachment) => attachment.id),
+    quote: state.composer.quote === undefined
+      ? undefined
+      : {
+          messageId: state.composer.quote.messageId,
+          text: state.composer.quote.text,
+        },
+  }));
+  const previousComposerSignature = useRef(composerSignature);
+  if (previousComposerSignature.current !== composerSignature) {
+    previousComposerSignature.current = composerSignature;
+    composerGeneration.current += 1;
+    composerResetPending.current = false;
+  }
   const canAttach =
     !isRunning
     && consoleState.selectedAgent?.capabilities.attachments === true;
@@ -348,24 +384,48 @@ export function Composer() {
     hasPending: () => {
       const state = aui.composer().getState();
       return (
-        state.text.length > 0
-        || state.attachments.length > 0
-        || state.quote !== undefined
+        (
+          !composerResetPending.current
+          && (
+            state.text.length > 0
+            || state.attachments.length > 0
+            || state.quote !== undefined
+          )
+        )
+        || attachmentPreparation.hasPending
       );
     },
-    discard: async () => {
-      await aui.composer().reset();
+    pendingKey: () => {
+      return JSON.stringify({
+        composerGeneration: composerGeneration.current,
+        ...(attachmentPreparation.pendingVersion === undefined
+          ? {}
+          : { attachmentPreparationVersion: attachmentPreparation.pendingVersion }),
+      });
     },
-  }), [aui]);
+    discard: async () => {
+      // File picker, paste, and drop all share the adapter boundary. Abort and
+      // settle every read before resetting the originating composer.
+      await attachmentPreparation.abortPending();
+      composerResetPending.current = true;
+      try {
+        await aui.composer().reset();
+      } catch (cause) {
+        composerResetPending.current = false;
+        throw cause;
+      }
+    },
+  }), [attachmentPreparation, aui]);
   useEffect(
     () => consoleState.registerNavigationBlocker(navigationBlocker),
     [consoleState.registerNavigationBlocker, navigationBlocker],
   );
   const addFiles = useCallback(async (files: FileList) => {
-    for (const file of files) {
+    for (const file of Array.from(files)) {
       try {
         await aui.composer().addAttachment(file);
       } catch (cause) {
+        if (isInlineAttachmentAbort(cause)) continue;
         consoleState.reportError(
           cause instanceof Error && cause.message.trim()
             ? cause.message

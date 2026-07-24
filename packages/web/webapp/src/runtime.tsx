@@ -42,12 +42,28 @@ interface FailedDraftContextValue {
   clear(draft: FailedComposerDraft): void;
 }
 
+interface AttachmentPreparationContextValue {
+  readonly hasPending: boolean;
+  readonly pendingVersion: number | undefined;
+  abortPending(): Promise<void>;
+}
+
 const FailedDraftContext = createContext<FailedDraftContextValue>({
   clear: () => undefined,
 });
+const AttachmentPreparationContext =
+  createContext<AttachmentPreparationContextValue | undefined>(undefined);
 
 export function useFailedComposerDraft(): FailedDraftContextValue {
   return useContext(FailedDraftContext);
+}
+
+export function useAttachmentPreparation(): AttachmentPreparationContextValue {
+  const value = useContext(AttachmentPreparationContext);
+  if (value === undefined) {
+    throw new Error("useAttachmentPreparation must be used inside WebRuntimeProvider.");
+  }
+  return value;
 }
 
 function status(message: Message): ThreadMessageLike["status"] {
@@ -326,11 +342,13 @@ export function WebRuntimeProvider({ children }: { readonly children: ReactNode 
     },
   }), [failedDraft]);
   return (
-    <AssistantRuntimeProvider runtime={runtime}>
-      <FailedDraftContext.Provider value={failedDraftContext}>
-        {children}
-      </FailedDraftContext.Provider>
-    </AssistantRuntimeProvider>
+    <AttachmentPreparationContext.Provider value={attachmentAdapter}>
+      <AssistantRuntimeProvider runtime={runtime}>
+        <FailedDraftContext.Provider value={failedDraftContext}>
+          {children}
+        </FailedDraftContext.Provider>
+      </AssistantRuntimeProvider>
+    </AttachmentPreparationContext.Provider>
   );
 }
 
