@@ -278,8 +278,8 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
         acceptEvents = false;
         clearTimeout(timer);
         request.signal.removeEventListener("abort", onAbort);
-        await chain.catch(() => undefined);
         if (terminalFailure) await termination;
+        else await chain.catch(() => undefined);
       }
     },
   };

@@ -8,8 +8,13 @@ export function record(value: unknown): Record<string, unknown> {
 
 export function usage(value: unknown): RuntimeUsage | undefined {
   const item = record(value);
-  const inputTokens = Number(item.input_tokens ?? item.inputTokens ?? 0);
-  const outputTokens = Number(item.output_tokens ?? item.outputTokens ?? 0);
+  const rawInputTokens = item.input_tokens ?? item.inputTokens;
+  const rawOutputTokens = item.output_tokens ?? item.outputTokens;
+  if (rawInputTokens === undefined || rawOutputTokens === undefined) {
+    return undefined;
+  }
+  const inputTokens = Number(rawInputTokens);
+  const outputTokens = Number(rawOutputTokens);
   if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) {
     return undefined;
   }

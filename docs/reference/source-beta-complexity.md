@@ -17,17 +17,17 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `d649a3a29fbdbf925d62abb7c8fd839f27265e0756da65f24f1759173fe9beee`
+Source manifest digest: `5dd5c4812424efbd65d7acd2fc5ce4ed8e25f8bdb505cb969bfac4637146d886`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 208 | 83528 |
-| Tests | 139 | 66181 |
+| Production | 208 | 83533 |
+| Tests | 139 | 66345 |
 | Repository and product tooling | 63 | 22966 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **410** | **172675** |
+| **Total executable source** | **410** | **172844** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
@@ -40,7 +40,7 @@ Average production file size is 401.6 lines.
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 83528 | 130000 | within limit |
+| repository-production | 83533 | 130000 | within limit |
 | kernel-production | 15296 | 15500 | within limit |
 
 ## Largest package ownership surfaces
