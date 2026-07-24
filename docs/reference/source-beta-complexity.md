@@ -17,17 +17,17 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `13e9e5683d2e921048f0c2830c6f7bc780df607905e501948879d3749548510b`
+Source manifest digest: `51b6ce225bb9a2f6dfede3179df81d3fb99ffe8ab3c80a34f48246f0027756b8`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 195 | 78695 |
+| Production | 195 | 78699 |
 | Tests | 130 | 59891 |
 | Repository and product tooling | 62 | 22463 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **387** | **161049** |
+| **Total executable source** | **387** | **161053** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
@@ -40,7 +40,7 @@ Average production file size is 403.6 lines.
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 78695 | 130000 | within limit |
+| repository-production | 78699 | 130000 | within limit |
 | kernel-production | 14974 | 15000 | within limit |
 
 ## Largest package ownership surfaces
@@ -50,7 +50,7 @@ Average production file size is 403.6 lines.
 | `@mono-agent/state-local` | 14 | 12164 | 4264 |
 | `@mono-agent/core` | 18 | 11906 | 14133 |
 | `@mono-agent/runtime-pi` | 15 | 7842 | 4194 |
-| `@mono-agent/memory-local` | 14 | 7149 | 3359 |
+| `@mono-agent/memory-local` | 14 | 7153 | 3359 |
 | `@mono-agent/service-macos` | 14 | 4336 | 1851 |
 | `create-mono-agent` | 7 | 3505 | 1289 |
 | `@mono-agent/channel-webhook` | 5 | 2658 | 1366 |

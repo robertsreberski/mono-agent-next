@@ -1325,9 +1325,13 @@ async function createPrivateTargetRoot(
     await assertPinnedSnapshotDirectory(path, target.identity, target);
     return target;
   } catch (error) {
-    const removed = observed !== undefined
-      && await removeObservedEmptySnapshotTarget(path, observed, target, hooks);
-    await handle?.close().catch(() => undefined);
+    let removed = false;
+    try {
+      removed = observed !== undefined
+        && await removeObservedEmptySnapshotTarget(path, observed, target, hooks);
+    } finally {
+      await handle?.close().catch(() => undefined);
+    }
     if (!removed) {
       throw migrationFailure(
         "Snapshot target identity changed during creation; preserving it as unusable.",
