@@ -715,7 +715,7 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
             failProcessedOffsetConfirmation(offset);
           }
         } finally {
-          await finishShutdown();
+          await finishShutdown(drainContext.deadline, drainContext.signal);
         }
       })();
       await shutdownPromise;
@@ -783,10 +783,19 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
     });
   }
 
-  async function finishShutdown(): Promise<void> {
-    if (polling !== undefined) await Promise.race([polling.catch(() => undefined), delay(STOP_TIMEOUT_MS)]);
+  async function finishShutdown(
+    deadline?: string,
+    signal: AbortSignal = new AbortController().signal,
+  ): Promise<void> {
+    const pollingTimeoutMs = drainTimeoutMs(deadline);
+    if (polling !== undefined && pollingTimeoutMs > 0 && !signal.aborted) {
+      await Promise.race([
+        polling.catch(() => undefined),
+        delay(pollingTimeoutMs, signal),
+      ]);
+    }
     if (active > 0) {
-      await waitForIdle(undefined, new AbortController().signal, undefined);
+      await waitForIdle(deadline, signal, undefined);
     }
     for (const chatId of [...pendingAsks.keys()]) clearPendingAsk(chatId);
     callbackAnswers.clear();

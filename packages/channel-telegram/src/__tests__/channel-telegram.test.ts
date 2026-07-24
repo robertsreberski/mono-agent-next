@@ -1341,6 +1341,75 @@ describe("telegram channel", () => {
     });
   });
 
+  it("does not extend the drain deadline when an active host turn ignores abort", async () => {
+    vi.useFakeTimers();
+    try {
+      const now = new Date().toISOString();
+      let firstPoll = true;
+      let releaseTurn!: () => void;
+      const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+      const close = vi.fn(async () => undefined);
+      const client: TelegramBotClient = {
+        async poll(_offset, _timeout, signal) {
+          if (firstPoll) {
+            firstPoll = false;
+            return [{
+              updateId: 1,
+              kind: "message",
+              chatId: "42",
+              messageId: "1",
+              senderId: "U",
+              text: "work",
+              attachments: [],
+              receivedAt: now,
+            }];
+          }
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener("abort", () => { resolve(); }, { once: true });
+          });
+          return [];
+        },
+        async download() { throw new Error("unexpected download"); },
+        async sendMessage() { return { messageId: "sent" }; },
+        async sendAttachment() { return { messageId: "attachment" }; },
+        close,
+      };
+      let turnSignal: AbortSignal | undefined;
+      const dispatch = vi.fn<ChannelHost["dispatch"]>(async (request) => {
+        turnSignal = request.signal;
+        await turnGate;
+        return { status: "cancelled" };
+      });
+      const channel = createTelegramChannel({
+        context: context(parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }), dispatch),
+        clientFactory: () => client,
+      });
+
+      await channel.start?.({ signal: new AbortController().signal });
+      await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+      let drainSettled = false;
+      const draining = Promise.resolve(channel.drain?.({
+        signal: new AbortController().signal,
+        deadline: new Date(Date.now() + 100).toISOString(),
+      })).then(
+        () => { drainSettled = true; return undefined; },
+        (error: unknown) => { drainSettled = true; return error; },
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      expect(drainSettled).toBe(true);
+      expect(turnSignal?.aborted).toBe(true);
+      expect(close).toHaveBeenCalledOnce();
+      await expect(draining).resolves.toEqual(
+        expect.objectContaining({ message: "Telegram update confirmation is degraded." }),
+      );
+      releaseTurn();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("waits for an active AskUser callback before completing graceful drain", async () => {
     const now = new Date().toISOString();
     let callbackToken: string | undefined;
