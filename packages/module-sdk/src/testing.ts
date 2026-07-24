@@ -427,10 +427,17 @@ function utf8Bytes(value: string): number {
 function assertBoundedModuleToolSchema(value: Record<string, unknown>, label: string): void {
   let bytes = 0;
   let items = 0;
+  let serializedBytes = 0;
   const active = new Set<object>();
   const charge = (amount: number): void => {
     bytes += amount;
     if (bytes > MODULE_TOOL_LIMITS.inputSchemaBytes) {
+      fail(`${label} exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaBytes)} UTF-8 bytes`);
+    }
+  };
+  const chargeSerialized = (amount: number): void => {
+    serializedBytes += amount;
+    if (serializedBytes > MODULE_TOOL_LIMITS.inputSchemaBytes) {
       fail(`${label} exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaBytes)} UTF-8 bytes`);
     }
   };
@@ -442,12 +449,17 @@ function assertBoundedModuleToolSchema(value: Record<string, unknown>, label: st
   };
   const visit = (current: unknown, path: string, depth: number): void => {
     if (depth === 0) addItems(1);
-    if (current === null || typeof current === "boolean") { charge(8); return; }
+    if (current === null) { charge(8); chargeSerialized(4); return; }
+    if (typeof current === "boolean") {
+      charge(8); chargeSerialized(current ? 4 : 5); return;
+    }
     if (typeof current === "number") {
       if (!Number.isFinite(current)) fail(`${path} must contain only finite numbers`);
-      charge(16); return;
+      charge(16); chargeSerialized(jsonScalarBytes(current)); return;
     }
-    if (typeof current === "string") { charge(utf8Bytes(current)); return; }
+    if (typeof current === "string") {
+      charge(utf8Bytes(current)); chargeSerialized(jsonScalarBytes(current)); return;
+    }
     if (current === null || typeof current !== "object") {
       fail(`${path} must contain only JSON values`);
     }
@@ -462,6 +474,7 @@ function assertBoundedModuleToolSchema(value: Record<string, unknown>, label: st
     const entries = Reflect.ownKeys(source)
       .filter((key) => !Array.isArray(current) || key !== "length");
     addItems(entries.length);
+    chargeSerialized(2 + Math.max(0, entries.length - 1));
     active.add(current);
     try {
       for (const key of entries) {
@@ -471,7 +484,10 @@ function assertBoundedModuleToolSchema(value: Record<string, unknown>, label: st
         if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
           fail(`${path}.${key} must be an enumerable data property`);
         }
-        if (!Array.isArray(current)) charge(utf8Bytes(key));
+        if (!Array.isArray(current)) {
+          charge(utf8Bytes(key));
+          chargeSerialized(jsonScalarBytes(key) + 1);
+        }
         visit(descriptor.value, Array.isArray(current) ? `${path}[${key}]` : `${path}.${key}`, depth + 1);
       }
     } finally {
@@ -479,6 +495,9 @@ function assertBoundedModuleToolSchema(value: Record<string, unknown>, label: st
     }
   }
   visit(value, label, 0);
+}
+function jsonScalarBytes(value: string | number): number {
+  return utf8Bytes(JSON.stringify(value));
 }
 function fail(message: string): never {
   throw new ModuleComplianceError(message);

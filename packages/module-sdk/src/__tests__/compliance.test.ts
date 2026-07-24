@@ -181,6 +181,10 @@ describe("public compliance assertions", () => {
     }])).toThrow("inputSchema exceeds 65536 UTF-8 bytes");
     expect(() => assertModuleToolContributionsCompliance([{
       ...contribution,
+      inputSchema: { description: "\n".repeat(40_000) },
+    }])).toThrow("inputSchema exceeds 65536 UTF-8 bytes");
+    expect(() => assertModuleToolContributionsCompliance([{
+      ...contribution,
       unexpected: true,
     }])).toThrow("contains unsupported property unexpected");
     expect(() => assertModuleToolBindingCompliance({
