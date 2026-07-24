@@ -111,7 +111,12 @@ export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: ty
 
   return {
     async poll(offset, timeoutSeconds, signal) {
-      const raw = await call("getUpdates", { offset, timeout: timeoutSeconds, allowed_updates: ["message", "callback_query"] }, signal);
+      const raw = await call("getUpdates", {
+        offset,
+        limit: 100,
+        timeout: timeoutSeconds,
+        allowed_updates: ["message", "callback_query"],
+      }, signal);
       if (!Array.isArray(raw)) throw new Error("Telegram getUpdates returned an invalid result.");
       return raw.map(parseUpdate).filter((update): update is TelegramUpdate => update !== undefined);
     },

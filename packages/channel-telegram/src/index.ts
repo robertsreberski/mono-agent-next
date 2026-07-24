@@ -41,7 +41,11 @@ const MAX_ASK_BUTTONS_PER_QUESTION = 8;
 const MAX_PENDING_ASKS = 1_000;
 const MAX_CALLBACK_ANSWERS = 10_000;
 const MAX_RUNTIME_SELECTIONS = 1_000;
+const MAX_TRACKED_UPDATES = 100;
+const MAX_POLL_BACKOFF_MS = 1_000;
 const TRANSCRIPTION_UNAVAILABLE = "[Automatic transcription unavailable; audio attachment retained.]";
+const RETRY_CONTROL_UPDATE = Symbol("retry-control-update");
+const RUN_AS_PRIMARY_UPDATE = Symbol("run-as-primary-update");
 
 interface PendingTelegramAsk {
   readonly ask: AskUserRequest;
@@ -61,6 +65,17 @@ interface TelegramCallbackAnswer {
 interface TelegramRuntimeSelection {
   readonly model?: string;
   readonly effort?: string;
+}
+
+interface TrackedTelegramUpdate {
+  readonly update: TelegramUpdate;
+  state: "queued" | "primary" | "control" | "settled";
+  controlDisposition: "eligible" | "deferred" | "primary";
+}
+
+interface ActiveTelegramPoll {
+  readonly controller: AbortController;
+  frontierInterrupted: boolean;
 }
 
 export interface TelegramChannel extends Channel {
@@ -103,10 +118,22 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
   let forceStopped = false;
   let active = 0;
   let lastError: string | undefined;
+  let primaryUpdate: TrackedTelegramUpdate | undefined;
+  let controlUpdate: TrackedTelegramUpdate | undefined;
+  let primaryChatId: string | undefined;
+  let primaryControlsReady = false;
+  let processingFailureObserved = false;
   const pendingAsks = new Map<string, PendingTelegramAsk>();
   const callbackAnswers = new Map<string, TelegramCallbackAnswer>();
   const runtimeSelections = new Map<string, TelegramRuntimeSelection>();
+  const trackedUpdates = new Map<number, TrackedTelegramUpdate>();
+  const receivedUpdateIds: number[] = [];
   const idleWaiters = new Set<() => void>();
+  let pollProgressVersion = 0;
+  let wakePollBackoff: (() => void) | undefined;
+  let activePollRequest: ActiveTelegramPoll | undefined;
+  let controlRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  let controlRetryMs = 100;
 
   const clearPendingAsk = (chatId: string): void => {
     const pending = pendingAsks.get(chatId);
@@ -134,6 +161,7 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
     const answers = Object.create(null) as Record<string, readonly string[]>;
     const pending: PendingTelegramAsk = { ask, answers, done: new Set(), tokens: new Set() };
     pendingAsks.set(chatId, pending);
+    if (turnLifecycle !== undefined) scheduleUpdates(turnLifecycle.signal);
     return pending;
   };
 
@@ -147,7 +175,11 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
     }
   };
 
-  const processUpdate = async (update: TelegramUpdate, signal: AbortSignal): Promise<void> => {
+  const processUpdate = async (
+    update: TelegramUpdate,
+    signal: AbortSignal,
+    controlOnly = false,
+  ): Promise<void> => {
     if (update.kind === "ignored") return;
     if (!authorized(update.chatId)) return;
     if (update.kind === "callback") {
@@ -192,7 +224,12 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
         }
       }
       if (update.text.trim() === "/cancel" && context.host.cancel !== undefined) {
-        await context.host.cancel({ conversationId: `telegram:${update.chatId}`, reason: "Telegram user requested cancellation.", signal });
+        const cancelled = await context.host.cancel({
+          conversationId: `telegram:${update.chatId}`,
+          reason: "Telegram user requested cancellation.",
+          signal,
+        });
+        if (controlOnly && cancelled.status === "idle") throw RETRY_CONTROL_UPDATE;
         return;
       }
       const command = runtimeCommand(update.text);
@@ -219,6 +256,8 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
       if (context.host.offerLiveInput !== undefined && update.text.length > 0 && update.attachments.length === 0) {
         const offered = await context.host.offerLiveInput({ conversationId: `telegram:${update.chatId}`, id: `telegram:${update.updateId}`, text: update.text, receivedAt: update.receivedAt, signal });
         if (offered.status === "applied" || offered.status === "discarded") return;
+        if (controlOnly && offered.status === "unavailable") throw RETRY_CONTROL_UPDATE;
+        if (controlOnly) throw RUN_AS_PRIMARY_UPDATE;
       }
       const attachments: ChannelAttachment[] = [];
       const transcriptNotes: string[] = [];
@@ -295,7 +334,12 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
         runtimeSelections.get(update.chatId),
         signal,
       );
-      const result = await context.host.dispatch(request, reply);
+      const dispatched = context.host.dispatch(request, reply);
+      if (!controlOnly && primaryUpdate?.update.updateId === update.updateId) {
+        primaryControlsReady = true;
+        scheduleUpdates(signal);
+      }
+      const result = await dispatched;
       const final = result.text ?? replyText;
       if (result.status === "completed" && final.length > 0) {
         await sendChunkedTelegramMessage(client, {
@@ -310,42 +354,294 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
     }
   };
 
+  function isControlUpdate(entry: TrackedTelegramUpdate): boolean {
+    const update = entry.update;
+    if (update.kind === "ignored") return false;
+    if (update.kind === "callback") {
+      const answer = callbackAnswers.get(update.data);
+      const pending = pendingAsks.get(update.chatId);
+      return answer !== undefined
+        && answer.chatId === update.chatId
+        && pending?.ask.interactionId === answer.interactionId;
+    }
+    const pending = pendingAsks.get(update.chatId);
+    const question = pending?.ask.questions.find((candidate) => !pending.done.has(candidate.id));
+    if (question?.allowFreeText === true && update.text.trim().length > 0) return true;
+    if (
+      update.text.trim() === "/cancel"
+      && context.host.cancel !== undefined
+      && entry.controlDisposition === "eligible"
+      && primaryControlsReady
+      && primaryChatId === update.chatId
+    ) return true;
+    return entry.controlDisposition === "eligible"
+      && primaryUpdate !== undefined
+      && primaryControlsReady
+      && primaryChatId === update.chatId
+      && context.host.offerLiveInput !== undefined
+      && update.text.length > 0
+      && update.attachments.length === 0;
+  }
+
+  function scheduleUpdates(signal: AbortSignal): void {
+    if (signal.aborted || forceStopped) return;
+    if (!stopped && primaryUpdate === undefined) {
+      const nextPrimary = receivedUpdateIds
+        .map((updateId) => trackedUpdates.get(updateId))
+        .find((entry): entry is TrackedTelegramUpdate =>
+          entry?.state === "queued" && !isControlUpdate(entry));
+      if (nextPrimary !== undefined) startTrackedUpdate(nextPrimary, "primary", signal);
+    }
+    if (controlUpdate === undefined) {
+      const nextControl = receivedUpdateIds
+        .map((updateId) => trackedUpdates.get(updateId))
+        .find((entry): entry is TrackedTelegramUpdate =>
+          entry?.state === "queued" && isControlUpdate(entry));
+      if (nextControl !== undefined) startTrackedUpdate(nextControl, "control", signal);
+    }
+  }
+
+  function startTrackedUpdate(
+    entry: TrackedTelegramUpdate,
+    lane: "primary" | "control",
+    signal: AbortSignal,
+  ): void {
+    entry.state = lane;
+    active += 1;
+    if (lane === "primary") {
+      primaryUpdate = entry;
+      primaryChatId = entry.update.kind === "ignored" ? undefined : entry.update.chatId;
+      primaryControlsReady = false;
+    } else {
+      controlUpdate = entry;
+    }
+    void (async () => {
+      let settled = true;
+      try {
+        await processUpdate(entry.update, signal, lane === "control");
+      } catch (error) {
+        if (error === RETRY_CONTROL_UPDATE) {
+          entry.controlDisposition = "deferred";
+          settled = false;
+        } else if (error === RUN_AS_PRIMARY_UPDATE) {
+          entry.controlDisposition = "primary";
+          settled = false;
+        } else if (signal.aborted) {
+          settled = false;
+        } else {
+          processingFailureObserved = true;
+          lastError = "Telegram update processing is degraded.";
+          context.logger.warn(lastError, {
+            instanceId: context.instanceId,
+            updateId: entry.update.updateId,
+            ...(entry.update.kind === "ignored" ? {} : { chatId: entry.update.chatId }),
+          });
+          if (entry.update.kind !== "ignored") {
+            await react(client, context.config.reactions.error, entry.update, "👎", signal);
+          }
+        }
+      } finally {
+        entry.state = settled ? "settled" : "queued";
+        if (lane === "primary" && primaryUpdate === entry) {
+          primaryUpdate = undefined;
+          primaryChatId = undefined;
+          primaryControlsReady = false;
+        }
+        if (lane === "control" && controlUpdate === entry) controlUpdate = undefined;
+        advanceConsumedFrontier();
+        scheduleUpdates(signal);
+        if (entry.state === "queued" && entry.controlDisposition === "deferred") {
+          scheduleDeferredControlRetry(signal);
+        } else if (lane === "control" && settled) {
+          controlRetryMs = 100;
+        }
+        releaseActiveUpdate();
+      }
+    })();
+  }
+
+  function advanceConsumedFrontier(): boolean {
+    const previousOffset = offset;
+    let lastSettledUpdateId: number | undefined;
+    while (receivedUpdateIds.length > 0) {
+      const updateId = receivedUpdateIds[0]!;
+      const entry = trackedUpdates.get(updateId);
+      if (entry?.state !== "settled") break;
+      receivedUpdateIds.shift();
+      trackedUpdates.delete(updateId);
+      lastSettledUpdateId = updateId;
+    }
+    const firstUnsettledId = receivedUpdateIds[0];
+    if (firstUnsettledId !== undefined) {
+      offset = Math.max(offset, firstUnsettledId);
+    } else if (lastSettledUpdateId !== undefined) {
+      offset = Math.max(offset, lastSettledUpdateId + 1);
+    }
+    const moved = offset !== previousOffset;
+    if (moved) {
+      pollProgressVersion += 1;
+      wakePollBackoff?.();
+      if (activePollRequest !== undefined && !activePollRequest.controller.signal.aborted) {
+        activePollRequest.frontierInterrupted = true;
+        activePollRequest.controller.abort(new Error("Telegram update frontier advanced."));
+      }
+    }
+    return moved;
+  }
+
+  function ingestUpdates(
+    updates: readonly TelegramUpdate[],
+    signal: AbortSignal,
+  ): { readonly added: number; readonly saturated: boolean; readonly frontierMoved: boolean } {
+    const batchIds = new Set<number>();
+    const additions = [...updates]
+      .sort((left, right) => left.updateId - right.updateId)
+      .filter((update) => {
+        if (update.updateId < offset || trackedUpdates.has(update.updateId) || batchIds.has(update.updateId)) {
+          return false;
+        }
+        batchIds.add(update.updateId);
+        return true;
+      });
+    const fullDuplicateWindow = updates.length >= MAX_TRACKED_UPDATES
+      && additions.length === 0
+      && trackedUpdates.size >= MAX_TRACKED_UPDATES;
+    if (trackedUpdates.size + additions.length > MAX_TRACKED_UPDATES || fullDuplicateWindow) {
+      const summary = "Telegram update ledger capacity is exhausted.";
+      if (lastError !== summary) {
+        lastError = summary;
+        context.logger.warn(summary, {
+          instanceId: context.instanceId,
+          returnedUpdates: updates.length,
+          trackedUpdates: trackedUpdates.size,
+        });
+      }
+      scheduleUpdates(signal);
+      return { added: 0, saturated: true, frontierMoved: false };
+    }
+    for (const update of additions) {
+      trackedUpdates.set(update.updateId, {
+        update,
+        state: "queued",
+        controlDisposition: "eligible",
+      });
+      receivedUpdateIds.push(update.updateId);
+    }
+    receivedUpdateIds.sort((left, right) => left - right);
+    const frontierMoved = advanceConsumedFrontier();
+    scheduleUpdates(signal);
+    return { added: additions.length, saturated: false, frontierMoved };
+  }
+
+  function rearmDeferredControls(): boolean {
+    if (primaryUpdate === undefined || !primaryControlsReady) return false;
+    let rearmed = false;
+    for (const entry of trackedUpdates.values()) {
+      if (entry.state === "queued" && entry.controlDisposition === "deferred") {
+        entry.controlDisposition = "eligible";
+        rearmed = true;
+      }
+    }
+    return rearmed;
+  }
+
+  function scheduleDeferredControlRetry(signal: AbortSignal): void {
+    if (controlRetryTimer !== undefined || signal.aborted || forceStopped) return;
+    const timeoutMs = controlRetryMs;
+    controlRetryMs = Math.min(controlRetryMs * 2, MAX_POLL_BACKOFF_MS);
+    controlRetryTimer = setTimeout(() => {
+      controlRetryTimer = undefined;
+      if (signal.aborted || forceStopped) return;
+      if (rearmDeferredControls()) scheduleUpdates(signal);
+    }, timeoutMs);
+    controlRetryTimer.unref();
+  }
+
+  function clearDeferredControlRetry(): void {
+    if (controlRetryTimer === undefined) return;
+    clearTimeout(controlRetryTimer);
+    controlRetryTimer = undefined;
+  }
+
   const poll = async (pollSignal: AbortSignal, turnSignal: AbortSignal): Promise<void> => {
+    let backoffMs = 100;
+    let previousRequestedOffset: number | undefined;
     while (!pollSignal.aborted) {
       try {
         const requestedOffset = offset;
-        const updates = await client.poll(requestedOffset, context.config.pollSeconds, pollSignal);
-        confirmedOffset = Math.max(confirmedOffset, requestedOffset);
-        let updateFailed = false;
-        for (const update of updates) {
+        const requestedOffsetAdvanced = previousRequestedOffset !== undefined
+          && requestedOffset !== previousRequestedOffset;
+        previousRequestedOffset = requestedOffset;
+        const request: ActiveTelegramPoll = {
+          controller: new AbortController(),
+          frontierInterrupted: false,
+        };
+        activePollRequest = request;
+        const abortRequest = (): void => {
+          request.controller.abort(pollSignal.reason ?? new Error("Telegram polling stopped."));
+        };
+        pollSignal.addEventListener("abort", abortRequest, { once: true });
+        let updates: readonly TelegramUpdate[];
+        try {
+          updates = await client.poll(
+            requestedOffset,
+            context.config.pollSeconds,
+            request.controller.signal,
+          );
+        } catch (error) {
           if (pollSignal.aborted) break;
-          if (update.updateId < offset) continue;
-          active += 1;
-          try {
-            await processUpdate(update, turnSignal);
-          } catch {
-            if (turnSignal.aborted) break;
-            updateFailed = true;
+          if (request.frontierInterrupted) {
+            backoffMs = 100;
+            continue;
+          }
+          throw error;
+        } finally {
+          pollSignal.removeEventListener("abort", abortRequest);
+          if (activePollRequest === request) activePollRequest = undefined;
+        }
+        if (pollSignal.aborted) break;
+        if (request.frontierInterrupted) {
+          backoffMs = 100;
+          continue;
+        }
+        confirmedOffset = Math.max(confirmedOffset, requestedOffset);
+        if (rearmDeferredControls()) clearDeferredControlRetry();
+        const ingested = ingestUpdates(updates, turnSignal);
+        if (ingested.added > 0) await yieldToUpdateTasks();
+        if (!ingested.saturated) {
+          if (processingFailureObserved) {
+            processingFailureObserved = false;
             lastError = "Telegram update processing is degraded.";
-            context.logger.warn(lastError, {
-              instanceId: context.instanceId,
-              updateId: update.updateId,
-              ...(update.kind === "ignored" ? {} : { chatId: update.chatId }),
-            });
-            if (update.kind === "message") {
-              await react(client, context.config.reactions.error, update, "👎", turnSignal);
-            }
-          } finally {
-            if (!turnSignal.aborted) offset = Math.max(offset, update.updateId + 1);
-            releaseActiveUpdate();
+          } else if (
+            lastError === "Telegram update ledger capacity is exhausted."
+            || lastError === "Telegram update processing is degraded."
+            || lastError === "Telegram polling is degraded."
+          ) {
+            lastError = undefined;
           }
         }
-        if (!updateFailed && !pollSignal.aborted) lastError = undefined;
+        const progressed = ingested.added > 0
+          || ingested.frontierMoved
+          || requestedOffsetAdvanced
+          || offset !== requestedOffset;
+        if (progressed) {
+          backoffMs = 100;
+        } else {
+          const version = pollProgressVersion;
+          await waitForPollBackoff(backoffMs, pollSignal);
+          backoffMs = pollProgressVersion === version
+            ? Math.min(backoffMs * 2, MAX_POLL_BACKOFF_MS)
+            : 100;
+        }
       } catch {
         if (pollSignal.aborted) break;
         lastError = "Telegram polling is degraded.";
         context.logger.warn(lastError, { instanceId: context.instanceId });
-        await delay(100, pollSignal);
+        const version = pollProgressVersion;
+        await waitForPollBackoff(backoffMs, pollSignal);
+        backoffMs = pollProgressVersion === version
+          ? Math.min(backoffMs * 2, MAX_POLL_BACKOFF_MS)
+          : 100;
       }
     }
   };
@@ -394,7 +690,7 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
           );
           if (idle && pollingStopped) {
             await confirmProcessedOffset(drainContext.deadline, drainContext.signal);
-          } else if (offset > confirmedOffset) {
+          } else {
             failProcessedOffsetConfirmation(offset);
           }
         } finally {
@@ -468,9 +764,15 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
 
   async function finishShutdown(): Promise<void> {
     if (polling !== undefined) await Promise.race([polling.catch(() => undefined), delay(STOP_TIMEOUT_MS)]);
+    if (active > 0) {
+      await waitForIdle(undefined, new AbortController().signal, undefined);
+    }
     for (const chatId of [...pendingAsks.keys()]) clearPendingAsk(chatId);
     callbackAnswers.clear();
     runtimeSelections.clear();
+    clearDeferredControlRetry();
+    trackedUpdates.clear();
+    receivedUpdateIds.length = 0;
     await client.close?.().catch(() => undefined);
     running = false;
   }
@@ -532,6 +834,25 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
     lastError = "Telegram update confirmation is degraded.";
     context.logger.warn(lastError, { instanceId: context.instanceId, offset: targetOffset });
     throw new Error(lastError);
+  }
+
+  async function waitForPollBackoff(ms: number, signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      const finish = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal.removeEventListener("abort", finish);
+        if (wakePollBackoff === finish) wakePollBackoff = undefined;
+        resolve();
+      };
+      const timer = setTimeout(finish, ms);
+      timer.unref();
+      wakePollBackoff = finish;
+      signal.addEventListener("abort", finish, { once: true });
+    });
   }
 }
 
@@ -636,7 +957,13 @@ function inbound(
   };
 }
 
-async function react(client: TelegramBotClient, enabled: boolean, update: TelegramMessageUpdate, emoji: string, signal: AbortSignal): Promise<void> {
+async function react(
+  client: TelegramBotClient,
+  enabled: boolean,
+  update: Pick<TelegramMessageUpdate, "chatId" | "messageId">,
+  emoji: string,
+  signal: AbortSignal,
+): Promise<void> {
   if (enabled) await client.setReaction?.(update.chatId, update.messageId, emoji, signal).catch(() => undefined);
 }
 
@@ -694,6 +1021,10 @@ function drainTimeoutMs(deadline: string | undefined): number {
   if (deadline === undefined) return STOP_TIMEOUT_MS;
   const parsed = Date.parse(deadline);
   return Number.isFinite(parsed) ? Math.max(0, parsed - Date.now()) : 0;
+}
+
+async function yieldToUpdateTasks(): Promise<void> {
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
 }
 
 async function delay(ms: number, signal?: AbortSignal): Promise<void> {
