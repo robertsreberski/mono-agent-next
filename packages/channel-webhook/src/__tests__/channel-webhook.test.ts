@@ -38,6 +38,7 @@ import {
 } from "../server.js";
 import { monoAgentModule, type WebhookModuleChannel } from "../index.js";
 import { WebhookDelivery } from "../delivery.js";
+import { MAX_WEBHOOK_ROUTE_PROMPT_LENGTH } from "../limits.js";
 import {
   loadWebhookRoutesFromDirectory,
   parseWebhookNotify,
@@ -237,6 +238,33 @@ describe("webhook HTTP channel", () => {
     expect(submit).not.toHaveBeenCalled();
   });
 
+  it("accepts local authorities and rejects foreign authorities on a wildcard bind", async () => {
+    const apiKey = "a".repeat(32);
+    const signatureSecret = "s".repeat(32);
+    const submit = vi.fn<WebhookSubmit>(async () => ({ text: "accepted" }));
+    const { info } = await startChannel({
+      listen: { host: "0.0.0.0", port: 0 },
+      allowNonLoopback: true,
+      signatureSecret,
+    }, submit, apiKey);
+
+    await expect(authorityStatus(
+      info.port,
+      `192.168.10.20:${String(info.port)}`,
+      info.invokeUrl,
+      apiKey,
+      signatureSecret,
+    )).resolves.toBe(200);
+    await expect(authorityStatus(
+      info.port,
+      `attacker.invalid:${String(info.port)}`,
+      info.invokeUrl,
+      apiKey,
+      signatureSecret,
+    )).resolves.toBe(421);
+    expect(submit).toHaveBeenCalledOnce();
+  });
+
   it("rejects an authorized body over the configured byte bound", async () => {
     const submit = vi.fn<WebhookSubmit>(async () => ({ text: "unexpected" }));
     const { info } = await startChannel({ maxBodyBytes: 64 }, submit, "right-key");
@@ -251,6 +279,22 @@ describe("webhook HTTP channel", () => {
 
     expect(response.status).toBe(413);
     expect(await response.json()).toMatchObject({
+      error: { code: "body_too_large" },
+    });
+    expect(submit).not.toHaveBeenCalled();
+  });
+
+  it("returns 413 when a chunked body crosses the streaming byte bound", async () => {
+    const submit = vi.fn<WebhookSubmit>(async () => ({ text: "unexpected" }));
+    const { info } = await startChannel({ maxBodyBytes: 64 }, submit);
+    const response = await chunkedInvoke(info, [
+      '{"text":"',
+      "x".repeat(128),
+      '"}',
+    ]);
+
+    expect(response.status).toBe(413);
+    expect(JSON.parse(response.body)).toMatchObject({
       error: { code: "body_too_large" },
     });
     expect(submit).not.toHaveBeenCalled();
@@ -305,6 +349,34 @@ describe("webhook HTTP channel", () => {
       error: { code: "timeout", message: "The request timed out." },
     });
     expect(observed?.abortSignal.aborted).toBe(true);
+  });
+
+  it("aborts a sync run when the client disconnects mid-run", async () => {
+    let observed: WebhookInboundRequest | undefined;
+    const { channel, info } = await startChannel({}, async (request) => {
+      observed = request;
+      return new Promise(() => undefined);
+    });
+    const body = JSON.stringify({ text: "disconnect" });
+    const client = httpRequest({
+      hostname: info.host,
+      port: info.port,
+      method: "POST",
+      path: new URL(info.invokeUrl).pathname,
+      headers: {
+        authorization: `Bearer ${TEST_API_KEY}`,
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body)),
+      },
+    });
+    client.on("error", () => undefined);
+    client.end(body);
+    await vi.waitFor(() => expect(observed).toBeDefined());
+
+    client.destroy();
+
+    await vi.waitFor(() => expect(observed?.abortSignal.aborted).toBe(true));
+    await vi.waitFor(() => expect(channel.health().activeRequests).toBe(0));
   });
 
   it("aborts active work and drains idempotently on shutdown", async () => {
@@ -799,7 +871,7 @@ describe("webhook outbound delivery", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
-  it("reports exact receipt capacity as degraded and never evicts prior authority", async () => {
+  it("evicts the oldest delivered receipt at capacity", async () => {
     const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
     const delivery = new WebhookDelivery({ url: "https://hooks.example.test/deliver", apiKey: "outbound-key", timeoutMs: 1_000, maxResponseBytes: 1_024 }, fetchImpl);
     const signal = new AbortController().signal;
@@ -810,23 +882,24 @@ describe("webhook outbound delivery", () => {
         idempotencyKey: `delivery-${String(index)}`,
       }, signal);
     }
-    expect(delivery.degraded).toBe(true);
-    expect(delivery.receiptCapacityExhausted).toBe(true);
     await expect(delivery.deliver({
       conversationId: "webhook:destination",
       text: "one too many",
       idempotencyKey: "delivery-capacity",
-    }, signal)).resolves.toMatchObject({
-      status: "failed",
-      diagnostic: { code: "webhook_delivery_receipt_capacity" },
-    });
-    expect(delivery.degraded).toBe(true);
+    }, signal)).resolves.toMatchObject({ status: "delivered" });
+    expect(delivery.degraded).toBe(false);
+    expect(delivery.receiptCapacityExhausted).toBe(false);
+    await expect(delivery.deliver({
+      conversationId: "webhook:destination",
+      text: "notice-1",
+      idempotencyKey: "delivery-1",
+    }, signal)).resolves.toMatchObject({ status: "duplicate" });
     await expect(delivery.deliver({
       conversationId: "webhook:destination",
       text: "notice-0",
       idempotencyKey: "delivery-0",
-    }, signal)).resolves.toMatchObject({ status: "duplicate" });
-    expect(fetchImpl).toHaveBeenCalledTimes(1_000);
+    }, signal)).resolves.toMatchObject({ status: "delivered" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1_002);
   });
 
   it("clears transient capacity degradation after definitive failures free receipts", async () => {
@@ -988,6 +1061,48 @@ describe("mono-agent channel module", () => {
     await channel.stop?.({ signal: lifecycle.signal, reason: "shutdown" });
   });
 
+  it("returns HTTP 503 for host cancellation and preserves host rejection distinctly", async () => {
+    const invokeHostResult = async (status: "cancelled" | "rejected") => {
+      const lifecycle = new AbortController();
+      const channel = await monoAgentModule.create({
+        instanceId: `host-${status}`,
+        config: monoAgentModule.schema.parse({ apiKey: "module-key" }),
+        configDirectory: "/config",
+        provenance: {},
+        workspaceDirectory: "/workspace",
+        dataDirectory: "/data",
+        logger: noopLogger(),
+        host: {
+          grantedCapabilities: new Set(),
+          getCapability<T>(): T | undefined {
+            return undefined;
+          },
+          async dispatch() {
+            return { status };
+          },
+        },
+        signal: lifecycle.signal,
+      });
+      moduleChannels.add(channel);
+      await channel.start?.({ signal: lifecycle.signal });
+      return invoke(channel.endpoint as string, { text: status }, "module-key");
+    };
+
+    const cancelled = await invokeHostResult("cancelled");
+    expect(cancelled.status).toBe(503);
+    expect(await cancelled.json()).toMatchObject({
+      status: "cancelled",
+      error: { code: "cancelled", message: "The request was cancelled." },
+    });
+
+    const rejected = await invokeHostResult("rejected");
+    expect(rejected.status).toBe(500);
+    expect(await rejected.json()).toMatchObject({
+      status: "failed",
+      error: { code: "rejected", message: "The request was rejected." },
+    });
+  });
+
   it("resolves a stable non-secret default for the configured fixed outbound URL", async () => {
     const host: ChannelHost = {
       grantedCapabilities: new Set(),
@@ -1085,7 +1200,14 @@ describe("mono-agent channel module", () => {
   });
 
   it("reports exact outbound receipt capacity as degraded module health", async () => {
-    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const fetchImpl = vi.fn<typeof fetch>(async () => {
+      await gate;
+      return new Response(null, { status: 204 });
+    });
     vi.stubGlobal("fetch", fetchImpl);
     const lifecycle = new AbortController();
     const channel = await monoAgentModule.create({
@@ -1116,15 +1238,22 @@ describe("mono-agent channel module", () => {
     });
     moduleChannels.add(channel);
     await channel.start?.({ signal: lifecycle.signal });
-    for (let index = 0; index < 1_000; index += 1) {
-      await channel.deliver?.({
+    const pending = Array.from({ length: 1_000 }, (_, index) =>
+      channel.deliver?.({
         conversationId: "webhook:outbound",
         text: `notice-${String(index)}`,
         idempotencyKey: `capacity-health-${String(index)}`,
-      }, lifecycle.signal);
-    }
+      }, lifecycle.signal));
 
-    expect(fetchImpl).toHaveBeenCalledTimes(1_000);
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1_000));
+    await expect(channel.deliver?.({
+      conversationId: "webhook:outbound",
+      text: "one too many",
+      idempotencyKey: "capacity-health-overflow",
+    }, lifecycle.signal)).resolves.toMatchObject({
+      status: "failed",
+      diagnostic: { code: "webhook_delivery_receipt_capacity" },
+    });
     expect(await channel.health?.({ signal: lifecycle.signal })).toMatchObject({
       status: "degraded",
       summary: "Webhook delivery receipt capacity is exhausted.",
@@ -1133,13 +1262,14 @@ describe("mono-agent channel module", () => {
         deliveryAmbiguousOutcome: false,
       },
     });
-    await expect(channel.deliver?.({
-      conversationId: "webhook:outbound",
-      text: "one too many",
-      idempotencyKey: "capacity-health-overflow",
-    }, lifecycle.signal)).resolves.toMatchObject({
-      status: "failed",
-      diagnostic: { code: "webhook_delivery_receipt_capacity" },
+    release();
+    await Promise.all(pending);
+    expect(await channel.health?.({ signal: lifecycle.signal })).toMatchObject({
+      status: "healthy",
+      details: {
+        deliveryReceiptCapacityExhausted: false,
+        deliveryAmbiguousOutcome: false,
+      },
     });
   });
 
@@ -1235,6 +1365,51 @@ describe("mono-agent channel module", () => {
     await channel.stop?.({ signal: lifecycle.signal, reason: "shutdown" });
   });
 
+  it("runs a loaded route at the prompt cap with non-empty invocation text", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mono-agent-webhook-prompt-cap-"));
+    temporaryDirectories.push(root);
+    const prompt = "x".repeat(MAX_WEBHOOK_ROUTE_PROMPT_LENGTH);
+    const markdown = (value: string) => [
+      "---",
+      "name: prompt-cap",
+      "path: /prompt-cap",
+      "mode: sync",
+      "---",
+      value,
+    ].join("\n");
+    await writeFile(join(root, "prompt-cap.md"), markdown(prompt), "utf8");
+    const routes = await loadWebhookRoutesFromDirectory(root, "sync");
+    expect(() => parseWebhookRouteMarkdown(
+      "prompt-too-large.md",
+      markdown(`${prompt}x`),
+      "sync",
+    )).toThrow(/prompt limit/u);
+
+    let submittedText = "";
+    const channel = createWebhookChannel({
+      config: parseWebhookConfig({ apiKey: TEST_API_KEY }),
+      routes,
+      submit: async (request) => {
+        submittedText = request.text;
+        return { text: "accepted" };
+      },
+    });
+    channels.add(channel);
+    const info = await channel.start();
+    const response = await invoke(
+      `${info.baseUrl}/prompt-cap`,
+      { text: "😀" },
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      status: "succeeded",
+      text: "accepted",
+    });
+    expect(submittedText).toBe(`${prompt}\n\n😀`);
+    expect(submittedText.length).toBe(1_000_000);
+  });
+
   it("rejects duplicate, unsafe, and malformed route definitions before listening", async () => {
     expect(parseWebhookNotify("telegram")).toEqual({ channel: "telegram" });
     expect(parseWebhookNotify({
@@ -1255,6 +1430,20 @@ describe("mono-agent channel module", () => {
     await writeFile(join(root, "a.md"), "---\nname: a\npath: /same\n---\na", "utf8");
     await writeFile(join(root, "b.md"), "---\nname: b\npath: /same\n---\nb", "utf8");
     await expect(loadWebhookRoutesFromDirectory(root, "sync")).rejects.toThrow(/Duplicate webhook route path/u);
+    expect(() => createWebhookChannel({
+      config: parseWebhookConfig({ apiKey: TEST_API_KEY }),
+      submit: async () => ({ text: "unused" }),
+      routes: [
+        { name: "invoke", path: "/hook", mode: "sync", prompt: "", source: "invoke.md" },
+        {
+          name: "collision",
+          path: "/hook/requests/child",
+          mode: "sync",
+          prompt: "",
+          source: "collision.md",
+        },
+      ],
+    })).toThrow(/conflicts with the status namespace/u);
   });
 
   it("preserves precise sanitized diagnostics for malformed supplied-route notifications", () => {
@@ -1341,6 +1530,34 @@ function rawInvoke(
   });
 }
 
+function chunkedInvoke(
+  info: { readonly host: string; readonly port: number; readonly invokeUrl: string },
+  chunks: readonly string[],
+): Promise<{ readonly status: number; readonly body: string }> {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({
+      hostname: info.host,
+      port: info.port,
+      method: "POST",
+      path: new URL(info.invokeUrl).pathname,
+      headers: {
+        authorization: `Bearer ${TEST_API_KEY}`,
+        "content-type": "application/json",
+      },
+    }, (response) => {
+      const responseChunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => responseChunks.push(chunk));
+      response.once("end", () => resolve({
+        status: response.statusCode ?? 0,
+        body: Buffer.concat(responseChunks).toString("utf8"),
+      }));
+    });
+    request.once("error", reject);
+    for (const chunk of chunks) request.write(chunk);
+    request.end();
+  });
+}
+
 function noopLogger(): ModuleLogger {
   return {
     debug() {},
@@ -1350,19 +1567,38 @@ function noopLogger(): ModuleLogger {
   };
 }
 
-function authorityStatus(port: number, host: string, invokeUrl: string): Promise<number> {
+function authorityStatus(
+  port: number,
+  host: string,
+  invokeUrl: string,
+  apiKey = TEST_API_KEY,
+  signatureSecret?: string,
+): Promise<number> {
   return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ text: "host authority" });
     const request = httpRequest({
       hostname: "127.0.0.1",
       port,
       method: "POST",
       path: new URL(invokeUrl).pathname,
-      headers: { host, authorization: `Bearer ${TEST_API_KEY}`, "content-type": "application/json" },
+      headers: {
+        host,
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(body)),
+        ...(signatureSecret === undefined
+          ? {}
+          : {
+              "x-mono-agent-signature": `sha256=${createHmac("sha256", signatureSecret)
+                .update(body)
+                .digest("hex")}`,
+            }),
+      },
     }, (response) => {
       response.resume();
       response.once("end", () => resolve(response.statusCode ?? 0));
     });
     request.once("error", reject);
-    request.end(JSON.stringify({ text: "host attack" }));
+    request.end(body);
   });
 }

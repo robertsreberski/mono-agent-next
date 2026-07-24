@@ -107,7 +107,8 @@ The request may include `text`, `conversationId`, `runtime`, `model`, `effort`,
 `mode`, and a JSON-object `metadata`. Request runtime fields override route
 defaults. Sync mode returns the terminal result. Async mode returns `202` with a
 `requestId` and route-local `statusUrl`; polling uses the same bearer
-authentication.
+authentication. A host cancellation returns a `503` terminal `cancelled`
+result, while a host rejection remains a distinct failed `rejected` result.
 
 `Idempotency-Key` is optional and bounded. When present, the channel derives a
 stable request id from the selected channel instance, route, and key. Identical
@@ -122,6 +123,9 @@ When `signatureSecret` is set, invocations must also carry
 body. Outbound delivery sends the idempotency key in both the JSON payload and
 `Idempotency-Key` header, collapses concurrent duplicates, and reports an
 ambiguous transport outcome as `unknown` rather than claiming delivery.
+Definitive delivered/duplicate receipts retain a bounded FIFO deduplication
+window; when full, the oldest such receipt is recycled. Ambiguous receipts are
+never evicted as safe-to-retry authority.
 
 The HTTP-only v1 slice always requires bearer authentication, including on
 loopback, and accepts invocation bodies only with an `application/json`
@@ -165,8 +169,11 @@ belongs behind a trusted TLS reverse proxy with rate limiting.
 
 | Source module | Responsibility |
 | --- | --- |
-| `config.ts` | Strict config parsing, JSON Schema secret markers, resolved-token validation, and safe-bind rules. |
-| `routes.ts` | No-follow Markdown route discovery and strict frontmatter parsing. |
+| `config.ts` | Strict config parsing, JSON Schema secret markers, resolved-token validation, and bind policy. |
+| `authority.ts` | Defensive start-time bind checks and request-authority validation. |
+| `limits.ts` | Shared request-text and route-prompt bounds. |
+| `routes.ts` | No-follow Markdown route discovery, strict frontmatter parsing, and shared uniqueness checks. |
+| `route-normalization.ts` | Validation and normalization for loaded, supplied, and legacy routes. |
 | `server.ts` | Node HTTP lifecycle, auth, bounded JSON, request normalization, status retention, timeout, and shutdown. |
 | `delivery.ts` | Fixed-destination authenticated delivery, raw-body signing, response bounds, and idempotency. |
 | `index.ts` | Typed `monoAgentModule` definition and package public exports. |

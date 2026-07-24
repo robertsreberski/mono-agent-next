@@ -1,23 +1,27 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { isIP, type AddressInfo, type Socket } from "node:net";
-import { hostname as systemHostname } from "node:os";
+import { type AddressInfo, type Socket } from "node:net";
 
 import type { ChannelCompletionDelivery } from "@mono-agent/module-sdk";
 
 import {
+  assertWebhookStartSafety,
+  isWebhookAuthorityAllowed,
+  webhookHostForUrl,
+} from "./authority.js";
+import {
   isLoopbackHost,
-  MAX_RUN_MS,
-  parseWebhookMode,
-  parseWebhookPath,
-  WebhookConfigError,
   type WebhookConfig,
   type WebhookMode,
 } from "./config.js";
-import { parseWebhookNotify, type WebhookRoute } from "./routes.js";
+import {
+  MAX_WEBHOOK_TEXT_BYTES,
+  MAX_WEBHOOK_TEXT_LENGTH,
+} from "./limits.js";
+import { normalizeWebhookRoutes } from "./route-normalization.js";
+import type { WebhookRoute } from "./routes.js";
 
 const SHUTDOWN_DRAIN_MS = 1_000;
-const MAX_TEXT_LENGTH = 1_000_000;
 const MAX_IDENTIFIER_LENGTH = 512;
 
 export type WebhookJsonValue =
@@ -47,8 +51,6 @@ export interface WebhookInboundRequest {
 
 export interface WebhookTurnResult {
   readonly text: string;
-  readonly route?: unknown;
-  readonly metadata?: WebhookJsonObject;
 }
 
 export type WebhookSubmit = (request: WebhookInboundRequest) => Promise<WebhookTurnResult>;
@@ -81,7 +83,12 @@ export type WebhookRequestStatus =
       readonly startedAt: string;
       readonly completedAt: string;
       readonly error: {
-        readonly code: "request_failed" | "idempotency_conflict" | "timeout" | "cancelled";
+        readonly code:
+          | "request_failed"
+          | "idempotency_conflict"
+          | "timeout"
+          | "cancelled"
+          | "rejected";
         readonly message: string;
       };
     };
@@ -170,22 +177,29 @@ class HttpError extends Error {
 }
 
 export class WebhookSubmissionError extends Error {
-  constructor(readonly code: "idempotency_conflict") {
+  constructor(readonly code: "idempotency_conflict" | "cancelled" | "rejected") {
     super(code);
     this.name = "WebhookSubmissionError";
   }
 }
 
 class ExecutionError extends Error {
-  constructor(readonly code: "request_failed" | "idempotency_conflict" | "timeout" | "cancelled") {
+  constructor(
+    readonly code:
+      | "request_failed"
+      | "idempotency_conflict"
+      | "timeout"
+      | "cancelled"
+      | "rejected",
+  ) {
     super(code);
     this.name = "ExecutionError";
   }
 }
 
 export function createWebhookChannel(options: CreateWebhookChannelOptions): WebhookChannel {
-  assertStartSafety(options.config);
-  const routes = normalizeRoutes(options.config, options.routes);
+  assertWebhookStartSafety(options.config);
+  const routes = normalizeWebhookRoutes(options.config, options.routes);
   const requestIdNamespace = options.requestIdNamespace ?? "standalone";
   if (!validRouteString(requestIdNamespace)) {
     throw new Error("Webhook request id namespace is invalid.");
@@ -291,7 +305,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
             reject(new Error(degradedMessage));
             return;
           }
-          const baseUrl = `http://${hostForUrl(host)}:${String(port)}`;
+          const baseUrl = `http://${webhookHostForUrl(host)}:${String(port)}`;
           const routeUrls = routes.map((route) => Object.freeze({
             name: route.name,
             invokeUrl: `${baseUrl}${route.path}`,
@@ -322,7 +336,13 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       sendJson(response, 503, safeErrorBody("not_started", "The webhook channel is not started."));
       return;
     }
-    validateAuthority(request, options.config.listen.host, startInfo.port);
+    if (!isWebhookAuthorityAllowed(
+      request.headers.host,
+      options.config.listen.host,
+      startInfo.port,
+    )) {
+      throw new HttpError(421, "invalid_authority", "Request authority is not accepted.");
+    }
     const requestUrl = parseRequestUrl(request.url);
     if (requestUrl.search.length > 0) {
       sendJson(response, 404, safeErrorBody("not_found", "Route not found."));
@@ -627,64 +647,6 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
   return Object.freeze({ start, health, getStatus, stop });
 }
 
-function normalizeRoutes(
-  config: WebhookConfig,
-  supplied: readonly WebhookRoute[] | undefined,
-): readonly WebhookRoute[] {
-  if (config.routesDirectory !== undefined && supplied === undefined) {
-    throw new Error("Webhook directory-backed config requires loaded routes.");
-  }
-  const candidates: readonly WebhookRoute[] = supplied ?? [Object.freeze({
-    name: "default",
-    path: config.path,
-    mode: config.defaultMode,
-    prompt: "",
-    source: "config:path",
-  })];
-  if (candidates.length < 1 || candidates.length > 1_000) {
-    throw new Error("Webhook channel requires between 1 and 1000 routes.");
-  }
-  const routes: WebhookRoute[] = [];
-  const names = new Set<string>();
-  const paths = new Set<string>();
-  for (const candidate of candidates) {
-    let notify;
-    try { notify = parseWebhookNotify(candidate.notify, "Webhook route notify"); }
-    catch (error: unknown) {
-      if (error instanceof WebhookConfigError) throw error;
-      throw new Error("Webhook route configuration is invalid.");
-    }
-    if (!/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(candidate.name)
-      || parseWebhookPath(candidate.path) !== candidate.path
-      || parseWebhookMode(candidate.mode) !== candidate.mode
-      || typeof candidate.prompt !== "string"
-      || Buffer.byteLength(candidate.prompt, "utf8") > MAX_TEXT_LENGTH * 4
-      || (candidate.runtime !== undefined && !validRouteString(candidate.runtime))
-      || (candidate.model !== undefined && !validRouteString(candidate.model))
-      || (candidate.effort !== undefined && !validRouteString(candidate.effort))
-      || (candidate.maxRunMs !== undefined
-        && (!Number.isSafeInteger(candidate.maxRunMs)
-          || candidate.maxRunMs < 1
-          || candidate.maxRunMs > MAX_RUN_MS))) {
-      throw new Error("Webhook route configuration is invalid.");
-    }
-    if (names.has(candidate.name) || paths.has(candidate.path)) {
-      throw new Error("Webhook route names and paths must be unique.");
-    }
-    names.add(candidate.name);
-    paths.add(candidate.path);
-    routes.push(Object.freeze({ ...candidate, ...(notify === undefined ? {} : { notify }) }));
-  }
-  for (const route of routes) {
-    if (routes.some((other) => other !== route
-      && (other.path === `${route.path}/requests`
-        || other.path.startsWith(`${route.path}/requests/`)))) {
-      throw new Error("Webhook route conflicts with a request-status namespace.");
-    }
-  }
-  return Object.freeze(routes);
-}
-
 function validRouteString(value: string): boolean {
   return value.length > 0
     && value.length <= MAX_IDENTIFIER_LENGTH
@@ -703,7 +665,10 @@ function applyRoute(invocation: ParsedInvocation, route: WebhookRoute): ParsedIn
   const text = route.prompt.length === 0
     ? invocation.text
     : `${route.prompt}\n\n${invocation.text}`;
-  if (text.length > MAX_TEXT_LENGTH || Buffer.byteLength(text, "utf8") > MAX_TEXT_LENGTH * 4) {
+  if (
+    text.length > MAX_WEBHOOK_TEXT_LENGTH
+    || Buffer.byteLength(text, "utf8") > MAX_WEBHOOK_TEXT_BYTES
+  ) {
     throw new HttpError(400, "invalid_request", "The route prompt and request text exceed the request bound.");
   }
   return Object.freeze({
@@ -745,7 +710,10 @@ async function executeSubmission(
     if (typeof result !== "object" || result === null || typeof result.text !== "string") {
       throw new ExecutionError("request_failed");
     }
-    if (result.text.length > MAX_TEXT_LENGTH || Buffer.byteLength(result.text, "utf8") > MAX_TEXT_LENGTH * 4) {
+    if (
+      result.text.length > MAX_WEBHOOK_TEXT_LENGTH
+      || Buffer.byteLength(result.text, "utf8") > MAX_WEBHOOK_TEXT_BYTES
+    ) {
       throw new ExecutionError("request_failed");
     }
     return result;
@@ -769,7 +737,7 @@ function parseInvocation(value: unknown): ParsedInvocation {
     throw new HttpError(400, "invalid_request", "Request body contains unknown fields.");
   }
 
-  const text = readInvocationString(input.text, "text", MAX_TEXT_LENGTH, true);
+  const text = readInvocationString(input.text, "text", MAX_WEBHOOK_TEXT_LENGTH, true);
   const conversationId = readInvocationString(
     input.conversationId,
     "conversationId",
@@ -984,7 +952,12 @@ function stableWebhookRequestId(namespace: string, route: string, key: string): 
 }
 
 function safeExecutionError(
-  code: "request_failed" | "idempotency_conflict" | "timeout" | "cancelled",
+  code:
+    | "request_failed"
+    | "idempotency_conflict"
+    | "timeout"
+    | "cancelled"
+    | "rejected",
 ): { readonly code: typeof code; readonly message: string } {
   switch (code) {
     case "idempotency_conflict":
@@ -993,6 +966,8 @@ function safeExecutionError(
       return { code, message: "The request timed out." };
     case "cancelled":
       return { code, message: "The request was cancelled." };
+    case "rejected":
+      return { code, message: "The request was rejected." };
     default:
       return { code, message: "The request failed." };
   }
@@ -1143,62 +1118,6 @@ function reserveStatusCapacity(
     if (statuses.size < maxStoredRequests) return true;
   }
   return false;
-}
-
-function assertStartSafety(config: WebhookConfig): void {
-  if (!isLoopbackHost(config.listen.host) && config.allowNonLoopback !== true) {
-    throw new Error("The HTTP webhook channel may bind outside loopback only with explicit allowNonLoopback.");
-  }
-  if (
-    typeof config.apiKey !== "string" ||
-    config.apiKey.length === 0 ||
-    config.apiKey.length > 4_096 ||
-    /\s/u.test(config.apiKey)
-  ) {
-    throw new Error("Webhook API key is required and must be a non-empty bearer token.");
-  }
-  if (
-    !isLoopbackHost(config.listen.host)
-    && (
-      config.apiKey.length < 32
-      || typeof config.signatureSecret !== "string"
-      || config.signatureSecret.length < 32
-      || config.signatureSecret.length > 4_096
-      || /\s/u.test(config.signatureSecret)
-    )
-  ) {
-    throw new Error("A non-loopback webhook listener requires bearer and signature secrets of at least 32 characters.");
-  }
-}
-
-function validateAuthority(request: IncomingMessage, configuredHost: string, port: number): void {
-  const host = request.headers.host;
-  if (host === undefined) throw new HttpError(421, "invalid_authority", "Request authority is not accepted.");
-  let authority: URL;
-  try { authority = new URL(`http://${host}`); } catch { throw new HttpError(421, "invalid_authority", "Request authority is not accepted."); }
-  if (authority.username !== "" || authority.password !== "" || authority.pathname !== "/" || authority.search !== "" || authority.hash !== "" || Number(authority.port || "80") !== port) {
-    throw new HttpError(421, "invalid_authority", "Request authority is not accepted.");
-  }
-  const candidate = authority.hostname.toLowerCase().replace(/^\[|\]$/gu, "");
-  const configured = configuredHost.toLowerCase().replace(/^\[|\]$/gu, "");
-  const wildcard = configured === "0.0.0.0" || configured === "::";
-  const allowed = wildcard ? isLocalNetworkHost(candidate) : isLoopbackHost(configured) ? isLoopbackHost(candidate) : candidate === configured;
-  if (!allowed) throw new HttpError(421, "invalid_authority", "Request authority is not accepted.");
-}
-
-function isLocalNetworkHost(host: string): boolean {
-  if (isLoopbackHost(host)) return true;
-  const machine = systemHostname().toLowerCase();
-  if (host === machine || host === `${machine}.local`) return true;
-  if (isIP(host) === 4) {
-    const [a = -1, b = -1] = host.split(".").map(Number);
-    return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254) || (a === 100 && b >= 64 && b <= 127);
-  }
-  return isIP(host) === 6 && (/^(?:fc|fd)/u.test(host) || /^fe[89ab]/u.test(host));
-}
-
-function hostForUrl(host: string): string {
-  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
 }
 
 async function settleWithin(promises: readonly Promise<unknown>[], timeoutMs: number): Promise<void> {
