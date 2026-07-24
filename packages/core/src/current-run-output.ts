@@ -145,5 +145,5 @@ function segment(value: string): string { if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127
 function safeName(value: string): string { if (Buffer.byteLength(value, "utf8") > 255 || value !== value.trim() || value === "." || value === ".." || value.includes("/") || value.includes("\\") || /[\u0000-\u001f\u007f]/u.test(value)) throw new TypeError("Current-run output name must be one safe basename"); return value; }
 function safeExtension(name: string): string { const extension = extname(name).slice(1); return /^[A-Za-z0-9]{1,16}$/u.test(extension) ? `.${extension}` : ""; }
 function displayName(name: string, index: number): string {
-  const safe = name.split(/[\\/]/u).at(-1)?.replace(/[\u0000-\u001f\u007f]/gu, "").trim(); return safe === undefined || safe.length === 0 || safe === "." || safe === ".." ? `attachment-${String(index)}` : safe;
+  const raw = name.split(/[\\/]/u).at(-1); const safe = raw?.replace(/[\u0000-\u001f\u007f]/gu, "").trim(); return raw === "." || raw === ".." || safe === undefined || safe.length === 0 || safe === "." || safe === ".." ? `attachment-${String(index)}` : safe;
 }

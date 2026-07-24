@@ -299,9 +299,14 @@ describe("current-run MCP files", () => {
     await expect(access(join(outside, "core"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it.each([".", ".."])("uses an opaque display fallback for unsafe basename %s", async (name) => {
+  it.each([
+    { label: "raw dot", name: "." },
+    { label: "raw dot-dot", name: ".." },
+    { label: "sanitized dot", name: ".\u0000" },
+    { label: "sanitized dot-dot", name: "..\u007f" },
+  ])("uses an opaque display fallback for $label", async ({ name }) => {
     const files = await createCurrentRunFiles({
-      projectRoot: await fixtureRoot(), runId: `run-${name.length}`,
+      projectRoot: await fixtureRoot(), runId: `run-${Buffer.from(name).toString("hex")}`,
       conversationId: "telegram:42",
       attachments: [attachment("voice", name, "audio/ogg", Uint8Array.of(1))],
       signal: new AbortController().signal,

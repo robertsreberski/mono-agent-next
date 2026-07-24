@@ -1581,13 +1581,13 @@ class AgentHostImplementation implements AgentHost {
         this.#activeTurns.set(input.conversationId, active);
         this.#active += 1;
         try {
-          if ((this.config.raw.context?.mcp?.requestContextServers?.length ?? 0) > 0) {
-            active.currentRunFiles = await createCurrentRunFiles({
-              projectRoot: this.config.projectRoot, runId: active.id,
-              conversationId: input.conversationId, attachments: input.attachments ?? [], signal,
-            });
-          }
           try {
+            if ((this.config.raw.context?.mcp?.requestContextServers?.length ?? 0) > 0) {
+              active.currentRunFiles = await createCurrentRunFiles({
+                projectRoot: this.config.projectRoot, runId: active.id,
+                conversationId: input.conversationId, attachments: input.attachments ?? [], signal,
+              });
+            }
             return await this.#runTurn(input, active, signal, emit, emitAsk, emitApproval);
           } catch (error) {
             if (this.#hostAbort.signal.aborted) {
