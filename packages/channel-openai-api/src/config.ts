@@ -101,10 +101,77 @@ function listenHost(value: unknown): string {
   return unwrapped.toLowerCase();
 }
 
-function path(value: unknown): string { const result = text(value, "basePath", DEFAULT_OPENAI_API_BASE_PATH, 256); if (!result.startsWith("/") || result.startsWith("//") || result.includes("\\") || result.includes("?") || result.includes("#") || result.includes("%") || /\s/u.test(result) || result.split("/").some((part) => part === "." || part === "..")) fail("basePath must be one absolute origin-form path without whitespace, escapes, dot segments, query, or fragment."); return result.length > 1 && result.endsWith("/") ? result.slice(0, -1) : result; }
-function record(value: unknown, label: string): Record<string, unknown> { if (typeof value !== "object" || value === null || Array.isArray(value)) fail(`${label} must be an object.`); const prototype = Object.getPrototypeOf(value) as unknown; if (prototype !== Object.prototype && prototype !== null) fail(`${label} must be a plain object.`); return value as Record<string, unknown>; }
-function exact(value: Record<string, unknown>, fields: readonly string[], label: string): void { const allowed = new Set(fields); const unknown = Object.keys(value).filter((field) => !allowed.has(field)).sort(); if (unknown.length > 0) fail(`${label} contains unknown field(s): ${unknown.join(", ")}.`); }
-function text(value: unknown, label: string, fallback: string | undefined, maximum: number): string { if (value === undefined && fallback !== undefined) return fallback; if (typeof value !== "string" || value.length === 0 || value.length > maximum || /[\u0000-\u001f\u007f]/u.test(value)) fail(`${label} must be a non-empty string of at most ${maximum} characters.`); return value as string; }
-function boolean(value: unknown, label: string, fallback: boolean): boolean { if (value === undefined) return fallback; if (typeof value !== "boolean") fail(`${label} must be a boolean.`); return value as boolean; }
-function integer(value: unknown, label: string, fallback: number, min: number, max: number): number { if (value === undefined) return fallback; if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) fail(`${label} must be an integer from ${min} through ${max}.`); return value as number; }
-function fail(message: string): never { throw new OpenAiApiConfigError(message); }
+function path(value: unknown): string {
+  const result = text(value, "basePath", DEFAULT_OPENAI_API_BASE_PATH, 256);
+  if (
+    !result.startsWith("/")
+    || result.startsWith("//")
+    || result.includes("\\")
+    || result.includes("?")
+    || result.includes("#")
+    || result.includes("%")
+    || /\s/u.test(result)
+    || result.split("/").some((part) => part === "." || part === "..")
+  ) {
+    fail("basePath must be one absolute origin-form path without whitespace, escapes, dot segments, query, or fragment.");
+  }
+  const normalized = result.length > 1 && result.endsWith("/")
+    ? result.slice(0, -1)
+    : result;
+  if (normalized === "/") {
+    fail("basePath must not be the root path.");
+  }
+  return normalized;
+}
+
+function record(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    fail(`${label} must be an object.`);
+  }
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  if (prototype !== Object.prototype && prototype !== null) {
+    fail(`${label} must be a plain object.`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function exact(value: Record<string, unknown>, fields: readonly string[], label: string): void {
+  const allowed = new Set(fields);
+  const unknown = Object.keys(value).filter((field) => !allowed.has(field)).sort();
+  if (unknown.length > 0) {
+    fail(`${label} contains unknown field(s): ${unknown.join(", ")}.`);
+  }
+}
+
+function text(value: unknown, label: string, fallback: string | undefined, maximum: number): string {
+  if (value === undefined && fallback !== undefined) return fallback;
+  if (
+    typeof value !== "string"
+    || value.length === 0
+    || value.length > maximum
+    || /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    fail(`${label} must be a non-empty string of at most ${maximum} characters.`);
+  }
+  return value as string;
+}
+
+function boolean(value: unknown, label: string, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") {
+    fail(`${label} must be a boolean.`);
+  }
+  return value as boolean;
+}
+
+function integer(value: unknown, label: string, fallback: number, min: number, max: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) {
+    fail(`${label} must be an integer from ${min} through ${max}.`);
+  }
+  return value as number;
+}
+
+function fail(message: string): never {
+  throw new OpenAiApiConfigError(message);
+}

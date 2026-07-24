@@ -27,6 +27,8 @@ pnpm add @mono-agent/channel-openai-api
 
 Select the module under `channels`. `apiKey` is env-only. The listener defaults to loopback and serves `GET /v1/models` plus `POST /v1/chat/completions`. `maxRunMs` bounds Core dispatch and `maxResponseBytes` bounds normalized response text and emitted response bytes.
 
+Graceful drain stops accepting requests and lets in-flight completions finish until the host deadline. Stop remains abrupt and cancels in-flight completions.
+
 Non-loopback HTTP requires both a non-loopback `listen.host` and explicit `allowNonLoopback: true`; the resolved bearer token must then contain at least 32 characters. Wildcard binds advertise a usable loopback URL, accept only local-interface Host authorities, and still require an exact same-origin Origin for browser mutations. Plain HTTP exposes bearer credentials to the network, so put this listener behind trusted network controls or a TLS-terminating reverse proxy.
 
 Conversation continuity prefers body metadata/chat ids and `conversation_id`,

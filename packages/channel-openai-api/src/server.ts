@@ -9,6 +9,7 @@ import type {
   ChannelReplyEvent,
   ChannelReplySink,
   ChannelTurnResult,
+  ModuleDrainContext,
   RuntimeToolCall,
   RuntimeUsage,
 } from "@mono-agent/module-sdk";
@@ -24,7 +25,13 @@ const MAX_TOOL_CALLS_PER_TURN = 256;
 export type OpenAiDispatch = (request: ChannelInboundRequest, reply: ChannelReplySink) => Promise<ChannelTurnResult>;
 export interface OpenAiApiStartInfo { readonly host: string; readonly port: number; readonly baseUrl: string; readonly modelsUrl: string; readonly chatCompletionsUrl: string; }
 export interface OpenAiApiHealth { readonly status: "stopped" | "healthy" | "degraded"; readonly activeRequests: number; readonly message?: string; }
-export interface OpenAiApiServer { readonly startInfo: OpenAiApiStartInfo | undefined; start(): Promise<OpenAiApiStartInfo>; stop(): Promise<void>; health(): OpenAiApiHealth; }
+export interface OpenAiApiServer {
+  readonly startInfo: OpenAiApiStartInfo | undefined;
+  start(): Promise<OpenAiApiStartInfo>;
+  drain(context: ModuleDrainContext): Promise<void>;
+  stop(): Promise<void>;
+  health(): OpenAiApiHealth;
+}
 export interface CreateOpenAiApiServerOptions { readonly config: OpenAiApiConfig; readonly dispatch: OpenAiDispatch; }
 
 interface OutputBudget { remaining: number; }
@@ -43,18 +50,25 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
   let server: Server | undefined;
   let info: OpenAiApiStartInfo | undefined;
   let startPromise: Promise<OpenAiApiStartInfo> | undefined;
-  let stopPromise: Promise<void> | undefined;
+  let closePromise: Promise<void> | undefined;
+  let shutdownPromise: Promise<void> | undefined;
   let stopping = false;
+  let forceStopped = false;
   let degraded: string | undefined;
   const sockets = new Set<Socket>();
   const active = new Set<AbortController>();
+  const idleWaiters = new Set<() => void>();
+  const forceLifecycle = new AbortController();
 
   const start = (): Promise<OpenAiApiStartInfo> => {
-    if (startPromise !== undefined) return startPromise;
     if (stopping) return Promise.reject(new Error("OpenAI API channel cannot restart after stop."));
+    if (startPromise !== undefined) return startPromise;
     startPromise = new Promise((resolve, reject) => {
       const next = createServer((request, response) => {
         securityHeaders(response);
+        response.once("finish", () => {
+          if (stopping) next.closeIdleConnections?.();
+        });
         void route(request, response).catch((error) => sendError(response, error));
       });
       next.requestTimeout = 30_000;
@@ -77,7 +91,6 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
       next.listen(options.config.listen.port, options.config.listen.host, () => {
         next.off("error", onError);
         if (stopping) {
-          void closeServer(next);
           reject(new Error("OpenAI API channel stopped while starting."));
           return;
         }
@@ -108,31 +121,91 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
     return startPromise;
   };
 
-  const stop = (): Promise<void> => {
-    if (stopPromise !== undefined) return stopPromise;
+  const beginClose = (): Promise<void> => {
     stopping = true;
-    stopPromise = (async () => {
-      for (const controller of active) controller.abort(new HttpError(503, "shutting_down", "The channel is stopping."));
-      const closing = server === undefined ? Promise.resolve() : closeServer(server);
-      server?.closeIdleConnections?.();
-      const timer = setTimeout(() => {
-        for (const socket of sockets) socket.destroy();
-      }, SHUTDOWN_MS);
-      timer.unref();
-      try {
-        await Promise.race([closing, delay(SHUTDOWN_MS)]);
-      } finally {
-        clearTimeout(timer);
-        for (const socket of sockets) socket.destroy();
-        info = undefined;
+    if (closePromise !== undefined) return closePromise;
+    const closeCurrent = (): Promise<void> => {
+      if (server === undefined) return Promise.resolve();
+      const closing = closeServer(server);
+      server.closeIdleConnections?.();
+      return closing;
+    };
+    closePromise = server?.listening === true
+      ? closeCurrent()
+      : startPromise === undefined
+        ? Promise.resolve()
+        : startPromise.then(closeCurrent, closeCurrent);
+    void closePromise.catch(() => undefined);
+    return closePromise;
+  };
+
+  const abortActive = (): void => {
+    for (const controller of active) {
+      controller.abort(new HttpError(503, "shutting_down", "The channel is stopping."));
+    }
+  };
+
+  const finishShutdown = async (
+    deadline: string | undefined,
+    signal: AbortSignal,
+  ): Promise<void> => {
+    const closing = beginClose();
+    let closed = false;
+    const observedClosing = closing.then(() => {
+      closed = true;
+    });
+    try {
+      if (forceStopped) {
+        await Promise.race([observedClosing, delay(SHUTDOWN_MS)]);
+      } else {
+        const timeoutMs = drainTimeoutMs(deadline);
+        if (timeoutMs > 0 && !signal.aborted) {
+          await Promise.race([
+            observedClosing,
+            delay(timeoutMs, [signal, forceLifecycle.signal]),
+          ]);
+        }
+        if (forceStopped && !closed) {
+          await Promise.race([observedClosing, delay(SHUTDOWN_MS)]);
+        }
       }
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+      info = undefined;
+    }
+  };
+
+  const drain = (context: ModuleDrainContext): Promise<void> => {
+    if (shutdownPromise !== undefined) return shutdownPromise;
+    beginClose();
+    shutdownPromise = (async () => {
+      const idle = await waitForIdle(
+        active,
+        idleWaiters,
+        context.deadline,
+        context.signal,
+        forceLifecycle.signal,
+      );
+      if (!idle) abortActive();
+      await finishShutdown(context.deadline, context.signal);
     })();
-    return stopPromise;
+    return shutdownPromise;
+  };
+
+  const stop = (): Promise<void> => {
+    stopping = true;
+    forceStopped = true;
+    abortActive();
+    forceLifecycle.abort(new Error("OpenAI API channel stopped."));
+    shutdownPromise ??= finishShutdown(undefined, new AbortController().signal);
+    return shutdownPromise;
   };
 
   return {
     get startInfo() { return info; },
     start,
+    drain,
     stop,
     health() {
       return {
@@ -154,7 +227,6 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
     if (target.includes("?") || target.includes("#") || url.search !== "" || url.hash !== "") {
       throw new HttpError(400, "invalid_query", "Query strings and fragments are not accepted.");
     }
-    response.setHeader("cache-control", "no-store");
     if (request.method === "GET" && url.pathname === `${options.config.basePath}/models`) {
       sendJson(response, 200, { object: "list", data: [{ id: options.config.modelId, object: "model", created: 0, owned_by: "mono-agent" }] });
       return;
@@ -166,6 +238,7 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
         options.config,
         conversationHeader(request),
       );
+      if (stopping) throw new HttpError(503, "shutting_down", "The channel is stopping.");
       if (parsed.warnings.length > 0) response.setHeader("x-mono-agent-warnings", parsed.warnings.join(","));
       await completion(parsed, response);
       return;
@@ -277,8 +350,8 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
             }
             case "compaction":
             case "session-evicted":
-              return;
             case "activity":
+              return;
             case "attachment":
             case "ask-user":
             case "approval":
@@ -358,6 +431,10 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
       response.off("close", abortForDisconnect);
       clearTimeout(timeout);
       active.delete(controller);
+      if (active.size === 0) {
+        if (stopping) server?.closeIdleConnections?.();
+        for (const onIdle of idleWaiters) onIdle();
+      }
     }
   }
 }
@@ -719,9 +796,64 @@ function closeServer(server: Server): Promise<void> {
   return new Promise((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
 }
 
-async function delay(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
+function waitForIdle(
+  active: ReadonlySet<AbortController>,
+  idleWaiters: Set<() => void>,
+  deadline: string | undefined,
+  signal: AbortSignal,
+  forceSignal: AbortSignal,
+): Promise<boolean> {
+  if (active.size === 0) return Promise.resolve(true);
+  const timeoutMs = drainTimeoutMs(deadline);
+  if (timeoutMs === 0 || signal.aborted || forceSignal.aborted) {
+    return Promise.resolve(false);
+  }
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (idle: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      idleWaiters.delete(onIdle);
+      signal.removeEventListener("abort", onAbort);
+      forceSignal.removeEventListener("abort", onAbort);
+      resolve(idle);
+    };
+    const onIdle = (): void => {
+      finish(true);
+    };
+    const onAbort = (): void => {
+      finish(false);
+    };
+    const timer = setTimeout(() => {
+      finish(false);
+    }, timeoutMs);
     timer.unref();
+    idleWaiters.add(onIdle);
+    signal.addEventListener("abort", onAbort, { once: true });
+    forceSignal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function drainTimeoutMs(deadline: string | undefined): number {
+  if (deadline === undefined) return SHUTDOWN_MS;
+  const parsed = Date.parse(deadline);
+  return Number.isFinite(parsed) ? Math.max(0, parsed - Date.now()) : 0;
+}
+
+async function delay(ms: number, signals: readonly AbortSignal[] = []): Promise<void> {
+  if (signals.some((signal) => signal.aborted)) return;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      for (const signal of signals) signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    timer.unref();
+    for (const signal of signals) signal.addEventListener("abort", finish, { once: true });
   });
 }

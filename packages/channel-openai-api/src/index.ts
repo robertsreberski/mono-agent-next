@@ -18,7 +18,7 @@ function createModule(context: ChannelModuleCreateContext<OpenAiApiConfig>): Ope
     get endpoint() { return server?.startInfo?.baseUrl; },
     get startInfo() { return server?.startInfo; },
     async start(startContext) { throwIfAborted(startContext.signal); server = createOpenAiApiServer({ config: context.config, dispatch: (request, reply) => context.host.dispatch(request, reply) }); const info = await server.start(); context.logger.info("OpenAI-compatible channel listening.", { instanceId: context.instanceId, endpoint: info.baseUrl, authRequired: true }); },
-    async drain() { await server?.stop(); },
+    async drain(drainContext) { await server?.drain(drainContext); },
     async stop() { await server?.stop(); },
     async health(): Promise<ModuleHealth> { const snapshot = server?.health(); return { status: snapshot?.status === "healthy" ? "healthy" : snapshot?.status === "degraded" ? "degraded" : "unknown", checkedAt: new Date().toISOString(), ...(snapshot?.message === undefined ? {} : { summary: snapshot.message }), details: { activeRequests: snapshot?.activeRequests ?? 0, ...(server?.startInfo === undefined ? {} : { endpoint: server.startInfo.baseUrl }) } }; },
   };
