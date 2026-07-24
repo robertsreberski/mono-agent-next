@@ -1,37 +1,26 @@
 import type {
-  JsonObject,
   JsonValue,
   ModuleDiagnostic,
   ModuleDiagnosticsContext,
   ModuleHealth,
   ModuleStopContext,
 } from "@mono-agent/module-sdk";
-import type {
-  ExportBatch,
-  ExportRecord,
-  ExportResult,
-  Exporter,
-} from "@mono-agent/module-sdk/internal";
+import type { ExportBatch, ExportResult, Exporter } from "@mono-agent/module-sdk/internal";
 
 import { parseEndpoint, type OtlpExporterConfig } from "./config.js";
 import { OtlpExporterError, throwIfAborted } from "./errors.js";
-import { serializeOtlpSpans } from "./otlp.js";
+import { serializeOtlpSpans, type SequencedExportRecord } from "./otlp.js";
+import { prepareRecord } from "./prepare.js";
 import {
   FetchOtlpTransport,
   type OtlpTransport,
   type OtlpTransportResponse,
 } from "./transport.js";
+import { PACKAGE_VERSION } from "./version.js";
 
-interface QueuedRecord {
-  readonly record: ExportRecord;
+interface QueuedRecord extends SequencedExportRecord {
   readonly bytes: number;
   readonly wireBytes: number;
-}
-
-interface PreparedRecord {
-  readonly record: ExportRecord;
-  readonly bytes: number;
-  readonly redactedValues: number;
 }
 
 export interface OtlpExporterOptions {
@@ -44,6 +33,7 @@ export class OtlpExporter implements Exporter {
   private readonly transport: OtlpTransport;
   private readonly clock: () => Date;
   private readonly queue: QueuedRecord[] = [];
+  private nextEnqueueSequence = 0n;
   private queuedBytes = 0;
   private deliveredRecords = 0;
   private rejectedRecords = 0;
@@ -94,8 +84,12 @@ export class OtlpExporter implements Exporter {
         continue;
       }
       let wireBytes: number;
+      const enqueueSequence = this.nextEnqueueSequence;
       try {
-        wireBytes = serializeOtlpSpans([prepared.record], this.config.projectName).byteLength;
+        wireBytes = serializeOtlpSpans(
+          [{ record: prepared.record, enqueueSequence }],
+          this.config.projectName,
+        ).byteLength;
       } catch {
         rejected += 1;
         continue;
@@ -111,7 +105,8 @@ export class OtlpExporter implements Exporter {
         rejected += 1;
         continue;
       }
-      this.queue.push({ ...prepared, wireBytes });
+      this.queue.push({ ...prepared, wireBytes, enqueueSequence });
+      this.nextEnqueueSequence += 1n;
       this.queuedBytes += prepared.bytes;
       if (prepared.redactedValues > 0) {
         this.redactedRecords += 1;
@@ -262,7 +257,7 @@ export class OtlpExporter implements Exporter {
       }
       const batch = this.selectBatch();
       try {
-        await this.sendBatch(batch.map((item) => item.record), signal);
+        await this.sendBatch(batch, signal);
       } catch (error) {
         this.lastError = normalizeTransportError(error);
         return;
@@ -292,13 +287,13 @@ export class OtlpExporter implements Exporter {
     return selected;
   }
 
-  private async sendBatch(records: readonly ExportRecord[], signal: AbortSignal): Promise<void> {
+  private async sendBatch(records: readonly QueuedRecord[], signal: AbortSignal): Promise<void> {
     const body = serializeOtlpSpans(records, this.config.projectName);
     let url = new URL(this.config.endpoint);
     const headers: Record<string, string> = {
       ...this.config.headers,
       "content-type": "application/x-protobuf",
-      "user-agent": "mono-agent-exporter-otlp/0.15.0",
+      "user-agent": `mono-agent-exporter-otlp/${PACKAGE_VERSION}`,
       "x-project-name": this.config.projectName,
     };
     const credentialHeaders = new Set(Object.keys(this.config.headers));
@@ -329,6 +324,12 @@ export class OtlpExporter implements Exporter {
         throw new OtlpExporterError("OTLP_REDIRECT_REJECTED", "The OTLP collector attempted a protocol downgrade.");
       }
       if (next.origin !== url.origin) {
+        if (this.config.includeSensitiveData) {
+          throw new OtlpExporterError(
+            "OTLP_REDIRECT_REJECTED",
+            "Cross-origin OTLP redirects are rejected when sensitive data export is enabled.",
+          );
+        }
         for (const name of credentialHeaders) delete headers[name];
       }
       url = next;
@@ -404,137 +405,6 @@ export class OtlpExporter implements Exporter {
       throw new OtlpExporterError("OTLP_CLOSED", "The OTLP exporter is closed.");
     }
   }
-}
-
-const MAX_RECORD_NODES = 10_000;
-
-// Intentionally closed and high confidence. Every expression requires a
-// credential-specific prefix, length, and alphabet; prefix mentions in prose
-// do not match. Quantifiers are bounded to keep scanning time predictable.
-const CONTENT_SECRET_PATTERNS = [
-  /\bsk-[A-Za-z0-9]{48}\b/gu,
-  /\bsk-(?:proj-|svcacct-)[A-Za-z0-9_-]{47,511}[A-Za-z0-9]\b/gu,
-  /\bghp_[A-Za-z0-9]{36}\b/gu,
-  /\bgithub_pat_[A-Za-z0-9_]{19,511}[A-Za-z0-9]\b/gu,
-  /\bAKIA[A-Z0-9]{16}\b/gu,
-  /\bxox[baprs]-[A-Za-z0-9-]{19,511}[A-Za-z0-9]\b/gu,
-  /\bxapp-[A-Za-z0-9-]{19,511}[A-Za-z0-9]\b/gu,
-] as const;
-
-function prepareRecord(
-  record: ExportRecord,
-  includeSensitiveData: boolean,
-  contentPatternRedaction: boolean,
-  maxRecordBytes: number,
-): PreparedRecord | undefined {
-  if (
-    typeof record !== "object" ||
-    record === null ||
-    typeof record.name !== "string" ||
-    record.name.trim().length === 0 ||
-    record.name.length > 512 ||
-    /[\u0000-\u001f\u007f]/u.test(record.name) ||
-    !isCanonicalTimestamp(record.timestamp) ||
-    !isPlainObject(record.attributes) ||
-    !Object.keys(record.attributes).every((key) =>
-      key.length > 0 && key.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(key))
-  ) {
-    return undefined;
-  }
-  try {
-    const state: CloneState = {
-      remainingNodes: MAX_RECORD_NODES,
-      remainingBytes: maxRecordBytes,
-      redactedValues: 0,
-      contentPatternRedaction,
-    };
-    consumeBytes(state, Buffer.byteLength(record.name, "utf8"));
-    const cloned: ExportRecord = {
-      name: redactString(record.name, state),
-      timestamp: record.timestamp,
-      attributes: cloneJson(record.attributes, state, 0) as JsonObject,
-      ...(includeSensitiveData && record.body !== undefined
-        ? { body: cloneJson(record.body, state, 0) }
-        : {}),
-    };
-    const bytes = Buffer.byteLength(JSON.stringify(cloned), "utf8");
-    return { record: cloned, bytes, redactedValues: state.redactedValues };
-  } catch {
-    return undefined;
-  }
-}
-
-interface CloneState {
-  remainingNodes: number;
-  remainingBytes: number;
-  redactedValues: number;
-  readonly contentPatternRedaction: boolean;
-}
-
-function cloneJson(value: unknown, state: CloneState, depth: number): JsonValue {
-  if (depth > 32) throw new Error("JSON nesting limit exceeded");
-  if (state.remainingNodes <= 0) throw new Error("JSON node limit exceeded");
-  state.remainingNodes -= 1;
-  if (value === null || typeof value === "boolean") return value;
-  if (typeof value === "string") {
-    consumeBytes(state, Buffer.byteLength(value, "utf8"));
-    return redactString(value, state);
-  }
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("JSON number must be finite");
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.map((nested) => cloneJson(nested, state, depth + 1));
-  }
-  if (!isPlainObject(value)) throw new Error("JSON object must be plain");
-  const output: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;
-  for (const key of Object.keys(value)) {
-    consumeBytes(state, Buffer.byteLength(key, "utf8"));
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (descriptor === undefined || !("value" in descriptor)) {
-      throw new Error("JSON object must contain only data properties");
-    }
-    output[key] = cloneJson(descriptor.value, state, depth + 1);
-  }
-  return output;
-}
-
-function consumeBytes(state: CloneState, bytes: number): void {
-  if (!Number.isSafeInteger(bytes) || bytes < 0 || bytes > state.remainingBytes) {
-    throw new Error("JSON byte limit exceeded");
-  }
-  state.remainingBytes -= bytes;
-}
-
-function redactString(value: string, state: CloneState): string {
-  if (!state.contentPatternRedaction) return value;
-  let redacted = value;
-  for (const pattern of CONTENT_SECRET_PATTERNS) {
-    redacted = redacted.replace(pattern, () => {
-      state.redactedValues += 1;
-      return "[redacted]";
-    });
-  }
-  return redacted;
-}
-
-function isPlainObject(value: unknown): value is JsonObject {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value) as unknown;
-  return prototype === Object.prototype || prototype === null;
-}
-
-function isCanonicalTimestamp(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const date = new Date(value);
-  const milliseconds = date.valueOf();
-  return (
-    Number.isFinite(milliseconds) &&
-    milliseconds >= 0 &&
-    milliseconds <= 18_446_744_073_709 &&
-    date.toISOString() === value
-  );
 }
 
 function isRedirect(status: number): boolean {

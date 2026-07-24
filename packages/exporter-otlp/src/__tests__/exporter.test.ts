@@ -1,16 +1,16 @@
-import type { ExportRecord } from "@mono-agent/module-sdk/internal";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { parseOtlpExporterConfig } from "../config.js";
-import { OtlpExporter } from "../exporter.js";
 import { mapRecordAttributes } from "../otlp.js";
-import type {
-  OtlpTransport,
-  OtlpTransportRequest,
-  OtlpTransportResponse,
-} from "../transport.js";
-
-const signal = new AbortController().signal;
+import {
+  createExporter,
+  deferred,
+  errorChain,
+  largeRecord,
+  record,
+  ScriptedTransport,
+  settleMicrotasks,
+  signal,
+} from "./helpers.js";
 
 describe("OtlpExporter", () => {
   it("bounds the queue and byte/count batches while omitting sensitive bodies by default", async () => {
@@ -39,6 +39,86 @@ describe("OtlpExporter", () => {
     await exporter.stop({ signal, reason: "shutdown" });
   });
 
+  it("delivers via the background interval without an explicit flush", async () => {
+    vi.useFakeTimers();
+    const transport = new ScriptedTransport((_request, index) => index === 0
+      ? { status: 503, headers: {} }
+      : { status: 200, headers: {} });
+    const exporter = createExporter(transport, { flushIntervalMs: 20 });
+    try {
+      await exporter.export({ records: [record("interval")], signal });
+      exporter.start({ signal });
+      await settleMicrotasks();
+      expect(transport.requests).toHaveLength(1);
+      expect(exporter.health({ signal })).toMatchObject({
+        status: "degraded",
+        details: { queuedRecords: 1, deliveredRecords: 0 },
+      });
+
+      await vi.advanceTimersByTimeAsync(20);
+      await settleMicrotasks();
+      expect(transport.requests).toHaveLength(2);
+      expect(exporter.health({ signal })).toMatchObject({
+        status: "healthy",
+        details: { queuedRecords: 0, deliveredRecords: 1 },
+      });
+      await exporter.stop({ signal, reason: "shutdown" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("accepts records pushed while a pump is in flight", async () => {
+    const firstStarted = deferred<void>();
+    const releaseFirst = deferred<{ status: number; headers: {} }>();
+    const transport = new ScriptedTransport((_request, index) => {
+      if (index !== 0) return { status: 200, headers: {} };
+      firstStarted.resolve(undefined);
+      return releaseFirst.promise;
+    });
+    const exporter = createExporter(transport);
+    await exporter.export({ records: [record("first")], signal });
+    const flushing = exporter.flush(signal);
+    await firstStarted.promise;
+
+    await expect(exporter.export({
+      records: [record("appended")],
+      signal,
+    })).resolves.toEqual({ accepted: 1, rejected: 0 });
+    releaseFirst.resolve({ status: 200, headers: {} });
+    await expect(flushing).resolves.toBeUndefined();
+
+    expect(transport.requests).toHaveLength(2);
+    expect(exporter.health({ signal })).toMatchObject({
+      status: "healthy",
+      details: { queuedRecords: 0, queuedBytes: 0, deliveredRecords: 2 },
+    });
+    await exporter.stop({ signal, reason: "shutdown" });
+  });
+
+  it("rejects non-canonical timestamps", async () => {
+    const transport = new ScriptedTransport(() => ({ status: 200, headers: {} }));
+    const exporter = createExporter(transport);
+    for (const timestamp of [
+      "2026-07-23T12:00:00Z",
+      "2026-07-23T12:00:00.000+00:00",
+    ]) {
+      await expect(exporter.export({
+        records: [{ ...record("non-canonical"), timestamp }],
+        signal,
+      })).resolves.toEqual({ accepted: 0, rejected: 1 });
+    }
+    await expect(exporter.export({
+      records: [record("canonical")],
+      signal,
+    })).resolves.toEqual({ accepted: 1, rejected: 0 });
+    expect(exporter.health({ signal })).toMatchObject({
+      status: "degraded",
+      details: { queuedRecords: 1, rejectedRecords: 2 },
+    });
+    await exporter.stop({ signal, reason: "shutdown" });
+  });
+
   it("includes explicitly opted-in bodies and produces deterministic OTLP span ids", async () => {
     const transport = new ScriptedTransport(() => ({ status: 200, headers: {} }));
     const exporter = createExporter(transport, { includeSensitiveData: true });
@@ -56,6 +136,21 @@ describe("OtlpExporter", () => {
     await next.flush(signal);
     expect(Buffer.from(nextTransport.requests[0]!.body).toString("utf8")).toBe(first);
     await next.stop({ signal, reason: "shutdown" });
+  });
+
+  it("assigns distinct identities to byte-identical queued records", async () => {
+    const transport = new ScriptedTransport(() => ({ status: 200, headers: {} }));
+    const exporter = createExporter(transport, { maxBatchRecords: 1 });
+    const duplicate = record("duplicate");
+    await expect(exporter.export({
+      records: [duplicate, duplicate],
+      signal,
+    })).resolves.toEqual({ accepted: 2, rejected: 0 });
+    await exporter.flush(signal);
+
+    expect(transport.requests).toHaveLength(2);
+    expect(transport.requests[1]!.body).not.toEqual(transport.requests[0]!.body);
+    await exporter.stop({ signal, reason: "shutdown" });
   });
 
   it("maps Core turn fields to Phoenix project, session, and OpenInference attributes", () => {
@@ -237,53 +332,6 @@ describe("OtlpExporter", () => {
     await exporter.stop({ signal, reason: "shutdown" });
   });
 
-  it("checks redirects and never forwards configured credentials across origins", async () => {
-    const transport = new ScriptedTransport((_request, index) => index === 0
-      ? {
-          status: 307,
-          headers: { location: "https://second.example/v1/traces" },
-        }
-      : { status: 200, headers: {} });
-    const exporter = createExporter(transport, {
-      headers: {
-        authorization: "Bearer secret",
-        "x-collector-token": "also-secret",
-      },
-    });
-    await exporter.export({ records: [record("redirect")], signal });
-    exporter.start({ signal });
-    await exporter.flush(signal);
-
-    expect(transport.requests).toHaveLength(2);
-    expect(transport.requests[0]?.headers).toMatchObject({
-      authorization: "Bearer secret",
-      "x-collector-token": "also-secret",
-    });
-    expect(transport.requests[1]?.url).toBe("https://second.example/v1/traces");
-    expect(transport.requests[1]?.headers.authorization).toBeUndefined();
-    expect(transport.requests[1]?.headers["x-collector-token"]).toBeUndefined();
-    expect(transport.requests[1]?.headers["content-type"]).toBe("application/x-protobuf");
-    expect(transport.requests[1]?.headers["x-project-name"]).toBe("test-agent");
-    await exporter.stop({ signal, reason: "shutdown" });
-  });
-
-  it("rejects protocol-downgrade redirects and leaves the failed batch queued", async () => {
-    const transport = new ScriptedTransport(() => ({
-      status: 307,
-      headers: { location: "http://127.0.0.1:4318/v1/traces" },
-    }));
-    const exporter = createExporter(transport);
-    await exporter.export({ records: [record("downgrade")], signal });
-    exporter.start({ signal });
-    await expect(exporter.flush(signal)).rejects.toMatchObject({ code: "OTLP_FLUSH_FAILED" });
-    expect(exporter.health({ signal })).toMatchObject({
-      status: "degraded",
-      details: { queuedRecords: 1, deliveredRecords: 0 },
-    });
-    await expect(exporter.stop({ signal, reason: "shutdown" }))
-      .rejects.toMatchObject({ code: "OTLP_FLUSH_FAILED" });
-  });
-
   it("retries retained records on a later flush after a transient failure", async () => {
     const transport = new ScriptedTransport((_request, index) => index === 0
       ? { status: 503, headers: {} }
@@ -293,6 +341,7 @@ describe("OtlpExporter", () => {
     await expect(exporter.flush(signal)).rejects.toMatchObject({ code: "OTLP_FLUSH_FAILED" });
     await exporter.flush(signal);
     expect(transport.requests).toHaveLength(2);
+    expect(transport.requests[1]!.body).toEqual(transport.requests[0]!.body);
     expect(exporter.health({ signal })).toMatchObject({
       details: { queuedRecords: 0, deliveredRecords: 1 },
     });
@@ -360,87 +409,3 @@ describe("OtlpExporter", () => {
     }
   });
 });
-
-class ScriptedTransport implements OtlpTransport {
-  readonly requests: OtlpTransportRequest[] = [];
-  private readonly handler: (
-    request: OtlpTransportRequest,
-    index: number,
-  ) => OtlpTransportResponse | Promise<OtlpTransportResponse>;
-
-  constructor(handler: ScriptedTransport["handler"]) {
-    this.handler = handler;
-  }
-
-  send(request: OtlpTransportRequest): Promise<OtlpTransportResponse> {
-    const snapshot: OtlpTransportRequest = {
-      ...request,
-      headers: { ...request.headers },
-      body: Uint8Array.from(request.body),
-    };
-    const index = this.requests.push(snapshot) - 1;
-    return Promise.resolve(this.handler(request, index));
-  }
-}
-
-function createExporter(
-  transport: OtlpTransport,
-  overrides: Readonly<Record<string, unknown>> = {},
-): OtlpExporter {
-  const config = parseOtlpExporterConfig({
-    endpoint: "https://collector.example/v1/traces",
-    projectName: "test-agent",
-    maxQueueRecords: 10,
-    maxQueueBytes: 64 * 1024,
-    maxBatchRecords: 10,
-    maxBatchBytes: 16 * 1024,
-    maxRecordBytes: 8 * 1024,
-    flushIntervalMs: 60_000,
-    requestTimeoutMs: 1_000,
-    flushTimeoutMs: 1_000,
-    stopTimeoutMs: 1_000,
-    ...overrides,
-  });
-  return new OtlpExporter(config, {
-    transport,
-    clock: () => new Date("2026-07-23T12:00:00.000Z"),
-  });
-}
-
-function record(
-  name: string,
-  overrides: Readonly<Record<string, ExportRecord["attributes"][string]>> = {},
-): ExportRecord {
-  return {
-    name,
-    timestamp: "2026-07-23T12:00:00.000Z",
-    attributes: {
-      "mono.agent.run_id": "run-1",
-      agentId: "agent-1",
-      conversationId: "conversation-1",
-      runtime: "pi",
-      model: "openai:gpt-5",
-      status: "completed",
-      attempt: 1,
-      ...overrides,
-    },
-    body: { prompt: "sensitive-body" },
-  };
-}
-
-function largeRecord(name: string): ExportRecord {
-  return {
-    ...record(name),
-    attributes: { payload: "x".repeat(500) },
-  };
-}
-
-function errorChain(value: unknown): string {
-  const messages: string[] = [];
-  let current = value;
-  for (let depth = 0; depth < 8 && current instanceof Error; depth += 1) {
-    messages.push(current.message);
-    current = current.cause;
-  }
-  return messages.join("\n");
-}

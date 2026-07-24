@@ -67,6 +67,8 @@ is a literal loopback address such as `127.0.0.1` or `[::1]`; `localhost`, LAN
 addresses, URL credentials, query strings, and fragments are rejected.
 Redirects are validated by the same rule. HTTPS downgrades fail, and every
 configured header is stripped before a cross-origin redirect.
+Cross-origin redirects are rejected entirely when `includeSensitiveData` is
+enabled, so an opted-in body is never replayed to a different origin.
 
 `includeSensitiveData` defaults to `false`; record bodies are discarded before
 queueing and never reach the payload. Attributes are expected to have already
@@ -99,10 +101,12 @@ and a node budget. This scan does not make an untrusted collector safe.
    conversation identity to `session.id`, and uses the official transformer to
    encode an OTLP protobuf request accepted by Phoenix and standard OTLP/HTTP
    trace collectors. Stable hashes derive trace and span IDs from canonical
-   record content.
+   record content plus a per-exporter enqueue sequence that stays fixed across
+   retries and distinguishes byte-identical records.
 4. The transport sends a manual-redirect POST with per-request cancellation.
    Redirect targets are reparsed; configured headers survive only same-origin
-   redirects and can never cross an origin boundary.
+   redirects and can never cross an origin boundary. Sensitive-body export
+   rejects cross-origin redirects instead of replaying the payload.
 5. A successful 2xx removes the exact front batch. Any other result retains it,
    records a redacted health error, and stops the current pump.
 6. `flush` and `stop` have independent deadlines. Stop attempts a final flush,
@@ -114,8 +118,10 @@ and a node budget. This scan does not make an untrusted collector safe.
 | --- | --- |
 | `config.ts` | Strict endpoint, secret-header, sensitive-data, scan, queue, batch, redirect, and deadline config. |
 | `otlp.ts` | Deterministic OpenInference/Phoenix span mapping and official OTLP protobuf serialization. |
+| `prepare.ts` | Bounded record validation, cloning, body omission, and optional credential-pattern redaction. |
 | `transport.ts` | Injectable one-request transport and manual-redirect fetch implementation. |
-| `exporter.ts` | Admission, queueing, batching, retries, redirect policy, health, flush, and stop. |
+| `exporter.ts` | Admission, sequenced queueing, batching, retries, redirect policy, health, flush, and stop. |
+| `version.ts` | Package-manifest-derived runtime version for module, scope, and user-agent metadata. |
 | `index.ts` | The typed reserved `monoAgentModule` definition. |
 
 ## Public API
@@ -189,5 +195,7 @@ The focused suite covers endpoint and header policy, environment schema
 annotations, queue pressure, count/byte batches, default sensitive-body
 omission, explicit warnings, bounded credential-pattern replacement,
 project/session/OpenInference mapping, deterministic payloads, cross-origin
-credential stripping, protocol downgrade rejection, retained retries, visible
-degradation, and bounded request/stop deadlines.
+credential stripping, sensitive cross-origin rejection, protocol downgrade
+rejection, timer delivery, in-flight appends, collision-free retry-stable span
+identity, canonical timestamps, version drift, visible degradation, and bounded
+request/stop deadlines.
