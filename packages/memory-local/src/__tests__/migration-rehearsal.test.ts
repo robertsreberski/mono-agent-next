@@ -126,8 +126,11 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
           compatible: true,
         },
       });
-      expect((await memory.recall({ query: "north cellar", limit: 2, signal })).records[0]?.id)
-        .toBe("v0:orchard");
+      expect((await memory.recall({ query: "north cellar", limit: 2, signal })).records[0])
+        .toMatchObject({
+          id: "v0:orchard",
+          createdAt: "2026-07-20T10:00:00.000Z",
+        });
       expect((await memory.recall({ query: "fruit inventory", limit: 1, signal })).records[0]?.id)
         .toBe("v0:orchard");
 
@@ -169,6 +172,16 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
       });
     } finally {
       await memory.stop();
+    }
+
+    const adoptedDatabase = new DatabaseSync(managedDatabasePath(rehearsal, fixture));
+    try {
+      expect((adoptedDatabase.prepare(
+        "SELECT created_at FROM memories WHERE id = ?",
+      ).get("v0:orchard") as { created_at: string }).created_at)
+        .toBe("2026-07-20T10:00:00Z");
+    } finally {
+      adoptedDatabase.close();
     }
 
     const v0After = readWithV0Final(rehearsal, fixture);
@@ -756,6 +769,37 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     expect(before.mode & 0o777).toBe(0o600);
     const after = await stat(markerPath);
     expect(after.ino).toBe(before.ino);
+  });
+
+  it("rejects semantically unreadable v0 records before adoption commit", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    const database = new DatabaseSync(managedDatabasePath(source, fixture));
+    try {
+      database.prepare("UPDATE memories SET created_at = ? WHERE id = ?")
+        .run("not-a-timestamp", "v0:orchard");
+    } finally {
+      database.close();
+    }
+
+    const snapshot = await snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    });
+    await expect(adoptV0MemoryLocalCopy({
+      liveSourceRoot: source,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: snapshot.treeSha256,
+      signal,
+    })).rejects.toThrow(/invalid memory records/u);
+    expect(await readFile(join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME), "utf8"))
+      .toMatch(/^initializing:[0-9a-f-]{36}\n$/u);
   });
 
   it("fails closed when the adoption database changes before its reserved binding", async () => {

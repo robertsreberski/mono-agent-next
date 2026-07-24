@@ -13,7 +13,7 @@
       "type": "note",
       "status": "open",
       "text": "The orchard apples are stored in the north cellar.",
-      "createdAt": "2026-07-20T10:00:00.000Z",
+      "createdAt": "2026-07-20T10:00:00Z",
       "conversationId": "v0-personal",
       "tags": ["inventory", "home"],
       "vector": [1, 0, 0]

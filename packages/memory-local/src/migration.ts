@@ -17,9 +17,11 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { load as loadSqliteVec } from "sqlite-vec";
 
 import {
+  assertReadableMemoryRows,
   auditBujoDatabase,
   type BujoAuditSnapshot,
 } from "./bujo-db.js";
+import { parseMemoryLocalConfig } from "./config.js";
 import { auditBujoProjections } from "./consolidation.js";
 import type { MemoryEmbeddingProvider } from "./embeddings.js";
 import { MemoryLocalError } from "./errors.js";
@@ -466,6 +468,11 @@ async function adoptV0MemoryLocalCopyInternal(
     );
     let embedding: EmbeddingIdentity | undefined;
     embedding = readEmbeddingIdentity(preCommit, snapshot);
+    try {
+      assertReadableMemoryRows(preCommit, parseMemoryLocalConfig(undefined), snapshot);
+    } catch {
+      throw migrationFailure("Adoption target contains invalid memory records.");
+    }
     assertStrictDatabase(snapshot, embedding);
     await databaseBinding.verify();
     await assertManifestCurrent(managed);

@@ -1,7 +1,9 @@
 import { link, chmod, mkdtemp, mkdir, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
+import { load as loadSqliteVec } from "sqlite-vec";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -18,6 +20,11 @@ import {
   openMemoryLocal,
   parseMemoryLocalConfig,
 } from "../index.js";
+import {
+  decodeMemoryRow,
+  ftsMatchExpression,
+  type BujoMemoryRow,
+} from "../bujo-db.js";
 
 const signal = new AbortController().signal;
 const roots: string[] = [];
@@ -30,6 +37,108 @@ afterEach(async () => {
 });
 
 describe("memory-local", () => {
+  it("canonicalizes parseable v0 timestamps without accepting corrupt stored timestamps", () => {
+    const row: BujoMemoryRow = {
+      id: "v0:legacy-timestamp",
+      seq: 1,
+      type: "note",
+      status: "open",
+      text: "Legacy timestamp compatibility.",
+      salience: 0.5,
+      is_insight: 0,
+      created_at: "2026-07-20T12:00:00+02:00",
+      last_accessed_at: null,
+      access_count: 0,
+      valid_from: null,
+      valid_to: null,
+      superseded_by: null,
+      superseded_at: null,
+      due_at: null,
+      collection: null,
+      source_session: null,
+      source_file: "daily/2026-07-20.md",
+      source_line: 1,
+      embedding_model: null,
+      dim: null,
+      tags: "[]",
+    };
+    const config = parseMemoryLocalConfig(undefined);
+
+    expect(decodeMemoryRow(row, config).createdAt).toBe("2026-07-20T10:00:00.000Z");
+    for (const createdAt of [
+      "not-a-timestamp",
+      "2026-02-31T00:00:00Z",
+      "07/24/2026",
+      "2026-07-20 12:00:00",
+      "0",
+    ]) {
+      expect(() => decodeMemoryRow({ ...row, created_at: createdAt }, config))
+        .toThrow(/stored BuJo memory row is invalid/iu);
+    }
+  });
+
+  it("recalls across all 256 candidates when a low-ranked v0 row omits milliseconds", async () => {
+    const { root, directory } = await fixture();
+    const initialized = await openMemoryLocal(options(root, directory));
+    await initialized.stop();
+    const databasePath = join(directory, MEMORY_LOCAL_DATABASE_FILENAME);
+    const database = new DatabaseSync(databasePath, { allowExtension: true });
+    const auditQuery = [
+      "This is a read-only execution-evidence audit.",
+      "Call the RunHistory tool exactly once.",
+      "After the tool returns, reply with exactly the audit marker.",
+      "Do not call any other tool.",
+    ].join(" ");
+    try {
+      loadSqliteVec(database);
+      database.enableLoadExtension(false);
+      const insertMemory = database.prepare(`
+        INSERT INTO memories (
+          id, seq, type, status, text, salience, is_insight, created_at, tags
+        ) VALUES (?, ?, 'note', 'open', ?, 0.5, 0, ?, '[]')
+      `);
+      const insertFts = database.prepare("INSERT INTO memories_fts(id, text) VALUES (?, ?)");
+      const text = "this is a read only audit tool and the other marker";
+      database.exec("BEGIN IMMEDIATE");
+      for (let index = 0; index < 255; index += 1) {
+        const id = `candidate-${String(index).padStart(3, "0")}`;
+        insertMemory.run(id, index + 1, text, "2026-07-21T12:00:00.000Z");
+        insertFts.run(id, text);
+      }
+      insertMemory.run("candidate-legacy", 256, text, "2026-07-20T12:00:00Z");
+      insertFts.run("candidate-legacy", text);
+      database.exec("COMMIT");
+      const ranked = database.prepare(`
+        SELECT f.id AS id
+        FROM memories_fts f
+        JOIN memories m ON m.id = f.id
+        WHERE memories_fts MATCH ?
+        ORDER BY bm25(memories_fts), m.created_at DESC, m.id ASC
+        LIMIT 256
+      `).all(ftsMatchExpression(auditQuery)) as unknown as { id: string }[];
+      expect(ranked).toHaveLength(256);
+      expect(ranked.at(-1)?.id).toBe("candidate-legacy");
+    } catch (error) {
+      try {
+        database.exec("ROLLBACK");
+      } catch {
+        // Preserve the original failure.
+      }
+      throw error;
+    } finally {
+      database.close();
+    }
+
+    const memory = await openMemoryLocal(options(root, directory));
+    try {
+      const recalled = await memory.recall({ query: auditQuery, limit: 8, signal });
+      expect(recalled.records).toHaveLength(8);
+      expect(recalled.records.some(({ id }) => id === "candidate-legacy")).toBe(false);
+    } finally {
+      await memory.stop();
+    }
+  });
+
   it("strictly validates bounded configuration", () => {
     expect(parseMemoryLocalConfig(undefined).capture.enabled).toBe(false);
     expect(parseMemoryLocalConfig(undefined).recallTool.enabled).toBe(true);
@@ -294,6 +403,102 @@ describe("memory-local", () => {
     await writeFile(databasePath, corrupt, { mode: 0o600 });
     await expect(openMemoryLocal(options(root, directory))).rejects.toMatchObject({ code: "corrupt_store" });
     expect(await readFile(databasePath)).toEqual(corrupt);
+  });
+
+  it("keeps new writes strict and rejects semantically invalid stored rows on reopen", async () => {
+    const { root, directory } = await fixture();
+    const memory = await openMemoryLocal({
+      ...options(root, directory, captureConfig()),
+      host: host(passthroughGrant()),
+    });
+    await expect(memory.capture?.({
+      record: record("noncanonical-input", "new input remains strict", "2026-07-23T12:00:00Z"),
+      signal,
+    })).rejects.toMatchObject({ code: "invalid_record" });
+    await memory.capture?.({
+      record: record("persisted", "stored row admission", "2026-07-23T12:00:00.000Z"),
+      signal,
+    });
+    await memory.stop();
+
+    const databasePath = join(directory, MEMORY_LOCAL_DATABASE_FILENAME);
+    const database = new DatabaseSync(databasePath, { allowExtension: true });
+    try {
+      loadSqliteVec(database);
+      database.enableLoadExtension(false);
+      database.prepare("UPDATE memories SET created_at = ?").run("not-a-timestamp");
+    } finally {
+      database.close();
+    }
+
+    await expect(openMemoryLocal(options(root, directory)))
+      .rejects.toMatchObject({ code: "corrupt_store" });
+    const inspection = new DatabaseSync(databasePath, { allowExtension: true });
+    try {
+      loadSqliteVec(inspection);
+      inspection.enableLoadExtension(false);
+      expect((inspection.prepare("SELECT created_at FROM memories LIMIT 1").get() as {
+        created_at: string;
+      }).created_at).toBe("not-a-timestamp");
+    } finally {
+      inspection.close();
+    }
+  });
+
+  it("rejects oversized stored metadata before semantic row materialization", async () => {
+    const { root, directory } = await fixture();
+    const memory = await openMemoryLocal({
+      ...options(root, directory, captureConfig()),
+      host: host(passthroughGrant()),
+    });
+    await memory.capture?.({
+      record: record("persisted", "stored metadata admission", "2026-07-23T12:00:00.000Z"),
+      signal,
+    });
+    await memory.stop();
+
+    const databasePath = join(directory, MEMORY_LOCAL_DATABASE_FILENAME);
+    const database = new DatabaseSync(databasePath, { allowExtension: true });
+    try {
+      loadSqliteVec(database);
+      database.enableLoadExtension(false);
+      database.prepare("UPDATE memories SET tags = ?")
+        .run(JSON.stringify(["x".repeat(64 * 1024)]));
+    } finally {
+      database.close();
+    }
+
+    await expect(openMemoryLocal(options(root, directory)))
+      .rejects.toMatchObject({ code: "corrupt_store" });
+  });
+
+  it("rejects invalid SQLite storage classes before materializing stored values", async () => {
+    const { root, directory } = await fixture();
+    const memory = await openMemoryLocal({
+      ...options(root, directory, captureConfig()),
+      host: host(passthroughGrant()),
+    });
+    await memory.capture?.({
+      record: record("persisted", "stored class admission", "2026-07-23T12:00:00.000Z"),
+      signal,
+    });
+    await memory.stop();
+
+    const databasePath = join(directory, MEMORY_LOCAL_DATABASE_FILENAME);
+    const database = new DatabaseSync(databasePath, { allowExtension: true });
+    try {
+      loadSqliteVec(database);
+      database.enableLoadExtension(false);
+      database.prepare("UPDATE memories SET salience = zeroblob(?)").run(128 * 1024);
+      expect((database.prepare("SELECT typeof(salience) AS storage FROM memories LIMIT 1").get() as {
+        storage: string;
+      }).storage).toBe("blob");
+    } finally {
+      database.close();
+    }
+
+    await expect(openMemoryLocal(options(root, directory)))
+      .rejects.toMatchObject({ code: "corrupt_store" });
   });
 });
 
