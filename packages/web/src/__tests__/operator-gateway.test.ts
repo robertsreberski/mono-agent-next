@@ -81,6 +81,51 @@ describe("web operator gateway", () => {
     }]);
   });
 
+  it("does not replay proactive conversations the product already knows", async () => {
+    const root = await temporaryDirectory();
+    const registry = join(root, "registry");
+    await mkdir(registry, { mode: 0o700 });
+    const now = new Date().toISOString();
+    await writeDescriptor(join(registry, "agent.json"), "http://127.0.0.1:43210", process.pid, now);
+    const replayed: string[] = [];
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/v1/info")) {
+        return new Response(JSON.stringify({
+          ...operatorInfo(true, now),
+          capabilities: { ...capabilities(true), proactive: true, replay: true },
+        }), { headers: { "content-type": "application/json" } });
+      }
+      if (url.endsWith("/v1/conversations")) {
+        return new Response(JSON.stringify({ conversations: [
+          { id: "already-imported", title: "Old", updatedAt: now, triggerKind: "cron" },
+          { id: "dismissed", title: "Tombstoned", updatedAt: now, triggerKind: "webhook" },
+          { id: "fresh", title: "New", updatedAt: now, triggerKind: "cron" },
+        ] }), { headers: { "content-type": "application/json" } });
+      }
+      const replay = /\/v1\/conversations\/([^/]+)\/replay$/u.exec(url);
+      if (replay !== null) {
+        replayed.push(decodeURIComponent(replay[1]!));
+        return new Response(JSON.stringify({
+          conversationId: replay[1],
+          messages: [{ id: "m", role: "assistant", text: "body", createdAt: now }],
+        }), { headers: { "content-type": "application/json" } });
+      }
+      throw new Error(`Unexpected operator request ${url}`);
+    };
+    const gateway = createOperatorGateway({ registryDirectories: [registry], environment: {}, fetch: fetchImpl });
+
+    // Bootstrap runs on every debounced SSE delta, so replaying conversations
+    // the store already holds costs one round trip each on every refresh.
+    const known = new Set(["already-imported", "dismissed"]);
+    const discovered = await gateway.discoverProactiveConversations?.(
+      (agentId, conversationId) => agentId === "personal" && known.has(conversationId),
+    );
+
+    expect(replayed).toEqual(["fresh"]);
+    expect(discovered).toMatchObject([{ conversationId: "fresh" }]);
+  });
+
   it("uses authoritative info and the shared override policy before forwarding overrides", async () => {
     const root = await temporaryDirectory();
     const registry = join(root, "registry");

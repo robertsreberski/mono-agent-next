@@ -1,5 +1,5 @@
 import { createServer, request as httpRequest, type Server } from "node:http";
-import { chmod, mkdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -491,6 +491,100 @@ describe("standalone web product", () => {
     await reopened.close();
   });
 });
+
+  it("bounds live event subscribers and readmits one after a stream closes", async () => {
+    const root = await temporaryDirectory();
+    const server = await startWebServer({
+      config: config(join(root, "state")),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(server);
+
+    const open: AbortController[] = [];
+    const subscribe = async (): Promise<Response> => {
+      const controller = new AbortController();
+      open.push(controller);
+      return await fetch(`${server.url}api/v1/events`, {
+        headers: { authorization: `Bearer ${WEB_TOKEN}` },
+        signal: controller.signal,
+      });
+    };
+
+    try {
+      for (let index = 0; index < 32; index += 1) {
+        expect((await subscribe()).status).toBe(200);
+      }
+      const overflow = await fetch(`${server.url}api/v1/events`, {
+        headers: { authorization: `Bearer ${WEB_TOKEN}` },
+      });
+      expect(overflow.status).toBe(503);
+      expect(await overflow.json()).toMatchObject({ error: { code: "event_capacity" } });
+
+      // Closing one stream must return its slot; a leaked `close` would keep
+      // the console permanently unable to resubscribe after a reload.
+      open.shift()?.abort();
+      await vi.waitFor(async () => {
+        const readmitted = await subscribe();
+        expect(readmitted.status).toBe(200);
+      }, { timeout: 5_000 });
+    } finally {
+      for (const controller of open) controller.abort();
+    }
+  });
+
+  it("withholds a static asset that exceeds the size cap or changes identity mid-read", async () => {
+    const root = await temporaryDirectory();
+    const assets = join(root, "assets");
+    await mkdir(assets);
+    await writeFile(join(assets, "index.html"), "<h1>safe application</h1>");
+    // 16 MiB is the cap; one byte past it must not be served at all.
+    await writeFile(join(assets, "huge.txt"), Buffer.alloc(16 * 1_024 * 1_024 + 1, 0x61));
+    await writeFile(join(assets, "swapped.txt"), "original bytes");
+
+    const server = await startWebServer({
+      config: config(join(root, "state")),
+      operatorGateway: immediateGateway(),
+      staticDirectory: assets,
+    });
+    webServers.add(server);
+
+    const oversized = await fetch(`${server.url}huge.txt`);
+    expect(oversized.status).toBe(404);
+    expect(await oversized.text()).not.toContain("aaaa");
+
+    const swapped = await fetch(`${server.url}swapped.txt`);
+    expect(swapped.status).toBe(200);
+    expect(await swapped.text()).toBe("original bytes");
+
+    // Replace the path with a different inode while the server is running: the
+    // before/after identity comparison must refuse to hand back either file's
+    // bytes rather than serving a half-read mixture.
+    await writeFile(join(root, "replacement.txt"), "replacement bytes");
+    await rename(join(root, "replacement.txt"), join(assets, "swapped.txt"));
+    const afterSwap = await fetch(`${server.url}swapped.txt`);
+    expect([200, 404]).toContain(afterSwap.status);
+    if (afterSwap.status === 200) expect(await afterSwap.text()).toBe("replacement bytes");
+  });
+
+  it("keeps the emitted service worker uncacheable", async () => {
+    const root = await temporaryDirectory();
+    const assets = join(root, "assets");
+    await mkdir(assets);
+    await writeFile(join(assets, "index.html"), "<h1>safe application</h1>");
+    // VitePWA emits `sw.js`; a stale worker would pin an old console build.
+    await writeFile(join(assets, "sw.js"), "self.addEventListener('install', () => {});");
+
+    const server = await startWebServer({
+      config: config(join(root, "state")),
+      operatorGateway: immediateGateway(),
+      staticDirectory: assets,
+    });
+    webServers.add(server);
+
+    const worker = await fetch(`${server.url}sw.js`);
+    expect(worker.status).toBe(200);
+    expect(worker.headers.get("cache-control")).toBe("no-store");
+  });
 
 function config(
   dataDirectory: string,

@@ -45,7 +45,15 @@ export interface WebOperatorGateway {
   listAgents(): Promise<readonly WebAgent[]>;
   runTurn(input: WebOperatorTurnInput): Promise<void>;
   cancel(agentId: string, conversationId: string): Promise<void>;
-  discoverProactiveConversations?(): Promise<readonly WebProactiveConversation[]>;
+  /**
+   * `isKnown` reports conversations already imported or tombstoned. Replay is
+   * the expensive half of discovery, so the gateway consults this before
+   * fetching rather than after. Omitting it means nothing is known and every
+   * trigger conversation is replayed.
+   */
+  discoverProactiveConversations?(
+    isKnown?: (agentId: string, conversationId: string) => boolean,
+  ): Promise<readonly WebProactiveConversation[]>;
   answerAsk?(
     agentId: string,
     conversationId: string,
@@ -99,10 +107,13 @@ export class WebService {
 
   async bootstrap(): Promise<WebBootstrap> {
     const newProactiveThreadIds: string[] = [];
-    for (const conversation of await this.gateway.discoverProactiveConversations?.() ?? []) {
-      if (this.store.findThreadByOperatorConversation(conversation.agentId, conversation.conversationId) !== undefined) {
-        continue;
-      }
+    // Bootstrap runs on every debounced SSE delta, so an unfiltered discovery
+    // re-replays every retained trigger conversation while a turn streams.
+    // The tombstone survives deletion, so a dismissed notice stays skipped.
+    const known = (agentId: string, conversationId: string): boolean =>
+      this.store.findThreadByOperatorConversation(agentId, conversationId) !== undefined;
+    for (const conversation of await this.gateway.discoverProactiveConversations?.(known) ?? []) {
+      if (known(conversation.agentId, conversation.conversationId)) continue;
       const imported = await this.store.importProactiveConversation(conversation);
       if (imported.created) {
         newProactiveThreadIds.push(imported.thread.id);
