@@ -246,7 +246,7 @@
     },
     {
       "path": "packages/operator/src/__tests__/client.test.ts",
-      "sha256": "f2d6e6da628bbd342abc3c3103dba7ca3d253cf1a5c21e3de9cbb31d443bd784",
+      "sha256": "673b6c70fee89459d408f08e67dcb9cbb725e80d61d6857547bf8f58714c7685",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",

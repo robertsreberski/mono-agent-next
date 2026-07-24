@@ -226,7 +226,7 @@ describe("operator client response hygiene", () => {
       await expect(client.getPendingAsk(conversationId)).rejects.toMatchObject({ code: "INVALID_VALUE" });
       await expect(client.answerAsk(conversationId, { interactionId: "i", answers: { q: ["a"] } }))
         .rejects.toMatchObject({ code: "INVALID_VALUE" });
-      await expect(client.offerLiveInput(conversationId, { text: "steer" }))
+      await expect(client.offerLiveInput(conversationId, { id: "live-1", text: "steer", receivedAt: "2026-01-02T03:04:05.000Z" }))
         .rejects.toMatchObject({ code: "INVALID_VALUE" });
     }
     // No request may reach the wire: the guard runs before the route exists.
