@@ -3,6 +3,11 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import {
+  packageCatalog,
+  packageRelativePath,
+} from "../package-catalog.mjs";
+
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 
 function readRepoFile(relativePath) {
@@ -19,23 +24,36 @@ function topLevelSection(page, heading) {
   return next === -1 ? rest : rest.slice(0, next);
 }
 
-describe("root README Quickstart boundary", () => {
+const registryCommandPatterns = [
+  /\bnpm\s+create\s+mono-agent\b/iu,
+  /\bnpx\s+(?:-y\s+)?["']?(?:@mono-agent\/|create-mono-agent\b)/iu,
+  /\bnpm\s+(?:i|install)\s+(?:--global\s+|-g\s+)?(?:@mono-agent\/|create-mono-agent\b)/iu,
+  /\bpnpm\s+add\s+(?:--global\s+|-g\s+)?@mono-agent\//iu,
+];
+const bareExecutablePatterns = [
+  /(?:^|\n)\s*mono-agent(?:\s|$)/mu,
+  /(?:^|\n)\s*mono-agent-memory-local(?:\s|$)/mu,
+  /(?:^|\n)\s*mono-agent-service-macos(?:\s|$)/mu,
+  /(?:^|\n)\s*mono-agent-web(?:\s|$)/mu,
+];
+
+describe("source-only newcomer boundary", () => {
   const readme = readRepoFile("README.md");
   const quickstart = topLevelSection(
     readme,
-    "Quickstart: An Agent Folder From One Config File",
+    "Source quickstart",
   );
 
-  it("keeps the complete runnable command flow in order", () => {
+  it("keeps the supported source flow complete and ordered", () => {
     const commands = [
-      "npm i -g create-mono-agent",
-      "mkdir my-agent",
-      "cd my-agent",
-      "mono-agent init",
-      "mono-agent validate",
-      "mono-agent start",
-      "PORT=3000",
-      'curl -s "http://127.0.0.1:${PORT}/webhook/invoke"',
+      "git clone https://github.com/robertsreberski/mono-agent-next.git",
+      "cd mono-agent-next",
+      "corepack enable",
+      "pnpm install --frozen-lockfile",
+      "pnpm build",
+      "node packages/create-mono-agent/dist/bin/create-mono-agent.js",
+      "--template minimal",
+      "pnpm run verify:v1-minimal",
     ];
 
     let cursor = -1;
@@ -45,54 +63,121 @@ describe("root README Quickstart boundary", () => {
       cursor = next;
     }
 
-    expect(quickstart.split("\n").length).toBeLessThanOrEqual(70);
-    expect(quickstart).toContain("./docs/getting-started/quickstart.md");
-    expect(quickstart).toContain("./docs/reference/setup-security.md");
+    expect(quickstart).toContain("not published to npm");
+    expect(quickstart).toContain("cannot be installed from npm");
   });
 
-  it("keeps deep setup internals outside the runnable section", () => {
-    const forbiddenInternals = [
-      /\bPOSIX\b/u,
-      /\bHMAC\b/u,
-      /\binode\b/iu,
-      /\blifetime lease\b/iu,
-      /\bno-clobber\b/iu,
-      /\b0600\b/u,
-      /\bowner-only\b/iu,
-      /\blaunchd\b/iu,
-      /\bPID reuse\b/iu,
-      /background-snapshot-keys/iu,
-      /dependency closure/iu,
-      /permission-denied/iu,
-    ];
-
-    for (const pattern of forbiddenInternals) {
-      expect(quickstart, `deep internal ${pattern} belongs in the reference page`).not.toMatch(
-        pattern,
-      );
+  it("does not advertise an unavailable registry path", () => {
+    for (const pattern of registryCommandPatterns) {
+      expect(quickstart).not.toMatch(pattern);
     }
   });
 
-  it("preserves the moved contracts on the linked canonical reference page", () => {
-    const setupSecurity = readRepoFile("docs/reference/setup-security.md");
-    const referenceIndex = readRepoFile("docs/reference/index.md");
+  it("states the same boundary in canonical newcomer docs and scaffolder docs", () => {
+    const install = readRepoFile("docs/getting-started/install.md");
     const firstAgent = readRepoFile("docs/getting-started/quickstart.md");
+    const scaffolder = readRepoFile("packages/create-mono-agent/README.md");
 
-    for (const anchor of [
-      "POSIX",
-      "HMAC",
-      "inode",
-      "lifetime lease",
-      "no-clobber",
-      "0600",
-      "permission-denied",
+    expect(install).toContain("Consumer installation from npm");
+    expect(firstAgent).toContain("not published to npm");
+    expect(firstAgent).toContain("packages/create-mono-agent/dist/bin/create-mono-agent.js");
+    expect(scaffolder).toContain("not published during the source preview");
+    expect(scaffolder).not.toContain("npm create mono-agent@0.15.0");
+    expect(scaffolder).not.toContain("npm install --global create-mono-agent@0.15.0");
+  });
+
+  it("keeps every package README off predecessor registry entry points", () => {
+    for (const entry of packageCatalog) {
+      const path = `${packageRelativePath(entry)}/README.md`;
+      const page = readRepoFile(path);
+      expect(page, `${path} must identify colliding registry artifacts`).toMatch(
+        /predecessor\s+repository/u,
+      );
+      for (const pattern of registryCommandPatterns) {
+        expect(page, `${path} must not advertise ${String(pattern)}`).not.toMatch(pattern);
+      }
+    }
+  });
+
+  it("keeps canonical source-preview docs and scaffolder help off registry entry points", () => {
+    for (const path of [
+      "README.md",
+      "docs/getting-started/install.md",
+      "docs/getting-started/quickstart.md",
+      "packages/create-mono-agent/README.md",
+      "packages/create-mono-agent/src/cli.ts",
     ]) {
-      expect(setupSecurity, `setup-security.md is missing moved anchor: ${anchor}`).toContain(
-        anchor,
+      const page = readRepoFile(path);
+      for (const pattern of registryCommandPatterns) {
+        expect(page, `${path} must not advertise ${String(pattern)}`).not.toMatch(pattern);
+      }
+    }
+  });
+
+  it("renders into a canonical temporary parent instead of a symlinked platform alias", () => {
+    for (const path of [
+      "README.md",
+      "docs/getting-started/install.md",
+      "docs/getting-started/quickstart.md",
+      "packages/create-mono-agent/README.md",
+    ]) {
+      const page = readRepoFile(path);
+      expect(page, `${path} must create a unique temporary parent`).toContain("mktemp -d");
+      expect(page, `${path} must canonicalize the temporary parent`).toContain("pwd -P");
+      expect(page, `${path} must not use the macOS /tmp symlink`).not.toMatch(/\/tmp\//u);
+    }
+  });
+
+  it("uses exact built entrypoints instead of shadowable global binaries", () => {
+    const expectedEntrypoints = new Map([
+      ["README.md", "node packages/cli/dist/bin/mono-agent.js"],
+      [
+        "docs/getting-started/quickstart.md",
+        "node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js",
+      ],
+      [
+        "docs/config/index.md",
+        "node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js",
+      ],
+      [
+        "docs/config/reference.md",
+        "node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js",
+      ],
+      ["docs/observability/web-console.md", "node packages/web/dist/bin.js"],
+      ["docs/reference/v1-architecture.md", "node packages/cli/dist/bin/mono-agent.js"],
+      [
+        "packages/memory-local/README.md",
+        "node packages/memory-local/dist/bin/memory-local.js",
+      ],
+      ["packages/runtime-pi/README.md", "node packages/cli/dist/bin/mono-agent.js"],
+      ["packages/sandbox-srt/README.md", "node packages/cli/dist/bin/mono-agent.js"],
+      [
+        "packages/service-macos/README.md",
+        "node packages/service-macos/dist/bin/service-macos.js",
+      ],
+      [
+        "packages/create-mono-agent/skills/mono-agent-composer/SKILL.md",
+        "node packages/create-mono-agent/dist/bin/create-mono-agent.js",
+      ],
+      [
+        "packages/create-mono-agent/skills/mono-agent-composer/references/validation.md",
+        "node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js",
+      ],
+      [
+        "SECURITY.md",
+        "node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js",
+      ],
+    ]);
+
+    for (const [path, entrypoint] of expectedEntrypoints) {
+      const page = readRepoFile(path);
+      expect(page, `${path} must use ${entrypoint}`).toContain(entrypoint);
+      for (const pattern of bareExecutablePatterns) {
+        expect(page, `${path} must not advertise ${String(pattern)}`).not.toMatch(pattern);
+      }
+      expect(page, `${path} must not invoke an ambient mono-agent binary`).not.toMatch(
+        /\bmono-agent\s+(?:auth|config|init|inspect|module|sandbox|start|validate)\b/iu,
       );
     }
-
-    expect(referenceIndex).toContain("[Setup security and managed runtime](/reference/setup-security/)");
-    expect(firstAgent).toContain("[Setup security and managed runtime](/reference/setup-security/)");
   });
 });

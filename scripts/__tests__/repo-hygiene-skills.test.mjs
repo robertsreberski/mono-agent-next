@@ -22,6 +22,57 @@ afterEach(async () => {
 });
 
 describe("repository hygiene skill contracts", () => {
+  it("keeps implementer base comparisons pinned to one immutable SHA", async () => {
+    const paths = [
+      "agents/implementer.md",
+      "agents/implementer.toml",
+    ];
+    const templates = await Promise.all(paths.map((path) => readFile(path, "utf8")));
+
+    for (const template of templates) {
+      expect(template).toContain("BASE_SHA");
+      expect(template).toContain("origin/main");
+      expect(template).toMatch(/exact (?:detached )?SHA|exact SHA|exact immutable BASE_SHA/iu);
+      expect(template).not.toMatch(/git worktree add[^\n]*origin\/main/iu);
+    }
+  });
+
+  it("keeps live-smoke guidance bounded and explicit about uncovered boundaries", async () => {
+    const operatorPaths = [
+      "agents/live-smoke-operator.md",
+      "agents/live-smoke-operator.toml",
+    ];
+    const operatorTemplates = await Promise.all(
+      operatorPaths.map((path) => readFile(path, "utf8")),
+    );
+    const [liveSmoke, verifyGreen, agents] = await Promise.all([
+      readFile("skills/live-smoke/SKILL.md", "utf8"),
+      readFile("skills/verify-green/SKILL.md", "utf8"),
+      readFile("AGENTS.md", "utf8"),
+    ]);
+
+    for (const template of operatorTemplates) {
+      expect(template).toMatch(/uncovered boundary/iu);
+      expect(template).toContain("SUBSTITUTED");
+      expect(template).not.toContain("/tmp/mono-agent-smoke");
+      expect(template).not.toContain("start.log");
+      expect(template).not.toContain("SMOKE=$(mktemp");
+    }
+    expect(liveSmoke).toContain("E. Focused-proof substitution");
+    expect(verifyGreen).toMatch(/focused-proof substitution/iu);
+    expect(agents).toMatch(/matching .*scenario when one exists/iu);
+  });
+
+  it("resolves each Pi package from its direct workspace owner", async () => {
+    const skill = await readFile("skills/pi-upstream-recon/SKILL.md", "utf8");
+
+    expect(skill).toContain("pnpm --filter @mono-agent/runtime-pi exec node");
+    expect(skill).toContain("pnpm --filter @mono-agent/tui exec node");
+    expect(skill).toContain('import.meta.resolve(name)');
+    expect(skill).toContain("npm view @earendil-works/pi-coding-agent@latest");
+    expect(skill).not.toContain("rg --files --hidden --no-ignore node_modules/.pnpm");
+  });
+
   it("keeps both cleanup recipes identical and documents compare-and-delete gates", async () => {
     const [worktreeSkill, hygieneSkill] = await Promise.all(
       cleanupSkillPaths.map((path) => readFile(path, "utf8")),

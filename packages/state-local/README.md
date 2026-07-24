@@ -26,11 +26,15 @@ the current operating-system owner.
 
 ## Install / Usage
 
-Install the state module as a direct dependency and select it in the reserved
-state slot:
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
+Build the state module and its workspace dependencies:
 
 ```bash
-pnpm add @mono-agent/state-local
+pnpm --filter @mono-agent/state-local... run build
 ```
 
 ```json
@@ -314,7 +318,7 @@ write state-local's package-private records directly.
 
 ## Related Documentation
 
-- [V1 product requirements](../../refactor/mono-agent-v1-prd.md)
+- [V1 architecture](../../docs/reference/v1-architecture.md)
 - [Module SDK](../module-sdk/README.md)
 
 ## Verification

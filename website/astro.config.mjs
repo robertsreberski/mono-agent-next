@@ -49,7 +49,6 @@ export default defineConfig({
         { label: 'Observability & CLI', items: [{ autogenerate: { directory: 'observability' } }] },
         { label: 'Programmatic', items: [{ autogenerate: { directory: 'programmatic' } }] },
         { label: 'Playbooks', items: [{ autogenerate: { directory: 'playbooks' } }] },
-        { label: 'Migration', items: [{ autogenerate: { directory: 'migration' } }] },
         { label: 'Products', items: [{ autogenerate: { directory: 'products' } }] },
         { label: 'Reference', items: [{ autogenerate: { directory: 'reference' } }] },
       ],

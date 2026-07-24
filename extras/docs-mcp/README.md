@@ -25,30 +25,35 @@ read-only MCP tool.
 
 ## Install / Usage
 
-Pair the exact version matching `@mono-agent/cli`:
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install or execute them during the source
+preview. Build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md), then run its
+entry point directly:
 
 ```bash
-MONO_AGENT_VERSION="$(mono-agent --version)"
-MONO_AGENT_VERSION="${MONO_AGENT_VERSION#mono-agent }"
-npx -y "@mono-agent/docs-mcp@$MONO_AGENT_VERSION"
+pnpm --filter @mono-agent/docs-mcp run build
+node extras/docs-mcp/dist/cli.js
 ```
 
 With no arguments, this is a long-running MCP subprocess over stdio. Register
-that **bare command** with a harness; do not add `--check` or `--version`, because
-both are human diagnostics that print JSON and exit.
+that direct source command with a harness; do not add `--check` or `--version`,
+because both are human diagnostics that print JSON and exit.
 
-Register the version-matched companion manually with the coding client:
+From the repository root, register this exact checkout manually with a coding
+client:
 
 ```bash
-codex mcp add mono-agent-docs -- npx -y "@mono-agent/docs-mcp@$MONO_AGENT_VERSION"
-claude mcp add --scope user mono-agent-docs -- npx -y "@mono-agent/docs-mcp@$MONO_AGENT_VERSION"
+DOCS_MCP_ENTRY="$(pwd)/extras/docs-mcp/dist/cli.js"
+codex mcp add mono-agent-docs -- node "$DOCS_MCP_ENTRY"
+claude mcp add --scope user mono-agent-docs -- node "$DOCS_MCP_ENTRY"
 ```
 
-Check the installed corpus from a terminal, outside the harness registration:
+Check the built corpus from a terminal, outside the harness registration:
 
 ```bash
-npx -y "@mono-agent/docs-mcp@$MONO_AGENT_VERSION" --check
-npx -y "@mono-agent/docs-mcp@$MONO_AGENT_VERSION" --version
+node extras/docs-mcp/dist/cli.js --check
+node extras/docs-mcp/dist/cli.js --version
 ```
 
 `--check` validates the bundled corpus and runs a representative query.

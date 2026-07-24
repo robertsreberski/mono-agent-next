@@ -6,7 +6,7 @@ Do not open a public issue for an exploitable vulnerability or include live cred
 
 ## Trust boundary
 
-mono-agent is local-first and single-owner by default. It can execute model-selected tools, read configured context, retain conversations and run artifacts, and send through enabled channels. Treat anyone who can operate an exposed endpoint as having the authority of that agent.
+`mono-agent` is local-first and single-owner by default. It can execute model-selected tools, read configured context, retain conversations and run artifacts, and send through enabled channels. Treat anyone who can operate an exposed endpoint as having the authority of that agent.
 
 Network-facing defaults and guards differ by surface:
 
@@ -24,11 +24,11 @@ request confusion but are not authentication, and plain LAN HTTP is not
 encrypted. Prefer loopback behind a correctly configured HTTPS reverse proxy
 or Tailscale Serve; do not publish the direct port to the internet.
 
-See [`docs/reference/setup-security.md`](./docs/reference/setup-security.md) for managed-runtime, secret-persistence, sandbox, and readiness guarantees.
+See [`docs/reference/setup-security.md`](./docs/reference/setup-security.md) for runtime authentication, secret-persistence, sandbox, and readiness guarantees.
 
 ## Secret handling
 
-- Keep provider and channel credentials in an owner-only `.env` or provider-native auth store, never committed JSON.
+- Keep provider and channel credentials in owner-private external environment injection or a provider-native auth store, never committed JSON.
 - Treat artifact redaction as defense in depth. Free-form model, user, and tool text may still contain sensitive data.
 - Rotate a credential before removing a leaked copy. Deleting a file does not revoke the credential or erase Git history/backups.
 - Do not paste secrets into issues, logs, screenshots, or model prompts used for debugging.
@@ -42,6 +42,9 @@ Repository maintenance does not authorize deleting an operator's ignored credent
 3. Rotate provider, channel, and API credentials at their issuer. Update the secure local auth store only after rotation.
 4. Remove only the explicitly reviewed local `.env`, auth, artifact, trace, log, upload, and temporary files. Preserve any run evidence still needed for incident review.
 5. Check whether a secret ever entered Git with `git log --all -- .env` and a targeted `git rev-list --objects --all` search. If it did, coordinate history rewriting with every clone after revocation; ordinary file deletion is insufficient.
-6. Restart only the explicitly intended target, run `mono-agent validate --config <file>`, and smoke-test the exact enabled surface with the replacement credential.
+6. From the installed agent folder, restart only the explicitly intended
+   target, run the project-local v1 CLI with
+   `node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js validate --config <file>`,
+   and smoke-test the exact enabled surface with the replacement credential.
 
 Never automate this checklist across a home directory or repository root with a broad recursive delete.

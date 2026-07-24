@@ -28,29 +28,31 @@ names-only environment example. `minimal` is the default; `personal` and
 
 ## Install / Usage
 
+The v1 package is not published during the source preview. The existing
+registry artifact under this name belongs to the predecessor repository, not
+this v1 source; do not install or execute it. Follow the
+[workspace source setup](../../docs/getting-started/install.md), then run the
+built entry point from the repository root:
+
 ```bash
-# No dependency installation or lifecycle scripts by default; minimal is used.
-npm create mono-agent@0.15.0 my-agent
+SCAFFOLD_PARENT="$(mktemp -d)"
+SCAFFOLD_PARENT="$(cd "$SCAFFOLD_PARENT" && pwd -P)"
+node packages/create-mono-agent/dist/bin/create-mono-agent.js \
+  "$SCAFFOLD_PARENT/my-agent" \
+  --template minimal
 
-# Select another deterministic template.
-npm create mono-agent@0.15.0 personal-agent -- --template personal
-npm create mono-agent@0.15.0 multi-agent -- --template multi-runtime
-
-# Installation is an explicit side effect.
-npm create mono-agent@0.15.0 my-agent -- --install --package-manager npm
-
-# A global install preserves the init/setup aliases and the thin CLI.
-npm install --global create-mono-agent@0.15.0
-mono-agent init ./my-agent
-mono-agent validate --config ./my-agent/mono-agent.config.json
-
-# Install only the bundled composer skill; both targets are the default.
-mono-agent install-skill
-mono-agent install-skill --target codex --force
+# Optional: install only the bundled composer skill.
+node packages/create-mono-agent/dist/bin/mono-agent.js install-skill
 ```
 
-Explicit installation supports pnpm and npm. Yarn is intentionally unavailable
-until Core can validate its lockfile as part of the module-loading boundary.
+The rendered manifest names release versions that are not available from npm
+yet, so source-preview users should inspect the project and use
+`pnpm run verify:v1-minimal` for the hermetic installed proof. Do not pass
+`--install` until those packages have been published and clean-install
+verification is green.
+
+Explicit post-release installation supports pnpm and npm. Yarn is intentionally
+unavailable until Core can validate its lockfile as part of the module-loading boundary.
 All templates use `openai-codex:gpt-5.6-sol` through Pi's owner-private
 `.secrets/pi/auth.json` store. The scaffolder never creates that store, `.env`,
 or any credential-bearing file. `.env.example` contains only the exact names
@@ -202,9 +204,9 @@ the scaffolded runtime dependency graph.
 ## Related Documentation
 
 - [V1 architecture](../../docs/reference/v1-architecture.md)
-- [Minimal agent fixture](../../refactor/mono-agent-v1-prd.md#62-minimal-agent)
-- [Sanitized Personal Agent fixture](../../refactor/mono-agent-v1-prd.md#63-sanitized-personal-agent-migration-fixture)
-- [Multi-runtime addition](../../refactor/mono-agent-v1-prd.md#64-multi-runtime-addition)
+- [Source installation](../../docs/getting-started/install.md)
+- [Your first agent](../../docs/getting-started/quickstart.md)
+- [Generated config reference](../../docs/config/reference.md)
 
 ## Verification
 

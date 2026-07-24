@@ -92,7 +92,7 @@ need the sweep below.
 List branches already merged into `main`, excluding `main`/current, and delete them:
 
 ```bash
-git branch --merged main | grep -vE '^\*|(^|\s)main$' | xargs -r git branch -d
+git branch --merged main | rg -v '^\*|(^|\s)main$' | xargs -r git branch -d
 ```
 
 `git branch -d` is the safe delete — it refuses any branch not actually merged, so

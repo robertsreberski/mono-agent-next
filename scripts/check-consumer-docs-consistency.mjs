@@ -4,33 +4,28 @@ import { constants } from "node:fs";
 import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  packageCatalog,
+  packageRelativePath,
+} from "./package-catalog.mjs";
+
 const userDocRoots = [
   "AGENTS.md",
   "README.md",
   "PACKAGES.md",
   "docs",
-  "packages/agent-app/README.md",
-  "packages/config/README.md",
-  "packages/memory/README.md",
-  "extras/memory-supermemory/README.md",
-  "packages/observability/README.md",
-  "packages/operator-adapter/README.md",
-  "packages/tui/README.md",
-  "packages/agent-app/skills/mono-agent-composer/references",
+  ...packageCatalog.map((entry) => `${packageRelativePath(entry)}/README.md`),
+  "packages/create-mono-agent/skills/mono-agent-composer/references",
 ];
 const demoMarkdownRoot = "demos";
 
 const artifactContractSourcePaths = [
-  "packages/agent-app/src/cli-background-command.ts",
-  "packages/agent-app/src/cli-help.ts",
-  "packages/operator-adapter/package.json",
-  "packages/operator-adapter/src/tui/constants.ts",
-  "packages/operator-adapter/src/tui/server.ts",
-  "packages/tui/src/ui/app.ts",
-  "packages/tui/src/ui/components/tool-panel.ts",
-  "packages/tui/src/ui/views/replay-detail.ts",
-  "packages/tui/src/ui/views/replay.ts",
+  "packages/channel-operator/src/server.ts",
+  "packages/operator/package.json",
+  "packages/operator/src/state.ts",
   "packages/tui/package.json",
+  "packages/tui/src/ui/app.ts",
+  "packages/tui/src/ui/terminal-text.ts",
   "scripts/package-catalog.mjs",
 ];
 

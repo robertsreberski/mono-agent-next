@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,75 +17,145 @@ afterEach(async () => {
 });
 
 describe("check-oss-hygiene", () => {
-  it("reports non-synthetic consumer fixture names without printing the raw name", () => {
+  it("flags private fleet, persona, endpoint, and email references without printing them", () => {
+    const employer = ["A8", "C"].join("");
+    const fleetPath = `~/${["personal", "agent"].join("-")}`;
+    const persona = ["Inner", " Child"].join("");
+    const port = ["54", "18"].join("");
+    const email = `${["roberts", "reberski"].join("")}@${["gmail", "com"].join(".")}`;
+    const text = [employer, fleetPath, persona, port, email].join("\n");
+
+    const findings = scanOssHygieneRecords([{ path: "notes.md", text }]);
+    const report = renderOssHygieneReport(findings);
+
+    expect(findings.map((finding) => finding.label)).toEqual([
+      "employer-reference",
+      "private-fleet-path",
+      "private-persona-reference",
+      "private-service-identifier",
+      "personal-email-outside-authors",
+    ]);
+    for (const value of [employer, fleetPath, persona, port, email]) {
+      expect(report).not.toContain(value);
+    }
+  });
+
+  it("flags private identifiers across config and slug delimiters", () => {
+    const employerKey = `${["A8", "C"].join("")}_SLACK_TOKEN`;
+    const personaSlugs = [
+      ["sleep", "ambra"].join("-"),
+      ["therapy", "council"].join("-"),
+      ["inner", "child"].join("-"),
+    ];
+    const findings = scanOssHygieneRecords([{
+      path: "config.json",
+      text: [employerKey, ...personaSlugs].join("\n"),
+    }]);
+
+    expect(findings.map((finding) => finding.label)).toEqual([
+      "employer-reference",
+      "private-persona-reference",
+      "private-persona-reference",
+      "private-persona-reference",
+    ]);
+  });
+
+  it("allows the author email only in AUTHORS and keeps generic examples public", () => {
+    const email = `${["roberts", "reberski"].join("")}@${["gmail", "com"].join(".")}`;
     const records = [
+      { path: "AUTHORS.md", text: `${email}\n` },
       {
-        path: "packages/agent-app/src/__tests__/fixtures/consumers/legacy-agent/mono-agent.config.json",
-        text: "projectName: legacy-agent\n",
+        path: "docs/example.md",
+        text: "Personal Agent template at /Users/example/agent and /home/user/agent.\n",
       },
     ];
 
-    const findings = scanOssHygieneRecords(records);
+    expect(scanOssHygieneRecords(records)).toEqual([]);
+  });
 
-    expect(findings).toEqual([
+  it("flags private references in tracked pathnames without printing them", () => {
+    const employerPath = ["docs", `${["a8", "c"].join("")}-internal.md`].join("/");
+    const servicePath = ["notes", `${["personal", "agent", "059657c8"].join("-")}.md`].join("/");
+    const findings = scanOssHygieneRecords([
+      { path: employerPath, text: "Public-looking content.\n" },
+      { path: servicePath, text: undefined },
+    ]);
+    const report = renderOssHygieneReport(findings);
+
+    expect(findings.map((finding) => finding.label)).toEqual([
+      "employer-reference",
+      "private-service-identifier",
+    ]);
+    expect(report).toContain("[redacted-tracked-path]:0:1");
+    expect(report).not.toContain(employerPath);
+    expect(report).not.toContain(servicePath);
+    expect(scanOssHygieneRecords([{
+      path: "docs/personal-agent-template.md",
+      text: "Public Personal Agent template.\n",
+    }])).toEqual([]);
+  });
+
+  it("flags and redacts non-example home paths in tracked pathnames", () => {
+    const employer = ["A8", "C"].join("");
+    const privatePath = ["snapshots", "Users", "localdev", "report.md"].join("/");
+    const findings = scanOssHygieneRecords([
+      { path: privatePath, text: `${employer}\n` },
+    ]);
+    const report = renderOssHygieneReport(findings);
+
+    expect(findings.map(({ file, label, line }) => ({ file, label, line }))).toEqual([
       {
-        column: 1,
-        file: "packages/agent-app/src/__tests__/fixtures/consumers/[non-synthetic-consumer]/mono-agent.config.json",
-        label: "non-synthetic-consumer-fixture-name",
+        file: "[redacted-tracked-path]",
+        label: "non-example-home-path",
         line: 0,
       },
       {
-        column: 14,
-        file: "packages/agent-app/src/__tests__/fixtures/consumers/[non-synthetic-consumer]/mono-agent.config.json",
-        label: "non-synthetic-consumer-fixture-reference",
+        file: "[redacted-tracked-path]",
+        label: "employer-reference",
         line: 1,
       },
     ]);
-
-    const report = renderOssHygieneReport(findings);
-    expect(report).toContain("non-synthetic-consumer-fixture-name");
-    expect(report).toContain("non-synthetic-consumer-fixture-reference");
-    expect(report).not.toContain("legacy-agent");
+    expect(report).not.toContain(privatePath);
+    expect(report).not.toContain("localdev");
   });
 
   it("flags real-looking home directories without printing the matched path", () => {
     const accountName = "localdev";
     const privateHomePath = ["", "Users", accountName, "workspace"].join("/");
-    const records = [
-      {
-        path: "docs/example.md",
-        text: `Use ${privateHomePath} for this local command.\n`,
-      },
-    ];
-
-    const findings = scanOssHygieneRecords(records);
+    const findings = scanOssHygieneRecords([
+      { path: "docs/example.md", text: `Use ${privateHomePath} for this command.\n` },
+    ]);
     const report = renderOssHygieneReport(findings);
 
-    expect(findings).toEqual([
-      {
-        column: 5,
-        file: "docs/example.md",
-        label: "non-example-home-path",
-        line: 1,
-      },
-    ]);
+    expect(findings).toEqual([{
+      column: 5,
+      file: "docs/example.md",
+      label: "non-example-home-path",
+      line: 1,
+    }]);
     expect(report).not.toContain(privateHomePath);
     expect(report).not.toContain(accountName);
   });
 
-  it("allows the public synthetic fixture names and example home paths", () => {
-    const records = [
+  it("flags Windows home directories case-insensitively while allowing examples", () => {
+    const accountName = "privateuser";
+    const privateHomePath = ["C:", "Users", accountName, "workspace"].join("\\");
+    const findings = scanOssHygieneRecords([
       {
-        path: "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-alpha/mono-agent.config.json",
-        text: "Use /Users/example/local-agent-alpha and /home/example/local-agent-beta.\n",
+        path: "docs/windows.md",
+        text: `${privateHomePath}\nC:\\Users\\Example\\workspace\n`,
       },
-      {
-        path: "packages/agent-app/src/__tests__/fixtures/consumers/local-agent-beta/mono-agent.config.json",
-        text: "Fixture for local-agent-beta.\n",
-      },
-    ];
+    ]);
+    const report = renderOssHygieneReport(findings);
 
-    expect(scanOssHygieneRecords(records)).toEqual([]);
+    expect(findings).toEqual([{
+      column: 1,
+      file: "docs/windows.md",
+      label: "non-example-home-path",
+      line: 1,
+    }]);
+    expect(report).not.toContain(privateHomePath);
+    expect(report).not.toContain(accountName);
   });
 
   it("scans git-tracked files and returns non-zero on findings", async () => {
@@ -110,6 +180,33 @@ describe("check-oss-hygiene", () => {
     expect(stdout.text).toContain("label=non-example-home-path");
     expect(stdout.text).not.toContain(privateHomePath);
     expect(stderr.text).toBe("");
+  });
+
+  it("rejects tracked symlinks without following or printing their targets", async () => {
+    const cwd = await tempDir();
+    const accountName = "privateaccount";
+    const target = ["", "Users", accountName, "secret"].join("/");
+    await symlink(target, join(cwd, "tracked-link"));
+    const stdout = sink();
+
+    const result = await runCheckOssHygiene({
+      cwd,
+      stdout,
+      stderr: sink(),
+      runCommand: async () => ({
+        status: 0,
+        stdout: "tracked-link\0",
+        stderr: "",
+      }),
+    });
+
+    expect(result.exitCode).toBe(1);
+    expect(result.findings.map((finding) => finding.label)).toEqual([
+      "tracked-symlink",
+      "non-example-home-path",
+    ]);
+    expect(stdout.text).not.toContain(target);
+    expect(stdout.text).not.toContain(accountName);
   });
 });
 

@@ -49,6 +49,38 @@ pnpm run generate:source-beta-docs
 
 Generated regions are marked in their files. Edit the catalog, exports, or config metadata that owns the content; do not patch the generated inventory by hand.
 
+## Inspecting leftovers from an older checkout
+
+A checkout that previously contained the retired v0 packages may still have
+ignored `dist`, `types`, or `node_modules` directories under their old names.
+They are not part of a fresh clone and do not need a repository cleanup script.
+Inspect exactly those ignored paths without deleting anything:
+
+```bash
+git clean -ndX -- \
+  packages/agent-app \
+  packages/agent-contracts \
+  packages/agent-harness \
+  packages/agent-runtime \
+  packages/config \
+  packages/cron-adapter \
+  packages/memory \
+  packages/observability \
+  packages/openai-api-adapter \
+  packages/operator-adapter \
+  packages/runtime-adapter \
+  packages/slack-adapter \
+  packages/telegram-adapter \
+  packages/webhook-adapter \
+  extras/a2a-adapter \
+  extras/agent-orchestrator \
+  extras/memory-supermemory \
+  extras/whatsapp-adapter
+```
+
+The command is dry-run only. Review the output and preserve any local data; this
+repository never auto-deletes ignored or untracked directories.
+
 ## Contribution licensing
 
 Only submit material that you have the right and authority to contribute. By

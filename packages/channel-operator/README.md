@@ -24,10 +24,15 @@ controls that Core actually grants.
 
 ## Install / Usage
 
-Install this module directly in the agent project:
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
+Build this module and its workspace dependencies:
 
 ```bash
-pnpm add @mono-agent/channel-operator
+pnpm --filter @mono-agent/channel-operator... run build
 ```
 
 Select it in `mono-agent.config.json`. The bearer token is always an explicit

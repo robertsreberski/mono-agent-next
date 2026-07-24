@@ -13,8 +13,8 @@ Review method:
 Repo-specific risks:
 - Swallowed model, runtime, or provider failures; broad fallbacks; fake success states.
 - Races, unawaited promises, listener leaks, interval leaks, stream leaks, and session leaks.
-- Adapter-local behavior leaking into @mono-agent/agent-contracts.
-- New config surface without typed validation, docs, or feature-registry coverage.
+- Adapter-local behavior leaking into @mono-agent/module-sdk or @mono-agent/core.
+- New config surface without typed validation, generated reference coverage, or task-oriented documentation.
 - Tests or typechecks that pass against stale dist.
 - New packages missing catalog metadata or README sections.
 - Secrets or local credentials in code, fixtures, docs, or logs.

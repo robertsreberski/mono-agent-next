@@ -25,10 +25,15 @@ events and the mono-agent runtime slot.
 
 ## Install / Usage
 
-Install the runtime as a direct project dependency and select it explicitly:
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
+Build the runtime and its workspace dependencies:
 
 ```bash
-pnpm add @mono-agent/runtime-pi
+pnpm --filter @mono-agent/runtime-pi... run build
 ```
 
 ```json
@@ -80,7 +85,7 @@ The runtime exposes one module-owned authentication command immediately after
 creation; it does not require the serving lifecycle to start:
 
 ```bash
-mono-agent auth pi:auth --module primary \
+node packages/cli/dist/bin/mono-agent.js auth pi:auth --module primary \
   --config ./mono-agent.config.json \
   --input-json '{"action":"status"}'
 ```

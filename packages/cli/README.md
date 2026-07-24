@@ -25,15 +25,20 @@ product, or platform.
 
 ## Install / Usage
 
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
 ```bash
-pnpm add @mono-agent/cli@0.15.0
-mono-agent validate --config ./mono-agent.config.json
-mono-agent doctor --config ./mono-agent.config.json --json
-mono-agent config schema --config ./mono-agent.config.json --write
-mono-agent config explain --config ./mono-agent.config.json routing.primary
-mono-agent memory memory-local:audit --config ./mono-agent.config.json
-mono-agent auth pi:auth --module primary --config ./mono-agent.config.json
-mono-agent start --config ./mono-agent.config.json
+pnpm --filter @mono-agent/cli... run build
+node packages/cli/dist/bin/mono-agent.js validate --config ./mono-agent.config.json
+node packages/cli/dist/bin/mono-agent.js doctor --config ./mono-agent.config.json --json
+node packages/cli/dist/bin/mono-agent.js config schema --config ./mono-agent.config.json --write
+node packages/cli/dist/bin/mono-agent.js config explain --config ./mono-agent.config.json routing.primary
+node packages/cli/dist/bin/mono-agent.js memory memory-local:audit --config ./mono-agent.config.json
+node packages/cli/dist/bin/mono-agent.js auth pi:auth --module primary --config ./mono-agent.config.json
+node packages/cli/dist/bin/mono-agent.js start --config ./mono-agent.config.json
 ```
 
 `start` runs in the foreground. Its first line is a JSON `started` event with
@@ -108,7 +113,7 @@ supervise background services, or implement provider/channel behavior.
 ## Related Documentation
 
 - [V1 architecture](../../docs/reference/v1-architecture.md)
-- [V1 product requirements](../../refactor/mono-agent-v1-prd.md)
+- [Getting started from source](../../docs/getting-started/install.md)
 
 ## Verification
 

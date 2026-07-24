@@ -4,13 +4,13 @@
   "files": [
     {
       "path": "SKILL.md",
-      "sha256": "sha256:3618c57d59f977ac859259566caa4c9bf6e917991ba2b7c5b016a942e3516d5b",
-      "sizeBytes": 2185
+      "sha256": "sha256:7946cb3508616bf11e2d57f9ec82d209f6cee8e750a769e7a7d1bc900454bbae",
+      "sizeBytes": 2318
     },
     {
       "path": "agents/openai.yaml",
-      "sha256": "sha256:e72ab6cab9b45e879019964bca1898a95b3bbbf4bfde5cb8ec90bfdd4349b12a",
-      "sizeBytes": 258
+      "sha256": "sha256:d3e9ac9fbce4d0d3ff810f84999ca6583bcfbcadc6729dd663906e7314814da2",
+      "sizeBytes": 286
     },
     {
       "path": "references/config.md",
@@ -19,8 +19,8 @@
     },
     {
       "path": "references/validation.md",
-      "sha256": "sha256:20f2ac68168e3e2a0e9c02054eea902d909b00aea04deef36403500b94efd76f",
-      "sizeBytes": 1958
+      "sha256": "sha256:2051115d5e2f5744db306ba8d22cbf77ad73ae9bc8f008b9db9a773dc9e17933",
+      "sizeBytes": 2221
     }
   ]
 }

@@ -84,14 +84,13 @@ loaded and `lifecycleTimeoutMs` at least as large as the configured
 `mono-agent doctor` performs read-only diagnostics and never captures, retries,
 rebuilds, consolidates, or repairs data.
 
-## Migration boundary
+## Data-adoption boundary
 
-BuJo is the only v0 application state intended for v1 adoption. Never point a
-beta at the only live copy. Stop writers, audit and back up the source, rehearse
-against a complete copy, compare recall and capture behavior, prove duplicate
-admission and destructive-operation confirmation, then retain the verified
-backup through rollback.
+Never point a source-preview build at the only copy of application state. Stop
+writers, audit and back up the source, rehearse against a complete copy, compare
+recall and capture behavior, prove duplicate admission and destructive-operation
+confirmation, then retain the verified backup through rollback.
 
 Conversation history, run artifacts, native runtime sessions, and web threads
-are not imported. Follow the [source-beta migration
-guide](/migration/v0-to-v1-source-beta/) before proposing a live cutover.
+are not imported automatically. Any later adoption needs an explicit,
+consumer-specific data map and rollback proof.

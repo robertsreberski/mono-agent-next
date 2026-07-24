@@ -20,10 +20,11 @@ Use these pages as the current v1 source authority:
 - [Capability ladder](/reference/capability-ladder/) — the lowest correct
   extension boundary.
 - [Setup and security](/reference/setup-security/) — secrets, network,
-  filesystem, runtime, service, and migration safety.
+  filesystem, runtime, service, and data-adoption safety.
 - [Source-beta complexity report](/reference/source-beta-complexity/) —
   reproducible source classification, line budgets, dependency graph, public
   surface, and scaffold closure.
 
-The product PRD remains the normative gate and migration contract. Generated
-pages fail CI when they drift from the source tree.
+The architecture page, package catalog, package contracts, and executable gates
+are the source authority. Generated pages fail CI when they drift from those
+inputs.

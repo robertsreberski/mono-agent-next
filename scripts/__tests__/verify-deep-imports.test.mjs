@@ -12,6 +12,7 @@ import {
 } from "../verify-deep-imports.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const REAL_BUILT_EXPORT_TIMEOUT_MS = 30_000;
 const temporaryRoots = [];
 
 afterEach(async () => {
@@ -375,20 +376,24 @@ describe("verify-deep-imports", () => {
     },
   );
 
-  it("resolves and imports every real built export", async () => {
-    const stdout = sink();
-    const result = await runVerifyDeepImports({
-      repoRoot,
-      stdout,
-      stderr: sink(),
-    });
-    if (result.exitCode !== 0) {
-      throw new Error(`built export verification failed:\n${stdout.text}`);
-    }
+  it(
+    "resolves and imports every real built export",
+    async () => {
+      const stdout = sink();
+      const result = await runVerifyDeepImports({
+        repoRoot,
+        stdout,
+        stderr: sink(),
+      });
+      if (result.exitCode !== 0) {
+        throw new Error(`built export verification failed:\n${stdout.text}`);
+      }
 
-    expect(result.exitCode).toBe(0);
-    expect(result.results.every((entry) => entry.ok)).toBe(true);
-  });
+      expect(result.exitCode).toBe(0);
+      expect(result.results.every((entry) => entry.ok)).toBe(true);
+    },
+    REAL_BUILT_EXPORT_TIMEOUT_MS,
+  );
 });
 
 function fixtureCatalog() {

@@ -23,5 +23,5 @@ Preflight:
 - pnpm run release:consumer -- --tag vX.Y.Z --require-minimum
 - git diff --check
 
-CI publication must be watched through completion and followed by pnpm run release:verify -- --tag vX.Y.Z. A local fallback must use pnpm run release:publish -- --tag vX.Y.Z, never raw npm publish, and remains blocked by release:guard. While the guard remains, do not deploy, restart, or repoint consumers. Registry checks must bypass the machine's AutoProxxy .npmrc by using --registry https://registry.npmjs.org/ or --userconfig /dev/null. Report version, tag, CI run status, post-publish verification, and any publish-graph changes.
+CI publication must be watched through completion and followed by pnpm run release:verify -- --tag vX.Y.Z. A local fallback must use pnpm run release:publish -- --tag vX.Y.Z, never raw npm publish, and remains blocked by release:guard. While the guard remains, do not deploy, restart, or repoint consumers. Registry checks must pin https://registry.npmjs.org/ or use --userconfig /dev/null. Report version, tag, CI run status, post-publish verification, and any publish-graph changes.
 """

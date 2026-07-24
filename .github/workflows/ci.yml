@@ -85,6 +85,10 @@ jobs:
           pnpm run scripts:test
           pnpm run test
 
+      - name: Test release contracts
+        if: ${{ matrix.node-version == '22.19.0' }}
+        run: pnpm run release:test:unit
+
       - name: Prove standalone operator products
         run: pnpm run verify:v1-operator-products
 

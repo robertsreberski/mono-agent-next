@@ -30,10 +30,15 @@ durable retry intake and is never treated as success.
 
 ## Install / Usage
 
-Install the module and select it in the memory slot:
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
+Build the module and its workspace dependencies:
 
 ```bash
-pnpm add @mono-agent/memory-local
+pnpm --filter @mono-agent/memory-local... run build
 ```
 
 ```json
@@ -84,11 +89,11 @@ identity and tree digests. SQLite online backup includes committed WAL state
 without stopping or writing the predecessor:
 
 ```bash
-mono-agent-memory-local snapshot-v0 \
+node packages/memory-local/dist/bin/memory-local.js snapshot-v0 \
   --source-root /absolute/path/to/v0-memory \
   --target-root /absolute/path/to/rehearsal-memory
 
-mono-agent-memory-local adopt-v0 \
+node packages/memory-local/dist/bin/memory-local.js adopt-v0 \
   --live-source-root /absolute/path/to/v0-memory \
   --target-root /absolute/path/to/rehearsal-memory \
   --expected-source-state-sha256 <snapshot-source-state-sha256> \
@@ -317,7 +322,6 @@ policy.
 
 ## Related Documentation
 
-- [V1 product requirements](../../refactor/mono-agent-v1-prd.md)
 - [V1 architecture](../../docs/reference/v1-architecture.md)
 - [Capability ladder](../../docs/reference/capability-ladder.md)
 - [Module SDK](../module-sdk/README.md)

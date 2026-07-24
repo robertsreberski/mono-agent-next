@@ -1,141 +1,75 @@
 ---
 name: new-package
-description: Add a new @mono-agent package/adapter that passes the architecture gate on the first try (catalog entry, README sections, dependency categories, lockstep version). Use when creating any new package, or when check:architecture fails on catalog/README/boundary errors.
+description: Add a new @mono-agent package that passes the architecture, README, catalog, dependency, and lockstep gates on the first try.
 ---
 
 # New package
 
-## First: climb the capability ladder (AGENTS.md)
+## Start at the capability ladder
 
-A new package is rung 3 of 5. Confirm the lower rungs don't satisfy the need:
+A new package is rung 3. Confirm that an existing public surface or a typed
+config/skill selection cannot own the capability first. A new MCP server is rung
+4; a provider-neutral shared-contract change in `@mono-agent/module-sdk` is rung
+5 and the last resort.
 
-1. Existing package / existing public surface
-2. Config field or selected skill (typed config + validation + docs)
-3. **New adapter/package in the correct category** ← this skill
-4. MCP server / auto-provisioned MCP tool (canonical examples: `MemoryRecall`, the adapter tools such as `AskUser` and `TelegramSendFile`)
-5. Shared contract change in `@mono-agent/agent-contracts` — last resort;
-   adapter-neutrality is enforced by the arch checker
+## Required shape
 
-## Checklist
+1. Add `packages/<name>/package.json` with the published name
+   `@mono-agent/<name>`. Match the lockstep version in
+   `packages/module-sdk/package.json`, use exact `workspace:<version>` internal
+   dependencies, and point `types`/`exports` at `dist/`.
+2. Add the package to `scripts/package-catalog.mjs` with one category, one
+   responsibility, the narrowest allowed dependency categories, and
+   `publishable: true`.
+3. Use the standard README section order:
+   `Category`, `Responsibility`, `Install / Usage`, `Architecture`, `Public API`,
+   `Dependency Boundary`, `What This Package Does Not Own`,
+   `Related Documentation`, and `Verification`. Architecture needs `Data flow`
+   and `Package structure`; Public API starts with a curated `Start here` map.
+4. Add focused behavior tests under `src/__tests__/` and package-local
+   `build`, `test`, and `typecheck` scripts matching a current sibling in the
+   same category.
+5. Add the package to the root development dependency closure with the exact
+   workspace version, then refresh `pnpm-lock.yaml`.
 
-1. **Manifest** — `packages/<name>/package.json`: name `@mono-agent/<name>`,
-   version = current lockstep version (match `packages/agent-app/package.json`),
-   internal deps as `workspace:<version>`, `types`/`exports` pointing at `dist/`
-   (NodeNext, no src aliases), and `build`/`test`/`typecheck` scripts matching a
-   sibling package in the same category.
-2. **Catalog** — register in `scripts/package-catalog.mjs`:
+Valid catalog categories are defined by `PACKAGE_CATEGORIES` in
+`scripts/package-catalog.mjs`; do not copy an older list into the manifest.
 
-```js
-{
-  dir: "<name>",
-  name: "@mono-agent/<name>",
-  category: "communication",   // one of: runtime, core, context, execution,
-                               // observability, evaluation, communication,
-                               // operator-surface, app
-  responsibility: "<one sentence>",
-  allowedDependencyCategories: ["core"],
-  publishable: true,
-}
-```
-
-3. **README** — must contain these byte-exact section headings, once and in
-   this order: `## Category`, `## Responsibility`, `## Install / Usage`,
-   `## Architecture`, `## Public API`, `## Dependency Boundary`,
-   `## What This Package Does Not Own`, `## Related Documentation`, and
-   `## Verification`. Under Architecture add `### Data flow` and
-   `### Package structure`; under Public API add a hand-authored
-   `### Start here` before the generated inventory markers.
-4. **Tests** — focused tests under `src/__tests__/`; behavior lives with tests
-   from the first commit.
-5. **Root wiring** — add to root `package.json` devDependencies as
-   `workspace:<version>` (release:validate checks the root too), then `pnpm install`.
-
-## Gate
+## Verify
 
 ```bash
+pnpm install --frozen-lockfile=false
 pnpm run generate:package-docs
-pnpm run generate:package-docs # must report 0 files updated
+pnpm run generate:package-docs
+pnpm run generate:public-api-docs
+pnpm run generate:public-api-docs
 pnpm run check:docs
 pnpm run check:architecture
 pnpm run release:validate -- --tag v<version>
-pnpm --filter @mono-agent/<name> run build && pnpm --filter @mono-agent/<name> test
+pnpm --filter @mono-agent/<name>... run build
+pnpm --filter @mono-agent/<name> run test
+pnpm --filter @mono-agent/<name> run typecheck
 ```
 
-Then the full `verify-green` gate. Common arch-check failures: package dir
-missing from the catalog, unknown/disallowed dependency category, missing README
-section, adapter-neutrality violation in agent-contracts.
+Both generators must report zero updates on their second run. Finish with the
+risk-based `verify-green` lane.
 
-## Boundaries to respect
+## Boundary checks
 
-- One clear responsibility, focused public API, no hidden cross-package coupling.
-- Dependencies only on categories in `allowedDependencyCategories`; if you need
-  more, that's a design smell — re-read the ladder before widening.
-- User-facing packages need docs: run `generate:package-docs` for `PACKAGES.md`
-  and the website directory, then add the feature-registry entry and, when
-  useful, extend a playbook (hand off to the `docs-sync` skill).
-
-## Adapter & channel checks (when the package is a channel driver)
-
-When the new package is a channel driver, or adds a new `ChannelId`:
-
-- **Adapter-neutrality — grep the ENTIRE core surface, not one package.** The
-  mechanical arch guard only scans `packages/agent-contracts/src` for two literals
-  (`telegram`, `whatsapp`), and that scope/word-list never grew as channels were
-  added. Run a standing check of both the contracts AND the harness for a
-  hardcoded reference to any shipped channel id, sourced from the channel catalog
-  rather than fixed literals:
-
-  ```bash
-  grep -riE "\b(telegram|whatsapp|slack|discord)\b" \
-    packages/agent-contracts/src packages/agent-harness/src --include=*.ts | grep -v __tests__
-  ```
-
-  `ChannelId` is `string`, open by design (third-party drivers pick their own id),
-  so core code must branch on capability, never on a literal id.
-
-- **Interactive-channel harness classification.** If the channel produces
-  interactive (human-attended) conversations, confirm the harness's per-turn
-  model-facing framing recognizes it — `sessionContextBlock` in
-  `packages/agent-harness/src/harness.ts`, plus any sibling logic keyed off the
-  `conversationId` shape. Do not assume a hardcoded string-prefix allowlist
-  elsewhere already covers the new id.
-
-## Design checks (prove it in the same diff)
-
-- **Singleton lock? Reuse the shared choreography.** If the package needs a
-  singleton lock, do not re-derive the mkdir / `owner.json` / incarnation /
-  quarantine dance — reuse `packages/agent-app/src/process-incarnation.ts`, the
-  shared liveness primitive. Four current copies (worker lease, CLI lifecycle
-  lock, managed-runtime install lock, SRT install lock) already share it and only
-  duplicate the directory/rename choreography; don't add a fifth.
-- **New runtime-resolution surface ⇒ a `doctor`/`validate` line.** If the package
-  adds a new place mono-agent decides "which physical package/closure is this" at
-  runtime (like `managed-runtime-packages.ts`'s app-vs-cwd resolution), add a
-  `doctor`/`validate` detail line naming what was resolved and from where —
-  otherwise the resolution is invisible when it picks the wrong one.
-- **Sibling test-shape parity.** When the package has two structurally-parallel
-  sub-modules, diff their `__tests__/` listings and add any missing counterpart;
-  a gap there is an untested path. `operator-adapter`'s `live/` was missing the
-  `config.test.ts` that `tui/` has, so `live/config.ts`'s secret-redaction path
-  went untested.
-
-  ```bash
-  diff <(ls packages/<pkg>/src/tui/__tests__) <(ls packages/<pkg>/src/live/__tests__)
-  ```
-
-- **MCP stateless-HTTP cleanup ordering.** For a rung-4 MCP server/tool using
-  `@modelcontextprotocol/sdk`, register the response close listener **before**
-  calling `handleRequest`, not after — the SDK examples show this order and
-  `agent-orchestrator` (`extras/agent-orchestrator/src/index.ts`) got it backwards:
-
-  ```js
-  res.on("close", () => { transport.close(); server.close(); });  // wire cleanup first
-  await transport.handleRequest(req, res, body);
-  ```
-
-## Gotchas
-
-- **A `demos/` dir without a `package.json` is by design** — it is a seed/template
-  agent, not a workspace package, so it won't appear in the catalog and shouldn't.
-  Read its own README before flagging it as dead/incomplete (`demos/final-agent`
-  is the canonical example).
+- Keep one responsibility and a focused public API. Widening
+  `allowedDependencyCategories` requires a concrete dependency and ownership
+  reason.
+- A selected module must use an admitted kind and its typed SDK factory. Do not
+  add aliases, automatic discovery, hidden activation, or a second config
+  registry.
+- For a communication package, declare its `channelIds` in the catalog. The
+  architecture gate derives the shipped ids and scans both
+  `packages/module-sdk/src` and `packages/core/src` for hard-coded channel
+  prefixes; run it rather than maintaining another literal list.
+- Before adding a parser, lock, secure-filesystem choreography, retry loop, or
+  transport primitive, search current production source for an implementation
+  that already owns it.
+- If the package creates durable state under `.mono-agent/`, document its
+  boundary and prove the existing clear/reset/purge surface covers it.
+- For an HTTP MCP server, register response-close cleanup before awaiting request
+  handling, and prove close/error/abort paths with focused tests.

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 
 import { describe, expect, test } from "vitest";
 
@@ -8,6 +9,7 @@ import { packageCatalog } from "../../package-catalog.mjs";
 import { PINNED_RUNTIME_DEPENDENCIES } from "../dependency-policy.mjs";
 import {
   discoverPackages,
+  REPO_ROOT,
   sortForPublish,
 } from "../package-graph.mjs";
 import {
@@ -32,6 +34,8 @@ import {
   freezeReleaseTarballs,
   publishFrozenTarball,
   publicNpmEnvironment,
+  resolveTrustedGitExecutable,
+  runReleaseBuildWithProvenance,
   runWorkspaceBuild,
   stagingDistTagForRelease,
 } from "../publish-release.mjs";
@@ -623,9 +627,10 @@ describe("hardened local release publish", () => {
   const other = "b".repeat(40);
 
   function fakeGit(responses, calls = []) {
-    return (_command, args, options) => {
-      const key = args.join(" ");
-      calls.push({ key, options });
+    return (command, args, options) => {
+      const gitArgs = args[0] === "-C" ? args.slice(2) : args;
+      const key = gitArgs.join(" ");
+      calls.push({ command, args, key, options });
       const response = responses[key];
       if (response === undefined) {
         return { status: 1, stdout: "", stderr: `unexpected git call: ${key}` };
@@ -638,25 +643,83 @@ describe("hardened local release publish", () => {
 
   test("requires a clean HEAD at the exact requested release tag", () => {
     const cleanTagged = fakeGit({
+      "rev-parse --show-toplevel": `${REPO_ROOT}\n`,
       "status --porcelain=v1 --untracked-files=all": "",
       "rev-parse HEAD": `${head}\n`,
       "rev-parse --verify refs/tags/v1.2.3^{commit}": `${head}\n`,
     });
-    expect(assertReleaseGitState("v1.2.3", { spawn: cleanTagged, repo: "/repo" })).toBe(head);
+    expect(assertReleaseGitState("v1.2.3", { spawn: cleanTagged, repo: REPO_ROOT })).toBe(head);
 
     const dirty = fakeGit({
+      "rev-parse --show-toplevel": `${REPO_ROOT}\n`,
       "status --porcelain=v1 --untracked-files=all": " M package.json\n",
     });
-    expect(() => assertReleaseGitState("v1.2.3", { spawn: dirty, repo: "/repo" }))
+    expect(() => assertReleaseGitState("v1.2.3", { spawn: dirty, repo: REPO_ROOT }))
       .toThrow(/HEAD is not clean/u);
 
     const wrongTag = fakeGit({
+      "rev-parse --show-toplevel": `${REPO_ROOT}\n`,
       "status --porcelain=v1 --untracked-files=all": "",
       "rev-parse HEAD": `${head}\n`,
       "rev-parse --verify refs/tags/v1.2.3^{commit}": `${other}\n`,
     });
-    expect(() => assertReleaseGitState("v1.2.3", { spawn: wrongTag, repo: "/repo" }))
+    expect(() => assertReleaseGitState("v1.2.3", { spawn: wrongTag, repo: REPO_ROOT }))
       .toThrow(/does not point at HEAD/u);
+  });
+
+  test("ignores PATH-shadow Git and ambient repository overrides", () => {
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-release-git-target-"));
+    const decoy = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-release-git-decoy-"));
+    const shadow = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-release-git-shadow-"));
+    const sentinel = path.join(shadow, "invoked");
+    const git = resolveTrustedGitExecutable();
+    const runGit = (repo, args) => {
+      const result = spawnSync(git, ["-C", repo, ...args], {
+        encoding: "utf8",
+        env: { PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" },
+      });
+      if (result.status !== 0) {
+        throw new Error(`test Git command failed: ${result.stderr}`);
+      }
+      return result.stdout.trim();
+    };
+    const initialize = (repo, contents) => {
+      runGit(repo, ["init", "--quiet"]);
+      fs.writeFileSync(path.join(repo, "proof.txt"), contents);
+      runGit(repo, ["add", "proof.txt"]);
+      runGit(repo, [
+        "-c", "user.name=Release Test",
+        "-c", "user.email=release-test@example.invalid",
+        "commit", "--quiet", "-m", "proof",
+      ]);
+      runGit(repo, ["tag", "v1.2.3"]);
+      return runGit(repo, ["rev-parse", "HEAD"]);
+    };
+
+    try {
+      const targetHead = initialize(target, "target\n");
+      initialize(decoy, "decoy\n");
+      fs.writeFileSync(
+        path.join(shadow, "git"),
+        `#!/bin/sh\nprintf invoked > "${sentinel}"\nexit 97\n`,
+        { mode: 0o700 },
+      );
+
+      expect(assertReleaseGitState("v1.2.3", {
+        repo: target,
+        envSource: {
+          ...process.env,
+          PATH: shadow,
+          GIT_DIR: path.join(decoy, ".git"),
+          GIT_WORK_TREE: decoy,
+        },
+      })).toBe(targetHead);
+      expect(fs.existsSync(sentinel)).toBe(false);
+    } finally {
+      fs.rmSync(target, { recursive: true, force: true });
+      fs.rmSync(decoy, { recursive: true, force: true });
+      fs.rmSync(shadow, { recursive: true, force: true });
+    }
   });
 
   test("requires build provenance for the exact clean HEAD", () => {
@@ -706,6 +769,178 @@ describe("hardened local release publish", () => {
     })).toThrow(/marker changed during verification/u);
   });
 
+  test("records schema-v2 provenance for the exact stable release build", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-release-provenance-"));
+    const completedAt = "2026-07-25T12:34:56.000Z";
+    const outputDigest = "c".repeat(64);
+    const dependencyDigest = "d".repeat(64);
+    const operations = [];
+    try {
+      expect(runReleaseBuildWithProvenance("v1.2.3", {
+        repo: directory,
+        now: () => new Date(completedAt),
+        assertGitState: () => {
+          operations.push("git");
+          return head;
+        },
+        runBuild: () => operations.push("build"),
+        computeDeploymentFingerprint: () => {
+          operations.push("deployment");
+          return "stable-deployment";
+        },
+        computeOutputDigest: (_repo, options) => {
+          operations.push(`output:${options.sync}`);
+          return outputDigest;
+        },
+        computeDependencyDigest: () => {
+          operations.push("dependency");
+          return dependencyDigest;
+        },
+      })).toBe(head);
+
+      expect(JSON.parse(
+        fs.readFileSync(path.join(directory, ".mono-agent-build.json"), "utf8"),
+      )).toEqual({
+        schemaVersion: 2,
+        gitSha: head,
+        completedAt,
+        nodeVersion: process.versions.node,
+        nodeAbi: process.versions.modules,
+        sourceState: "clean",
+        outputDigest,
+        dependencyDigest,
+      });
+      expect(operations).toEqual([
+        "git",
+        "build",
+        "git",
+        "deployment",
+        "output:true",
+        "dependency",
+        "git",
+        "deployment",
+        "git",
+        "deployment",
+      ]);
+      expect(fs.existsSync(path.join(directory, ".mono-agent-build.lock"))).toBe(false);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects deployment-state drift during release build attestation", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-release-drift-"));
+    let deploymentState = "before";
+    try {
+      expect(() => runReleaseBuildWithProvenance("v1.2.3", {
+        repo: directory,
+        assertGitState: () => head,
+        runBuild: () => {},
+        computeDeploymentFingerprint: () => deploymentState,
+        computeOutputDigest: () => "c".repeat(64),
+        computeDependencyDigest: () => "d".repeat(64),
+        afterDeploymentDigests: () => {
+          deploymentState = "after";
+        },
+      })).toThrow(/deployment state changed during build attestation/u);
+      expect(fs.existsSync(path.join(directory, ".mono-agent-build.json"))).toBe(false);
+      expect(fs.existsSync(path.join(directory, ".mono-agent-build.lock"))).toBe(false);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("invalidates provenance when the exact release HEAD races publication", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-release-source-race-"));
+    let gitChecks = 0;
+    try {
+      expect(() => runReleaseBuildWithProvenance("v1.2.3", {
+        repo: directory,
+        assertGitState: () => {
+          gitChecks += 1;
+          return gitChecks === 4 ? other : head;
+        },
+        runBuild: () => {},
+        computeDeploymentFingerprint: () => "stable-deployment",
+        computeOutputDigest: () => "c".repeat(64),
+        computeDependencyDigest: () => "d".repeat(64),
+      })).toThrow(/HEAD changed during build provenance publication/u);
+      expect(fs.existsSync(path.join(directory, ".mono-agent-build.json"))).toBe(false);
+      expect(fs.existsSync(path.join(directory, ".mono-agent-build.lock"))).toBe(false);
+    } finally {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves the lock when failure-path marker invalidation cannot be proven", () => {
+    const lock = { id: "held-lock" };
+    const operations = [];
+    let clearCalls = 0;
+    expect(() => runReleaseBuildWithProvenance("v1.2.3", {
+      repo: "/repo",
+      acquireLock: () => {
+        operations.push("acquire");
+        return lock;
+      },
+      clearMarker: () => {
+        clearCalls += 1;
+        operations.push(`clear:${clearCalls}`);
+        if (clearCalls === 2) throw new Error("marker unlink failed");
+      },
+      preserveLock: (_repo, currentLock) => {
+        operations.push(`preserve:${currentLock.id}`);
+      },
+      releaseLock: () => operations.push("release"),
+      assertGitState: () => head,
+      runBuild: () => {
+        operations.push("build");
+        throw new Error("build failed");
+      },
+    })).toThrow(/failed to invalidate build provenance/u);
+    expect(operations).toEqual([
+      "acquire",
+      "clear:1",
+      "build",
+      "clear:2",
+      "preserve:held-lock",
+    ]);
+  });
+
+  test("restores a fail-closed lock when release and marker cleanup both fail", () => {
+    const lock = { id: "release-failed-lock" };
+    const operations = [];
+    let clearCalls = 0;
+    expect(() => runReleaseBuildWithProvenance("v1.2.3", {
+      repo: "/repo",
+      acquireLock: () => lock,
+      clearMarker: () => {
+        clearCalls += 1;
+        operations.push(`clear:${clearCalls}`);
+        if (clearCalls === 2) throw new Error("marker unlink failed");
+      },
+      preserveLock: (_repo, currentLock) => {
+        operations.push(`preserve:${currentLock.id}`);
+      },
+      releaseLock: () => {
+        operations.push("release");
+        throw new Error("lock release failed");
+      },
+      assertGitState: () => head,
+      runBuild: () => {},
+      computeDeploymentFingerprint: () => "stable-deployment",
+      computeOutputDigest: () => "c".repeat(64),
+      computeDependencyDigest: () => "d".repeat(64),
+      publishMarker: () => operations.push("publish"),
+    })).toThrow(/marker invalidation failed closed/u);
+    expect(operations).toEqual([
+      "clear:1",
+      "publish",
+      "release",
+      "clear:2",
+      "preserve:release-failed-lock",
+    ]);
+  });
+
   test("computes npm-compatible SHA-512 tarball integrity", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-integrity-test-"));
     try {
@@ -751,23 +986,24 @@ describe("hardened local release publish", () => {
     const childEnvironments = [];
     const gitCalls = [];
     const cleanTagged = fakeGit({
+      "rev-parse --show-toplevel": `${REPO_ROOT}\n`,
       "status --porcelain=v1 --untracked-files=all": "",
       "rev-parse HEAD": `${head}\n`,
       "rev-parse --verify refs/tags/v1.2.3^{commit}": `${head}\n`,
     }, gitCalls);
     assertReleaseGitState("v1.2.3", {
       spawn: cleanTagged,
-      repo: "/repo",
+      repo: REPO_ROOT,
       envSource,
     });
-    childEnvironments.push(...gitCalls.map((call) => call.options.env));
+    childEnvironments.push(...gitCalls.map((call) => ({ kind: "git", env: call.options.env })));
 
     runWorkspaceBuild({
-      repo: "/repo",
+      repo: REPO_ROOT,
       envSource,
       log: () => {},
       spawn: (_command, _args, options) => {
-        childEnvironments.push(options.env);
+        childEnvironments.push({ kind: "build", env: options.env });
         return { status: 0 };
       },
     });
@@ -781,7 +1017,7 @@ describe("hardened local release publish", () => {
           envSource,
           log: () => {},
           spawn: (_command, _args, options) => {
-            childEnvironments.push(options.env);
+            childEnvironments.push({ kind: "pack", env: options.env });
             return { status: 0, stdout: "", stderr: "" };
           },
           pack: (pkg, destination, packOptions) => {
@@ -797,12 +1033,118 @@ describe("hardened local release publish", () => {
     }
 
     expect(childEnvironments.length).toBeGreaterThan(0);
-    for (const env of childEnvironments) {
+    for (const { env } of childEnvironments) {
       expect(env.NODE_AUTH_TOKEN).toBeUndefined();
       expect(env.NPM_TOKEN).toBeUndefined();
       expect(env.NPM_DEV_TOKEN).toBeUndefined();
       expect(env[authKey]).toBeUndefined();
-      expect(env.PATH).toBe("/bin");
+    }
+    for (const { env } of childEnvironments.filter(({ kind }) => kind === "git")) {
+      expect(env).toEqual({ PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" });
+    }
+    expect(childEnvironments.find(({ kind }) => kind === "build").env.PATH)
+      .toBe([path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter));
+    expect(childEnvironments.find(({ kind }) => kind === "pack").env.PATH).toBe("/bin");
+  });
+
+  test("ignores a shadow pnpm and invokes the validated entrypoint through current Node", () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-release-pnpm-repo-"));
+    const shadow = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-release-pnpm-shadow-"));
+    const sentinel = path.join(shadow, "invoked");
+    const proof = path.join(repo, "build-proof");
+    try {
+      fs.writeFileSync(
+        path.join(repo, "package.json"),
+        `${JSON.stringify({
+          name: "release-pnpm-proof",
+          version: "0.0.0",
+          private: true,
+          scripts: { build: "node build.mjs" },
+        })}\n`,
+      );
+      fs.writeFileSync(
+        path.join(repo, "build.mjs"),
+        `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(proof)}, process.execPath);\n`,
+      );
+      fs.writeFileSync(
+        path.join(shadow, "pnpm"),
+        `#!/bin/sh\nprintf invoked > "${sentinel}"\nexit 0\n`,
+        { mode: 0o700 },
+      );
+      runWorkspaceBuild({
+        repo,
+        envSource: { PATH: shadow },
+        log: () => {},
+      });
+      expect(fs.realpathSync.native(fs.readFileSync(proof, "utf8")))
+        .toBe(fs.realpathSync.native(process.execPath));
+      expect(fs.existsSync(sentinel)).toBe(false);
+    } finally {
+      fs.rmSync(repo, { recursive: true, force: true });
+      fs.rmSync(shadow, { recursive: true, force: true });
+    }
+  });
+
+  test("resolves trusted pnpm authority under the direct Node release entrypoint", () => {
+    const moduleUrl = new URL("../publish-release.mjs", import.meta.url).href;
+    const script = [
+      `process.argv[1] = ${JSON.stringify(path.join(REPO_ROOT, "direct-node-release-probe.mjs"))};`,
+      `const { resolveTrustedPnpmEntrypoint } = await import(${JSON.stringify(moduleUrl)});`,
+      `process.stdout.write(resolveTrustedPnpmEntrypoint(${JSON.stringify(REPO_ROOT)}));`,
+    ].join("\n");
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: process.env,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const entrypoint = fs.realpathSync.native(result.stdout.trim());
+    expect(path.isAbsolute(entrypoint)).toBe(true);
+    expect(path.relative(REPO_ROOT, entrypoint)).toMatch(/^\.\./u);
+  });
+
+  test("pins build shebang resolution to the marker-producing Node", () => {
+    const shadow = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-release-node-shadow-"));
+    const sentinel = path.join(shadow, "invoked");
+    const probePath = path.join(shadow, "node-probe");
+    let childNode;
+    try {
+      fs.writeFileSync(
+        path.join(shadow, "node"),
+        `#!/bin/sh\nprintf invoked > "${sentinel}"\nexit 97\n`,
+        { mode: 0o700 },
+      );
+      fs.writeFileSync(
+        probePath,
+        "#!/usr/bin/env node\nprocess.stdout.write(process.execPath);\n",
+        { mode: 0o700 },
+      );
+      runWorkspaceBuild({
+        repo: REPO_ROOT,
+        envSource: {
+          PATH: shadow,
+          NODE_AUTH_TOKEN: "not-a-real-token",
+          NPM_TOKEN: "not-a-real-token",
+        },
+        log: () => {},
+        spawn: (command, args, options) => {
+          expect(command).toBe(process.execPath);
+          expect(args.slice(1)).toEqual(["run", "build"]);
+          const probe = spawnSync(probePath, [], {
+            encoding: "utf8",
+            env: options.env,
+          });
+          expect(probe.status).toBe(0);
+          childNode = probe.stdout.trim();
+          expect(options.env.NODE_AUTH_TOKEN).toBeUndefined();
+          expect(options.env.NPM_TOKEN).toBeUndefined();
+          return { status: 0 };
+        },
+      });
+      expect(fs.realpathSync.native(childNode)).toBe(fs.realpathSync.native(process.execPath));
+      expect(fs.existsSync(sentinel)).toBe(false);
+    } finally {
+      fs.rmSync(shadow, { recursive: true, force: true });
     }
   });
 

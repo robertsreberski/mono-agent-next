@@ -1,4 +1,0 @@
-interface:
-  display_name: "Ops Log Hygiene"
-  short_description: "Check targeted logs or run a full audit"
-  default_prompt: "Use $ops-log-hygiene for a bounded post-restart log check on named services, or a full audit only when explicitly requested."

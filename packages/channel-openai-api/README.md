@@ -21,8 +21,13 @@ Expose model discovery and streaming/non-streaming Chat Completions, normalize b
 
 ## Install / Usage
 
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
 ```bash
-pnpm add @mono-agent/channel-openai-api
+pnpm --filter @mono-agent/channel-openai-api... run build
 ```
 
 Select the module under `channels`. `apiKey` is env-only. The listener defaults to loopback and serves `GET /v1/models` plus `POST /v1/chat/completions`. `maxRunMs` bounds Core dispatch and `maxResponseBytes` bounds normalized response text and emitted response bytes.
@@ -119,7 +124,7 @@ It does not terminate TLS, execute models, select Core runtimes/models, persist 
 ## Related Documentation
 
 - [V1 architecture](../../docs/reference/v1-architecture.md)
-- [V1 product requirements](../../refactor/mono-agent-v1-prd.md)
+- [Generated config reference](../../docs/config/reference.md)
 
 ## Verification
 

@@ -1,4 +1,14 @@
-import { dirname, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import {
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -7,9 +17,11 @@ import {
   SOURCE_BETA_LINE_BUDGETS,
   assertSourceBetaBudgets,
   classifySourcePath,
+  collectSourceBetaReport,
   collectExecutableConfigReference,
   collectSchemaFieldRows,
   discoverTypedModulePackages,
+  listReportablePaths,
   renderSourceBetaConfigMarkdown,
 } from "../lib/source-beta-report.mjs";
 import { parseSourceBetaReportArgs } from "../source-beta-report.mjs";
@@ -97,6 +109,50 @@ describe("source-beta production budgets", () => {
       expect(() => classifySourcePath(path)).toThrow(
         `Unclassified executable source file ${path}`,
       );
+    }
+  });
+
+  it("omits deleted tracked files but retains dangling tracked source symlinks to fail closed", () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "source-beta-paths-"));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: fixtureRoot });
+      writeFileSync(join(fixtureRoot, "deleted.ts"), "export {};\n", "utf8");
+      symlinkSync("missing-target.ts", join(fixtureRoot, "rogue.ts"));
+      execFileSync("git", ["add", "--all"], { cwd: fixtureRoot });
+      unlinkSync(join(fixtureRoot, "deleted.ts"));
+
+      expect(listReportablePaths(fixtureRoot)).toEqual(["rogue.ts"]);
+      expect(() => collectSourceBetaReport({
+        root: fixtureRoot,
+        renderProject: () => {
+          throw new Error("renderProject must not be reached");
+        },
+      })).toThrow("Source file rogue.ts must be a stable regular file.");
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects an existing external source symlink without reading its target", () => {
+    const fixtureRoot = mkdtempSync(join(tmpdir(), "source-beta-external-link-"));
+    const externalRoot = mkdtempSync(join(tmpdir(), "source-beta-external-target-"));
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd: fixtureRoot });
+      mkdirSync(join(fixtureRoot, "scripts"));
+      const externalTarget = join(externalRoot, "private.bin");
+      writeFileSync(externalTarget, Buffer.from([0]));
+      symlinkSync(externalTarget, join(fixtureRoot, "scripts", "rogue.mjs"));
+      execFileSync("git", ["add", "--all"], { cwd: fixtureRoot });
+
+      expect(() => collectSourceBetaReport({
+        root: fixtureRoot,
+        renderProject: () => {
+          throw new Error("renderProject must not be reached");
+        },
+      })).toThrow("Source file scripts/rogue.mjs must be a stable regular file.");
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+      rmSync(externalRoot, { recursive: true, force: true });
     }
   });
 });

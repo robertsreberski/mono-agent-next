@@ -38,7 +38,7 @@
     },
     {
       "path": "packages/module-sdk/README.md",
-      "sha256": "34a5e9c425191e730f74c7c7c2976dfbbc92e9204938b1cc15022f267572c498",
+      "sha256": "31af590c9c4b4740c644dc872fc8cbe63c3760ee835e61e72abeb8985a9064b9",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -221,7 +221,7 @@
     },
     {
       "path": "packages/operator/README.md",
-      "sha256": "0d1f362a89d2ffb6254e984f74f2a993d0eb3234933806d4d482593c62530b0c",
+      "sha256": "f9ea38d43f5441651393c77561e227ce3f66f1d0eeffd57d973c9dcf47220602",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",

@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+} from "node:fs";
 import { extname, join, posix } from "node:path";
 
 import { packageCatalog, packageRelativePath } from "../package-catalog.mjs";
@@ -38,6 +45,7 @@ const GENERATED_REPORT_PATHS = new Set([
   "docs/reference/public-api.md",
   SOURCE_BETA_REPORT_OUTPUT,
 ]);
+const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
 const MODULE_SCHEMA_ENV_ELIGIBLE = "x-mono-agent-env-eligible";
 const MODULE_SCHEMA_SECRET = "x-mono-agent-secret";
@@ -342,7 +350,7 @@ agent envelope; each literal \`$use\` selection contributes its own schema.
 Generate the exact installed project schema with:
 
 \`\`\`bash
-mono-agent config schema --config ./mono-agent.config.json --write
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js config schema --config ./mono-agent.config.json --write
 \`\`\`
 
 That command first proves every selection is a matching direct production
@@ -996,7 +1004,7 @@ migrate user data, deploy a consumer, run a soak, or retire the predecessor.
 `;
 }
 
-function listReportablePaths(root) {
+export function listReportablePaths(root) {
   const output = execFileSync(
     "git",
     ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
@@ -1006,8 +1014,21 @@ function listReportablePaths(root) {
     .split("\0")
     .filter(Boolean)
     .map((path) => path.split("\\").join("/"))
+    .filter((path) => hasDirectoryEntry(root, path))
     .filter((path) => !GENERATED_REPORT_PATHS.has(path))
     .sort(compareText);
+}
+
+function hasDirectoryEntry(root, path) {
+  try {
+    lstatSync(join(root, path));
+    return true;
+  } catch (error) {
+    if (error !== null && typeof error === "object" && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
 }
 
 function isSourcePath(path) {
@@ -1015,16 +1036,49 @@ function isSourcePath(path) {
 }
 
 function sourceFileRecord(root, path) {
-  const bytes = readFileSync(join(root, path));
-  if (bytes.includes(0)) throw new Error(`Source file ${path} contains a NUL byte.`);
-  const source = bytes.toString("utf8");
-  return Object.freeze({
-    path,
-    classification: classifySourcePath(path),
-    owner: sourceOwner(path),
-    lines: physicalLines(source),
-    sha256: digest(bytes),
-  });
+  const absolutePath = join(root, path);
+  const listed = lstatSync(absolutePath, { bigint: true });
+  if (!listed.isFile() || listed.isSymbolicLink()) {
+    throw new Error(`Source file ${path} must be a stable regular file.`);
+  }
+
+  let descriptor;
+  try {
+    descriptor = openSync(absolutePath, constants.O_RDONLY | NOFOLLOW);
+    const opened = fstatSync(descriptor, { bigint: true });
+    const current = lstatSync(absolutePath, { bigint: true });
+    if (!sameSourceFile(listed, opened) || !sameSourceFile(opened, current)) {
+      throw new Error(`Source file ${path} changed before it could be read.`);
+    }
+
+    const bytes = readFileSync(descriptor);
+    const after = fstatSync(descriptor, { bigint: true });
+    const final = lstatSync(absolutePath, { bigint: true });
+    if (!sameSourceFile(opened, after) || !sameSourceFile(after, final)) {
+      throw new Error(`Source file ${path} changed while it was read.`);
+    }
+    if (bytes.includes(0)) throw new Error(`Source file ${path} contains a NUL byte.`);
+    const source = bytes.toString("utf8");
+    return Object.freeze({
+      path,
+      classification: classifySourcePath(path),
+      owner: sourceOwner(path),
+      lines: physicalLines(source),
+      sha256: digest(bytes),
+    });
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+  }
+}
+
+function sameSourceFile(left, right) {
+  return left.isFile()
+    && right.isFile()
+    && left.dev === right.dev
+    && left.ino === right.ino
+    && left.size === right.size
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs;
 }
 
 export function classifySourcePath(path) {

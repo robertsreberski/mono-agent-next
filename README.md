@@ -1,53 +1,67 @@
 # mono-agent
 
-`mono-agent-next` is the public development successor for mono-agent v1. It is
-a config-first agent framework: `@mono-agent/core` reads one strict
-`mono-agent.config.json`, validates every explicitly selected module, and runs
-the resulting agent without importing a concrete provider or channel itself.
+Mono-agent is a config-first framework for building one agent from one strict,
+reviewable `mono-agent.config.json`. Runtimes, channels, memory, state, triggers,
+exporters, and sandboxing are explicit typed selections; installing a package
+never activates it. `@mono-agent/core` validates the selected package identity,
+lockfile evidence, schema, and cross-module references before startup.
 
-This repository is currently a source deliverable. It is not the live source
-for existing agents, and work here does not authorize publishing, deployment,
-service repointing, data migration, production soak, cutover, or predecessor
-retirement.
+The result is intentionally inspectable: every capability traces to config,
+every implementation has one narrow package boundary, and runtime or provider
+failures stay visible.
 
-## Build and prove the source target
+## Source quickstart
+
+The public preview is source-only. The v1 packages are not published to npm yet.
+Existing registry artifacts under the same package names belong to the
+predecessor repository, not this v1 source; do not install or execute them.
+Clone and build this workspace instead.
 
 Prerequisites are Node.js 22.19.0 or newer and pnpm 10.16.0 or newer. The
 workspace pins pnpm 10.28.2.
 
 ```bash
+git clone https://github.com/robertsreberski/mono-agent-next.git
+cd mono-agent-next
 corepack enable
 pnpm install --frozen-lockfile
 pnpm build
-pnpm typecheck
-pnpm test
 ```
 
-The smallest packed-consumer proof builds and packs the five-package runtime
-closure, scaffolds a clean project, installs it from the packed artifacts,
-starts an authenticated loopback webhook, completes one deterministic turn,
-and proves graceful shutdown:
+Render a minimal agent folder directly from the built source:
+
+```bash
+SCAFFOLD_PARENT="$(mktemp -d)"
+SCAFFOLD_PARENT="$(cd "$SCAFFOLD_PARENT" && pwd -P)"
+node packages/create-mono-agent/dist/bin/create-mono-agent.js \
+  "$SCAFFOLD_PARENT/mono-agent-example" \
+  --template minimal
+```
+
+The rendered project is ready to inspect, but its release-version dependencies
+cannot be installed from npm during the source preview. Run the hermetic packed
+proof to build those packages, install them into a temporary clean consumer,
+start an authenticated loopback webhook, complete one deterministic turn, and
+prove graceful shutdown:
 
 ```bash
 pnpm run verify:v1-minimal
 ```
 
-The independent operator products have a separate integration proof:
+For contributor checks and the other bounded proofs:
 
 ```bash
+pnpm typecheck
+pnpm test
 pnpm run verify:v1-operator-products
-```
-
-The complete source-candidate proof requires a clean committed checkout. It
-clones that exact SHA into an owner-private temporary workspace, packs all 23
-packages, installs the three scaffold closures from those exact artifacts, and
-emits machine-readable digest evidence:
-
-```bash
 pnpm run verify:v1-system
 ```
 
-None of these commands publishes a package or touches a live consumer.
+`verify:v1-system` requires a clean committed checkout. It clones that exact SHA
+into an owner-private temporary workspace, packs all 23 packages, installs the
+three scaffold closures from those exact artifacts, and emits machine-readable
+digest evidence. None of these commands publishes a package or touches a live
+consumer.
 
 ## Architecture
 
@@ -143,8 +157,10 @@ After building this source tree, render a template without installing
 unreleased dependencies:
 
 ```bash
+SCAFFOLD_PARENT="$(mktemp -d)"
+SCAFFOLD_PARENT="$(cd "$SCAFFOLD_PARENT" && pwd -P)"
 node packages/create-mono-agent/dist/bin/create-mono-agent.js \
-  /tmp/mono-agent-example \
+  "$SCAFFOLD_PARENT/mono-agent-example" \
   --template minimal
 ```
 
@@ -158,13 +174,13 @@ The v1 CLI is a thin foreground frontend over `@mono-agent/core`. A config path
 is always explicit.
 
 ```bash
-mono-agent validate --config ./mono-agent.config.json [--json]
-mono-agent inspect --config ./mono-agent.config.json [--json]
-mono-agent config schema --config ./mono-agent.config.json [--write]
-mono-agent config explain --config ./mono-agent.config.json [path] [--json]
-mono-agent module command --config ./mono-agent.config.json \
+node packages/cli/dist/bin/mono-agent.js validate --config ./mono-agent.config.json [--json]
+node packages/cli/dist/bin/mono-agent.js inspect --config ./mono-agent.config.json [--json]
+node packages/cli/dist/bin/mono-agent.js config schema --config ./mono-agent.config.json [--write]
+node packages/cli/dist/bin/mono-agent.js config explain --config ./mono-agent.config.json [path] [--json]
+node packages/cli/dist/bin/mono-agent.js module command --config ./mono-agent.config.json \
   --module <instance-id> --name <command> [--input-json '<json>']
-mono-agent start --config ./mono-agent.config.json
+node packages/cli/dist/bin/mono-agent.js start --config ./mono-agent.config.json
 ```
 
 `start` stays in the foreground, prints one JSON `started` event, and drains then
@@ -217,13 +233,11 @@ Security reporting and repository-wide policy live in [SECURITY.md](./SECURITY.m
 - [Generated config reference](./docs/config/reference.md)
 - [Generated public API inventory](./docs/reference/public-api.md)
 - [Generated source-beta complexity report](./docs/reference/source-beta-complexity.md)
-- [v0 to v1 source-beta migration guide](./docs/migration/v0-to-v1-source-beta.md)
-- [V1 product requirements](./refactor/mono-agent-v1-prd.md)
+- [Contribution guide](./CONTRIBUTING.md)
 
 ## Phase boundary
 
 The current milestone ends at a buildable, tested, runnable public source tree
-with a clean, packed migration rehearsal. Public visibility and hosted CI do
-not authorize registry publication, live installation, service mutation, data
-cutover, bounded soak and observation, consumer migration, or predecessor
-retirement. Those operations remain a later, explicitly authorized phase.
+with clean packed proofs. Public visibility and hosted CI do not authorize
+registry publication, live installation, service mutation, data adoption, or
+consumer cutover. Those operations remain a later, explicitly authorized phase.

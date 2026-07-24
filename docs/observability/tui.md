@@ -16,13 +16,14 @@ part of this product.
 
 ## Direct connection
 
-Install the product, place the bearer in an environment variable, and pass the
-channel's loopback root URL:
+During the source preview, build the product from this workspace, place the
+bearer in an environment variable, and pass the channel's loopback root URL:
 
 ```bash
-pnpm add -g @mono-agent/tui
+pnpm --filter @mono-agent/tui... run build
 export MONO_AGENT_OPERATOR_TOKEN="replace-with-a-long-random-token"
-mono-agent-tui --endpoint http://127.0.0.1:52341
+node packages/tui/dist/bin/mono-agent-tui.js \
+  --endpoint http://127.0.0.1:52341
 ```
 
 Direct connections require a token environment. The default name is
@@ -30,9 +31,9 @@ Direct connections require a token environment. The default name is
 process arguments:
 
 ```bash
-mono-agent-tui \
+node packages/tui/dist/bin/mono-agent-tui.js \
   --endpoint http://127.0.0.1:52341 \
-  --token-env PERSONAL_OPERATOR_TOKEN
+  --token-env EXAMPLE_OPERATOR_TOKEN
 ```
 
 There is intentionally no `--token` flag.
@@ -44,11 +45,11 @@ directory is `~/.mono-agent/trace-sources`; `--registry` may be repeated to
 select explicit roots:
 
 ```bash
-mono-agent-tui
-mono-agent-tui --agent personal-agent
-mono-agent-tui \
-  --registry ~/personal-agent/.mono-agent/trace-sources \
-  --agent personal-agent
+node packages/tui/dist/bin/mono-agent-tui.js
+node packages/tui/dist/bin/mono-agent-tui.js --agent example-agent
+node packages/tui/dist/bin/mono-agent-tui.js \
+  --registry /Users/example/agents/example-agent/.mono-agent/trace-sources \
+  --agent example-agent
 ```
 
 One live entry is selected automatically. Multiple live entries require

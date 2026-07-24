@@ -23,8 +23,13 @@ stream events into the public runtime contract.
 
 ## Install / Usage
 
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
 ```bash
-pnpm add @mono-agent/runtime-claude
+pnpm --filter @mono-agent/runtime-claude... run build
 ```
 
 ```json

@@ -38,8 +38,13 @@ Catalog responsibility: Runs the standalone authenticated browser product with o
 
 ## Install / Usage
 
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
 ```bash
-pnpm add @mono-agent/web
+pnpm --filter @mono-agent/web... run build
 ```
 
 Create `web.config.json`:
@@ -68,7 +73,7 @@ not add TLS.
 
 ```bash
 MONO_AGENT_WEB_AUTH_TOKEN='replace-with-a-long-random-token' \
-  mono-agent-web ./web.config.json
+  node packages/web/dist/bin.js ./web.config.json
 ```
 
 The browser shell contains no state. It prompts for the token and keeps it in
@@ -255,8 +260,8 @@ validator for a bounded free-form effort.
 
 The only package dependency is `@mono-agent/operator`. Node HTTP, filesystem,
 and crypto primitives own product transport, state, and authentication. Web
-does not depend on core, module-sdk, a runtime, a channel implementation,
-agent-contracts, v0 config, or observability.
+does not depend on core, module-sdk, a runtime, a channel implementation, v0
+config, or observability.
 
 ## What This Package Does Not Own
 
@@ -272,7 +277,7 @@ agent-contracts, v0 config, or observability.
 ## Related Documentation
 
 - [v1 architecture](../../docs/reference/v1-architecture.md)
-- [v1 product requirements](../../refactor/mono-agent-v1-prd.md)
+- [Setup and security](../../docs/reference/setup-security.md)
 - [`@mono-agent/operator`](../operator/README.md)
 - [`@mono-agent/channel-operator`](../channel-operator/README.md)
 

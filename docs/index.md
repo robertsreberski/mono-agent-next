@@ -10,14 +10,14 @@ mono-agent v1 is a config-first agent framework. One strict
 exporter, and sandbox modules; `@mono-agent/core` validates their installed
 identity and runs them through neutral contracts.
 
-This documentation describes the public `mono-agent-next` source target. The
-packages are not yet published, and this repository is not the live source for
-existing agents.
+This documentation describes the public source preview. The packages are not
+yet published, so the supported newcomer path starts by cloning and building
+the workspace.
 
 :::caution
 Building or testing this source tree does not authorize package publication,
-deployment, service changes, data migration, production soak, cutover, or
-predecessor retirement. Those are a later, separately approved phase.
+deployment, service changes, data adoption, production soak, or cutover. Those
+are a later, separately approved phase.
 :::
 
 ## Start here
@@ -30,8 +30,6 @@ predecessor retirement. Those are a later, separately approved phase.
    adding a module.
 4. Read the [exact v1 architecture](/reference/v1-architecture/) for the closed
    23-package roster and dependency rules.
-5. Use the [source-beta migration guide](/migration/v0-to-v1-source-beta/) to
-   rehearse a consumer without changing its live v0 copy.
 
 ## What v1 contains
 

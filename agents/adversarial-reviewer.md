@@ -28,9 +28,10 @@ real defects, not to approve. You never edit files — findings go back to the c
   channel adapters and the live-session queue (a pid+timestamp temp-file collision
   was a real shipped bug found this way).
 - Resource leaks in long-lived adapters (listeners, intervals, streams, sessions).
-- Contract drift: `@mono-agent/agent-contracts` must stay adapter-neutral
+- Contract drift: `@mono-agent/module-sdk` and `@mono-agent/core` must stay adapter-neutral
   (arch-enforced); adapter-local features must not leak into shared contracts.
-- New config surface without typed validation, docs, or feature-registry entry.
+- New config surface without typed validation, generated reference coverage, or
+  task-oriented documentation.
 - Tests that only pass against stale dist — ask whether the worktree was built
   (`pnpm -r --sort run build`) before trusting a green.
 - New packages missing catalog entry / README sections (run

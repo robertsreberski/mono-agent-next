@@ -9,9 +9,11 @@ Status: Accepted architecture; implemented public source target
 
 Decision date: 2026-07-22
 
-The full implementation requirements remain in the repository's v1 product
-requirements. This page is the concise contract for the resulting architecture.
-It describes source behavior, not a release or production cutover.
+This page is the canonical reader-facing architecture contract. The exact
+roster and allowed dependency categories live in
+`scripts/package-catalog.mjs`; package exports and CI gates make the contract
+machine-checkable. It describes source behavior, not a registry release or
+consumer adoption.
 
 ## Decision
 
@@ -182,13 +184,13 @@ ranges, and age-based removal are forbidden.
 The CLI is intentionally small:
 
 ```bash
-mono-agent validate --config <file> [--json]
-mono-agent inspect --config <file> [--json]
-mono-agent config schema --config <file> [--write]
-mono-agent config explain --config <file> [path] [--json]
-mono-agent module command --config <file> \
+node packages/cli/dist/bin/mono-agent.js validate --config <file> [--json]
+node packages/cli/dist/bin/mono-agent.js inspect --config <file> [--json]
+node packages/cli/dist/bin/mono-agent.js config schema --config <file> [--write]
+node packages/cli/dist/bin/mono-agent.js config explain --config <file> [path] [--json]
+node packages/cli/dist/bin/mono-agent.js module command --config <file> \
   --module <instance-id> --name <command> [--input-json '<json>']
-mono-agent start --config <file>
+node packages/cli/dist/bin/mono-agent.js start --config <file>
 ```
 
 `validate` performs the full installed-selection preflight. `inspect` returns
@@ -347,6 +349,21 @@ record; it never receives the bearer-token value.
   timeout, and cancellation are checked before execution; verification failure
   has no unsandboxed fallback.
 
+## Source authority and gate status
+
+V1 is defined by the current architecture, catalog, package contracts, and
+executable checks. The repository does not claim a retroactive, one-row-per-v0-
+behavior parity ledger. Retired-package assertions prove the explicit exclusions
+they name; they are not evidence that every historical behavior was retained.
+
+| Boundary | Current status | Deciding evidence |
+| --- | --- | --- |
+| Architecture and 23-package roster | Implemented | This page, `scripts/package-catalog.mjs`, generated package docs, and `check:architecture`. |
+| Strict config, module selection, and public APIs | Implemented | Package contracts, focused tests, generated config/API docs, and packed consumer proofs. |
+| Source build and clean packed execution | Implemented | `verify:v1-minimal`, `verify:v1-operator-products`, and `verify:v1-system`. |
+| npm publication and clean registry install | Not completed | Release guard, pack/consumer checks, and a later explicitly authorized release. |
+| Consumer data adoption and service changes | Not performed by this source milestone | Package-specific safety contracts and a separately reviewed adoption plan. |
+
 ## Deliberate separation from delivery
 
 The first v1 deliverable is a buildable, tested, runnable public repository with
@@ -357,10 +374,10 @@ The following remain a separate phase:
 
 1. release candidate packing and exact-artifact review;
 2. registry authorization, publication, and clean-install verification;
-3. per-consumer migration rehearsal, data audit, and rollback proof;
+3. per-consumer data rehearsal, audit, and rollback proof;
 4. explicit live deployment and process adoption;
 5. bounded soak, observation, and issue disposition;
-6. cutover, deprecation window, and predecessor retirement.
+6. cutover and deprecation policy.
 
 No source build, test result, scaffold, or documentation update implicitly
 performs or authorizes any of those steps.

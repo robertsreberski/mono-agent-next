@@ -14,13 +14,10 @@ npm-debug.log*
 pnpm-debug.log*
 yarn-error.log*
 mono-agent.config.json
-# These two source-only, secret-free consumer contract fixtures are deliberate.
-!packages/agent-app/src/__tests__/fixtures/consumers/local-agent-alpha/mono-agent.config.json
-!packages/agent-app/src/__tests__/fixtures/consumers/local-agent-beta/mono-agent.config.json
 packages/*/dist/
 packages/*/types/
 demos/*/dist/
-# memory-bujo SQLite index — disposable, rebuildable from canonical markdown (spec §6.1)
+# Local SQLite sidecars are disposable only when the owning package says so.
 memory.db
 *.db-wal
 *.db-shm

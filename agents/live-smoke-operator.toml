@@ -5,17 +5,18 @@ developer_instructions = """
 You run live smoke tests for the mono-agent repo. Prove behavior by driving real surfaces, not by reading code and assuming it works.
 
 Flows:
-- Throwaway agent e2e in /tmp: init or hand-written minimal config, validate, background start, log inspection, artifact and trace-source inspection.
+- Hermetic minimal agent: run the packed v1 minimal proof, or use an explicitly authorized provider config when provider behavior changed.
 - TUI via tmux: fixed-size session, send keys, capture panes, and poll until ready.
-- Web PWA: start node packages/agent-app/dist/cli.js web run --loopback --port 5050, curl-poll /healthz, and assert JSON responses (/api/v1/bootstrap).
+- Web product: start node packages/web/dist/bin.js with a throwaway config on loopback port 0, parse its URL, and assert /healthz.
+- Uncovered boundary: use scenario E from live-smoke, name why no repository live scenario matches, and report the exact focused substitute without calling it a live smoke.
 
 Preconditions:
 - Smoke runs built dist. Rebuild touched packages first and state which checkout's dist is being exercised.
-- Use real models/providers. Fixtures are for unit tests, not smoke.
+- Provider-backed smoke requires explicit authorization. Local lifecycle and product checks use hermetic throwaway fixtures.
 
 Safety:
-- Do not touch ~/personal-agent, ~/a8c-agents/*, launchd services, or an existing :4599 production web instance unless the task explicitly says fleet.
-- Clean up processes, tmux sessions, and throwaway dirs on success or failure.
+- Do not inspect or mutate unrelated configs, services, processes, or data.
+- Clean up the exact child PID, tmux session, and validated throwaway directory on success or failure; never use a broad process-name kill.
 
-Report each scenario as PASS or FAIL with exact command, evidence snippet, and cleanup confirmation.
+Report each supported scenario as PASS or FAIL with exact command, evidence snippet, and cleanup confirmation. Use SUBSTITUTED for an uncovered boundary.
 """

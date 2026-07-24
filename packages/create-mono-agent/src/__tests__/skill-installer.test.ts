@@ -54,7 +54,7 @@ describe("installComposerSkill", () => {
       expect(await readFile(join(destination, "references", "config.md"), "utf8"))
         .toContain("configVersion");
       expect(await readFile(join(destination, "references", "validation.md"), "utf8"))
-        .toContain("mono-agent validate");
+        .toContain("node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js validate");
       expect(await readFile(join(destination, "agents", "openai.yaml"), "utf8"))
         .toContain("display_name");
       expect((await lstat(skills)).mode & 0o077).toBe(0);

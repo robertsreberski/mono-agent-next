@@ -7,6 +7,8 @@ sidebar:
 
 This page installs the public source workspace. Consumer installation from npm
 is intentionally deferred until a separately authorized release phase.
+Existing registry artifacts under the same package names belong to the
+predecessor repository, not this v1 source; do not install or execute them.
 
 ## Prerequisites
 
@@ -78,18 +80,20 @@ separate executables and lifecycles.
 After `pnpm build`, the source scaffolder can render any closed template:
 
 ```bash
+SCAFFOLD_PARENT="$(mktemp -d)"
+SCAFFOLD_PARENT="$(cd "$SCAFFOLD_PARENT" && pwd -P)"
 node packages/create-mono-agent/dist/bin/create-mono-agent.js \
-  /tmp/mono-agent-minimal \
+  "$SCAFFOLD_PARENT/mono-agent-minimal" \
   --template minimal
 
 node packages/create-mono-agent/dist/bin/create-mono-agent.js \
-  /tmp/mono-agent-multi \
+  "$SCAFFOLD_PARENT/mono-agent-multi" \
   --template multi-runtime
 ```
 
 Accepted templates are `minimal`, `personal`, and `multi-runtime`; `minimal` is
 the default. The target must not already exist. Installation never runs unless
-`--install` is explicit, so omit that flag during the source-beta phase.
+`--install` is explicit, so omit that flag during the source-only preview.
 
 Every template writes:
 
@@ -128,11 +132,10 @@ selected runtime.
 
 ## Consumer installation is a later phase
 
-The intended post-release consumer commands are exposed by
-`create-mono-agent` and `@mono-agent/cli`, but this source rebuild does not
-publish them. A future release procedure must first pack the exact candidate,
-verify package contents and identities, publish under reviewed authority, and
-prove a clean registry install. Only then should users run registry-backed
-scaffolding or add v1 packages to a real agent project.
+This source rebuild exposes no supported registry installation path. A future
+release procedure must first pack the exact candidate, verify package contents
+and identities, publish under reviewed authority, and prove a clean registry
+install. Only then should this page document registry-backed scaffolding or
+adding v1 packages to a real agent project.
 
 Continue with the [first-agent proof](/getting-started/quickstart/).

@@ -6,17 +6,16 @@ This repository contains the config-first v1 framework built from npm packages u
 
 ## Successor bootstrap safety
 
-This public repository is the development-only successor. The original private
-`mono-agent` repository remains the live source for the local CLI and Personal
-Agent. Do not publish packages, deploy or restart consumers, repoint services,
-or retire the predecessor from this checkout. Release, soak, observation,
-migration, cutover, and predecessor retirement are a separate explicitly
-authorized phase.
+This public repository is a source-only development target. Do not publish
+packages, deploy or restart consumers, repoint services, migrate data, or
+retire an existing installation from this checkout. Release and consumer
+adoption are separate, explicitly authorized phases.
 
-## V1 migration authority
+## V1 architecture authority
 
-- The accepted v1 architecture decision and `refactor/mono-agent-v1-prd.md`
-  define the product boundaries and 23-package roster.
+- `docs/reference/v1-architecture.md`, `scripts/package-catalog.mjs`, the
+  package contracts, and their CI gates define the product boundaries and
+  exact 23-package roster.
 - Implement coherent vertical outcomes. Do not recreate deleted v0 packages as
   aliases, compatibility shims, generic plugins, or hidden fallback paths.
 - Keep this phase source-only. Critical checks cover security, data loss,
@@ -48,7 +47,7 @@ authorized phase.
 - All changes land through a PR; never commit directly to `main`.
 - After the canonical-repository cutover, the normal `main` checkout is the clean canonical development source. Consumers remain pinned to reviewed release installations; keep `main` usable and make tracked changes only in isolated worktrees (see `skills/worktree-feature`).
 - Start with the single skill that best matches the requested outcome. Add another skill only when the requested scope crosses that skill's boundary; a release does not imply deployment, deployment does not imply a full-fleet audit, and docs do not imply a website build unless those surfaces changed.
-- Select verification from the diff's risk, using `verify-green`: docs/skills/process changes use their focused contract checks; ordinary package changes use focused build/test/typecheck plus one broad CI gate; security, storage, lifecycle, provider-routing, delivery, and public-boundary changes add one local full gate and one matching smoke scenario.
+- Select verification from the diff's risk, using `verify-green`: docs/skills/process changes use their focused contract checks; ordinary package changes use focused build/test/typecheck plus one broad CI gate; security, storage, lifecycle, provider-routing, delivery, and public-boundary changes add one local full gate plus a matching `live-smoke` scenario when one exists, or an explicit focused-proof substitution when the scenario table has no match.
 - Release and restart only explicitly requested consumers. Prove the exact target's version, process, and bounded health evidence instead of automatically verifying unrelated agents.
 - Give every external review finding an explicit disposition (fixed / follow-up issue / rejected-with-reason) before merge.
 - `agents/` holds the subagent templates; each `agents/*.md` has a `.toml` companion kept in sync by `pnpm run check:codex-discoverability`.

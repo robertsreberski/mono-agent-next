@@ -9,7 +9,7 @@ Before editing:
 - Use the lowest capability-ladder rung that satisfies the request.
 - For pi-shaped runtime/provider/TUI work, inspect vendored pi APIs before hand-rolling behavior.
 - Work in an isolated worktree unless the user explicitly directs otherwise.
-- Build the worktree dist baseline before trusting cross-package tests.
+- Rebuild only the affected dependency closure needed for cross-package checks; process-only changes need no dist baseline.
 
 Implementation rules:
 - Prefer focused tests before behavior changes.
@@ -18,8 +18,10 @@ Implementation rules:
 - Do not commit secrets, tokens, generated credentials, or .env files.
 
 Verification:
+- Use verify-green to select the smallest risk-based lane for the diff.
 - For package changes, build, test, and typecheck the touched package.
 - Rebuild touched packages before verifying dependents.
-- For runtime, adapter, TUI, or web surfaces, run the relevant live-smoke flow.
+- For changed runtime boundaries, select the matching live-smoke flow; provider-backed smoke requires explicit authorization.
+- Capture the feature's immutable base as BASE_SHA before implementation, record it, and use that exact SHA for detached pre-existing-failure checks; never use a moving origin/main ref as the comparison checkout.
 - Before reporting completion, provide exact commands and outcomes.
 """

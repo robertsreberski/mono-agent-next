@@ -11,6 +11,7 @@ import {
   renderPackageDependencyGraph,
   renderPackageDirectory,
   renderPackageMetadata,
+  updatePackageDirectoryPage,
   updatePackageReadmeMetadata,
 } from "../lib/package-docs.mjs";
 
@@ -105,11 +106,29 @@ describe("package documentation generation", () => {
     expect(directory).toContain(
       "[README for @mono-agent/example](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/example/README.md)",
     );
-    expect(directory).toContain(
-      "[npm for @mono-agent/example](https://www.npmjs.com/package/@mono-agent/example)",
-    );
+    expect(directory).not.toContain("npmjs.com");
+    expect(directory).not.toContain("npm for");
     expect(directory).not.toContain("[README](");
     expect(directory).not.toContain("[npm](");
+    const page = updatePackageDirectoryPage(
+      [
+        "---",
+        'title: "Packages"',
+        'description: "Stale npm directory."',
+        "---",
+        "",
+        "<!-- package-directory:start -->",
+        "stale",
+        "<!-- package-directory:end -->",
+        "",
+      ].join("\n"),
+      directory,
+    );
+    expect(page).toContain(
+      'description: "Directory of every mono-agent v1 source package, its ownership tier, responsibility, and authoritative README."',
+    );
+    expect(page).not.toContain("Stale npm directory.");
+    expect(updatePackageDirectoryPage(page, directory)).toBe(page);
   });
 
   test("reports every stale generated surface", async () => {
