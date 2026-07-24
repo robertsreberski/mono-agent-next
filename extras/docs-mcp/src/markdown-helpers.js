@@ -76,35 +76,45 @@ export function balanceFences(markdown, startOffset, endOffset) {
   /** @type {string | undefined} */
   let openingMarker = openingAtStart?.marker;
   const lines = markdown.slice(startOffset, endOffset).split("\n");
-  /** @type {string[]} */
-  const output = openingMarker === undefined ? [] : [syntheticFence(openingMarker)];
   const startsAtLineBoundary = startOffset === 0 || markdown[startOffset - 1] === "\n";
   const endsAtLineBoundary = endOffset === markdown.length || markdown[endOffset - 1] === "\n";
+  /** @type {string | undefined} */
+  let renderMarker = openingMarker === undefined
+    ? undefined
+    : safeSyntheticFence(lines, 0, openingMarker, "", startsAtLineBoundary, endsAtLineBoundary);
+  /** @type {string[]} */
+  const output = renderMarker === undefined ? [] : [renderMarker];
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
-    const isCompleteLine = (index > 0 || startsAtLineBoundary)
-      && (index < lines.length - 1 || endsAtLineBoundary);
+    const isCompleteLine = completeSliceLine(index, lines.length, startsAtLineBoundary, endsAtLineBoundary);
     const fence = isCompleteLine ? markdownFence(line) : undefined;
     if (openingMarker === undefined) {
       if (fence === undefined) {
         output.push(line);
       } else {
         openingMarker = fence.marker;
-        output.push(`${fence.indent}${syntheticFence(openingMarker)}${fence.trailing}`);
+        renderMarker = safeSyntheticFence(
+          lines,
+          index + 1,
+          openingMarker,
+          fence.trailing,
+          startsAtLineBoundary,
+          endsAtLineBoundary,
+        );
+        output.push(`${fence.indent}${renderMarker}${fence.trailing}`);
       }
       continue;
     }
     if (fence !== undefined && closesFence(fence, openingMarker)) {
-      output.push(`${fence.indent}${syntheticFence(openingMarker)}`);
+      output.push(`${fence.indent}${renderMarker ?? syntheticFence(openingMarker)}`);
       openingMarker = undefined;
-    } else if (fence !== undefined && closesSyntheticFence(fence, openingMarker)) {
-      output.push(`    ${line}`);
+      renderMarker = undefined;
     } else {
       output.push(line);
     }
   }
-  if (openingMarker !== undefined) output.push(syntheticFence(openingMarker));
+  if (openingMarker !== undefined) output.push(renderMarker ?? syntheticFence(openingMarker));
   return output.join("\n");
 }
 
@@ -195,14 +205,56 @@ function closesFence(candidate, openingMarker) {
 }
 
 /**
- * @param {MarkdownFence} candidate
+ * Select a delimiter that cannot be closed by any complete content line in the
+ * visible part of this source fence. The content itself remains byte-for-byte
+ * unchanged; only the excerpt's synthetic wrapper may use another marker.
+ *
+ * @param {readonly string[]} lines
+ * @param {number} startIndex
  * @param {string} openingMarker
+ * @param {string} openingTrailing
+ * @param {boolean} startsAtLineBoundary
+ * @param {boolean} endsAtLineBoundary
+ * @returns {string}
+ */
+function safeSyntheticFence(
+  lines,
+  startIndex,
+  openingMarker,
+  openingTrailing,
+  startsAtLineBoundary,
+  endsAtLineBoundary,
+) {
+  let longestBacktick = 2;
+  let longestTilde = 2;
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const fence = markdownFence(lines[index] ?? "");
+    if (fence === undefined) continue;
+    const isCompleteLine = completeSliceLine(index, lines.length, startsAtLineBoundary, endsAtLineBoundary);
+    if (isCompleteLine && closesFence(fence, openingMarker)) break;
+    if (fence.trailing.trim().length !== 0) continue;
+    if (fence.marker[0] === "`") longestBacktick = Math.max(longestBacktick, fence.marker.length);
+    else longestTilde = Math.max(longestTilde, fence.marker.length);
+  }
+
+  const backtick = "`".repeat(longestBacktick + 1);
+  const tilde = "~".repeat(longestTilde + 1);
+  if (openingTrailing.includes("`")) return tilde;
+  if (backtick.length < tilde.length) return backtick;
+  if (tilde.length < backtick.length) return tilde;
+  return openingMarker[0] === "~" ? tilde : backtick;
+}
+
+/**
+ * @param {number} index
+ * @param {number} lineCount
+ * @param {boolean} startsAtLineBoundary
+ * @param {boolean} endsAtLineBoundary
  * @returns {boolean}
  */
-function closesSyntheticFence(candidate, openingMarker) {
-  return candidate.marker[0] === openingMarker[0]
-    && candidate.marker.length >= 3
-    && candidate.trailing.trim().length === 0;
+function completeSliceLine(index, lineCount, startsAtLineBoundary, endsAtLineBoundary) {
+  return (index > 0 || startsAtLineBoundary)
+    && (index < lineCount - 1 || endsAtLineBoundary);
 }
 
 /**

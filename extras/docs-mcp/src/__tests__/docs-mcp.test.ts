@@ -324,12 +324,14 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     const read = reader.read(`${MONO_AGENT_DOCS_CHUNK_URI_PREFIX}${nested.chunk.id}`);
     expect("error" in read).toBe(false);
     if ("error" in read) throw new Error(read.error.message);
-    expect(fenceMarkers(read.markdown)).toEqual(["```", "```"]);
+    expect(fenceMarkers(read.markdown)).toEqual(["~~~", "```", "```", "~~~"]);
+    expect(read.markdown).toContain("\n```\n[hidden](fixture.md)\n```\n");
     expect(markdownLinks(read.markdown)).toEqual([]);
     expect(read.internalLinks).toEqual([]);
 
     const searchHit = reader.searchHit(nested.chunk, 1);
-    expect(fenceMarkers(searchHit.markdown)).toEqual(["```", "```"]);
+    expect(fenceMarkers(searchHit.markdown)).toEqual(["~~~", "```", "```", "~~~"]);
+    expect(searchHit.markdown).toContain("\n```\n[hidden](fixture.md)\n```\n");
     expect(markdownLinks(searchHit.markdown)).toEqual([]);
     expect(searchHit.internalLinks).toEqual([]);
   });
