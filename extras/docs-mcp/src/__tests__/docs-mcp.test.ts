@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -123,15 +123,34 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     }
   });
 
-  it("rejects route and path collisions before corpus artifacts are generated", () => {
-    expect(() => assertUniqueDocumentLocations([
-      { path: "docs/foo.md", route: "/foo/" },
-      { path: "docs/foo/index.md", route: "/foo/" },
-    ])).toThrow("Documentation corpus contains duplicate document route /foo/.");
+  it("rejects duplicate document paths before corpus artifacts are generated", () => {
     expect(() => assertUniqueDocumentLocations([
       { path: "docs/foo.md", route: "/foo/" },
       { path: "docs/foo.md", route: "/other/" },
     ])).toThrow("Documentation corpus contains duplicate document path docs/foo.md.");
+  });
+
+  it("fails the generator entrypoint before writes when documentation routes collide", async () => {
+    const root = await mkdtemp(join(tmpdir(), "mono-agent-docs-route-collision-"));
+    temporaryDirectories.push(root);
+    const docsRoot = join(root, "docs");
+    const outputDirectory = join(root, "output");
+    await mkdir(join(docsRoot, "foo"), { recursive: true });
+    await Promise.all([
+      writeFile(join(docsRoot, "foo.md"), "# Foo\n", "utf8"),
+      writeFile(join(docsRoot, "foo", "index.md"), "# Foo index\n", "utf8"),
+    ]);
+
+    await expect(execFileAsync(process.execPath, [
+      join(packageRoot, "scripts", "generate-corpus.mjs"),
+      "--docs-root",
+      docsRoot,
+      "--output-directory",
+      outputDirectory,
+    ], { cwd: packageRoot })).rejects.toMatchObject({
+      stderr: expect.stringContaining("Documentation corpus contains duplicate document route /foo/."),
+    });
+    await expect(access(outputDirectory)).rejects.toThrow();
   });
 
   it("finds paraphrased concepts and exact identifiers as expanded, section-deduplicated excerpts", async () => {
@@ -250,12 +269,13 @@ describe.sequential("@mono-agent/docs-mcp", () => {
     if ("error" in closedResult) throw new Error(closedResult.error.message);
     expect(fenceMarkers(closedResult.markdown)).toHaveLength(2);
 
+    const pathologicalFence = "`".repeat(1_500);
     const pathologicalMarkdown = [
       "# Fixture",
       "",
       "## Unclosed code",
       "",
-      "```text",
+      pathologicalFence,
       "x".repeat(15_000),
     ].join("\n");
     const pathological = corpusFixture(pathologicalMarkdown, pathologicalMarkdown.indexOf("x") + 7_000);

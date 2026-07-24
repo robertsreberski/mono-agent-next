@@ -23,9 +23,10 @@ const DOCS_ORIGIN = "https://mono-agent-docs.vercel.app";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(packageRoot, "../..");
-const outputDirectory = join(packageRoot, "dist", "corpus");
+const buildPaths = parseBuildPaths(process.argv.slice(2));
+const outputDirectory = buildPaths.outputDirectory;
 
-const sources = await collectSources();
+const sources = await collectSources(buildPaths.docsRoot);
 const sourceHash = createHash("sha256");
 const documents = [];
 const chunks = [];
@@ -109,8 +110,7 @@ process.stderr.write(
   `Generated ${documents.length} documents and ${chunks.length} mono-agent documentation chunks (${manifest.corpusDigest.slice(0, 12)}).\n`,
 );
 
-async function collectSources() {
-  const docsRoot = join(repositoryRoot, "docs");
+async function collectSources(docsRoot) {
   const docsFiles = (await walkMarkdown(docsRoot))
     .filter((path) => {
       const firstSegment = relative(docsRoot, path).split(sep)[0];
@@ -131,6 +131,24 @@ async function collectSources() {
     });
   }
   return records;
+}
+
+function parseBuildPaths(args) {
+  const result = {
+    docsRoot: join(repositoryRoot, "docs"),
+    outputDirectory: join(packageRoot, "dist", "corpus"),
+  };
+  for (let index = 0; index < args.length; index += 2) {
+    const flag = args[index];
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith("--")) {
+      throw new Error("Usage: generate-corpus.mjs [--docs-root <path>] [--output-directory <path>]");
+    }
+    if (flag === "--docs-root") result.docsRoot = resolve(value);
+    else if (flag === "--output-directory") result.outputDirectory = resolve(value);
+    else throw new Error(`Unknown generate-corpus option ${flag}.`);
+  }
+  return result;
 }
 
 async function walkMarkdown(root) {

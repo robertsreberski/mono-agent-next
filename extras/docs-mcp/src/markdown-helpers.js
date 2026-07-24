@@ -71,7 +71,7 @@ export function balanceFences(markdown, startOffset, endOffset) {
     : `${boundedFenceOpening(openingAtStart)}\n`;
   const suffix = openingAtEnd === undefined
     ? ""
-    : `\n${openingAtEnd.marker.charAt(0).repeat(openingAtEnd.marker.length)}`;
+    : `\n${boundedFenceMarker(openingAtEnd)}`;
   return `${prefix}${markdown.slice(startOffset, endOffset)}${suffix}`;
 }
 
@@ -139,5 +139,15 @@ function activeFence(markdown, offset) {
  * @returns {string}
  */
 function boundedFenceOpening(fence) {
-  return fence.line.length <= 160 ? fence.line : fence.marker;
+  return fence.line.length <= 160 ? fence.line : boundedFenceMarker(fence);
+}
+
+/**
+ * @param {{ readonly marker: string }} fence
+ * @returns {string}
+ */
+function boundedFenceMarker(fence) {
+  return fence.marker.length <= 160
+    ? fence.marker
+    : fence.marker.charAt(0).repeat(3);
 }
