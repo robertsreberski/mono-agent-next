@@ -16,6 +16,7 @@ import {
 } from "@mono-agent/module-sdk";
 import {
   OPERATOR_LIMITS,
+  OPERATOR_ROUTES,
   OperatorClient,
   parseAskAnswerRequest,
   parseOperatorFrame,
@@ -953,7 +954,16 @@ describe("mono-agent operator channel module", () => {
         agent: operatorIdentity.agent,
         operator: { endpoint: channel.endpoint, tokenEnvironment: "OPERATOR_TOKEN" },
         process: { pid: process.pid, startedAt: channel.startInfo?.startedAt },
-        capabilities: { attachments: true, cancellation: true, health: true, quotes: true },
+        // This host grants `readReplay` but not `readConfig`, so discovery must
+        // advertise replay and withhold config view rather than claiming both.
+        capabilities: {
+          attachments: true,
+          cancellation: true,
+          health: true,
+          quotes: true,
+          replay: true,
+          configView: false,
+        },
       },
     });
     const response = await postJson(`${channel.endpoint}/v1/turns`, {
@@ -1311,6 +1321,60 @@ describe("mono-agent operator channel module", () => {
       details: { deliveryOutcomeAmbiguous: true },
     });
     expect(openConversation).toHaveBeenCalledTimes(2);
+  });
+
+  it("advertises in discovery exactly what the info route advertises", async () => {
+    // The registry fragment and the served info document describe the same
+    // channel. When they disagree, a consumer picks a route from discovery and
+    // then gets a 501 from it.
+    const buildChannel = async (
+      host: Partial<Pick<ChannelHost, "readConfig" | "readReplay">>,
+    ) => {
+      const operatorIdentity = identity("parity-agent", "Parity Agent");
+      const lifecycle = new AbortController();
+      const channel = await monoAgentModule.create({
+        instanceId: "operator",
+        config: monoAgentModule.schema.parse({ auth: { token: TOKEN } }),
+        provenance: { "/auth/token": { source: "environment", environmentName: "OPERATOR_TOKEN" } },
+        configDirectory: "/config",
+        workspaceDirectory: "/workspace",
+        dataDirectory: "/data",
+        logger: noopLogger(),
+        host: {
+          grantedCapabilities: new Set(["operator.identity.v1"]),
+          getCapability<T>(name: string): T | undefined {
+            return (name === "operator.identity.v1" ? operatorIdentity : undefined) as T | undefined;
+          },
+          async dispatch(): Promise<ChannelTurnResult> { return { status: "completed" }; },
+          ...host,
+        },
+        signal: lifecycle.signal,
+      });
+      moduleChannels.add(channel);
+      await channel.start?.({ signal: lifecycle.signal });
+      return channel;
+    };
+
+    for (const host of [
+      {},
+      { async readConfig() { return { revision: "r1", generatedAt: new Date().toISOString(), value: {}, redacted: true }; } },
+      { async readReplay() { return { entries: [] }; } },
+      {
+        async readConfig() { return { revision: "r1", generatedAt: new Date().toISOString(), value: {}, redacted: true }; },
+        async readReplay() { return { entries: [] }; },
+      },
+    ] as Partial<Pick<ChannelHost, "readConfig" | "readReplay">>[]) {
+      const channel = await buildChannel(host);
+      const presence = channel.readHostPresence?.() as {
+        operatorRegistry: { capabilities: Record<string, boolean> };
+      };
+      const info = parseOperatorInfo(await authorizedJson(`${channel.endpoint}${OPERATOR_ROUTES.info}`));
+
+      expect(presence.operatorRegistry.capabilities.configView).toBe(info.capabilities.configView);
+      expect(presence.operatorRegistry.capabilities.replay).toBe(info.capabilities.replay);
+      expect(presence.operatorRegistry.capabilities.configView).toBe(host.readConfig !== undefined);
+      expect(presence.operatorRegistry.capabilities.replay).toBe(host.readReplay !== undefined);
+    }
   });
 });
 

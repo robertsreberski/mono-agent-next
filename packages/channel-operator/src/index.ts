@@ -152,6 +152,10 @@ function createOperatorModuleChannel(
           agent: identity.agent,
           operator: { endpoint: info.endpoint, tokenEnvironment },
           process: { pid: identity.process.pid, startedAt: info.startedAt },
+          // Discovery has to describe the same channel `/v1/info` describes.
+          // `readConfig` and `readReplay` are optional host grants, so a
+          // deployment without them serves 501 on those routes; advertising
+          // them here sent consumers to a route this channel cannot answer.
           capabilities: {
             attachments: capabilities.attachments,
             liveInput: capabilities.liveInput,
@@ -160,8 +164,8 @@ function createOperatorModuleChannel(
             quotes: context.host.readReplay !== undefined,
             runtimeOverrides: capabilities.runtimeControl,
             proactive: capabilities.proactive,
-            configView: true,
-            replay: true,
+            configView: context.host.readConfig !== undefined,
+            replay: context.host.readReplay !== undefined,
             health: true,
           },
         },
