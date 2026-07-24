@@ -121,6 +121,7 @@ apply the configured session-unavailable policy deterministically.
 | `approvals.ts` | Fail-closed Core approval bridging and provider evidence capture. |
 | `containment.ts` | Frozen Codex feature, tool, MCP, and config containment. |
 | `json-rpc.ts` | Bounded, timeout-aware, direct-process JSON-RPC client. |
+| `model.ts` | Public model validation and runtime capability metadata. |
 | `preflight.ts` | Process-home preparation, direct probes, and effective-config verification. |
 | `runtime.ts` | Turn orchestration, cancellation, live input, and event normalization. |
 | `index.ts` | Typed module definition. |

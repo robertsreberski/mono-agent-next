@@ -993,6 +993,61 @@ describe("runtime-codex", () => {
     }
   });
 
+  it("isolates a rejected fallback emit from a completed provider turn", async () => {
+    const child = new FakeCodexProcess((request, process) => {
+      if (request.method !== "turn/start") return false;
+      process.send({
+        id: request.id,
+        result: { turn: { id: "turn-fallback-emit" } },
+      });
+      queueMicrotask(() => {
+        process.send({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: {
+              id: "turn-fallback-emit",
+              status: "completed",
+              items: [{
+                id: "fallback-message",
+                type: "agentMessage",
+                text: "fallback",
+              }],
+            },
+          },
+        });
+      });
+      return true;
+    });
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("fallback-emit-isolation"),
+      spawnProcess: runtimeLaunch([child]),
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+
+    await expect(runtime.runTurn({
+      turnId: "turn",
+      conversationId: "conversation",
+      model: "gpt-5.6-codex",
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      tools: [],
+      signal: new AbortController().signal,
+    }, {
+      emit(event) {
+        if (event.type === "text-delta") {
+          return Promise.reject(new Error("consumer emit failed"));
+        }
+      },
+      async executeTool(call) { return { callId: call.id, content: [] }; },
+    })).resolves.toMatchObject({
+      status: "completed",
+      message: { content: [{ type: "text", text: "fallback" }] },
+    });
+  });
+
   it("maps an early transport failure without an unhandled terminal rejection", async () => {
     const child = new FakeCodexProcess((request, process) => {
       if (request.method !== "turn/start") return false;

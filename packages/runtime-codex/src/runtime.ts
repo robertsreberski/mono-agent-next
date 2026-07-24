@@ -618,7 +618,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
             const item = record(candidate);
             return item.type === "agentMessage" && typeof item.text === "string" ? item.text : "";
           }).join("");
-          if (output !== "") await context.emit({ type: "text-delta", delta: output });
+          if (output !== "") emitIsolated(context, { type: "text-delta", delta: output });
         }
         let structuredOutput;
         if (request.options?.responseSchema !== undefined) {
