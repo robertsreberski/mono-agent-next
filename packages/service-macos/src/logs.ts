@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   constants,
   fstatSync,
@@ -7,6 +6,13 @@ import {
 } from "node:fs";
 import { lstat, open, type FileHandle } from "node:fs/promises";
 import { dirname } from "node:path";
+
+import {
+  assertUnchangedManagedFile,
+  digest,
+  isErrno,
+  sameManagedFileObject,
+} from "./internal-fs.js";
 import type { ServiceRunnerActivation } from "./plist.js";
 type ActivationLogs = ServiceRunnerActivation["logs"];
 type ReadinessRecord = { readonly event: "reset" } | {
@@ -39,7 +45,8 @@ export async function assertServiceLogRetention(logs: ActivationLogs, uid: numbe
       const archive = `${path}.${String(index)}.mono-agent-log`;
       try {
         const stats = await lstat(archive, { bigint: true });
-        assertSafe(archive, stats, uid); await assertDirectory(logs, uid);
+        assertSafe(archive, stats, uid);
+        await assertDirectory(logs, uid);
         throw new Error(`Log retention decrease requires explicit removal of managed archive ${archive}.`);
       } catch (error) {
         if (!isErrno(error, "ENOENT")) throw error;
@@ -97,7 +104,7 @@ async function inspectOptionalManagedFile(
     assertSafe(path, opened, uid);
     await assertBound(logs, path, opened, uid);
     const after = await handle.stat({ bigint: true });
-    assertSame(path, opened, after);
+    assertUnchangedManagedFile(path, opened, after);
     await assertBound(logs, path, after, uid);
   } finally {
     await handle.close();
@@ -122,7 +129,7 @@ async function readOptionalManagedFile(
     await assertBound(logs, path, opened, uid);
     const source = await handle.readFile();
     const after = await handle.stat({ bigint: true });
-    assertSame(path, opened, after);
+    assertUnchangedManagedFile(path, opened, after);
     await assertBound(logs, path, after, uid);
     if (source.byteLength !== Number(after.size)) {
       throw new Error(`${path} changed size during preflight.`);
@@ -186,11 +193,16 @@ export async function readManagedServiceLog(
     const returnedBytes = Math.min(Number(before.size), maxBytes);
     const source = Buffer.alloc(returnedBytes);
     if (returnedBytes > 0) {
-      await handle.read(source, 0, returnedBytes, Number(before.size) - returnedBytes);
+      await readExact(
+        handle,
+        source,
+        Number(before.size) - returnedBytes,
+        path,
+      );
     }
     const after = await handle.stat({ bigint: true });
-    assertSame(path, before, after);
-    if (!sameFile(after, await lstat(path, { bigint: true }))) {
+    assertUnchangedManagedFile(path, before, after);
+    if (!sameManagedFileObject(after, await lstat(path, { bigint: true }))) {
       throw new Error(`${path} changed pathname identity during log inspection.`);
     }
     return Object.freeze({
@@ -198,7 +210,7 @@ export async function readManagedServiceLog(
       totalBytes: Number(before.size),
       returnedBytes,
       truncated: before.size > BigInt(returnedBytes),
-      digest: createHash("sha256").update(source).digest("hex"),
+      digest: digest(source),
       content: source.toString("utf8"),
     });
   } finally {
@@ -224,7 +236,7 @@ export async function readServiceReadiness(
     assertSafe(logs.readinessPath, before, uid, READINESS_MAX_BYTES);
     const source = await handle.readFile();
     const after = await handle.stat({ bigint: true });
-    assertSame(logs.readinessPath, before, after);
+    assertUnchangedManagedFile(logs.readinessPath, before, after);
     await assertBound(logs, logs.readinessPath, after, uid);
     const record = parseReadiness(source);
     return record?.event === "started" && record.serviceMacosProof === token && record.pid === pid;
@@ -276,7 +288,9 @@ async function rewriteReadiness(
       throw new Error(`${logs.readinessPath} is not the expected managed readiness proof.`);
     }
     const bytes = Buffer.from(`${JSON.stringify(next)}\n`);
-    await handle.truncate(0); await handle.write(bytes, 0, bytes.length, 0); await handle.sync();
+    await handle.truncate(0);
+    await handle.write(bytes, 0, bytes.length, 0);
+    await handle.sync();
     const after = await handle.stat({ bigint: true });
     assertSafe(logs.readinessPath, after, uid, READINESS_MAX_BYTES);
     await assertBound(logs, logs.readinessPath, after, uid);
@@ -309,7 +323,7 @@ async function rotate(
     const archive = Buffer.alloc(bytes);
     await readExact(handle, archive, Number(before.size) - bytes, path);
     const after = await handle.stat({ bigint: true });
-    assertSame(path, before, after);
+    assertUnchangedManagedFile(path, before, after);
     await assertBound(logs, path, after, uid);
     await writeArchive(path, archive, logs, uid);
     await hooks.afterArchiveWrite?.(path);
@@ -317,11 +331,13 @@ async function rotate(
     // The managed target shares this Node event loop. Keep the final descriptor
     // stability check and truncate synchronous so its writes cannot interleave.
     const preTruncate = fstatSync(handle.fd, { bigint: true });
-    assertSame(path, after, preTruncate);
+    assertUnchangedManagedFile(path, after, preTruncate);
     ftruncateSync(handle.fd, 0);
     await handle.sync();
     const final = await handle.stat({ bigint: true });
-    if (!sameFile(after, final)) throw new Error(`${path} changed during log rotation.`);
+    if (!sameManagedFileObject(after, final)) {
+      throw new Error(`${path} changed during log rotation.`);
+    }
     await assertBound(logs, path, final, uid);
   } finally { await handle.close(); }
 }
@@ -331,11 +347,13 @@ async function writeArchive(path: string, bytes: Buffer, logs: ActivationLogs, u
   for (let index = 0; index < logs.retainFiles; index += 1) {
     const candidate = `${path}.${String(index)}.mono-agent-log`;
     try {
-      const stats = await lstat(candidate, { bigint: true }); assertSafe(candidate, stats, uid);
+      const stats = await lstat(candidate, { bigint: true });
+      assertSafe(candidate, stats, uid);
       if (selected === undefined || (selected.stats?.mtimeNs ?? 0n) > stats.mtimeNs) selected = { path: candidate, stats };
     } catch (error) {
       if (!isErrno(error, "ENOENT")) throw error;
-      selected = { path: candidate }; break;
+      selected = { path: candidate };
+      break;
     }
   }
   if (selected === undefined) throw new Error("No managed log archive slot is available.");
@@ -346,10 +364,18 @@ async function writeArchive(path: string, bytes: Buffer, logs: ActivationLogs, u
     : constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK;
   const handle = await open(selected.path, flags, 0o600);
   try {
-    const opened = await handle.stat({ bigint: true }); assertSafe(selected.path, opened, uid);
-    if (selected.stats !== undefined && !sameFile(selected.stats, opened)) throw new Error(`${selected.path} changed before archive rotation.`);
+    const opened = await handle.stat({ bigint: true });
+    assertSafe(selected.path, opened, uid);
+    if (
+      selected.stats !== undefined
+      && !sameManagedFileObject(selected.stats, opened)
+    ) {
+      throw new Error(`${selected.path} changed before archive rotation.`);
+    }
     await assertBound(logs, selected.path, opened, uid);
-    await handle.truncate(0); await writeExact(handle, bytes, selected.path); await handle.sync();
+    await handle.truncate(0);
+    await writeExact(handle, bytes, selected.path);
+    await handle.sync();
     await assertBound(logs, selected.path, await handle.stat({ bigint: true }), uid);
   } finally { await handle.close(); }
 }
@@ -391,7 +417,8 @@ async function writeExact(
 async function bindFile(logs: ActivationLogs, path: string, uid: number): Promise<string> {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    const stats = await handle.stat({ bigint: true }); assertSafe(path, stats, uid);
+    const stats = await handle.stat({ bigint: true });
+    assertSafe(path, stats, uid);
     await assertBound(logs, path, stats, uid);
     return fileIdentity(stats);
   } finally { await handle.close(); }
@@ -409,7 +436,9 @@ async function assertDirectory(logs: ActivationLogs, uid: number): Promise<void>
 }
 async function assertBound(logs: ActivationLogs, path: string, stats: BigIntStats, uid: number): Promise<void> {
   await assertDirectory(logs, uid);
-  if (!sameFile(stats, await lstat(path, { bigint: true }))) throw new Error(`${path} changed pathname identity.`);
+  if (!sameManagedFileObject(stats, await lstat(path, { bigint: true }))) {
+    throw new Error(`${path} changed pathname identity.`);
+  }
 }
 function parseReadiness(source: Uint8Array): ReadinessRecord | undefined {
   try {
@@ -427,15 +456,4 @@ function assertSafe(path: string, stats: BigIntStats, uid: number, maximum = Num
     throw new Error(`${path} must be an owner-private single-linked managed file.`);
   }
 }
-function assertSame(path: string, left: BigIntStats, right: BigIntStats): void {
-  if (!sameFile(left, right) || left.ctimeNs !== right.ctimeNs || left.mtimeNs !== right.mtimeNs
-    || left.size !== right.size) throw new Error(`${path} changed during operation.`);
-}
 function fileIdentity(stats: BigIntStats): string { return [stats.dev, stats.ino, stats.uid, stats.mode].join(":"); }
-function sameFile(left: BigIntStats, right: BigIntStats): boolean {
-  return left.dev === right.dev && left.ino === right.ino && left.uid === right.uid
-    && left.mode === right.mode && left.nlink === right.nlink;
-}
-function isErrno(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === code;
-}
