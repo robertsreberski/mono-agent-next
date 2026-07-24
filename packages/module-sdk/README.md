@@ -414,6 +414,7 @@ RuntimeIncompleteTurnResult
 RuntimeLiveInput
 RuntimeLiveInputDisposition
 RuntimeLiveInputHandler
+RuntimeModelDescriptor
 RuntimeModelPreflightRequest
 RuntimeModelPreflightResult
 RuntimeModelValidation

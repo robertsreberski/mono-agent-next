@@ -138,6 +138,7 @@ Every symbol exported by each public code entrypoint is listed below.
 DiscoverOperatorsOptions
 DiscoveredOperator
 NormalizeDiscoveredOperatorOptions
+OPERATOR_IDENTIFIER_PATTERN
 OPERATOR_LIMITS
 OPERATOR_PROTOCOL
 OPERATOR_REGISTRY_DETAILS_SCHEMA
