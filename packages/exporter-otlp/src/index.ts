@@ -20,11 +20,12 @@ import {
   type OtlpTransportRequest,
   type OtlpTransportResponse,
 } from "./transport.js";
+import { PACKAGE_VERSION } from "./version.js";
 
 export const monoAgentModule = Object.freeze({
   manifest: Object.freeze({
     packageName: "@mono-agent/exporter-otlp",
-    packageVersion: "0.15.0",
+    packageVersion: PACKAGE_VERSION,
     apiVersion: 1,
     kind: "exporter",
     responsibility: "Exports bounded normalized telemetry batches to an OTLP HTTP endpoint.",

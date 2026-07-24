@@ -5,10 +5,25 @@ import type { ReadableSpan } from "@opentelemetry/sdk-trace-base";
 import type { JsonValue } from "@mono-agent/module-sdk";
 import type { ExportRecord } from "@mono-agent/module-sdk/internal";
 
+import { PACKAGE_VERSION } from "./version.js";
+
 type HrTime = [number, number];
 type OtlpAttributeValue = string | number | boolean | readonly string[] | readonly number[] | readonly boolean[];
 
-export function serializeOtlpSpans(records: readonly ExportRecord[], projectName: string): Buffer {
+export interface SequencedExportRecord {
+  readonly record: ExportRecord;
+  readonly enqueueSequence: bigint;
+}
+
+export const OTLP_INSTRUMENTATION_SCOPE = Object.freeze({
+  name: "@mono-agent/exporter-otlp",
+  version: PACKAGE_VERSION,
+});
+
+export function serializeOtlpSpans(
+  records: readonly SequencedExportRecord[],
+  projectName: string,
+): Buffer {
   const resource = {
     attributes: {
       "service.name": "mono-agent",
@@ -18,10 +33,8 @@ export function serializeOtlpSpans(records: readonly ExportRecord[], projectName
     },
     schemaUrl: undefined,
   };
-  const scope = { name: "@mono-agent/exporter-otlp", version: "0.15.0" };
-  const spans = records.map((record): ReadableSpan => {
-    const canonical = canonicalJson(record);
-    const digest = createHash("sha256").update(canonical).digest("hex");
+  const spans = records.map(({ record, enqueueSequence }): ReadableSpan => {
+    const identity = deriveOtlpSpanIdentity(record, enqueueSequence);
     const timestamp = toHrTime(record.timestamp);
     const attributes = mapRecordAttributes(record);
     if (record.body !== undefined) {
@@ -30,7 +43,7 @@ export function serializeOtlpSpans(records: readonly ExportRecord[], projectName
     const span = {
       name: record.name,
       kind: 0,
-      spanContext: () => ({ traceId: digest.slice(0, 32), spanId: digest.slice(32, 48), traceFlags: 1 }),
+      spanContext: () => ({ ...identity, traceFlags: 1 }),
       parentSpanContext: undefined,
       startTime: timestamp,
       endTime: timestamp,
@@ -41,7 +54,7 @@ export function serializeOtlpSpans(records: readonly ExportRecord[], projectName
       duration: [0, 0] as HrTime,
       ended: true,
       resource,
-      instrumentationScope: scope,
+      instrumentationScope: OTLP_INSTRUMENTATION_SCOPE,
       droppedAttributesCount: 0,
       droppedEventsCount: 0,
       droppedLinksCount: 0,
@@ -54,6 +67,25 @@ export function serializeOtlpSpans(records: readonly ExportRecord[], projectName
     throw new Error("OTLP protobuf serialization failed.");
   }
   return Buffer.from(encoded);
+}
+
+export function deriveOtlpSpanIdentity(
+  record: ExportRecord,
+  enqueueSequence: bigint,
+): { readonly traceId: string; readonly spanId: string } {
+  if (enqueueSequence < 0n) {
+    throw new RangeError("OTLP enqueue sequence must not be negative.");
+  }
+  const digest = createHash("sha256")
+    .update("mono-agent.exporter-otlp.span\u0000")
+    .update(canonicalJson(record))
+    .update("\u0000")
+    .update(enqueueSequence.toString(10))
+    .digest("hex");
+  return {
+    traceId: digest.slice(0, 32),
+    spanId: digest.slice(32, 48),
+  };
 }
 
 /**
