@@ -7,6 +7,7 @@ import type {
   MemoryLocalRebuildResult,
 } from "./store.js";
 import type { MemoryLocalConsolidateResult } from "./consolidation.js";
+import { MAX_MEMORY_LOCAL_INTAKE_RETRIES } from "./config.js";
 import { MemoryLocalError } from "./errors.js";
 
 const MAX_PATH_LENGTH = 4_096;
@@ -72,6 +73,19 @@ export const memoryLocalForgetCommandInputSchema = Object.freeze({
 });
 
 export const memoryLocalConsolidateCommandInputSchema = EMPTY_INPUT_SCHEMA;
+
+export const memoryLocalRetryCommandInputSchema = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    limit: {
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_MEMORY_LOCAL_INTAKE_RETRIES,
+      default: 32,
+    },
+  },
+});
 
 export function createMemoryLocalCommands(memory: MemoryLocal): readonly ModuleCommand[] {
   return Object.freeze([
@@ -181,6 +195,26 @@ export function createMemoryLocalCommands(memory: MemoryLocal): readonly ModuleC
         return consolidateToJson(await memory.consolidate({ signal: context.signal }));
       },
     },
+    {
+      name: "memory-local:retry",
+      kind: "maintenance",
+      description:
+        "Retry bounded durable capture or vector intake using this running host's providers.",
+      inputSchema: memoryLocalRetryCommandInputSchema,
+      async run(input, context): Promise<JsonValue> {
+        const parsed = ownInput(input, ["limit"], true, "Memory intake retry command input");
+        const limit = optionalBoundedInteger(
+          parsed.limit,
+          "limit",
+          1,
+          MAX_MEMORY_LOCAL_INTAKE_RETRIES,
+        );
+        return retryToJson(await memory.retryIntake({
+          signal: context.signal,
+          ...(limit === undefined ? {} : { limit }),
+        }));
+      },
+    },
   ] satisfies readonly ModuleCommand[]);
 }
 
@@ -235,6 +269,19 @@ function optionalBoolean(value: unknown, field: string): boolean | undefined {
   if (value === undefined) return undefined;
   if (typeof value !== "boolean") invalid(`${field} must be a boolean.`);
   return value;
+}
+
+function optionalBoundedInteger(
+  value: unknown,
+  field: string,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) < minimum || (value as number) > maximum) {
+    invalid(`${field} must be an integer from ${minimum} through ${maximum}.`);
+  }
+  return value as number;
 }
 
 function requireConfirmation(value: unknown, operation: string): void {
@@ -316,5 +363,15 @@ function consolidateToJson(result: MemoryLocalConsolidateResult): JsonValue {
     entities: result.entities,
     indexBytes: result.indexBytes,
     futureLogBytes: result.futureLogBytes,
+  };
+}
+
+function retryToJson(result: Awaited<ReturnType<MemoryLocal["retryIntake"]>>): JsonValue {
+  return {
+    capturesRetried: result.capturesRetried,
+    vectorsRetried: result.vectorsRetried,
+    failed: result.failed,
+    remainingCaptures: result.remainingCaptures,
+    remainingVectors: result.remainingVectors,
   };
 }

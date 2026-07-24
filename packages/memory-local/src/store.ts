@@ -60,6 +60,7 @@ import {
   DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_BYTES,
   DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_TOKENS,
   DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS,
+  MAX_MEMORY_LOCAL_INTAKE_RETRIES,
   parseMemoryLocalConfig,
   type MemoryLocalConfig,
 } from "./config.js";
@@ -106,7 +107,6 @@ export const MEMORY_LOCAL_MARKER_FILENAME = ".first-run-memory-initializing";
 const MARKER_MAX_BYTES = 128;
 const MANIFEST_MAX_BYTES = 256 * 1024;
 const MAX_RECALL_CANDIDATES = 256;
-const MAX_INTAKE_RETRIES = 1_000;
 const MANAGED_GENERATION = /^g-[0-9]{8}T[0-9]{9}Z-[a-f0-9-]{36}$/u;
 const CAPTURE_INTAKE_PREFIX = "memory-local:capture-intake:";
 const VECTOR_INTAKE_PREFIX = "memory-local:vector-intake:";
@@ -645,8 +645,15 @@ export class MemoryLocal implements Memory {
     try {
       throwIfAborted(request.signal);
       const limit = request.limit ?? 32;
-      if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_INTAKE_RETRIES) {
-        throw new MemoryLocalError("maintenance_failed", `Memory intake retry limit must be from 1 through ${MAX_INTAKE_RETRIES}.`);
+      if (
+        !Number.isSafeInteger(limit)
+        || limit < 1
+        || limit > MAX_MEMORY_LOCAL_INTAKE_RETRIES
+      ) {
+        throw new MemoryLocalError(
+          "maintenance_failed",
+          `Memory intake retry limit must be from 1 through ${MAX_MEMORY_LOCAL_INTAKE_RETRIES}.`,
+        );
       }
       return await this.#enqueueWrite(async () => {
         await this.#verifyStore();

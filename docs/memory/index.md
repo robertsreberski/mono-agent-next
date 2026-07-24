@@ -74,9 +74,13 @@ leaving automatic pre-turn recall available. Core always reserves the exact
 `MemoryRecall` name against MCP and channel impersonation.
 
 Audit, backup, consolidation, rebuild, forget preview/confirmation, and intake
-retry remain explicit package or `mono-agent memory` operations. `mono-agent
-doctor` performs read-only diagnostics and never captures, retries, rebuilds,
-consolidates, or repairs data.
+retry remain explicit package operations. Running hosts expose the namespaced
+`memory-local:retry` command with an optional limit from 1 through 1,000. The
+one-shot `mono-agent memory` route creates only the selected memory module, so
+it can run store-only maintenance but cannot recover runtime-backed capture
+intake; issue that retry through an AgentHost with the configured runtime
+loaded. `mono-agent doctor` performs read-only diagnostics and never captures,
+retries, rebuilds, consolidates, or repairs data.
 
 ## Migration boundary
 
