@@ -56,7 +56,23 @@ async function main() {
     const operatorIdentity = {
       agent: { id: AGENT_ID, label: AGENT_LABEL },
       process: { pid: process.pid },
-      defaults: { runtime: "smoke", model: "smoke:model" },
+      defaults: { runtime: "smoke", model: "smoke:model", effort: "medium" },
+      models: [
+        {
+          runtime: "smoke",
+          id: "smoke:model",
+          label: "Smoke default",
+          efforts: ["low", "medium", "high"],
+          contextWindow: 128_000,
+        },
+        {
+          runtime: "smoke-secondary",
+          id: "smoke:model-override",
+          label: "Smoke override",
+          efforts: ["low", "medium", "high"],
+          contextWindow: 256_000,
+        },
+      ],
       configPath: join(temporaryRoot, "mono-agent.config.json"),
       projectRoot: temporaryRoot,
     };
@@ -328,8 +344,7 @@ async function main() {
     assert.equal(terminal.started, true);
     assert.equal(tuiInfoRequests, 1);
     for (const command of [
-      "/runtime smoke-secondary",
-      "/model smoke:model-override",
+      "/model smoke-secondary smoke:model-override",
       "/effort high",
       INTERACTIVE_INPUT,
     ]) {
