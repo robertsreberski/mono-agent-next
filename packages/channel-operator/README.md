@@ -83,6 +83,9 @@ absent or malformed.
 4. Channel reply events become only shared operator NDJSON frames. Assistant
    text, transient thought deltas, generic activity, redacted tool calls and
    results, compaction, AskUser, and usage retain distinct bounded shapes.
+   Oversized activity and text frames are truncated at the wire boundary;
+   truncated terminal text completes with `stopReason:"length"`, while a full
+   stream emits a reserved `stream_limit` terminal error and aborts the turn.
    Compaction and session-eviction also merge into sticky usage flags without
    erasing the latest token counts; the terminal frame carries the
    authoritative result and a deterministic opaque identity derived from the
@@ -99,7 +102,10 @@ absent or malformed.
 | Source module | Responsibility |
 | --- | --- |
 | `config.ts` | Exact config shape, secret annotations, strong-token validation, and loopback checks. |
-| `server.ts` | Authenticated bounded routes, attachment decoding, replay-verified quote projection, NDJSON streaming, Core control projection, cancellation, health, and shutdown. |
+| `server.ts` | Authenticated bounded routes, Core control projection, cancellation, health, and shutdown. |
+| `projection.ts` | Single host-capability derivation plus bounded request, replay, health, and frame projections. |
+| `frame-writer.ts` | Backpressure-aware NDJSON writes, byte accounting, and reserved terminal stream-limit errors. |
+| `errors.ts` and `lifecycle.ts` | Internal typed failures and bounded abort/shutdown helpers. |
 | `index.ts` | Typed channel module definition and public exports. |
 
 ## Public API
@@ -111,6 +117,7 @@ absent or malformed.
 | `monoAgentModule` | Load the operator endpoint through mono-agent core. |
 | `parseOperatorChannelConfig` | Validate resolved module config without lifecycle effects. |
 | `createOperatorChannel` | Compose or test the HTTP transport against a typed dispatch function. |
+| `deriveOperatorCapabilities` | Derive discovery, `/v1/info`, and module capability claims from one host shape. |
 | `OperatorModuleChannel.endpoint` | Read the actual URL after a successful start. |
 | `OperatorChannelStartInfo` | Publish the exact endpoint and `startedAt` identity also served by `/v1/info`. |
 | `OperatorIdentityGrant` | Type the exact Core-owned identity capability consumed at creation. |
@@ -139,6 +146,7 @@ OperatorIdentityGrant
 OperatorListenConfig
 OperatorModuleChannel
 createOperatorChannel
+deriveOperatorCapabilities
 isLoopbackHost
 monoAgentModule
 operatorChannelConfigSchema

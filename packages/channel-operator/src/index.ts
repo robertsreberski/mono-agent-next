@@ -25,6 +25,7 @@ import {
 } from "./config.js";
 import {
   createOperatorChannel,
+  deriveOperatorCapabilities,
   type OperatorChannel,
   type OperatorChannelStartInfo,
   type OperatorIdentityGrant,
@@ -74,15 +75,16 @@ function createOperatorModuleChannel(
     dispatch: (request, reply) => context.host.dispatch(request, reply),
     host: context.host,
   });
+  const operatorCapabilities = deriveOperatorCapabilities(context.host);
   const capabilities = Object.freeze({
-    attachments: true,
-    liveInput: context.host.offerLiveInput !== undefined,
-    askUser: context.host.answerAsk !== undefined,
+    attachments: operatorCapabilities.attachments,
+    liveInput: operatorCapabilities.liveInput,
+    askUser: operatorCapabilities.askUser,
     approvals: false,
-    proactive: context.host.openConversation !== undefined,
-    runtimeControl: true,
+    proactive: operatorCapabilities.proactive,
+    runtimeControl: operatorCapabilities.runtimeOverrides,
     verbatim: false,
-    cancellation: true,
+    cancellation: operatorCapabilities.cancellation,
   });
   const deliveryReceipts = new Map<string, OperatorDeliveryReceipt>();
   let deliveryCapacityExhausted = false;
@@ -152,22 +154,7 @@ function createOperatorModuleChannel(
           agent: identity.agent,
           operator: { endpoint: info.endpoint, tokenEnvironment },
           process: { pid: identity.process.pid, startedAt: info.startedAt },
-          // Discovery has to describe the same channel `/v1/info` describes.
-          // `readConfig` and `readReplay` are optional host grants, so a
-          // deployment without them serves 501 on those routes; advertising
-          // them here sent consumers to a route this channel cannot answer.
-          capabilities: {
-            attachments: capabilities.attachments,
-            liveInput: capabilities.liveInput,
-            askUser: capabilities.askUser,
-            cancellation: capabilities.cancellation,
-            quotes: context.host.readReplay !== undefined,
-            runtimeOverrides: capabilities.runtimeControl,
-            proactive: capabilities.proactive,
-            configView: context.host.readConfig !== undefined,
-            replay: context.host.readReplay !== undefined,
-            health: true,
-          },
+          capabilities: { ...operatorCapabilities },
         },
       };
     },

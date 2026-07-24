@@ -29,7 +29,7 @@ pnpm run generate:source-beta-docs
 | `@mono-agent/channel-slack` | 1 | 36 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-slack/README.md) |
 | `@mono-agent/channel-webhook` | 1 | 44 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-webhook/README.md) |
 | `@mono-agent/channel-openai-api` | 1 | 25 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-openai-api/README.md) |
-| `@mono-agent/channel-operator` | 1 | 20 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-operator/README.md) |
+| `@mono-agent/channel-operator` | 1 | 21 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-operator/README.md) |
 | `@mono-agent/trigger-cron` | 1 | 29 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/trigger-cron/README.md) |
 | `@mono-agent/memory-local` | 1 | 57 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/memory-local/README.md) |
 | `@mono-agent/state-local` | 1 | 26 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/state-local/README.md) |
@@ -724,6 +724,7 @@ OperatorIdentityGrant
 OperatorListenConfig
 OperatorModuleChannel
 createOperatorChannel
+deriveOperatorCapabilities
 isLoopbackHost
 monoAgentModule
 operatorChannelConfigSchema
