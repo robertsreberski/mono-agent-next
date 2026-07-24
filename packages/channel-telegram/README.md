@@ -77,6 +77,35 @@ normalized `ChannelInboundRequest` -> Core -> final reply. Supported Core
 controls route `/cancel`, live steering, and bounded AskUser button/free-text
 answers. `/model` and `/effort` maintain bounded, process-local per-chat
 overrides. Activity updates edit one status message when Telegram supports it.
+Interactive replies and AskUser prompts are split at Telegram's 4096-character
+message bound; activity text is bounded to one editable message. Multiple
+AskUser answers are unique, capped at 20 values, and require at least one value
+before Done.
+
+Polling uses one ordered primary lane plus one ordered control lane so an
+AskUser answer, `/cancel`, or live-input offer can reach an active turn without
+redispatching that turn. The confirmed offset stays pinned to the earliest
+unsettled received update and advances only across the settled received-order
+prefix. A failed update is reported with the configured error reaction and
+settled so later updates can continue. Unsupported updates with valid Telegram
+update IDs are consumed without dispatch so they cannot wedge the poll offset.
+Repeated polls containing no new update or settled-prefix progress use bounded
+exponential backoff.
+
+The in-memory update ledger is capped at Telegram's 100-update poll limit. If
+more than 100 updates remain unconfirmed behind a blocked earliest update,
+Telegram can keep a later control outside the visible server window. The
+channel then marks health degraded and applies backpressure without advancing
+the offset or dropping the tracked updates; that later control remains delayed
+until the earliest update settles. This adapter intentionally has no durable
+update spool.
+
+A successful graceful drain stops new polling and primary work, lets active
+work plus already-ingested control updates finish until the host deadline, and
+confirms the consumed offset before closing. A failed, aborted, or timed-out
+confirmation closes the transport but rejects the drain and marks health
+degraded, exposing that an unconfirmed update may replay instead of claiming a
+clean shutdown.
 Core proactive delivery -> durable Core/state receipt -> exact Telegram
 destination -> fingerprint-guarded Bot API send.
 For a channel-only notification, the selected adapter resolves
@@ -93,6 +122,7 @@ owns tool policy, deterministic idempotency, and receipt-keyed history.
 | --- | --- |
 | `config.ts` | Strict configuration and env-only secret schema. |
 | `bot.ts` | Injectable Bot API transport and bounded HTTP implementation. |
+| `http.ts` | Shared bounded HTTP response readers and record guard. |
 | `delivery.ts` | Exact-destination idempotent proactive delivery. |
 | `send-tools.ts` | Strict message/file tool schemas and side-effect-free outbound preparation. |
 | `transcription.ts` | Bounded OpenAI-compatible audio transcription. |
@@ -162,9 +192,10 @@ It does not persist transcripts or delivery receipts, select runtimes, create
 Telegram credentials, or promise delivery after Telegram returns an ambiguous
 transport failure. Core plus the selected state module is the only restart-safe
 delivery authority and records confirmed send-tool receipts in destination
-history. The adapter keeps a bounded fingerprint-aware live-instance guard,
-retains ambiguous outcomes without replay, rejects conflicting key reuse, and
-fails closed instead of evicting that guard when its capacity is exhausted.
+history. It does not own a durable Telegram update spool. The adapter keeps a
+bounded fingerprint-aware live-instance guard, retains ambiguous outcomes
+without replay, rejects conflicting key reuse, and fails closed instead of
+evicting that guard when its capacity is exhausted.
 
 ## Related Documentation
 

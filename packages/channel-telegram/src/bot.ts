@@ -2,6 +2,7 @@ import type { ChannelAttachment } from "@mono-agent/module-sdk";
 import { Agent, type Dispatcher } from "undici";
 
 import type { TelegramConfig } from "./config.js";
+import { isRecord, readBoundedBytes, readBoundedJson } from "./http.js";
 import { createTelegramTranscriber } from "./transcription.js";
 
 export interface TelegramRemoteAttachment {
@@ -35,7 +36,12 @@ export interface TelegramCallbackUpdate {
   readonly receivedAt: string;
 }
 
-export type TelegramUpdate = TelegramMessageUpdate | TelegramCallbackUpdate;
+interface TelegramIgnoredUpdate {
+  readonly updateId: number;
+  readonly kind: "ignored";
+}
+
+export type TelegramUpdate = TelegramMessageUpdate | TelegramCallbackUpdate | TelegramIgnoredUpdate;
 
 export interface TelegramSendMessageRequest {
   readonly chatId: string;
@@ -98,14 +104,19 @@ export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: ty
       body: JSON.stringify(body),
       signal,
     });
-    const value = await readBoundedJson(response, 2 * 1024 * 1024);
+    const value = await readBoundedJson(response, 2 * 1024 * 1024, "Telegram API response");
     if (!response.ok || !isRecord(value) || value.ok !== true) throw new Error(`Telegram API ${method} failed with HTTP ${response.status}.`);
     return value.result;
   };
 
   return {
     async poll(offset, timeoutSeconds, signal) {
-      const raw = await call("getUpdates", { offset, timeout: timeoutSeconds, allowed_updates: ["message", "callback_query"] }, signal);
+      const raw = await call("getUpdates", {
+        offset,
+        limit: 100,
+        timeout: timeoutSeconds,
+        allowed_updates: ["message", "callback_query"],
+      }, signal);
       if (!Array.isArray(raw)) throw new Error("Telegram getUpdates returned an invalid result.");
       return raw.map(parseUpdate).filter((update): update is TelegramUpdate => update !== undefined);
     },
@@ -146,7 +157,7 @@ export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: ty
       if (request.disableNotification !== undefined) form.set("disable_notification", String(request.disableNotification));
       const method = photo ? "sendPhoto" : "sendDocument";
       const response = await telegramFetch(`${api}/${method}`, { method: "POST", body: form, signal: request.signal, redirect: "error" });
-      const value = await readBoundedJson(response, 2 * 1024 * 1024);
+      const value = await readBoundedJson(response, 2 * 1024 * 1024, "Telegram API response");
       if (!response.ok || !isRecord(value) || value.ok !== true) throw new Error(`Telegram ${method} failed with HTTP ${response.status}.`);
       return { messageId: telegramMessageId(value.result) };
     },
@@ -162,26 +173,27 @@ export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: ty
 function parseUpdate(value: unknown): TelegramUpdate | undefined {
   if (!isRecord(value) || !Number.isSafeInteger(value.update_id)) return undefined;
   const updateId = value.update_id as number;
+  const ignored: TelegramIgnoredUpdate = { updateId, kind: "ignored" };
   const now = new Date().toISOString();
   if (isRecord(value.message)) {
     const message = value.message;
-    if (!isRecord(message.chat) || !isRecord(message.from) || !Number.isSafeInteger(message.message_id)) return undefined;
+    if (!isRecord(message.chat) || !isRecord(message.from) || !Number.isSafeInteger(message.message_id)) return ignored;
     const chatId = identifier(message.chat.id);
     const senderId = identifier(message.from.id);
-    if (chatId === undefined || senderId === undefined) return undefined;
+    if (chatId === undefined || senderId === undefined) return ignored;
     const text = typeof message.text === "string" ? message.text : typeof message.caption === "string" ? message.caption : "";
     const senderName = telegramName(message.from);
     return { updateId, kind: "message", chatId, messageId: String(message.message_id), senderId, ...(senderName === undefined ? {} : { senderName }), text, attachments: Object.freeze(parseAttachments(message)), receivedAt: typeof message.date === "number" ? new Date(message.date * 1_000).toISOString() : now };
   }
   if (isRecord(value.callback_query)) {
     const callback = value.callback_query;
-    if (typeof callback.id !== "string" || typeof callback.data !== "string" || !isRecord(callback.from) || !isRecord(callback.message) || !isRecord(callback.message.chat) || !Number.isSafeInteger(callback.message.message_id)) return undefined;
+    if (typeof callback.id !== "string" || typeof callback.data !== "string" || !isRecord(callback.from) || !isRecord(callback.message) || !isRecord(callback.message.chat) || !Number.isSafeInteger(callback.message.message_id)) return ignored;
     const chatId = identifier(callback.message.chat.id);
     const senderId = identifier(callback.from.id);
-    if (chatId === undefined || senderId === undefined) return undefined;
+    if (chatId === undefined || senderId === undefined) return ignored;
     return { updateId, kind: "callback", callbackId: callback.id, chatId, messageId: String(callback.message.message_id), senderId, data: callback.data, receivedAt: now };
   }
-  return undefined;
+  return ignored;
 }
 
 function parseAttachments(message: Record<string, unknown>): TelegramRemoteAttachment[] {
@@ -222,46 +234,6 @@ function safeName(value: string): string {
 
 function attachmentKind(mediaType: string): "image" | "audio" | "file" {
   return mediaType.startsWith("image/") ? "image" : mediaType.startsWith("audio/") ? "audio" : "file";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
-
-async function readBoundedJson(response: Response, maxBytes: number): Promise<unknown> {
-  const bytes = await readBoundedBytes(response, maxBytes, "Telegram API response");
-  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
-}
-
-async function readBoundedBytes(response: Response, maxBytes: number, label: string): Promise<Uint8Array> {
-  const declared = response.headers.get("content-length");
-  if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > maxBytes)) {
-    await response.body?.cancel();
-    throw new Error(`${label} exceeds the byte limit.`);
-  }
-  if (response.body === null) return new Uint8Array();
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) break;
-      total += next.value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel();
-        throw new Error(`${label} exceeds the byte limit.`);
-      }
-      chunks.push(next.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const result = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return result;
 }
 
 function safeFilePath(value: string): boolean {

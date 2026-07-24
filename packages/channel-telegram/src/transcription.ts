@@ -1,6 +1,7 @@
 import type { ChannelAttachment } from "@mono-agent/module-sdk";
 
 import type { TelegramTranscriptionConfig } from "./config.js";
+import { isRecord, readBoundedJson } from "./http.js";
 
 const MAX_TRANSCRIPTION_RESPONSE_BYTES = 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES = 512 * 1024;
@@ -40,7 +41,11 @@ export function createTelegramTranscriber(
         redirect: "error",
         signal: combined,
       });
-      const payload = await readBoundedJson(response, MAX_TRANSCRIPTION_RESPONSE_BYTES);
+      const payload = await readBoundedJson(
+        response,
+        MAX_TRANSCRIPTION_RESPONSE_BYTES,
+        "Telegram transcription response",
+      );
       if (!response.ok) {
         throw new Error(`Telegram transcription failed with HTTP ${response.status}.`);
       }
@@ -56,41 +61,4 @@ export function createTelegramTranscriber(
       clearTimeout(timer);
     }
   };
-}
-
-async function readBoundedJson(response: Response, maxBytes: number): Promise<unknown> {
-  const declared = response.headers.get("content-length");
-  if (declared !== null && (!/^\d+$/u.test(declared) || Number(declared) > maxBytes)) {
-    await response.body?.cancel();
-    throw new Error("Telegram transcription response exceeds the byte limit.");
-  }
-  if (response.body === null) throw new Error("Telegram transcription response is empty.");
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const next = await reader.read();
-      if (next.done) break;
-      total += next.value.byteLength;
-      if (total > maxBytes) {
-        await reader.cancel();
-        throw new Error("Telegram transcription response exceeds the byte limit.");
-      }
-      chunks.push(next.value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
