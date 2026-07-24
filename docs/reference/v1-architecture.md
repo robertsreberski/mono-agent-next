@@ -222,6 +222,13 @@ Core owns bounded admission, per-conversation ordering, cancellation, live
 input, AskUser answer routing, normalized history, tool policy, delivery,
 health, drain, and stop. Runtime modules own native request construction,
 protocol parsing, provider sessions, and attempt-local failure classification.
+When the active direct or channel interaction surface supports it, Core adds a
+reserved, policy-filtered `AskUser` request tool. The model supplies one to
+three questions under the shared module-sdk bounds; Core supplies interaction
+identity, routes and validates the answer with the exact attempt signal, and
+returns the structured result so the runtime can continue. Because this is a
+Core-mediated interaction rather than an external effect, it never creates a
+second approval prompt. MCP and channel tools cannot claim the reserved name.
 
 Failures are not converted to fake responses. An attempt that may have committed
 a side effect is not blindly replayed on another route.

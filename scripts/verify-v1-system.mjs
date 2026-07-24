@@ -40,6 +40,10 @@ const SHUTDOWN_TIMEOUT_MS = 10_000;
 const EXPECTED_REPLY = "mono-agent-next durable provider fact 7d3f9c";
 const MEMORY_QUERY = "packed-memory-query-a41c";
 const MEMORY_RECALL_CALL_ID = "packed-memory-recall-call";
+const ASK_USER_QUERY = "packed-ask-user-query-b52d";
+const ASK_USER_CALL_ID = "packed-ask-user-call";
+const ASK_USER_ANSWER = "Keep it concise and avoid jargon.";
+const ASK_USER_COMPLETION = "packed AskUser answer observed";
 const PERSONAL_WEBHOOK_PROMPT = "Handle this authenticated project webhook request.";
 const WEBHOOK_SECRET = "packed-system-webhook-token";
 const OPERATOR_SECRET = "packed-system-operator-token-0000000000000001";
@@ -1470,7 +1474,7 @@ function packedSystemConfig({ providerBaseUrl, otlpEndpoint, deliveryEndpoint })
       },
     },
     policy: {
-      tools: { default: "deny", allow: ["MemoryRecall"] },
+      tools: { default: "deny", allow: ["AskUser", "MemoryRecall"] },
       approvals: { default: "allow" },
       sandbox: { mode: "off" },
     },
@@ -1496,6 +1500,10 @@ const EXPECTED_REPLY = "mono-agent-next durable provider fact 7d3f9c";
 const MEMORY_QUERY = "packed-memory-query-a41c";
 const WEB_TOKEN = "packed-system-web-token-0000000000000001";
 const MEMORY_RECALL_CALL_ID = "packed-memory-recall-call";
+const ASK_USER_QUERY = "packed-ask-user-query-b52d";
+const ASK_USER_CALL_ID = "packed-ask-user-call";
+const ASK_USER_ANSWER = "Keep it concise and avoid jargon.";
+const ASK_USER_COMPLETION = "packed AskUser answer observed";
 const configPath = resolve(process.argv[2] ?? "mono-agent.config.json");
 const configDirectory = dirname(configPath);
 const webhookSecret = requiredEnvironment("SYSTEM_WEBHOOK_TOKEN");
@@ -1567,6 +1575,35 @@ try {
   await webServer.stop();
   webServer = undefined;
 
+  const askFrames = [];
+  for await (const frame of persisted.client.streamTurn({
+    conversationId: "packed-ask-user",
+    input: { text: ASK_USER_QUERY },
+  })) {
+    askFrames.push(frame);
+    if (frame.type === "ask_user") {
+      assert.equal(frame.ask.questions.length, 2);
+      assert.equal(frame.ask.questions[0].id, "tone");
+      assert.equal(frame.ask.questions[1].allowFreeText, true);
+      const answered = await persisted.client.answerAsk("packed-ask-user", {
+        interactionId: frame.ask.interactionId,
+        answers: { tone: ["concise"], notes: [ASK_USER_ANSWER] },
+      });
+      assert.equal(answered.status, "accepted");
+    }
+  }
+  const askCompleted = askFrames.find((frame) => frame.type === "completed");
+  assert.equal(askCompleted?.finalMessage.text, ASK_USER_COMPLETION);
+  assert.ok(askFrames.some((frame) =>
+    frame.type === "tool_call" && frame.call.name === "AskUser"));
+  const askToolResult = askFrames.find((frame) =>
+    frame.type === "tool_result" && frame.result.callId === ASK_USER_CALL_ID);
+  assert.equal(askToolResult?.result.contentOmitted, false);
+  assert.ok(JSON.stringify(askToolResult?.result.content).includes(ASK_USER_ANSWER));
+  assert.equal(askFrames.some((frame) => frame.type === "approval"), false);
+  assert.equal((await persisted.client.getPendingAsk("packed-ask-user")).ask, null);
+  assert.equal((await persisted.client.getReplay("packed-ask-user")).messages.length, 4);
+
   const duplicate = await secondHost.runModuleCommand("cron", "trigger-cron:invoke", {
     jobId: "packed-system",
     scheduledAt: cronInstant,
@@ -1604,6 +1641,7 @@ try {
     duplicateCron: duplicate.value,
     operatorFrames: operatorFrames.map((frame) => frame.type),
     webQuoteProof,
+    askFrames: askFrames.map((frame) => frame.type),
   }) + "\n");
 } finally {
   if (webServer !== undefined) await within(webServer.stop(), 5000, "web server failure cleanup").catch(() => undefined);
@@ -1672,6 +1710,7 @@ async function proveOperatorSurfaces(endpoint, conversationId, expectedMessages)
   assert.equal(info.capabilities.replay, true);
   assert.equal(info.capabilities.configView, true);
   assert.equal(info.capabilities.health, true);
+  assert.equal(info.capabilities.askUser, true);
   assert.equal(replay.messages.length, expectedMessages);
   assert.equal(config.redacted, true);
   const serializedConfig = JSON.stringify(config.value);
@@ -1846,6 +1885,10 @@ function assertScenarioOutput(stdout) {
   if (!parsed.operatorFrames.includes("tool_call") || !parsed.operatorFrames.includes("tool_result")) {
     throw new Error(`Packed scenario did not stream the MemoryRecall round trip: ${stdout}`);
   }
+  if (!parsed.askFrames?.includes("ask_user") || !parsed.askFrames.includes("completed")
+    || !parsed.askFrames.includes("tool_call") || !parsed.askFrames.includes("tool_result")) {
+    throw new Error(`Packed scenario did not stream the AskUser round trip: ${stdout}`);
+  }
   return {
     expectedCronKey: expectedKey,
     webConversationId: parsed.webQuoteProof.conversationId,
@@ -1864,9 +1907,9 @@ function assertProviderRequests(requests, scenarioProof) {
   }
   const captureRequests = requests.filter((request) => isStructuredCaptureRequest(request.parsed));
   const userRequests = requests.filter((request) => !isStructuredCaptureRequest(request.parsed));
-  if (captureRequests.length !== 5 || userRequests.length !== 10) {
+  if (captureRequests.length !== 6 || userRequests.length !== 12) {
     throw new Error(
-      `Fake provider expected ten agent turns and five memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
+      `Fake provider expected twelve agent turns and six memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
     );
   }
   const userInputs = userRequests.map((request) => finalProviderUserText(request.parsed));
@@ -1885,9 +1928,9 @@ function assertProviderRequests(requests, scenarioProof) {
     throw new Error(`Packed provider user inputs must begin ${JSON.stringify(expectedInputs)}; found ${JSON.stringify(userInputs)}`);
   }
   const projectedQuote = /^Quoted message \(verified from conversation replay\):\n(.+)\n\nUser message:\nquote the prior answer$/u
-    .exec(userInputs.at(-1) ?? "");
+    .exec(userInputs[9] ?? "");
   if (projectedQuote === null) {
-    throw new Error(`Packed web quote was not projected into the provider input: ${JSON.stringify(userInputs.at(-1))}`);
+    throw new Error(`Packed web quote was not projected into the provider input: ${JSON.stringify(userInputs[9])}`);
   }
   const quote = JSON.parse(projectedQuote[1]);
   if (
@@ -1897,6 +1940,9 @@ function assertProviderRequests(requests, scenarioProof) {
     || quote.text !== EXPECTED_REPLY
   ) {
     throw new Error(`Packed web quote projection did not preserve authoritative replay identity: ${projectedQuote[1]}`);
+  }
+  if (JSON.stringify(userInputs.slice(10)) !== JSON.stringify([ASK_USER_QUERY, ASK_USER_QUERY])) {
+    throw new Error(`Packed AskUser provider inputs were not exact: ${JSON.stringify(userInputs.slice(10))}`);
   }
   for (const personalRequest of [userRequests[1], userRequests[2]]) {
     if (!JSON.stringify(personalRequest.parsed.tools ?? []).includes("project_status")) {
@@ -1918,14 +1964,41 @@ function assertProviderRequests(requests, scenarioProof) {
     || !toolResult.content.includes(EXPECTED_REPLY)) {
     throw new Error("Pi did not continue after executing MemoryRecall against packed memory-local");
   }
+  const askRequest = userRequests[10];
+  if (!hasProviderTool(askRequest.parsed, "AskUser")) {
+    throw new Error("Operator provider request did not receive the Core-owned AskUser tool");
+  }
+  const askContinuation = userRequests[11];
+  const askResult = askContinuation.parsed.messages?.find((message) =>
+    message?.role === "tool" && message.tool_call_id === ASK_USER_CALL_ID);
+  if (!hasProviderTool(askContinuation.parsed, "AskUser")
+    || typeof askResult?.content !== "string"
+    || !askResult.content.includes(ASK_USER_ANSWER)) {
+    throw new Error("Pi did not continue after the packed operator answered AskUser");
+  }
+  const capturedReplies = [];
   for (const request of captureRequests) {
-    if (hasProviderTool(request.parsed, "MemoryRecall")) {
-      throw new Error("Tool-free memory capture unexpectedly received MemoryRecall");
+    if (hasProviderTool(request.parsed, "MemoryRecall") || hasProviderTool(request.parsed, "AskUser")) {
+      throw new Error("Tool-free memory capture unexpectedly received an interactive Core tool");
     }
     const input = finalProviderUserText(request.parsed);
-    if (!input?.startsWith("User: ") || !input.includes(`Assistant: ${EXPECTED_REPLY}`)) {
+    if (!input?.startsWith("User: ")) {
       throw new Error(`Memory capture did not receive an exact completed turn: ${JSON.stringify(input)}`);
     }
+    if (input.endsWith(`Assistant: ${EXPECTED_REPLY}`)) capturedReplies.push(EXPECTED_REPLY);
+    else if (input.endsWith(`Assistant: ${ASK_USER_COMPLETION}`)) capturedReplies.push(ASK_USER_COMPLETION);
+    else throw new Error(`Memory capture received an unexpected completion: ${JSON.stringify(input)}`);
+  }
+  const expectedCapturedReplies = [
+    EXPECTED_REPLY,
+    EXPECTED_REPLY,
+    EXPECTED_REPLY,
+    EXPECTED_REPLY,
+    EXPECTED_REPLY,
+    ASK_USER_COMPLETION,
+  ].sort();
+  if (JSON.stringify(capturedReplies.sort()) !== JSON.stringify(expectedCapturedReplies)) {
+    throw new Error(`Memory capture completions must be ${JSON.stringify(expectedCapturedReplies)}; found ${JSON.stringify(capturedReplies)}`);
   }
 }
 
@@ -2179,6 +2252,59 @@ async function startOpenAiCompatibleProvider() {
       }
       const hasMemoryResult = parsed.messages?.some((message) =>
         message?.role === "tool" && message.tool_call_id === MEMORY_RECALL_CALL_ID);
+      const hasAskUserResult = parsed.messages?.some((message) =>
+        message?.role === "tool" && message.tool_call_id === ASK_USER_CALL_ID);
+      if (!hasAskUserResult
+        && finalProviderUserText(parsed) === ASK_USER_QUERY
+        && hasProviderTool(parsed, "AskUser")) {
+        response.write(sse({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: "echo",
+          choices: [{
+            index: 0,
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: ASK_USER_CALL_ID,
+                type: "function",
+                function: {
+                  name: "AskUser",
+                  arguments: JSON.stringify({
+                    questions: [{
+                      id: "tone",
+                      prompt: "Which tone should I use?",
+                      choices: [
+                        { value: "concise", label: "Concise", description: "Keep it short." },
+                        { value: "detailed", label: "Detailed" },
+                      ],
+                      allowFreeText: false,
+                      multiple: false,
+                    }, {
+                      id: "notes",
+                      prompt: "Any other constraints?",
+                      allowFreeText: true,
+                      multiple: false,
+                    }],
+                  }),
+                },
+              }],
+            },
+            finish_reason: null,
+          }],
+        }));
+        response.write(sse({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: "echo",
+          choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+          usage: { prompt_tokens: 8, completion_tokens: 8, total_tokens: 16 },
+        }));
+        response.end("data: [DONE]\n\n");
+        return;
+      }
       if (!hasMemoryResult
         && finalProviderUserText(parsed) === MEMORY_QUERY
         && hasProviderTool(parsed, "MemoryRecall")
@@ -2220,7 +2346,7 @@ async function startOpenAiCompatibleProvider() {
         object: "chat.completion.chunk",
         created,
         model: "echo",
-        choices: [{ index: 0, delta: { content: EXPECTED_REPLY }, finish_reason: null }],
+        choices: [{ index: 0, delta: { content: hasAskUserResult ? ASK_USER_COMPLETION : EXPECTED_REPLY }, finish_reason: null }],
       }));
       response.write(sse({
         id,

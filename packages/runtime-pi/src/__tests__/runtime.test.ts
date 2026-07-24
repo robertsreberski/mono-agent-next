@@ -281,6 +281,87 @@ describe("Pi-native runtime module", () => {
     await stop(runtime);
   });
 
+  it("executes Core-owned AskUser through Pi and continues with its structured answer", async () => {
+    const { runtime, faux } = fauxRuntime();
+    const questions = [{
+      id: "tone",
+      prompt: "Which tone should I use?",
+      choices: [
+        { value: "concise", label: "Concise", description: "Keep it short." },
+        { value: "detailed", label: "Detailed" },
+      ],
+      allowFreeText: false,
+      multiple: false,
+    }, {
+      id: "notes",
+      prompt: "Any other constraints?",
+      allowFreeText: true,
+      multiple: false,
+    }];
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("AskUser", { questions }, { id: "ask-1" })]),
+      (providerContext) => fauxAssistantMessage([fauxText(
+        JSON.stringify(providerContext.messages).includes("No jargon.")
+          ? "structured answer observed"
+          : "structured answer missing",
+      )]),
+    ]);
+    const executeTool = vi.fn(async (call: RuntimeToolCall, signal: AbortSignal) => {
+      signal.throwIfAborted();
+      return {
+        callId: call.id,
+        content: [{
+          type: "json" as const,
+          value: {
+            interactionId: "interaction-1",
+            answers: { tone: ["concise"], notes: ["No jargon."] },
+            answeredAt: "2026-07-24T00:00:00.000Z",
+          },
+        }],
+      };
+    });
+    const { context, events } = turnContext(executeTool);
+    await start(runtime);
+    const result = await runtime.runTurn(request("ask before answering", {
+      tools: [{
+        name: "AskUser",
+        description: "Ask the user and wait for a structured answer.",
+        inputSchema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["questions"],
+          properties: { questions: { type: "array", minItems: 1, maxItems: 3 } },
+        },
+      }],
+    }), context);
+
+    expect(result.message?.content).toContainEqual({ type: "text", text: "structured answer observed" });
+    expect(executeTool).toHaveBeenCalledWith({
+      id: "ask-1",
+      name: "AskUser",
+      input: { questions },
+    }, expect.any(AbortSignal));
+    expect(events).toContainEqual({
+      type: "tool-call",
+      call: { id: "ask-1", name: "AskUser", input: { questions } },
+    });
+    expect(events).toContainEqual({
+      type: "tool-result",
+      result: {
+        callId: "ask-1",
+        content: [{
+          type: "json",
+          value: {
+            interactionId: "interaction-1",
+            answers: { tone: ["concise"], notes: ["No jargon."] },
+            answeredAt: "2026-07-24T00:00:00.000Z",
+          },
+        }],
+      },
+    });
+    await stop(runtime);
+  });
+
   it("uses a terminating schema-constrained Pi tool for structured output", async () => {
     const { runtime, faux } = fauxRuntime();
     let maxTokens: number | undefined;

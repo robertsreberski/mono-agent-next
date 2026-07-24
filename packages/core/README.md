@@ -160,6 +160,17 @@ disable Core's separate automatic pre-turn recall, and `MemoryRecall` remains
 reserved against MCP/channel impersonation even when no model-visible recall
 tool is active.
 
+When a direct interaction handler or the originating channel exposes AskUser,
+Core also offers a reserved `AskUser` request tool. Global and request-local
+tool policy can remove it; approval policy cannot add a second prompt because
+the tool is itself an effect-free Core-mediated interaction. The model supplies
+one to three canonical questions with bounded choices and/or free text, while
+Core generates interaction identity and time, validates the shared
+module-sdk request and answer contracts, binds the active attempt signal, and
+returns the structured answer for provider continuation. The name remains
+reserved against MCP and channel impersonation even when no interaction bridge
+is available.
+
 ## Architecture
 
 ### Data flow
@@ -243,7 +254,7 @@ resent.
 | `state-execution-client.ts` | Typed, bounded, fail-closed client for the state module's opaque execution protocol. Durable storage formats remain state-owned. |
 | `bounded-value.ts` | Shared descriptor-safe snapshots and exact object/array boundary checks. |
 | `run-history-tool.ts` | Conversation-scoped, redacted, untrusted historical run evidence for capable runtimes. |
-| `host.ts` | Admission, serialized turns, exact sessions, safe fallback, model-visible memory recall, settlement, lifecycle, and health. |
+| `host.ts` | Admission, serialized turns, exact sessions, safe fallback, model-visible memory recall and AskUser, settlement, lifecycle, and health. |
 
 ## Public API
 
