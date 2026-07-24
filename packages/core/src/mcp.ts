@@ -210,7 +210,7 @@ export async function connectProjectMcpTools(
               }, undefined, {
                 signal: progress?.signal ?? signal,
                 timeout: Math.min(callTimeoutMs, totalTimeoutMs),
-                maxTotalTimeout: totalTimeoutMs,
+                maxTotalTimeout: totalTimeoutMs + callTimeoutMs,
                 ...(progress === undefined ? {} : {
                   resetTimeoutOnProgress: true, onprogress: progress.accept,
                 }),

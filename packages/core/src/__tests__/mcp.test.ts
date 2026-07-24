@@ -825,7 +825,7 @@ it("grants unspoofable request context only to selected stdio servers and resets
     environment: { PATH: process.env.PATH, HOME: process.env.HOME },
     requestContextServers: ["scoped"],
     callTimeoutMs: 150,
-    callTotalTimeoutMs: 300,
+    callTotalTimeoutMs: 1_000,
   });
   try {
     const scoped = connected.tools.find((tool) => tool.source.kind === "mcp" && tool.source.server === "scoped")!;
@@ -858,7 +858,7 @@ it("grants unspoofable request context only to selected stdio servers and resets
     expect(ordinaryActivities).toEqual([]);
 
     await expect(scoped.execute(
-      { delayMs: 2_000, progressEveryMs: 0.1, progressCount: 300 },
+      { delayMs: 2_000, progressEveryMs: 1, progressCount: 300, burstProgress: true },
       { requestContext: firstContext },
     )).rejects.toThrow(/progress exceeds the per-call event or byte limit/u);
     await waitForCancellationCount(cancellationMarker, 1);
@@ -870,7 +870,7 @@ it("grants unspoofable request context only to selected stdio servers and resets
     await waitForCancellationCount(cancellationMarker, 2);
 
     await expect(scoped.execute(
-      { delayMs: 600, progressEveryMs: 40, progressCount: 12 },
+      { delayMs: 1_200, progressEveryMs: 40, progressCount: 30 },
       { requestContext: firstContext },
     )).rejects.toMatchObject({ name: "TimeoutError" });
 
@@ -1083,10 +1083,12 @@ process.stdin.on("data", (chunk) => {
                 ? "\u0000\t" + "x".repeat(16372) + prefix + context.runOutputDir
                 : "\u0000 " + context.runOutputDir + "\n " + prefix + "phase " + phase
               : prefix + "phase " + phase;
-          setTimeout(() => send({
+          const report = () => send({
             jsonrpc: "2.0", method: "notifications/progress",
             params: { progressToken: token, progress: phase, total: count, message: detail },
-          }), every * phase);
+          });
+          if (message.params.arguments?.burstProgress === true) report();
+          else setTimeout(report, every * phase);
         }
       }
       setTimeout(() => {
