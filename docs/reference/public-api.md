@@ -18,7 +18,7 @@ pnpm run generate:source-beta-docs
 
 | Package | Public entrypoints | Named exports | Package API |
 | --- | ---: | ---: | --- |
-| `@mono-agent/module-sdk` | 5 | 335 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
+| `@mono-agent/module-sdk` | 5 | 342 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
 | `@mono-agent/core` | 1 | 59 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/core/README.md) |
 | `@mono-agent/cli` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/cli/README.md) |
 | `@mono-agent/runtime-pi` | 1 | 6 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-pi/README.md) |
@@ -134,6 +134,7 @@ MODULE_API_VERSION
 MODULE_SCHEMA_ENV_ELIGIBLE
 MODULE_SCHEMA_SECRET
 MODULE_SCHEMA_SLOT_REFERENCE
+MODULE_TOOL_LIMITS
 Memory
 MemoryCapabilities
 MemoryCaptureRequest
@@ -174,6 +175,10 @@ ModuleSlot
 ModuleStartContext
 ModuleStopContext
 ModuleStopReason
+ModuleToolBinding
+ModuleToolCallContext
+ModuleToolContribution
+ModuleToolTurnContext
 MonoAgentModule
 NormalizedAttachment
 OPEN_MODULE_KINDS
@@ -400,6 +405,8 @@ assertChannelModuleCompliance
 assertMemoryInstanceCompliance
 assertMemoryModuleCompliance
 assertModuleDefinitionCompliance
+assertModuleToolBindingCompliance
+assertModuleToolContributionsCompliance
 assertMonoAgentModuleExport
 assertRuntimeInstanceCompliance
 assertRuntimeModuleCompliance

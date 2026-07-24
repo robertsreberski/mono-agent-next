@@ -34,6 +34,10 @@ Exercise the configured channel with one real request and require a real model
 response. For the minimal template, send one authenticated request to its
 loopback webhook. For multi-runtime, also prove that reported attempt routing
 matches the configured runtime/model rather than assuming fallback occurred.
+If the selected module owns a model tool, prove it through that same real turn;
+static validation does not start the instance or promise that a failed startup
+contributed a callable tool. With state-local selected, `RunHistory` must come
+from that instance rather than a Core fallback.
 
 Stop the foreground process cleanly and confirm it drains. A renderer exit,
 separate product, or successful static validation is not a runtime smoke.

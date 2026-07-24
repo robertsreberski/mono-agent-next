@@ -9,6 +9,11 @@ Model-callable project tools belong in `.mcp.json`, referenced from the agent's
 context. An MCP server does not become a typed runtime, channel, memory, state,
 trigger, exporter, or sandbox module.
 
+The narrow exception is behavior inseparable from an already selected module's
+own private data and lifecycle. That module may offer a bounded tool descriptor
+without a new config key; this does not justify creating a module for an
+ordinary project or domain tool.
+
 ```json
 {
   "mcpServers": {
@@ -38,6 +43,21 @@ MCP into a generic daemon manager.
 
 Ordinary MCP servers receive only that configured stdio environment or HTTP
 headers.
+
+## Unified tool names and policy
+
+Core builds one catalog across reserved Core/instruction tools,
+selected-module contributions, MCP tools, and channel send tools. A unique
+portable non-Core name remains usable as written. Collisions receive stable
+kind-and-source-hashed canonical names, and a global or request-local policy
+that names an ambiguous raw alias fails with the canonical alternatives. Load
+order never selects a winner.
+
+All governed sources pass through agent and request tool policy, Core result
+normalization, redaction, and artifact handling. Module effects drive approval
+and sandbox eligibility exactly as declared; an effect-free state-local
+`RunHistory`, for example, does not require an approval. MCP and channel calls
+retain their established external-effect authority.
 
 ## Request-context grant
 

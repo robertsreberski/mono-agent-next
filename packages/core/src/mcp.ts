@@ -6,6 +6,10 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { FetchLike, Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  ModuleSlot,
+  RuntimeNativeToolEffect,
+} from "@mono-agent/module-sdk";
 import { AgentConfigError, errorMessage } from "./errors.js";
 import type { McpRequestContextV1 } from "./current-run-output.js";
 const MCP_CLOSE_TIMEOUT_MS = 1_000;
@@ -56,11 +60,20 @@ export interface CoreRuntimeTool {
   readonly rawAlias?: string;
   readonly description: string;
   readonly inputSchema: Readonly<Record<string, unknown>>;
+  /** Present for selected-module tools; other source kinds retain their established authority model. */
+  readonly effects?: readonly RuntimeNativeToolEffect[];
   readonly requestContextResult?: boolean;
   readonly source:
     | { readonly kind: "mcp"; readonly server: string; readonly tool: string }
     | { readonly kind: "channel"; readonly instanceId: string; readonly tool: string }
-    | { readonly kind: "core"; readonly capability: "skills.read" | "run-history.read" | "memory.recall" | "interaction.ask-user" };
+    | {
+        readonly kind: "module";
+        readonly slot: ModuleSlot;
+        readonly instanceId: string;
+        readonly packageName: string;
+        readonly tool: string;
+      }
+    | { readonly kind: "core"; readonly capability: "skills.read" | "memory.recall" | "interaction.ask-user" };
   execute(input: unknown, options?: {
     readonly signal?: AbortSignal;
     readonly callId?: string;

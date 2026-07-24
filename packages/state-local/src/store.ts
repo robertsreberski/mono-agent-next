@@ -7,6 +7,7 @@ import type {
   ModuleDiagnostic,
   ModuleDiagnosticsContext,
   ModuleHealth,
+  ModuleToolContribution,
   ModuleStopContext,
 } from "@mono-agent/module-sdk";
 import type {
@@ -135,6 +136,7 @@ export class StateLocalStore implements StateStore {
   readonly snapshotPath: string;
   readonly commands: readonly ModuleCommand[];
   readonly execution: StateLocalExecution;
+  readonly toolContributions: readonly ModuleToolContribution[];
   private readonly config: ResolvedStateLocalConfig;
   private readonly rootIdentity: FileIdentity;
   private readonly lease: ProcessLease;
@@ -203,6 +205,7 @@ export class StateLocalStore implements StateStore {
         return this.artifacts.releasePublished({ ref, signal });
       }),
     });
+    this.toolContributions = this.execution.toolContributions;
   }
 
   static async open(

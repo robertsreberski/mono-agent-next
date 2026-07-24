@@ -10,6 +10,8 @@ runtime-visible behavior:
 
 - [Project MCP](/tools/mcp/) is the normal boundary for model-callable project
   and domain tools.
+- An already selected module may offer a bounded tool only when the behavior is
+  inseparable from its own data and lifecycle; Core still governs it.
 - Skills supply instructions for an existing MCP server, CLI, or workflow.
 - `policy.tools` and `policy.approvals` narrow runtime-owned tool authority.
 - [Sandbox](/tools/sandbox/) is either explicitly off or one selected
@@ -18,4 +20,5 @@ runtime-visible behavior:
   not a tool selected by the running agent.
 
 Core is not a generic plugin registry or process supervisor. V1 has no
-continuation host grants or hidden child-run host capabilities.
+continuation host grants, hidden child-run host capabilities, or module-tool
+configuration key.

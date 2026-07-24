@@ -121,6 +121,12 @@ Unknown envelope fields and unknown core directives fail validation. A module
 schema controls its own exact options; extensible maps exist only where that
 schema declares them. There is no implicit `.env` loading.
 
+An explicitly selected instance may expose bounded static
+`toolContributions` for behavior inseparable from its own data and lifecycle.
+Core snapshots the descriptors and catalogs only successfully started
+instances. Importing or installing a package activates nothing, and there is no
+tool-plugin config key or registry.
+
 ## MCP request context and current-run output
 
 Project tools remain ordinary `.mcp.json` servers. Most receive only their
@@ -222,13 +228,27 @@ Core owns bounded admission, per-conversation ordering, cancellation, live
 input, AskUser answer routing, normalized history, tool policy, delivery,
 health, drain, and stop. Runtime modules own native request construction,
 protocol parsing, provider sessions, and attempt-local failure classification.
+Core also builds one deterministic catalog across Core, instruction,
+selected-module, MCP, and channel tools. Unique portable non-Core names remain
+raw; collisions receive stable kind-and-source-hashed names, and ambiguous raw
+policy aliases are rejected with their canonical alternatives. Module
+descriptors bind once per logical turn and remain subject to global/request
+policy, exact effect approval, sandbox eligibility, a 120-second hard deadline,
+normalization, redaction, cancellation, and final revocation.
 When the active direct or channel interaction surface supports it, Core adds a
 reserved, policy-filtered `AskUser` request tool. The model supplies one to
 three questions under the shared module-sdk bounds; Core supplies interaction
 identity, routes and validates the answer with the exact attempt signal, and
 returns the structured result so the runtime can continue. Because this is a
 Core-mediated interaction rather than an external effect, it never creates a
-second approval prompt. MCP and channel tools cannot claim the reserved name.
+second approval prompt. Module, MCP, and channel tools cannot claim the
+reserved name.
+
+The first-party state-local module uses this seam for its effect-free
+`RunHistory` tool. It reads the package-private journal directly and exposes
+only bounded, redacted terminal prior-run evidence from the exact logical
+conversation. Core retains the unchanged programmatic `listRuns()` and
+`readRun()` host APIs.
 
 Failures are not converted to fake responses. An attempt that may have committed
 a side effect is not blindly replayed on another route.

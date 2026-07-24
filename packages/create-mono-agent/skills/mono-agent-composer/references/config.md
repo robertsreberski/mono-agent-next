@@ -12,6 +12,10 @@ Mono-agent v1 uses one strict JSON envelope:
 - Unknown fields, package aliases, paths, Git/HTTP sources, undeclared
   environment interpolation, inline secrets, and invalid cross-slot references
   fail validation.
+- A selected package may expose bounded module-owned tools after startup. Do
+  not add a `plugins`, `tools`, or contribution config key; selection remains
+  the existing `$use`, and ordinary project/domain tools remain `.mcp.json`
+  entries.
 
 The generated minimal shape is:
 

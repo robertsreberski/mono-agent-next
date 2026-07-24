@@ -15,7 +15,7 @@ export const SOURCE_BETA_LINE_BUDGETS = Object.freeze([
   }),
   Object.freeze({
     id: "kernel-production",
-    maximumLines: 15_000,
+    maximumLines: 15_500,
   }),
 ]);
 
