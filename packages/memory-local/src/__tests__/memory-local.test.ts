@@ -23,8 +23,10 @@ import {
 import {
   decodeMemoryRow,
   ftsMatchExpression,
+  recordLimits,
   type BujoMemoryRow,
 } from "../bujo-db.js";
+import { reconstructMemoryRecord } from "../records.js";
 
 const signal = new AbortController().signal;
 const roots: string[] = [];
@@ -37,6 +39,29 @@ afterEach(async () => {
 });
 
 describe("memory-local", () => {
+  it("keeps reconstructed metadata on the exact serialized byte boundary", () => {
+    const config = parseMemoryLocalConfig(undefined);
+    const metadata = {
+      "quoted\"\n💾": ["value", { nested: true }],
+    };
+    const metadataBytes = Buffer.byteLength(JSON.stringify(metadata), "utf8");
+    const record = {
+      id: "bounded-metadata",
+      text: "Read-path metadata bound.",
+      createdAt: "2026-07-24T00:00:00.000Z",
+      metadata,
+    } satisfies MemoryRecord;
+
+    expect(reconstructMemoryRecord(record, {
+      ...recordLimits(config),
+      maxMetadataBytes: metadataBytes,
+    })).toEqual(record);
+    expect(() => reconstructMemoryRecord(record, {
+      ...recordLimits(config),
+      maxMetadataBytes: metadataBytes - 1,
+    })).toThrow(/metadata exceeds/iu);
+  });
+
   it("canonicalizes parseable v0 timestamps without accepting corrupt stored timestamps", () => {
     const row: BujoMemoryRow = {
       id: "v0:legacy-timestamp",
@@ -158,6 +183,33 @@ describe("memory-local", () => {
         dimensions: 768,
       },
     })).toThrow(/literal-loopback/u);
+    for (const [endpoint, normalized] of [
+      ["https://host:11434/", "https://host:11434"],
+      ["http://[::1]:11434", "http://[::1]:11434"],
+      ["http://127.0.0.1:11434/api///", "http://127.0.0.1:11434/api"],
+    ] as const) {
+      expect(parseMemoryLocalConfig({
+        embeddings: {
+          provider: "ollama",
+          endpoint,
+          model: "nomic-embed-text:v1.5",
+          dimensions: 768,
+        },
+      }).embeddings?.endpoint).toBe(normalized);
+    }
+    for (const endpoint of [
+      "https://host:11434/?query=yes",
+      "http://127.0.0.1:11434/api/#fragment",
+    ]) {
+      expect(() => parseMemoryLocalConfig({
+        embeddings: {
+          provider: "ollama",
+          endpoint,
+          model: "nomic-embed-text:v1.5",
+          dimensions: 768,
+        },
+      })).toThrow(/query or fragment/u);
+    }
   });
 
   it("projects model-visible recall enablement as an immutable capability", async () => {

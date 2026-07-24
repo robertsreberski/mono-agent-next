@@ -1,13 +1,12 @@
 import { backup as backupSqlite, DatabaseSync } from "node:sqlite";
-import { createHash, randomUUID } from "node:crypto";
-import { lstat, readdir, realpath } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readdir } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
 import type {
   Memory,
   MemoryCaptureRequest,
   MemoryForgetRequest,
-  MemoryHost,
   MemoryRecallRequest,
   MemoryRecallResult,
   MemoryRecord,
@@ -19,7 +18,6 @@ import type {
   ModuleHealthContext,
   ModuleStopContext,
 } from "@mono-agent/module-sdk";
-import { HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE } from "@mono-agent/module-sdk";
 
 import {
   assertCaptureReceiptIntegrity,
@@ -27,8 +25,6 @@ import {
   auditBujoDatabase,
   captureIntakeKey,
   captureReceiptKey,
-  configureBujoDatabase,
-  createBujoSchema,
   decodeMemoryRow,
   deleteMetadata,
   ensureVectorIntake,
@@ -37,7 +33,6 @@ import {
   getMetadata,
   insertMemoryRows,
   listMetadata,
-  openBujoDatabase,
   parseCaptureReceipt,
   quickCheck,
   readMemoryRow,
@@ -46,7 +41,6 @@ import {
   recordLimits,
   setMetadata,
   vectorIntakeKey,
-  verifyBujoSchema,
   writeMemoryVector,
   type BujoMemoryRow,
 } from "./bujo-db.js";
@@ -60,7 +54,6 @@ import {
   type MemoryLocalProjectionAudit,
 } from "./consolidation.js";
 import {
-  DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_BYTES,
   DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_TOKENS,
   DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS,
   MAX_MEMORY_LOCAL_INTAKE_RETRIES,
@@ -69,7 +62,6 @@ import {
 } from "./config.js";
 import {
   type MemoryEmbeddingProvider,
-  OllamaMemoryEmbeddingProvider,
   toVectorBlob,
 } from "./embeddings.js";
 import { MemoryLocalError } from "./errors.js";
@@ -79,64 +71,55 @@ import {
   type ValidatedMemoryRecord,
 } from "./records.js";
 import {
-  bindSecureDatabaseFile,
   createSecureFile,
-  hardenNewFile,
   inspectSecureFile,
   openPinnedSecureFile,
-  openSecureSqliteSidecars,
   openSecureRoot,
-  pathExists,
   readSecureFile,
-  rejectLegacyMarkerArtifacts,
-  sameFileIdentity,
   syncDirectory,
   verifySecureRoot,
-  type BoundSecureDatabaseFile,
   type FileIdentity,
   type PinnedSecureFile,
-  type SecureRoot,
-  type SecureSqliteSidecars,
 } from "./security.js";
 import {
-  acquireMemoryWriterLease,
-  type MemoryWriterLease,
-  type MemoryWriterLeaseHooks,
-} from "./writer-lease.js";
+  embeddingIdentity,
+  embeddingUnavailable,
+  parseCaptureIntake,
+  parseVectorIntake,
+  resolveEmbeddings,
+  resolveRuntimeCapture,
+  runtimeCaptureUnavailable,
+  runtimeCaptureResponseSchema,
+  validateRecordId,
+  validateRuntimeCaptureResult,
+  vectorIdentityCompatible,
+  type CaptureIntake,
+} from "./store-capture.js";
+import {
+  assertInitializedMarkerBytes,
+  readPinnedBytes,
+} from "./store-marker.js";
+import {
+  MEMORY_LOCAL_DATABASE_FILENAME,
+  MEMORY_LOCAL_MARKER_FILENAME,
+  closeDatabaseSafely,
+  openStore,
+  type MemoryLocalOpenHooks,
+  type OpenMemoryLocalForTestingOptions,
+  type OpenMemoryLocalOptions,
+  type StoreState,
+} from "./store-open.js";
 
-export const MEMORY_LOCAL_DATABASE_FILENAME = "memory.db";
-export const MEMORY_LOCAL_MARKER_FILENAME = ".first-run-memory-initializing";
+export {
+  MEMORY_LOCAL_DATABASE_FILENAME,
+  MEMORY_LOCAL_MARKER_FILENAME,
+  type OpenMemoryLocalOptions,
+} from "./store-open.js";
 
 const MARKER_MAX_BYTES = 128;
-const MANIFEST_MAX_BYTES = 256 * 1024;
 const MAX_RECALL_CANDIDATES = 256;
-const MANAGED_GENERATION = /^g-[0-9]{8}T[0-9]{9}Z-[a-f0-9-]{36}$/u;
 const CAPTURE_INTAKE_PREFIX = "memory-local:capture-intake:";
 const VECTOR_INTAKE_PREFIX = "memory-local:vector-intake:";
-
-export interface MemoryLocalOpenHooks {
-  readonly writerLease?: MemoryWriterLeaseHooks;
-  readonly beforeDatabaseOpen?: (path: string) => void | Promise<void>;
-  readonly afterDatabaseOpen?: (path: string) => void | Promise<void>;
-  readonly beforeMarkerCommit?: (path: string) => void | Promise<void>;
-  readonly afterMarkerCommit?: (path: string) => void | Promise<void>;
-  readonly beforeMarkerReopen?: (path: string) => void | Promise<void>;
-  readonly beforeCaptureCommit?: () => void;
-  readonly beforeConsolidationCommit?: () => void | Promise<void>;
-}
-
-export interface OpenMemoryLocalOptions {
-  readonly config?: unknown;
-  readonly configDirectory: string;
-  readonly dataDirectory: string;
-  readonly host?: MemoryHost;
-  readonly embeddingProvider?: MemoryEmbeddingProvider;
-  readonly clock?: () => Date;
-}
-
-export interface OpenMemoryLocalForTestingOptions extends OpenMemoryLocalOptions {
-  readonly hooks?: MemoryLocalOpenHooks;
-}
 
 export interface MemoryLocalAuditRequest {
   readonly signal: AbortSignal;
@@ -224,33 +207,6 @@ export interface MemoryLocalRetryResult {
 
 export interface MemoryLocalConsolidateRequest {
   readonly signal: AbortSignal;
-}
-
-interface StoreMarker {
-  readonly state: "initialized";
-  readonly storeId: string;
-}
-
-interface StoreState {
-  readonly root: SecureRoot;
-  readonly databasePath: string;
-  readonly markerPath: string;
-  readonly databaseFile: BoundSecureDatabaseFile;
-  readonly sidecars: SecureSqliteSidecars;
-  readonly markerFile: PinnedSecureFile;
-  readonly marker: StoreMarker;
-  readonly markerBytes: Uint8Array;
-  readonly database: DatabaseSync;
-  readonly lease: MemoryWriterLease;
-  readonly vectorDimensions: number;
-}
-
-interface CaptureIntake {
-  readonly version: 1;
-  readonly source: MemoryRecord;
-  readonly sourceHash: string;
-  readonly attempts: number;
-  readonly lastFailureAt?: string;
 }
 
 let testingFactory: (
@@ -1105,529 +1061,6 @@ export async function openMemoryLocalForTesting(
   return await testingFactory(options);
 }
 
-async function openStore(
-  directory: string,
-  config: MemoryLocalConfig,
-  hooks: MemoryLocalOpenHooks,
-): Promise<StoreState> {
-  const root = await openSecureRoot(directory);
-  let lease: MemoryWriterLease | undefined;
-  try {
-    await rejectLegacyMarkerArtifacts(root);
-    const markerPath = join(root.path, MEMORY_LOCAL_MARKER_FILENAME);
-    const databasePath = await resolveDatabasePath(root);
-    const markerExists = await pathExists(markerPath);
-    const databaseExists = databasePath !== undefined;
-    if (!databaseExists && !markerExists) {
-      if ((await readdir(root.path)).length !== 0) {
-        throw new MemoryLocalError(
-          "incomplete_initialization",
-          "Memory directory is non-empty but has no permanent BuJo store identity.",
-        );
-      }
-      lease = await acquireMemoryWriterLease(root, hooks.writerLease);
-      return await initializeStore(
-        root,
-        join(root.path, MEMORY_LOCAL_DATABASE_FILENAME),
-        markerPath,
-        lease,
-        config.embeddings?.dimensions ?? 768,
-        hooks,
-      );
-    }
-    if (!databaseExists || !markerExists || databasePath === undefined) {
-      throw new MemoryLocalError(
-        "incomplete_initialization",
-        "Memory database and permanent marker must either both exist or both be absent.",
-      );
-    }
-    await readSecureFile(markerPath, MARKER_MAX_BYTES);
-    lease = await acquireMemoryWriterLease(root, hooks.writerLease);
-    return await openExistingStore(root, databasePath, markerPath, lease, config, hooks);
-  } catch (error) {
-    await lease?.release().catch(() => undefined);
-    await root.handle.close().catch(() => undefined);
-    throw error;
-  }
-}
-
-async function initializeStore(
-  root: SecureRoot,
-  databasePath: string,
-  markerPath: string,
-  lease: MemoryWriterLease,
-  dimensions: number,
-  hooks: MemoryLocalOpenHooks,
-): Promise<StoreState> {
-  const storeId = randomUUID();
-  const markerHandle = await createSecureFile(markerPath);
-  let database: DatabaseSync | undefined;
-  let databaseFile: BoundSecureDatabaseFile | undefined;
-  let sidecars: SecureSqliteSidecars | undefined;
-  try {
-    await writeMarkerState(markerHandle, "initializing", storeId);
-    await syncDirectory(root.path);
-    const databaseHandle = await createSecureFile(databasePath);
-    try {
-      await databaseHandle.sync();
-    } finally {
-      await databaseHandle.close();
-    }
-    databaseFile = await bindSecureDatabaseFile(
-      databasePath,
-      () => hooks.beforeDatabaseOpen?.(databasePath),
-    );
-    await databaseFile.verify();
-    sidecars = await openSecureSqliteSidecars(
-      databaseFile.openPath,
-      databaseFile.recovering,
-    );
-    database = openBujoDatabase(databaseFile.openPath);
-    await databaseFile.verify();
-    await sidecars.captureNew();
-    await hooks.afterDatabaseOpen?.(databasePath);
-    await databaseFile.verify();
-    await sidecars.verify();
-    configureBujoDatabase(database);
-    await sidecars.captureNew();
-    createBujoSchema(database, dimensions);
-    await sidecars.captureNew();
-    quickCheck(database);
-    checkpoint(database);
-    await sidecars.captureNew();
-    await databaseFile.verify();
-    await verifySecureRoot(root);
-    const markerIdentity = fileIdentity(await markerHandle.stat());
-    const markerBefore = await readSecureFile(markerPath, MARKER_MAX_BYTES);
-    if (!sameFileIdentity(markerIdentity, markerBefore.identity)) {
-      throw new MemoryLocalError("unsafe_store", "First-run marker identity changed before publication.");
-    }
-    assertMarkerBytes(markerBefore.bytes, "initializing", storeId);
-    await hooks.beforeMarkerCommit?.(markerPath);
-    await verifySecureRoot(root);
-    await databaseFile.verify();
-    const descriptorBytes = await readHandleBytes(markerHandle, MARKER_MAX_BYTES);
-    assertMarkerBytes(descriptorBytes, "initializing", storeId);
-    const pathBeforeCommit = await readSecureFile(markerPath, MARKER_MAX_BYTES);
-    if (!sameFileIdentity(markerIdentity, pathBeforeCommit.identity)) {
-      throw new MemoryLocalError("unsafe_store", "First-run marker pathname changed before publication.");
-    }
-    assertMarkerBytes(pathBeforeCommit.bytes, "initializing", storeId);
-    await writeMarkerState(markerHandle, "initialized", storeId);
-    await syncDirectory(root.path);
-    await hooks.afterMarkerCommit?.(markerPath);
-    const markerAfter = await readSecureFile(markerPath, MARKER_MAX_BYTES);
-    if (!sameFileIdentity(markerIdentity, markerAfter.identity)) {
-      throw new MemoryLocalError("unsafe_store", "First-run marker identity changed during publication.");
-    }
-    const marker = Object.freeze({ state: "initialized" as const, storeId });
-    assertInitializedMarkerBytes(markerAfter.bytes, marker);
-    await databaseFile.verify();
-    await verifySecureRoot(root);
-    await hooks.beforeMarkerReopen?.(markerPath);
-    const markerFile = await openPinnedSecureFile(markerPath);
-    if (!sameFileIdentity(markerIdentity, markerFile.identity)) {
-      await markerFile.close();
-      throw new MemoryLocalError("unsafe_store", "First-run marker identity changed before reopening.");
-    }
-    return {
-      root,
-      databasePath,
-      markerPath,
-      databaseFile,
-      sidecars,
-      markerFile,
-      marker,
-      markerBytes: Uint8Array.from(markerAfter.bytes),
-      database,
-      lease,
-      vectorDimensions: dimensions,
-    };
-  } catch (error) {
-    const closeFailure = await closeDatabaseSafely(database, sidecars);
-    await databaseFile?.close().catch(() => undefined);
-    const reported = closeFailure ?? error;
-    throw new MemoryLocalError(
-      reported instanceof MemoryLocalError ? reported.code : "corrupt_store",
-      reported instanceof MemoryLocalError
-        ? reported.message
-        : "Memory store initialization failed and was left for inspection.",
-      { cause: safeInitializationCause(reported) },
-    );
-  } finally {
-    await markerHandle.close().catch(() => undefined);
-  }
-}
-
-async function openExistingStore(
-  root: SecureRoot,
-  databasePath: string,
-  markerPath: string,
-  lease: MemoryWriterLease,
-  config: MemoryLocalConfig,
-  hooks: MemoryLocalOpenHooks,
-): Promise<StoreState> {
-  const markerFile = await openPinnedSecureFile(markerPath);
-  let databaseFile: BoundSecureDatabaseFile | undefined;
-  let database: DatabaseSync | undefined;
-  let sidecars: SecureSqliteSidecars | undefined;
-  try {
-    databaseFile = await bindSecureDatabaseFile(
-      databasePath,
-      () => hooks.beforeDatabaseOpen?.(databasePath),
-    );
-    const markerBytes = await readPinnedBytes(markerFile, MARKER_MAX_BYTES);
-    const marker = parseMarker(markerBytes);
-    assertInitializedMarkerBytes(markerBytes, marker);
-    await databaseFile.verify();
-    sidecars = await openSecureSqliteSidecars(
-      databaseFile.openPath,
-      databaseFile.recovering,
-    );
-    database = openBujoDatabase(databaseFile.openPath);
-    await databaseFile.verify();
-    await sidecars.captureNew();
-    await hooks.afterDatabaseOpen?.(databasePath);
-    await databaseFile.verify();
-    await sidecars.verify();
-    configureBujoDatabase(database);
-    await sidecars.captureNew();
-    const snapshot = auditBujoDatabase(database);
-    assertReadableMemoryRows(database, config, snapshot);
-    const vectorDimensions = verifyBujoSchema(database);
-    await sidecars.captureNew();
-    await verifySecureRoot(root);
-    await markerFile.verify();
-    await databaseFile.verify();
-    const finalMarker = await readPinnedBytes(markerFile, MARKER_MAX_BYTES);
-    assertInitializedMarkerBytes(finalMarker, marker);
-    return {
-      root,
-      databasePath,
-      markerPath,
-      databaseFile,
-      sidecars,
-      markerFile,
-      marker,
-      markerBytes: Uint8Array.from(markerBytes),
-      database,
-      lease,
-      vectorDimensions,
-    };
-  } catch (error) {
-    const closeFailure = await closeDatabaseSafely(database, sidecars);
-    await markerFile.close().catch(() => undefined);
-    await databaseFile?.close().catch(() => undefined);
-    const reported = closeFailure ?? error;
-    throw new MemoryLocalError(
-      reported instanceof MemoryLocalError ? reported.code : "corrupt_store",
-      reported instanceof MemoryLocalError
-        ? reported.message
-        : "Memory database is corrupt or incompatible; refusing to modify it.",
-      { cause: safeInitializationCause(reported) },
-    );
-  }
-}
-
-async function resolveDatabasePath(root: SecureRoot): Promise<string | undefined> {
-  const manifestPath = join(root.path, ".index", "manifest.json");
-  if (await pathExists(manifestPath)) {
-    const manifestRead = await readSecureFile(manifestPath, MANIFEST_MAX_BYTES);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(manifestRead.bytes));
-    } catch {
-      throw new MemoryLocalError("corrupt_store", "Managed BuJo manifest is malformed.");
-    }
-    if (!isPlainObject(parsed) || parsed.schemaVersion !== 1 || !isPlainObject(parsed.active)) {
-      throw new MemoryLocalError("corrupt_store", "Managed BuJo manifest has an unsupported identity.");
-    }
-    const name = parsed.active.name;
-    if (typeof name !== "string" || !MANAGED_GENERATION.test(name)) {
-      throw new MemoryLocalError("corrupt_store", "Managed BuJo manifest active generation is malformed.");
-    }
-    const generationDirectory = join(root.path, ".index", "generations", name);
-    const canonical = await realpath(generationDirectory).catch(() => undefined);
-    if (canonical !== generationDirectory) {
-      throw new MemoryLocalError("unsafe_store", "Managed BuJo generation path is absent or traverses a link.");
-    }
-    const directoryStat = await lstat(generationDirectory);
-    if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()
-      || directoryStat.uid !== currentUid() || (directoryStat.mode & 0o777) !== 0o700) {
-      throw new MemoryLocalError("unsafe_store", "Managed BuJo generation directory is unsafe.");
-    }
-    return join(generationDirectory, MEMORY_LOCAL_DATABASE_FILENAME);
-  }
-  const legacy = join(root.path, MEMORY_LOCAL_DATABASE_FILENAME);
-  return await pathExists(legacy) ? legacy : undefined;
-}
-
-function parseMarker(bytes: Uint8Array): StoreMarker {
-  let value: string;
-  try {
-    value = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-  } catch {
-    throw new MemoryLocalError("corrupt_store", "Permanent first-run memory marker is not valid UTF-8.");
-  }
-  const match = /^initialized:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\n$/u.exec(value);
-  if (match === null) {
-    if (/^initializing:/u.test(value)) {
-      throw new MemoryLocalError(
-        "incomplete_initialization",
-        "Permanent first-run memory marker is still initializing; preserving it for operator inspection.",
-      );
-    }
-    throw new MemoryLocalError("corrupt_store", "Permanent first-run memory marker has invalid exact bytes.");
-  }
-  return Object.freeze({ state: "initialized", storeId: match[1]! });
-}
-
-function assertInitializedMarkerBytes(bytes: Uint8Array, marker: StoreMarker): void {
-  assertMarkerBytes(bytes, "initialized", marker.storeId);
-}
-
-function assertMarkerBytes(
-  bytes: Uint8Array,
-  state: "initializing" | "initialized",
-  storeId: string,
-): void {
-  const canonical = Buffer.from(`${state}:${storeId}\n`, "utf8");
-  if (!Buffer.from(bytes).equals(canonical)) {
-    throw new MemoryLocalError("corrupt_store", "Permanent first-run memory marker bytes are not canonical.");
-  }
-}
-
-async function writeMarkerState(
-  handle: import("node:fs/promises").FileHandle,
-  state: "initializing" | "initialized",
-  storeId: string,
-): Promise<void> {
-  const bytes = Buffer.from(`${state}:${storeId}\n`, "utf8");
-  const result = await handle.write(bytes, 0, bytes.byteLength, 0);
-  if (result.bytesWritten !== bytes.byteLength) {
-    throw new MemoryLocalError("incomplete_initialization", "First-run marker write was incomplete.");
-  }
-  await handle.truncate(bytes.byteLength);
-  await handle.sync();
-}
-
-async function readPinnedBytes(
-  file: PinnedSecureFile,
-  maximumBytes: number,
-): Promise<Uint8Array> {
-  await file.verify();
-  const bytes = await readHandleBytes(file.handle, maximumBytes);
-  await file.verify();
-  return bytes;
-}
-
-async function readHandleBytes(
-  handle: import("node:fs/promises").FileHandle,
-  maximumBytes: number,
-): Promise<Uint8Array> {
-  const stat = await handle.stat();
-  if (stat.size < 0 || stat.size > maximumBytes) {
-    throw new MemoryLocalError("unsafe_store", "Memory marker exceeds its byte bound.");
-  }
-  const output = Buffer.alloc(stat.size);
-  let offset = 0;
-  while (offset < output.byteLength) {
-    const { bytesRead } = await handle.read(output, offset, output.byteLength - offset, offset);
-    if (bytesRead === 0) break;
-    offset += bytesRead;
-  }
-  if (offset !== output.byteLength) {
-    throw new MemoryLocalError("unsafe_store", "Memory marker changed while reading.");
-  }
-  return Uint8Array.from(output);
-}
-
-function resolveRuntimeCapture(
-  config: MemoryLocalConfig,
-  host: MemoryHost | undefined,
-): MemoryRuntimeCaptureGrant | undefined {
-  if (!config.capture.enabled) return undefined;
-  if (host?.grantedCapabilities.has(HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE) !== true) {
-    throw runtimeCaptureUnavailable();
-  }
-  const grant = host.runtimeCapture;
-  if (grant === undefined || typeof grant !== "object" || grant === null || typeof grant.complete !== "function") {
-    throw runtimeCaptureUnavailable();
-  }
-  return grant;
-}
-
-function resolveEmbeddings(
-  config: MemoryLocalConfig,
-  supplied: MemoryEmbeddingProvider | undefined,
-): MemoryEmbeddingProvider | undefined {
-  if (config.embeddings === undefined) {
-    if (supplied !== undefined) {
-      throw new MemoryLocalError("embedding_unavailable", "An embedding provider was supplied without embedding config.");
-    }
-    return undefined;
-  }
-  const provider = supplied ?? new OllamaMemoryEmbeddingProvider(config.embeddings);
-  if (provider.id !== `ollama:${config.embeddings.model}`
-    || provider.dimensions !== config.embeddings.dimensions
-    || typeof provider.embed !== "function") {
-    throw new MemoryLocalError("embedding_unavailable", "Memory embedding provider identity does not match config.");
-  }
-  return provider;
-}
-
-function validateRuntimeCaptureResult(
-  result: Awaited<ReturnType<MemoryRuntimeCaptureGrant["complete"]>>,
-  source: MemoryRecord,
-): readonly MemoryRecord[] {
-  if (result === null || typeof result !== "object" || Array.isArray(result) || typeof result.text !== "string") {
-    throw new MemoryLocalError("runtime_capture_invalid", "Runtime capture returned an invalid result object.");
-  }
-  if (Buffer.byteLength(result.text, "utf8") > DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_BYTES) {
-    throw new MemoryLocalError("runtime_capture_invalid", "Runtime capture exceeded its output byte bound.");
-  }
-  let output: unknown = result.structuredOutput;
-  if (output === undefined) {
-    try {
-      output = JSON.parse(result.text) as unknown;
-    } catch {
-      throw new MemoryLocalError("runtime_capture_invalid", "Runtime capture returned invalid JSON.");
-    }
-  }
-  if (!isPlainObject(output) || Object.keys(output).length !== 1 || !Array.isArray(output.records)) {
-    throw new MemoryLocalError("runtime_capture_invalid", "Runtime capture returned an invalid structured object.");
-  }
-  if (output.records.length === 0 || output.records.length > DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS) {
-    throw new MemoryLocalError("runtime_capture_invalid", "Runtime capture returned an invalid record count.");
-  }
-  let serialized: string;
-  try {
-    serialized = canonicalJson(output as never);
-  } catch {
-    throw new MemoryLocalError("runtime_capture_invalid", "Runtime capture returned non-JSON records.");
-  }
-  if (Buffer.byteLength(serialized, "utf8") > DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_BYTES) {
-    throw new MemoryLocalError("runtime_capture_invalid", "Runtime capture exceeded its output byte bound.");
-  }
-  return Object.freeze(output.records.map((entry): MemoryRecord => {
-    if (!isPlainObject(entry) || Object.keys(entry).length !== 1 || typeof entry.text !== "string") {
-      throw new MemoryLocalError("runtime_capture_invalid", "Runtime capture returned an invalid extracted record.");
-    }
-    const text = entry.text.trim();
-    if (text.length === 0) {
-      throw new MemoryLocalError("runtime_capture_invalid", "Runtime capture returned an empty extracted record.");
-    }
-    return Object.freeze({
-      id: runtimeCaptureRecordId(source.id, text),
-      text,
-      createdAt: source.createdAt,
-      ...(source.metadata === undefined ? {} : { metadata: source.metadata }),
-    });
-  }));
-}
-
-function runtimeCaptureRecordId(sourceId: string, text: string): string {
-  const digest = createHash("sha256")
-    .update(sourceId)
-    .update("\0")
-    .update(text)
-    .digest("hex")
-    .slice(0, 48);
-  return `runtime:${digest}`;
-}
-
-function runtimeCaptureResponseSchema(maxRecords: number): Readonly<Record<string, unknown>> {
-  return Object.freeze({
-    type: "object",
-    required: ["records"],
-    additionalProperties: false,
-    properties: Object.freeze({
-      records: Object.freeze({
-        type: "array",
-        minItems: 1,
-        maxItems: maxRecords,
-        items: Object.freeze({
-          type: "object",
-          required: ["text"],
-          additionalProperties: false,
-          properties: Object.freeze({ text: Object.freeze({ type: "string", minLength: 1 }) }),
-        }),
-      }),
-    }),
-  });
-}
-
-function parseCaptureIntake(value: string, config: MemoryLocalConfig): CaptureIntake {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw new MemoryLocalError("corrupt_store", "Memory capture intake is malformed.");
-  }
-  if (!isPlainObject(parsed)
-    || parsed.version !== 1
-    || typeof parsed.sourceHash !== "string"
-    || !/^[a-f0-9]{64}$/u.test(parsed.sourceHash)
-    || !Number.isSafeInteger(parsed.attempts)
-    || (parsed.attempts as number) < 0
-    || (parsed.attempts as number) > 1_000_000
-    || !isPlainObject(parsed.source)
-    || (parsed.lastFailureAt !== undefined && !isCanonicalTimestamp(parsed.lastFailureAt))) {
-    throw new MemoryLocalError("corrupt_store", "Memory capture intake has invalid bounded fields.");
-  }
-  const source = validateMemoryRecord(parsed.source as unknown as MemoryRecord, recordLimits(config));
-  if (source.contentHash !== parsed.sourceHash) {
-    throw new MemoryLocalError("corrupt_store", "Memory capture intake content hash does not match.");
-  }
-  return Object.freeze({
-    version: 1,
-    source: source.record,
-    sourceHash: source.contentHash,
-    attempts: parsed.attempts as number,
-    ...(parsed.lastFailureAt === undefined ? {} : { lastFailureAt: parsed.lastFailureAt as string }),
-  });
-}
-
-function parseVectorIntake(value: string): string {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw new MemoryLocalError("corrupt_store", "Memory vector intake is malformed.");
-  }
-  if (!isPlainObject(parsed) || parsed.version !== 1 || typeof parsed.recordId !== "string") {
-    throw new MemoryLocalError("corrupt_store", "Memory vector intake has invalid bounded fields.");
-  }
-  validateRecordId(parsed.recordId);
-  return parsed.recordId;
-}
-
-function vectorIdentityCompatible(
-  database: DatabaseSync,
-  provider: MemoryEmbeddingProvider | undefined,
-  vectorDimensions: number,
-): boolean {
-  const count = Number((database.prepare("SELECT COUNT(*) AS count FROM memories_vec").get() as unknown as
-    { count: number }).count);
-  if (count === 0) return provider === undefined || provider.dimensions === vectorDimensions;
-  if (provider === undefined || provider.dimensions !== vectorDimensions) return false;
-  const mismatch = Number((database.prepare(`
-    SELECT COUNT(*) AS count
-    FROM memories m
-    JOIN memories_vec v ON v.rowid = m.seq
-    WHERE m.embedding_model IS NULL OR m.embedding_model != ? OR m.dim IS NULL OR m.dim != ?
-  `).get(provider.id, provider.dimensions) as unknown as { count: number }).count);
-  return mismatch === 0;
-}
-
-function embeddingIdentity(
-  provider: MemoryEmbeddingProvider | undefined,
-): { readonly id: string; readonly dimensions: number } | undefined {
-  return provider === undefined
-    ? undefined
-    : Object.freeze({ id: provider.id, dimensions: provider.dimensions });
-}
-
 async function hashPinnedFile(
   file: PinnedSecureFile,
   signal: AbortSignal,
@@ -1652,42 +1085,6 @@ async function hashPinnedFile(
 
 function checkpoint(database: DatabaseSync): void {
   database.exec("PRAGMA wal_checkpoint(TRUNCATE);");
-}
-
-async function closeDatabaseSafely(
-  database: DatabaseSync | undefined,
-  sidecars: SecureSqliteSidecars | undefined,
-): Promise<unknown | undefined> {
-  if (database === undefined) {
-    try {
-      await sidecars?.close();
-      return undefined;
-    } catch (error) {
-      return error;
-    }
-  }
-
-  let failure: unknown;
-  if (sidecars !== undefined) {
-    try {
-      failure = await sidecars.prepareForDatabaseClose();
-    } catch (error) {
-      // Do not allow pathname-only SQLite close to unlink an object that could
-      // not first be retained under descriptor-backed quarantine authority.
-      return error;
-    }
-  }
-  try {
-    database.close();
-  } catch (error) {
-    failure ??= error;
-  }
-  try {
-    await sidecars?.close();
-  } catch (error) {
-    failure ??= error;
-  }
-  return failure;
 }
 
 function identitySummary(identity: FileIdentity): {
@@ -1724,15 +1121,11 @@ function databaseIdentitySummary(identity: FileIdentity): {
   });
 }
 
-function validateRecordId(value: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/u.test(value)) {
-    throw new MemoryLocalError("invalid_record", "recordId has an invalid identifier.");
-  }
-}
-
 function throwIfAborted(signal: AbortSignal): void {
   if (!signal.aborted) return;
-  throw signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError");
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("The operation was aborted", "AbortError");
 }
 
 function canonicalNow(clock: () => Date): string {
@@ -1741,50 +1134,6 @@ function canonicalNow(clock: () => Date): string {
     throw new MemoryLocalError("maintenance_failed", "Memory clock returned an invalid date.");
   }
   return now.toISOString();
-}
-
-function isCanonicalTimestamp(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value) as unknown;
-  return prototype === Object.prototype || prototype === null;
-}
-
-function currentUid(): number {
-  if (typeof process.getuid !== "function") {
-    throw new MemoryLocalError("unsafe_store", "memory-local requires POSIX ownership checks.");
-  }
-  return process.getuid();
-}
-
-function fileIdentity(stat: import("node:fs").Stats): FileIdentity {
-  return Object.freeze({
-    device: String(stat.dev),
-    inode: String(stat.ino),
-    mode: stat.mode & 0o7777,
-    links: stat.nlink,
-    owner: stat.uid,
-    size: stat.size,
-  });
-}
-
-function runtimeCaptureUnavailable(): MemoryLocalError {
-  return new MemoryLocalError(
-    "runtime_capture_unavailable",
-    "Runtime-backed capture requires an explicit bounded host grant.",
-  );
-}
-
-function embeddingUnavailable(): MemoryLocalError {
-  return new MemoryLocalError(
-    "embedding_unavailable",
-    "Memory embedding provider is unavailable; FTS recall remains available.",
-  );
 }
 
 function sanitizedConsolidationError(error: unknown): MemoryLocalError {
@@ -1806,16 +1155,6 @@ function sanitizedConsolidationError(error: unknown): MemoryLocalError {
       ),
     },
   );
-}
-
-function safeInitializationCause(error: unknown): Error | undefined {
-  if (error instanceof MemoryLocalError) return undefined;
-  const code = typeof error === "object" && error !== null
-    ? Object.getOwnPropertyDescriptor(error, "code")?.value
-    : undefined;
-  return new Error(typeof code === "string" && /^[A-Z0-9_]{1,64}$/u.test(code)
-    ? `Memory initialization failed with ${code}`
-    : "Memory initialization failed");
 }
 
 function health(
