@@ -1,16 +1,8 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-
 import {
-  parseApprovalDecision,
   RUNTIME_SESSION_UNAVAILABLE_CODE,
   RuntimeTurnError,
 } from "@mono-agent/module-sdk";
 import type {
-  ApprovalRequest,
   JsonObject,
   ModuleDiagnostic,
   ModuleDiagnosticsContext,
@@ -26,27 +18,41 @@ import type {
   RuntimeTurnContext,
   RuntimeTurnRequest,
   RuntimeTurnResult,
-  RuntimeNativeToolDescriptor,
   TurnMessage,
 } from "@mono-agent/module-sdk";
 
+import {
+  captureApprovalEvidence,
+  handleCodexServerRequest,
+  type CodexItemEvidence,
+} from "./approvals.js";
 import type { RuntimeCodexConfig } from "./config.js";
+import {
+  approvalPolicy,
+  containedCodexConfig,
+  type EffectiveCodexMcpServer,
+} from "./containment.js";
 import { codexProcessEnvironment } from "./environment.js";
 import {
   JsonRpcProcess,
   JsonRpcRequestError,
   type JsonRpcMessage,
-  type JsonRpcServerRequest,
-  type ProcessLike,
   type SpawnProcess,
 } from "./json-rpc.js";
 import {
   isRuntimeCodexModel,
   runtimeCodexCapabilities,
-  runtimeCodexCommandEscalationTool,
-  runtimeCodexFileChangeEscalationTool,
   validateRuntimeCodexModel,
 } from "./model.js";
+import {
+  assertFrozenAppServerMcpConfig,
+  cancellationError,
+  codexAppServerArguments,
+  createProcessWorkingDirectory,
+  preflightCodexProcess,
+  preparePersistentCodexHome,
+  resolveNativeCodexHome,
+} from "./preflight.js";
 
 type RuntimeState = "created" | "running" | "draining" | "stopped";
 
@@ -215,1106 +221,6 @@ function notificationMatches(params: Record<string, unknown>, threadId: string, 
     || record(params.turn).id === turnId;
 }
 
-type CodexApprovalOutcome = "allow" | "deny" | "cancel";
-type CodexApprovalPolicy = "on-request" | "never";
-
-const APPROVAL_SUMMARY_MAX_BYTES = 16_000;
-const MAX_TRACKED_APPROVAL_ITEMS = 64;
-const SUPPORTED_CODEX_VERSION = "codex-cli 0.145.0";
-const PREFLIGHT_OUTPUT_MAX_BYTES = 65_536;
-const MAX_EFFECTIVE_MCP_SERVERS = 64;
-const MAX_MCP_SERVER_NAME_BYTES = 256;
-const MAX_MCP_OVERRIDE_BYTES = 32_768;
-const INERT_MCP_COMMAND = "/usr/bin/false";
-const INERT_MCP_URL = "http://127.0.0.1:1";
-const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u;
-const DIRECTIONAL_CONTROLS = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u;
-const BEARER_TOKEN = /\bBearer\s+[^\s,;]+/iu;
-
-const CODEX_DISABLED_FEATURES = Object.freeze([
-  "apply_patch_freeform",
-  "apply_patch_streaming_events",
-  "apps",
-  "apps_mcp_path_override",
-  "artifact",
-  "auth_elicitation",
-  "browser_use",
-  "browser_use_external",
-  "browser_use_full_cdp_access",
-  "chronicle",
-  "codex_git_commit",
-  "code_mode",
-  "code_mode_buffered_exec",
-  "code_mode_host",
-  "code_mode_only",
-  "collaboration_modes",
-  "concurrent_reasoning_summaries",
-  "computer_use",
-  "current_time_reminder",
-  "default_mode_request_user_input",
-  "deferred_executor",
-  "elevated_windows_sandbox",
-  "enable_fanout",
-  "enable_mcp_apps",
-  "enable_request_compression",
-  "exec_permission_approvals",
-  "executor_capability_discovery",
-  "experimental_windows_sandbox",
-  "external_agent_memory_import",
-  "external_migration",
-  "fast_mode",
-  "goals",
-  "guardian_approval",
-  "hooks",
-  "image_detail_original",
-  "image_generation",
-  "in_app_browser",
-  "item_ids",
-  "js_repl",
-  "js_repl_tools_only",
-  "local_thread_store_compression",
-  "memories",
-  "mentions_v2",
-  "multi_agent",
-  "multi_agent_mode",
-  "multi_agent_v2",
-  "network_proxy",
-  "non_prefixed_mcp_tool_names",
-  "personality",
-  "plugin_hooks",
-  "plugin_sharing",
-  "plugins",
-  "prevent_idle_sleep",
-  "realtime_conversation",
-  "remote_compaction_v2",
-  "remote_control",
-  "remote_models",
-  "remote_plugin",
-  "request_permissions_tool",
-  "request_rule",
-  "resize_all_images",
-  "respect_system_proxy",
-  "responses_websockets",
-  "responses_websockets_v2",
-  "rollout_budget",
-  "runtime_metrics",
-  "search_tool",
-  "secret_auth_storage",
-  "shell_snapshot",
-  "shell_zsh_fork",
-  "skill_env_var_dependency_prompt",
-  "skill_mcp_dependency_install",
-  "skill_search",
-  "sqlite",
-  "standalone_web_search",
-  "steer",
-  "terminal_resize_reflow",
-  "terminal_visualization_instructions",
-  "token_budget",
-  "tool_call_mcp_elicitation",
-  "tool_search",
-  "tool_search_always_defer_mcp_tools",
-  "tool_suggest",
-  "tui_app_server",
-  "unavailable_dummy_tools",
-  "undo",
-  "unified_exec_zsh_fork",
-  "use_agent_identity",
-  "use_legacy_landlock",
-  "use_linux_sandbox_bwrap",
-  "web_search_cached",
-  "web_search_request",
-  "web_search",
-  "workspace_dependencies",
-  "workspace_owner_usage_nudge",
-  // 0.145 compatibility aliases must be disabled alongside their canonical
-  // feature so a lower-precedence config cannot revive the authority.
-  "codex_hooks",
-  "collab",
-  "connectors",
-  "imagegenext",
-  "memory_tool",
-  "request_permissions",
-  "telepathy",
-] as const);
-
-const CODEX_ENABLED_FEATURES = Object.freeze([
-  "shell_tool",
-  "unified_exec",
-] as const);
-
-const CODEX_HOOK_EVENTS = Object.freeze([
-  "PermissionRequest",
-  "PostCompact",
-  "PostToolUse",
-  "PreCompact",
-  "PreToolUse",
-  "SessionEnd",
-  "SessionStart",
-  "Stop",
-  "SubagentStart",
-  "SubagentStop",
-  "UserPromptSubmit",
-] as const);
-
-function approvalPolicy(context: RuntimeTurnContext): CodexApprovalPolicy {
-  return context.requestApproval === undefined ? "never" : "on-request";
-}
-
-type CodexMcpTransport = "stdio" | "streamable_http";
-
-interface EffectiveCodexMcpServer {
-  readonly name: string;
-  readonly enabled: boolean;
-  readonly transport: CodexMcpTransport;
-}
-
-function inertMcpServerConfig(
-  transport: CodexMcpTransport,
-): Record<string, unknown> {
-  return transport === "stdio"
-    ? {
-        enabled: false,
-        required: false,
-        command: INERT_MCP_COMMAND,
-        args: [],
-      }
-    : { enabled: false, required: false, url: INERT_MCP_URL };
-}
-
-function containedCodexConfig(
-  mcpServers: readonly EffectiveCodexMcpServer[],
-): Record<string, unknown> {
-  return {
-    mcp_servers: Object.fromEntries(mcpServers.map((server) => [
-      server.name,
-      inertMcpServerConfig(server.transport),
-    ])),
-    notify: [],
-    web_search: "disabled",
-    model_provider: "openai",
-    openai_base_url: "",
-    chatgpt_base_url: "https://chatgpt.com/backend-api/",
-    approvals_reviewer: "user",
-    approval_policy: "never",
-    sandbox_mode: "read-only",
-    allow_login_shell: false,
-    check_for_update_on_startup: false,
-    hooks: Object.fromEntries(CODEX_HOOK_EVENTS.map((event) => [event, []])),
-    include_apps_instructions: false,
-    include_collaboration_mode_instructions: false,
-    include_environment_context: false,
-    include_permissions_instructions: false,
-    experimental_use_unified_exec_tool: false,
-    plugins: {},
-    skills: {
-      config: [],
-      include_instructions: false,
-    },
-    tool_suggest: {
-      discoverables: [],
-    },
-    analytics: { enabled: false },
-    feedback: { enabled: false },
-    otel: {
-      exporter: "none",
-      metrics_exporter: "none",
-      trace_exporter: "none",
-      log_user_prompt: false,
-    },
-    apps: {
-      _default: {
-        enabled: false,
-        destructive_enabled: false,
-        open_world_enabled: false,
-      },
-    },
-    features: {
-      ...Object.fromEntries(CODEX_DISABLED_FEATURES.map((feature) => [
-        feature,
-        false,
-      ])),
-      ...Object.fromEntries(CODEX_ENABLED_FEATURES.map((feature) => [
-        feature,
-        true,
-      ])),
-    },
-  };
-}
-
-function tomlBasicString(value: string): string {
-  let encoded = '"';
-  for (let index = 0; index < value.length;) {
-    const codePoint = value.codePointAt(index);
-    if (codePoint === undefined) throw new Error("Codex MCP server name is invalid");
-    if (codePoint >= 0xd800 && codePoint <= 0xdfff) {
-      throw new Error("Codex MCP server name contains invalid Unicode");
-    }
-    index += codePoint > 0xffff ? 2 : 1;
-    if (codePoint === 0x22) encoded += '\\"';
-    else if (codePoint === 0x5c) encoded += "\\\\";
-    else if (codePoint === 0x08) encoded += "\\b";
-    else if (codePoint === 0x09) encoded += "\\t";
-    else if (codePoint === 0x0a) encoded += "\\n";
-    else if (codePoint === 0x0c) encoded += "\\f";
-    else if (codePoint === 0x0d) encoded += "\\r";
-    else if (codePoint <= 0x1f || codePoint === 0x7f) {
-      encoded += `\\u${codePoint.toString(16).padStart(4, "0")}`;
-    } else {
-      encoded += String.fromCodePoint(codePoint);
-    }
-  }
-  return `${encoded}"`;
-}
-
-function mcpDisableConfigArguments(
-  servers: readonly EffectiveCodexMcpServer[],
-): readonly string[] {
-  if (servers.length === 0) return [];
-  const entries = servers.map((server) => {
-    const config = server.transport === "stdio"
-      ? `enabled=false,required=false,command=${tomlBasicString(INERT_MCP_COMMAND)},args=[]`
-      : `enabled=false,required=false,url=${tomlBasicString(INERT_MCP_URL)}`;
-    return `${tomlBasicString(server.name)}={${config}}`;
-  });
-  const override = `mcp_servers={${entries.join(",")}}`;
-  if (Buffer.byteLength(override, "utf8") > MAX_MCP_OVERRIDE_BYTES) {
-    throw new Error("Codex MCP disable override exceeds the bounded size limit");
-  }
-  return ["-c", override];
-}
-
-function codexProcessConfigArguments(
-  mcpServers: readonly EffectiveCodexMcpServer[] = [],
-): readonly string[] {
-  const overrides = [
-    "project_doc_max_bytes=0",
-    'approval_policy="never"',
-    'approvals_reviewer="user"',
-    'sandbox_mode="read-only"',
-    "allow_login_shell=false",
-    'model_provider="openai"',
-    'openai_base_url=""',
-    'chatgpt_base_url="https://chatgpt.com/backend-api/"',
-    "check_for_update_on_startup=false",
-    "include_apps_instructions=false",
-    "include_collaboration_mode_instructions=false",
-    "include_environment_context=false",
-    "include_permissions_instructions=false",
-    "experimental_use_unified_exec_tool=false",
-    "analytics.enabled=false",
-    "feedback.enabled=false",
-    'otel.exporter="none"',
-    'otel.metrics_exporter="none"',
-    'otel.trace_exporter="none"',
-    "otel.log_user_prompt=false",
-    "notify=[]",
-    "mcp_servers={}",
-    "plugins={}",
-    "skills.config=[]",
-    "skills.include_instructions=false",
-    "tool_suggest.discoverables=[]",
-    ...CODEX_HOOK_EVENTS.map((event) => `hooks.${event}=[]`),
-    ...CODEX_DISABLED_FEATURES.map((feature) => `features.${feature}=false`),
-    ...CODEX_ENABLED_FEATURES.map((feature) => `features.${feature}=true`),
-  ];
-  return [
-    ...overrides.flatMap((value) => ["-c", value]),
-    ...mcpDisableConfigArguments(mcpServers),
-  ];
-}
-
-function approvalCallId(params: Record<string, unknown>): string {
-  for (const key of ["approvalId", "itemId", "callId"]) {
-    const candidate = params[key];
-    if (
-      typeof candidate === "string"
-      && candidate.length <= 256
-      && IDENTIFIER.test(candidate)
-    ) {
-      return candidate;
-    }
-  }
-  return `codex-call-${randomUUID()}`;
-}
-
-function approvalText(value: unknown): string | readonly string[] | undefined {
-  if (typeof value === "string" && value.trim() !== "") return value;
-  if (
-    Array.isArray(value)
-    && value.length > 0
-    && value.every((candidate) => typeof candidate === "string")
-  ) {
-    return [...value];
-  }
-  return undefined;
-}
-
-function approvalString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim() !== "" ? value : undefined;
-}
-
-interface FileChangeAuthority {
-  readonly path: string;
-  readonly kind?: string;
-}
-
-type CodexItemEvidence =
-  | {
-      readonly type: "commandExecution";
-      readonly command?: string;
-      readonly cwd?: string;
-    }
-  | {
-      readonly type: "fileChange";
-      readonly changes: readonly FileChangeAuthority[];
-    };
-
-function fileChangeAuthority(value: unknown): readonly FileChangeAuthority[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const changes: FileChangeAuthority[] = [];
-  for (const candidate of value) {
-    const change = record(candidate);
-    if (typeof change.path !== "string" || change.path.trim() === "") return undefined;
-    changes.push({
-      path: change.path,
-      ...(typeof change.kind === "string" ? { kind: change.kind } : {}),
-    });
-  }
-  return changes;
-}
-
-function exactApprovalSummary(
-  title: string,
-  authority: Record<string, unknown>,
-  secret: string | undefined,
-): string | undefined {
-  let encoded: string;
-  try {
-    encoded = JSON.stringify(authority);
-  } catch {
-    return undefined;
-  }
-  if (
-    encoded === undefined
-    || DIRECTIONAL_CONTROLS.test(encoded)
-    || BEARER_TOKEN.test(encoded)
-    || (secret !== undefined && secret.length > 0 && encoded.includes(secret))
-  ) {
-    return undefined;
-  }
-  encoded = encoded
-    .replaceAll("\u2028", "\\u2028")
-    .replaceAll("\u2029", "\\u2029");
-  const summary = `${title}\nExact authority JSON: ${encoded}`;
-  return Buffer.byteLength(summary, "utf8") <= APPROVAL_SUMMARY_MAX_BYTES
-    ? summary
-    : undefined;
-}
-
-function commandApprovalSummary(
-  params: Record<string, unknown>,
-  evidence: CodexItemEvidence | undefined,
-  secret: string | undefined,
-): string | undefined {
-  const command = approvalText(params.command)
-    ?? (evidence?.type === "commandExecution" ? evidence.command : undefined);
-  if (command === undefined) return undefined;
-  const cwd = approvalString(params.cwd)
-    ?? (evidence?.type === "commandExecution" ? evidence.cwd : undefined);
-  return exactApprovalSummary(
-    "Codex requests permission to execute a command.",
-    {
-      command,
-      cwd: cwd ?? null,
-      reason: approvalString(params.reason) ?? null,
-      networkApprovalContext: params.networkApprovalContext ?? null,
-      additionalPermissions: params.additionalPermissions ?? null,
-    },
-    secret,
-  );
-}
-
-function fileChangeApprovalSummary(
-  params: Record<string, unknown>,
-  evidence: CodexItemEvidence | undefined,
-  secret: string | undefined,
-): string | undefined {
-  const fileChanges = record(params.fileChanges);
-  const legacyChanges = Object.keys(fileChanges)
-    .sort()
-    .map((path) => ({ path }));
-  const changes = legacyChanges.length > 0
-    ? legacyChanges
-    : evidence?.type === "fileChange"
-      ? evidence.changes
-      : [];
-  const grantRoot = approvalString(params.grantRoot);
-  if (changes.length === 0 && grantRoot === undefined) return undefined;
-  return exactApprovalSummary(
-    "Codex requests permission to change files.",
-    {
-      changes,
-      grantRoot: grantRoot ?? null,
-      reason: approvalString(params.reason) ?? null,
-    },
-    secret,
-  );
-}
-
-function approvalRouteMatches(
-  method: string,
-  params: Record<string, unknown>,
-  threadId: string | undefined,
-  turnId: string | undefined,
-): boolean {
-  if (threadId === undefined) return false;
-  if (method === "execCommandApproval" || method === "applyPatchApproval") {
-    return params.conversationId === threadId;
-  }
-  return params.threadId === threadId
-    && turnId !== undefined
-    && params.turnId === turnId;
-}
-
-function captureApprovalEvidence(
-  message: JsonRpcMessage,
-  evidence: Map<string, CodexItemEvidence>,
-): void {
-  const params = record(message.params);
-  if (message.method === "item/started") {
-    const item = record(params.item);
-    if (typeof item.id !== "string") return;
-    let next: CodexItemEvidence | undefined;
-    if (item.type === "commandExecution") {
-      const command = approvalString(item.command);
-      const cwd = approvalString(item.cwd);
-      next = {
-        type: "commandExecution",
-        ...(command === undefined ? {} : { command }),
-        ...(cwd === undefined ? {} : { cwd }),
-      };
-    } else if (item.type === "fileChange") {
-      const changes = fileChangeAuthority(item.changes);
-      if (changes !== undefined) next = { type: "fileChange", changes };
-    }
-    if (
-      next !== undefined
-      && (evidence.has(item.id) || evidence.size < MAX_TRACKED_APPROVAL_ITEMS)
-    ) {
-      evidence.set(item.id, next);
-    }
-    return;
-  }
-  if (
-    message.method === "item/fileChange/patchUpdated"
-    && typeof params.itemId === "string"
-  ) {
-    const changes = fileChangeAuthority(params.changes);
-    if (
-      changes !== undefined
-      && (evidence.has(params.itemId) || evidence.size < MAX_TRACKED_APPROVAL_ITEMS)
-    ) {
-      evidence.set(params.itemId, { type: "fileChange", changes });
-    }
-  }
-}
-
-async function coreApproval(
-  context: RuntimeTurnContext,
-  signal: AbortSignal,
-  descriptor: RuntimeNativeToolDescriptor,
-  callId: string,
-  summary: string,
-  timeoutMs: number,
-): Promise<CodexApprovalOutcome> {
-  if (signal.aborted) return "cancel";
-  if (context.requestApproval === undefined) return "deny";
-  const request: ApprovalRequest = {
-    interactionId: `codex-${randomUUID()}`,
-    callId,
-    toolId: descriptor.id,
-    displayName: descriptor.displayName,
-    effects: descriptor.effects,
-    summary,
-    requestedAt: new Date().toISOString(),
-  };
-  let timer: NodeJS.Timeout | undefined;
-  let abortHandler: (() => void) | undefined;
-  try {
-    const callback = Promise.resolve()
-      .then(async () => context.requestApproval?.(request, signal))
-      .then((decision) => {
-        if (decision === undefined) return "deny" as const;
-        const parsed = parseApprovalDecision(decision, request);
-        return parsed.decision === "allow_once" ? "allow" as const : "deny" as const;
-      })
-      .catch(() => "deny" as const);
-    const timeout = new Promise<"deny">((resolve) => {
-      timer = setTimeout(() => resolve("deny"), timeoutMs);
-      timer.unref?.();
-    });
-    const cancelled = new Promise<"cancel">((resolve) => {
-      abortHandler = () => resolve("cancel");
-      signal.addEventListener("abort", abortHandler, { once: true });
-      if (signal.aborted) abortHandler();
-    });
-    const outcome = await Promise.race([callback, timeout, cancelled]);
-    return signal.aborted ? "cancel" : outcome;
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    if (abortHandler !== undefined) {
-      signal.removeEventListener("abort", abortHandler);
-    }
-  }
-}
-
-function v2ApprovalResponse(outcome: CodexApprovalOutcome): {
-  readonly decision: "accept" | "decline" | "cancel";
-} {
-  return {
-    decision: outcome === "allow"
-      ? "accept"
-      : outcome === "cancel"
-        ? "cancel"
-        : "decline",
-  };
-}
-
-function v2CommandApprovalResponse(
-  outcome: CodexApprovalOutcome,
-  params: Record<string, unknown>,
-): { readonly decision: "accept" | "decline" | "cancel" } {
-  if (
-    outcome === "allow"
-    && Array.isArray(params.availableDecisions)
-    && !params.availableDecisions.includes("accept")
-  ) {
-    return { decision: "decline" };
-  }
-  return v2ApprovalResponse(outcome);
-}
-
-function legacyApprovalResponse(outcome: CodexApprovalOutcome): {
-  readonly decision: "approved" | "abort" | {
-    readonly denied: { readonly rejection: string };
-  };
-} {
-  return {
-    decision: outcome === "allow"
-      ? "approved"
-      : outcome === "cancel"
-        ? "abort"
-        : { denied: { rejection: "Denied by mono-agent policy" } },
-  };
-}
-
-async function handleCodexServerRequest(
-  message: JsonRpcServerRequest,
-  context: RuntimeTurnContext,
-  signal: AbortSignal,
-  threadId: string | undefined,
-  turnId: string | undefined,
-  evidence: ReadonlyMap<string, CodexItemEvidence>,
-  secret: string | undefined,
-  timeoutMs: number,
-): Promise<unknown> {
-  const params = record(message.params);
-  const itemEvidence = typeof params.itemId === "string"
-    ? evidence.get(params.itemId)
-    : undefined;
-  const routeMatches = approvalRouteMatches(
-    message.method,
-    params,
-    threadId,
-    turnId,
-  );
-
-  if (message.method === "item/commandExecution/requestApproval") {
-    const summary = commandApprovalSummary(params, itemEvidence, secret);
-    const outcome = routeMatches && summary !== undefined
-      ? await coreApproval(
-          context,
-          signal,
-          runtimeCodexCommandEscalationTool,
-          approvalCallId(params),
-          summary,
-          timeoutMs,
-        )
-      : "deny";
-    return v2CommandApprovalResponse(outcome, params);
-  }
-  if (message.method === "item/fileChange/requestApproval") {
-    const summary = fileChangeApprovalSummary(params, itemEvidence, secret);
-    const outcome = routeMatches && summary !== undefined
-      ? await coreApproval(
-          context,
-          signal,
-          runtimeCodexFileChangeEscalationTool,
-          approvalCallId(params),
-          summary,
-          timeoutMs,
-        )
-      : "deny";
-    return v2ApprovalResponse(outcome);
-  }
-  if (message.method === "execCommandApproval") {
-    const summary = commandApprovalSummary(params, itemEvidence, secret);
-    const outcome = routeMatches && summary !== undefined
-      ? await coreApproval(
-          context,
-          signal,
-          runtimeCodexCommandEscalationTool,
-          approvalCallId(params),
-          summary,
-          timeoutMs,
-        )
-      : "deny";
-    return legacyApprovalResponse(outcome);
-  }
-  if (message.method === "applyPatchApproval") {
-    const summary = fileChangeApprovalSummary(params, itemEvidence, secret);
-    const outcome = routeMatches && summary !== undefined
-      ? await coreApproval(
-          context,
-          signal,
-          runtimeCodexFileChangeEscalationTool,
-          approvalCallId(params),
-          summary,
-          timeoutMs,
-        )
-      : "deny";
-    return legacyApprovalResponse(outcome);
-  }
-  if (message.method === "item/permissions/requestApproval") {
-    // The provider protocol has no explicit denial variant for permission
-    // profiles. An empty, turn-scoped grant is the protocol-correct
-    // fail-closed response; runtime-codex never echoes requested authority.
-    return {
-      permissions: {},
-      scope: "turn",
-      strictAutoReview: true,
-    };
-  }
-  throw new Error(`Unsupported Codex server request: ${message.method}`);
-}
-
-function errnoCode(error: unknown): string | undefined {
-  return error !== null
-    && typeof error === "object"
-    && "code" in error
-    && typeof error.code === "string"
-    ? error.code
-    : undefined;
-}
-
-function currentUid(): number {
-  if (typeof process.getuid !== "function") {
-    throw new Error("runtime-codex requires POSIX ownership checks");
-  }
-  return process.getuid();
-}
-
-function assertOwnedDirectory(
-  info: Awaited<ReturnType<typeof lstat>>,
-  path: string,
-  exactPrivate: boolean,
-): void {
-  if (!info.isDirectory() || info.isSymbolicLink()) {
-    throw new Error(`${path} must be a regular directory, not a symbolic link`);
-  }
-  if (info.uid !== currentUid()) {
-    throw new Error(`${path} must be owned by the current user`);
-  }
-  const mode = Number(info.mode) & 0o777;
-  if (exactPrivate ? mode !== 0o700 : (mode & 0o022) !== 0) {
-    throw new Error(exactPrivate
-      ? `${path} must have mode 0700`
-      : `${path} must not be group/world writable`);
-  }
-}
-
-async function prepareDataDirectory(authoredPath: string): Promise<string> {
-  const root = resolve(authoredPath);
-  const missing: string[] = [];
-  let cursor = root;
-  let existing: Awaited<ReturnType<typeof lstat>> | undefined;
-  while (existing === undefined) {
-    existing = await lstat(cursor).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return undefined;
-      throw error;
-    });
-    if (existing === undefined) {
-      const parent = dirname(cursor);
-      if (parent === cursor) throw new Error("runtime-codex data directory has no existing parent");
-      missing.unshift(cursor);
-      cursor = parent;
-    }
-  }
-  assertOwnedDirectory(existing, cursor, false);
-  if (await realpath(cursor) !== cursor) {
-    throw new Error("runtime-codex data directory ancestors must not traverse symbolic links");
-  }
-  for (const path of missing) {
-    await mkdir(path, { mode: 0o700 });
-    const created = await lstat(path);
-    assertOwnedDirectory(created, path, true);
-    if (await realpath(path) !== path) {
-      throw new Error("runtime-codex data directory creation crossed a symbolic link");
-    }
-  }
-  return root;
-}
-
-async function preparePersistentCodexHome(dataDirectory: string): Promise<string> {
-  const root = await prepareDataDirectory(dataDirectory);
-  const codexHome = join(root, "codex-home");
-  const existing = await lstat(codexHome).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return undefined;
-    throw error;
-  });
-  if (existing === undefined) {
-    await mkdir(codexHome, { mode: 0o700 });
-  }
-  const prepared = await lstat(codexHome);
-  assertOwnedDirectory(prepared, codexHome, true);
-  if (await realpath(codexHome) !== codexHome) {
-    throw new Error("runtime-codex contained home must be a canonical non-symlink path");
-  }
-  const config = await lstat(join(codexHome, "config.toml")).catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return undefined;
-      throw error;
-    },
-  );
-  if (config !== undefined) {
-    throw new Error("runtime-codex contained home must not contain config.toml");
-  }
-  return codexHome;
-}
-
-async function resolveNativeCodexHome(): Promise<string> {
-  const configuredHome = process.env.CODEX_HOME?.trim();
-  const userHome = process.env.HOME?.trim();
-  const authored = configuredHome !== undefined && configuredHome !== ""
-    ? configuredHome
-    : userHome === undefined || userHome === ""
-      ? undefined
-      : join(userHome, ".codex");
-  if (authored === undefined) {
-    throw new Error("runtime-codex native auth requires CODEX_HOME or HOME");
-  }
-  const canonical = await realpath(resolve(authored));
-  const info = await lstat(canonical);
-  assertOwnedDirectory(info, canonical, false);
-  return canonical;
-}
-
-async function createProcessWorkingDirectory(): Promise<{
-  readonly directory: string;
-  cleanup(): Promise<void>;
-}> {
-  const directory = await mkdtemp(join(tmpdir(), "mono-agent-codex-process-"));
-  const info = await lstat(directory);
-  assertOwnedDirectory(info, directory, true);
-  return {
-    directory,
-    async cleanup() {
-      await rm(directory, { recursive: true, force: true });
-    },
-  };
-}
-
-interface DirectProcessResult {
-  readonly code: number | null;
-  readonly signal: NodeJS.Signals | null;
-  readonly stdout: string;
-  readonly stderr: string;
-}
-
-function defaultDirectSpawn(
-  command: string,
-  args: readonly string[],
-  options: {
-    readonly cwd: string;
-    readonly env: NodeJS.ProcessEnv;
-    readonly shell: false;
-  },
-): ProcessLike {
-  return spawn(command, [...args], {
-    ...options,
-    stdio: ["pipe", "pipe", "pipe"],
-  }) as ChildProcessWithoutNullStreams;
-}
-
-async function runBoundedProcess(options: {
-  readonly command: string;
-  readonly args: readonly string[];
-  readonly cwd: string;
-  readonly env: NodeJS.ProcessEnv;
-  readonly timeoutMs: number;
-  readonly signal: AbortSignal;
-  readonly spawnProcess?: SpawnProcess;
-}): Promise<DirectProcessResult> {
-  if (options.signal.aborted) throw cancellationError(options.signal);
-  const launch = options.spawnProcess ?? defaultDirectSpawn;
-  const child = launch(options.command, options.args, {
-    cwd: options.cwd,
-    env: options.env,
-    shell: false,
-  });
-  return new Promise<DirectProcessResult>((resolveResult, rejectResult) => {
-    let stdout = "";
-    let stderr = "";
-    let settled = false;
-    const finish = (
-      result: DirectProcessResult | undefined,
-      error?: Error,
-    ): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      options.signal.removeEventListener("abort", onAbort);
-      if (error !== undefined) rejectResult(error);
-      else if (result !== undefined) resolveResult(result);
-    };
-    const append = (stream: "stdout" | "stderr", chunk: Buffer | string): void => {
-      const value = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      if (stream === "stdout") stdout += value;
-      else stderr += value;
-      if (
-        Buffer.byteLength(stream === "stdout" ? stdout : stderr, "utf8")
-        > PREFLIGHT_OUTPUT_MAX_BYTES
-      ) {
-        child.kill("SIGKILL");
-        finish(undefined, new Error(`Codex ${stream} exceeded the preflight output limit`));
-      }
-    };
-    const onAbort = (): void => {
-      child.kill("SIGKILL");
-      finish(undefined, cancellationError(options.signal));
-    };
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(undefined, new Error("Codex preflight timed out"));
-    }, options.timeoutMs);
-    timer.unref?.();
-    child.stdout.on("data", (chunk: Buffer | string) => append("stdout", chunk));
-    child.stderr.on("data", (chunk: Buffer | string) => append("stderr", chunk));
-    child.once("error", (error) => finish(undefined, error));
-    child.once("close", (code, signal) => {
-      finish({ code, signal, stdout, stderr });
-    });
-    options.signal.addEventListener("abort", onAbort, { once: true });
-    child.stdin.end();
-    if (options.signal.aborted) onAbort();
-  });
-}
-
-function codexAppServerArguments(
-  mcpServers: readonly EffectiveCodexMcpServer[],
-): readonly string[] {
-  return [
-    "app-server",
-    "--listen",
-    "stdio://",
-    "--strict-config",
-    ...codexProcessConfigArguments(mcpServers),
-  ];
-}
-
-function assertCleanProcessResult(
-  result: DirectProcessResult,
-  operation: string,
-): void {
-  if (result.code !== 0 || result.signal !== null) {
-    throw new Error(`${operation} exited unsuccessfully`);
-  }
-  if (result.stderr.trim() !== "") {
-    throw new Error(`${operation} emitted stderr`);
-  }
-}
-
-function parseEffectiveMcpServers(
-  output: string,
-  operation: string,
-): readonly EffectiveCodexMcpServer[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(output) as unknown;
-  } catch {
-    throw new Error(`${operation} emitted malformed JSON`);
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error(`${operation} did not return a server array`);
-  }
-  if (parsed.length > MAX_EFFECTIVE_MCP_SERVERS) {
-    throw new Error(`${operation} exceeded the MCP server-count limit`);
-  }
-  const names = new Set<string>();
-  const servers: EffectiveCodexMcpServer[] = [];
-  for (const candidate of parsed) {
-    const entry = record(candidate);
-    const name = entry.name;
-    const enabled = entry.enabled;
-    const transport = record(entry.transport).type;
-    if (
-      typeof name !== "string"
-      || Buffer.byteLength(name, "utf8") > MAX_MCP_SERVER_NAME_BYTES
-      || typeof enabled !== "boolean"
-      || (transport !== "stdio" && transport !== "streamable_http")
-    ) {
-      throw new Error(`${operation} returned an invalid MCP server entry`);
-    }
-    if (names.has(name)) {
-      throw new Error(`${operation} returned duplicate MCP server names`);
-    }
-    // Exercise the same encoder used in the frozen CLI override now, before
-    // any provider process is allowed to start.
-    tomlBasicString(name);
-    names.add(name);
-    servers.push({ name, enabled, transport });
-  }
-  return servers.sort((left, right) =>
-    left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
-  );
-}
-
-async function preflightCodexProcess(options: {
-  readonly command: string;
-  readonly cwd: string;
-  readonly env: NodeJS.ProcessEnv;
-  readonly timeoutMs: number;
-  readonly signal: AbortSignal;
-  readonly spawnProcess?: SpawnProcess;
-  readonly probeStrictConfig: boolean;
-}): Promise<readonly EffectiveCodexMcpServer[]> {
-  const run = async (args: readonly string[]): Promise<DirectProcessResult> =>
-    runBoundedProcess({ ...options, args });
-  const version = await run(["--version"]);
-  assertCleanProcessResult(version, "Codex version preflight");
-  if (version.stdout.trim() !== SUPPORTED_CODEX_VERSION) {
-    throw new Error(`runtime-codex requires exactly ${SUPPORTED_CODEX_VERSION}`);
-  }
-
-  const discovery = await run([
-    "mcp",
-    "list",
-    "--json",
-    ...codexProcessConfigArguments(),
-  ]);
-  assertCleanProcessResult(discovery, "Codex MCP discovery preflight");
-  const configuredServers = parseEffectiveMcpServers(
-    discovery.stdout,
-    "Codex MCP discovery preflight",
-  );
-
-  if (options.probeStrictConfig) {
-    const strictConfig = await run(codexAppServerArguments(configuredServers));
-    assertCleanProcessResult(strictConfig, "Codex strict-config preflight");
-    if (strictConfig.stdout.trim() !== "") {
-      throw new Error("Codex strict-config preflight emitted unexpected output");
-    }
-  }
-
-  const mcp = await run([
-    "mcp",
-    "list",
-    "--json",
-    ...codexProcessConfigArguments(configuredServers),
-  ]);
-  assertCleanProcessResult(mcp, "Codex MCP preflight");
-  const verifiedServers = parseEffectiveMcpServers(
-    mcp.stdout,
-    "Codex MCP preflight",
-  );
-  if (
-    verifiedServers.length !== configuredServers.length
-    || verifiedServers.some((server, index) =>
-      server.name !== configuredServers[index]?.name
-      || server.transport !== configuredServers[index]?.transport
-    )
-  ) {
-    throw new Error("Codex MCP server set changed during containment preflight");
-  }
-  if (verifiedServers.some((server) => server.enabled)) {
-    throw new Error("runtime-codex could not disable every effective Codex MCP server");
-  }
-  return verifiedServers;
-}
-
-function assertFrozenAppServerMcpConfig(
-  value: unknown,
-  expected: readonly EffectiveCodexMcpServer[],
-): void {
-  const response = record(value);
-  if (
-    response.config === null
-    || typeof response.config !== "object"
-    || Array.isArray(response.config)
-  ) {
-    throw new Error("Codex app-server returned malformed effective config");
-  }
-  const config = response.config as Record<string, unknown>;
-  if (
-    config.mcp_servers === null
-    || typeof config.mcp_servers !== "object"
-    || Array.isArray(config.mcp_servers)
-  ) {
-    throw new Error("Codex app-server returned malformed effective MCP config");
-  }
-  const mcpServers = config.mcp_servers as Record<string, unknown>;
-  const actualNames = Object.keys(mcpServers).sort();
-  const expectedNames = expected.map((server) => server.name).sort();
-  if (
-    actualNames.length !== expectedNames.length
-    || actualNames.some((name, index) => name !== expectedNames[index])
-  ) {
-    throw new Error("Codex app-server MCP config changed after containment preflight");
-  }
-  const expectedByName = new Map(expected.map((server) => [
-    server.name,
-    server,
-  ]));
-  for (const name of actualNames) {
-    const server = expectedByName.get(name);
-    const actual = record(mcpServers[name]);
-    if (
-      server === undefined
-      || actual.enabled !== false
-      || actual.required === true
-    ) {
-      throw new Error("Codex app-server exposed an enabled MCP server");
-    }
-    if (
-      server.transport === "stdio"
-      && (
-        actual.command !== INERT_MCP_COMMAND
-        || !Array.isArray(actual.args)
-        || actual.args.length !== 0
-        || actual.url !== undefined
-      )
-    ) {
-      throw new Error("Codex app-server changed an inert MCP transport");
-    }
-    if (
-      server.transport === "streamable_http"
-      && (
-        actual.url !== INERT_MCP_URL
-        || actual.command !== undefined
-      )
-    ) {
-      throw new Error("Codex app-server changed an inert MCP transport");
-    }
-  }
-}
-
-function cancellationError(signal: AbortSignal): Error {
-  return signal.reason instanceof Error
-    ? signal.reason
-    : new Error("Codex turn was cancelled");
-}
-
 async function abortable<T>(
   operation: () => Promise<T>,
   signal: AbortSignal,
@@ -1329,6 +235,17 @@ async function abortable<T>(
       .finally(() => signal.removeEventListener("abort", onAbort));
     if (signal.aborted) onAbort();
   });
+}
+
+function emitIsolated(
+  context: RuntimeTurnContext,
+  event: Parameters<RuntimeTurnContext["emit"]>[0],
+): void {
+  try {
+    void Promise.resolve(context.emit(event)).catch(() => undefined);
+  } catch {
+    // Streaming consumers cannot take down the provider transport.
+  }
 }
 
 export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime {
@@ -1467,7 +384,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           probeStrictConfig: false,
         });
       } catch (error) {
-        await processDirectory?.cleanup();
+        await processDirectory?.cleanup().catch(() => undefined);
         throw new RuntimeCodexError(
           "PROVIDER_FAILED",
           "runtime-codex could not preflight its isolated provider process",
@@ -1486,7 +403,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           turnMcpServers,
         );
       } catch (error) {
-        await processDirectory.cleanup();
+        await processDirectory.cleanup().catch(() => undefined);
         throw new RuntimeCodexError(
           "PROVIDER_FAILED",
           redact(error, options.config.auth?.apiKey),
@@ -1532,16 +449,16 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         if (message.method === "item/agentMessage/delta" && typeof params.delta === "string") {
           if (typeof params.itemId === "string") streamedItemIds.add(params.itemId);
           output += params.delta;
-          void context.emit({ type: "text-delta", delta: params.delta });
+          emitIsolated(context, { type: "text-delta", delta: params.delta });
         } else if (message.method === "item/completed") {
           const item = record(params.item);
           if (item.type === "agentMessage" && typeof item.text === "string"
             && (typeof item.id !== "string" || !streamedItemIds.has(item.id))) {
             output += item.text;
-            void context.emit({ type: "text-delta", delta: item.text });
+            emitIsolated(context, { type: "text-delta", delta: item.text });
           }
         } else if ((message.method === "item/reasoning/summaryTextDelta" || message.method === "item/reasoning/textDelta") && typeof params.delta === "string") {
-          void context.emit({ type: "thinking-delta", delta: params.delta });
+          emitIsolated(context, { type: "thinking-delta", delta: params.delta });
         } else if (message.method === "turn/completed") terminalResolve(message);
         else if (message.method === "error" || message.method === "$transport/closed") {
           terminalReject(new Error(redact(
@@ -1751,16 +668,25 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         });
       } finally {
         resolveTurnIdentity();
-        unregisterLiveInput?.();
-        request.signal.removeEventListener("abort", onAbort);
-        unregisterServerRequests();
-        unsubscribe();
         try {
-          await client.close();
-        } finally {
-          active.delete(client);
-          await processDirectory.cleanup();
+          unregisterLiveInput?.();
+        } catch {
+          // Cleanup is best effort and must not replace the turn result.
         }
+        request.signal.removeEventListener("abort", onAbort);
+        try {
+          unregisterServerRequests();
+        } catch {
+          // Cleanup is best effort and must not replace the turn result.
+        }
+        try {
+          unsubscribe();
+        } catch {
+          // Cleanup is best effort and must not replace the turn result.
+        }
+        await client.close().catch(() => undefined);
+        active.delete(client);
+        await processDirectory.cleanup().catch(() => undefined);
       }
     },
   };

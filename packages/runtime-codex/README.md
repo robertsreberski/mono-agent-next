@@ -118,8 +118,11 @@ apply the configured session-unavailable policy deterministically.
 | --- | --- |
 | `config.ts` | Strict limits and environment-secret annotation. |
 | `auth-command.ts` | Non-serving, redacted authentication status and unsupported-action results. |
+| `approvals.ts` | Fail-closed Core approval bridging and provider evidence capture. |
+| `containment.ts` | Frozen Codex feature, tool, MCP, and config containment. |
 | `json-rpc.ts` | Bounded, timeout-aware, direct-process JSON-RPC client. |
-| `runtime.ts` | Codex protocol lifecycle and event normalization. |
+| `preflight.ts` | Process-home preparation, direct probes, and effective-config verification. |
+| `runtime.ts` | Turn orchestration, cancellation, live input, and event normalization. |
 | `index.ts` | Typed module definition. |
 
 ## Public API

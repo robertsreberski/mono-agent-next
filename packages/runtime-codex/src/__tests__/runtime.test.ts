@@ -16,6 +16,7 @@ import { PassThrough, Writable } from "node:stream";
 
 import type {
   ApprovalRequest,
+  RuntimeLiveInputHandler,
   RuntimeSession,
   RuntimeTurnEvent,
 } from "@mono-agent/module-sdk";
@@ -33,14 +34,22 @@ class FakeCodexProcess extends EventEmitter implements ProcessLike {
   readonly stderr = new PassThrough();
   readonly stdin: Writable;
   readonly requests: Record<string, unknown>[] = [];
+  readonly killSignals: (NodeJS.Signals | undefined)[] = [];
+  closeEmitted = false;
+  readonly firstKill: Promise<NodeJS.Signals | undefined>;
+  #resolveFirstKill!: (signal: NodeJS.Signals | undefined) => void;
 
   constructor(
     private readonly observeRequest?: (
       request: Record<string, unknown>,
       process: FakeCodexProcess,
     ) => boolean,
+    private readonly closeOnKill = true,
   ) {
     super();
+    this.firstKill = new Promise((resolve) => {
+      this.#resolveFirstKill = resolve;
+    });
     let input = "";
     this.stdin = new Writable({
       write: (chunk, _encoding, callback) => {
@@ -77,7 +86,17 @@ class FakeCodexProcess extends EventEmitter implements ProcessLike {
   }
 
   send(value: unknown): void { this.stdout.write(`${JSON.stringify(value)}\n`); }
-  kill(_signal?: NodeJS.Signals): boolean { queueMicrotask(() => this.emit("close", 0, null)); return true; }
+  kill(signal?: NodeJS.Signals): boolean {
+    this.killSignals.push(signal);
+    this.#resolveFirstKill(signal);
+    if (this.closeOnKill) {
+      queueMicrotask(() => {
+        this.closeEmitted = true;
+        this.emit("close", 0, null);
+      });
+    }
+    return true;
+  }
 }
 
 class FakeCommandProcess extends EventEmitter implements ProcessLike {
@@ -461,6 +480,393 @@ describe("runtime-codex", () => {
     const containedHome = String(launchOptions?.env.CODEX_HOME);
     expect(containedHome).toBe(join(testDataDirectory("direct"), "codex-home"));
     expect((await lstat(containedHome)).mode & 0o777).toBe(0o700);
+  });
+
+  it("cancels an active turn and cleans up", async () => {
+    const child = new FakeCodexProcess((request, process) => {
+      if (request.method === "turn/start") {
+        process.send({
+          id: request.id,
+          result: { turn: { id: "turn-cancelled" } },
+        });
+        return true;
+      }
+      if (request.method === "turn/interrupt") {
+        process.send({ id: request.id, result: {} });
+        return true;
+      }
+      return false;
+    });
+    const launch = runtimeLaunch([child]);
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("cancel"),
+      spawnProcess: launch,
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    const controller = new AbortController();
+
+    const pending = runtime.runTurn({
+      turnId: "turn",
+      conversationId: "conversation",
+      model: "gpt-5.6-codex",
+      messages: [{ role: "user", content: [{ type: "text", text: "wait" }] }],
+      tools: [],
+      signal: controller.signal,
+    }, {
+      emit() {},
+      async executeTool(call) { return { callId: call.id, content: [] }; },
+    });
+
+    await vi.waitFor(() => {
+      expect(child.requests.some((request) =>
+        request.method === "turn/start")).toBe(true);
+    });
+    controller.abort(new Error("operator cancelled"));
+    await expect(pending).resolves.toMatchObject({
+      status: "cancelled",
+      session: {
+        id: "thread-1",
+        conversationId: "conversation",
+        route: {
+          runtimeInstanceId: "codex-runtime",
+          model: "gpt-5.6-codex",
+        },
+      },
+    });
+    expect(child.requests).toContainEqual(expect.objectContaining({
+      method: "turn/interrupt",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-cancelled",
+      },
+    }));
+    expect(child.killSignals).toContain("SIGTERM");
+    expect(child.closeEmitted).toBe(true);
+    const turnLaunch = [...launch.mock.calls].reverse().find((call) =>
+      call[1][0] === "app-server");
+    await expect(lstat(String(turnLaunch?.[2].cwd))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("steers live input into the active turn", async () => {
+    const child = new FakeCodexProcess((request, process) => {
+      if (request.method === "turn/start") {
+        process.send({
+          id: request.id,
+          result: { turn: { id: "turn-steered" } },
+        });
+        return true;
+      }
+      if (request.method === "turn/steer") {
+        process.send({ id: request.id, result: {} });
+        return true;
+      }
+      return false;
+    });
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("steer"),
+      spawnProcess: runtimeLaunch([child]),
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    const controller = new AbortController();
+    let liveInput: RuntimeLiveInputHandler | undefined;
+    let beforeTurn: Promise<unknown> | undefined;
+    const unregister = vi.fn();
+
+    const pending = runtime.runTurn({
+      turnId: "turn",
+      conversationId: "conversation",
+      model: "gpt-5.6-codex",
+      messages: [{ role: "user", content: [{ type: "text", text: "wait" }] }],
+      tools: [],
+      signal: controller.signal,
+    }, {
+      emit() {},
+      async executeTool(call) { return { callId: call.id, content: [] }; },
+      registerLiveInput(handler) {
+        liveInput = handler;
+        beforeTurn = Promise.resolve(handler({
+          id: "early",
+          text: "too early",
+          receivedAt: new Date().toISOString(),
+        }, controller.signal));
+        return unregister;
+      },
+    });
+
+    await vi.waitFor(() => expect(liveInput).toBeDefined());
+    await expect(beforeTurn).resolves.toBe("requeue");
+    await vi.waitFor(() => {
+      expect(child.requests.some((request) =>
+        request.method === "turn/start")).toBe(true);
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const handler = liveInput;
+    if (handler === undefined) throw new Error("expected live-input handler");
+    await expect(handler({
+      id: "live",
+      text: "steer now",
+      receivedAt: new Date().toISOString(),
+    }, controller.signal)).resolves.toBe("applied");
+    expect(child.requests).toContainEqual(expect.objectContaining({
+      method: "turn/steer",
+      params: {
+        threadId: "thread-1",
+        expectedTurnId: "turn-steered",
+        input: [{ type: "text", text: "steer now" }],
+      },
+    }));
+
+    child.send({
+      method: "item/agentMessage/delta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-steered",
+        delta: "done",
+      },
+    });
+    child.send({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: {
+          id: "turn-steered",
+          status: "completed",
+          items: [],
+        },
+      },
+    });
+    await expect(pending).resolves.toMatchObject({
+      status: "completed",
+      message: { content: [{ type: "text", text: "done" }] },
+    });
+    expect(unregister).toHaveBeenCalledOnce();
+
+    const steerCount = child.requests.filter((request) =>
+      request.method === "turn/steer").length;
+    controller.abort(new Error("already complete"));
+    await expect(handler({
+      id: "late",
+      text: "too late",
+      receivedAt: new Date().toISOString(),
+    }, controller.signal)).resolves.toBe("requeue");
+    expect(child.requests.filter((request) =>
+      request.method === "turn/steer")).toHaveLength(steerCount);
+  });
+
+  it("parses structured output and rejects non-JSON", async () => {
+    const outputProcess = (output: string): FakeCodexProcess =>
+      new FakeCodexProcess((request, process) => {
+        if (request.method !== "turn/start") return false;
+        process.send({
+          id: request.id,
+          result: { turn: { id: "turn-structured" } },
+        });
+        queueMicrotask(() => {
+          process.send({
+            method: "item/agentMessage/delta",
+            params: {
+              threadId: "thread-1",
+              turnId: "turn-structured",
+              delta: output,
+            },
+          });
+          process.send({
+            method: "turn/completed",
+            params: {
+              threadId: "thread-1",
+              turn: {
+                id: "turn-structured",
+                status: "completed",
+                items: [],
+              },
+            },
+          });
+        });
+        return true;
+      });
+    const valid = outputProcess('{"answer":42}');
+    const invalid = outputProcess("not JSON");
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("structured"),
+      spawnProcess: runtimeLaunch([valid, invalid]),
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    const responseSchema = {
+      type: "object",
+      properties: { answer: { type: "number" } },
+      required: ["answer"],
+      additionalProperties: false,
+    } as const;
+    const context = {
+      emit() {},
+      async executeTool(call: { readonly id: string }) {
+        return { callId: call.id, content: [] };
+      },
+    };
+
+    await expect(runtime.runTurn({
+      turnId: "valid",
+      conversationId: "conversation",
+      model: "gpt-5.6-codex",
+      messages: [{ role: "user", content: [{ type: "text", text: "json" }] }],
+      tools: [],
+      signal: new AbortController().signal,
+      options: { responseSchema },
+    }, context)).resolves.toMatchObject({
+      status: "completed",
+      structuredOutput: { answer: 42 },
+    });
+    expect(valid.requests).toContainEqual(expect.objectContaining({
+      method: "turn/start",
+      params: expect.objectContaining({ outputSchema: responseSchema }),
+    }));
+
+    await expect(runtime.runTurn({
+      turnId: "invalid",
+      conversationId: "conversation",
+      model: "gpt-5.6-codex",
+      messages: [{ role: "user", content: [{ type: "text", text: "json" }] }],
+      tools: [],
+      signal: new AbortController().signal,
+      options: { responseSchema },
+    }, context)).rejects.toMatchObject({
+      name: "RuntimeCodexError",
+      code: "PROTOCOL_INVALID",
+      retryability: "not-retryable",
+      sideEffects: "none",
+    });
+  });
+
+  it("does not let close cleanup mask a completed turn", async () => {
+    const child = new FakeCodexProcess(undefined, false);
+    const launch = runtimeLaunch([child]);
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("close-failure"),
+      spawnProcess: launch,
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    vi.useFakeTimers();
+    try {
+      const pending = runtime.runTurn({
+        turnId: "turn",
+        conversationId: "conversation",
+        model: "gpt-5.6-codex",
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+        tools: [],
+        signal: new AbortController().signal,
+      }, {
+        emit() {},
+        async executeTool(call) { return { callId: call.id, content: [] }; },
+      });
+      await child.firstKill;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(pending).resolves.toMatchObject({
+        status: "completed",
+        message: { content: [{ type: "text", text: "hello" }] },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(child.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    const turnLaunch = [...launch.mock.calls].reverse().find((call) =>
+      call[1][0] === "app-server");
+    await expect(lstat(String(turnLaunch?.[2].cwd))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("isolates rejected notification emits from the provider turn", async () => {
+    const child = new FakeCodexProcess((request, process) => {
+      if (request.method !== "turn/start") return false;
+      process.send({
+        id: request.id,
+        result: { turn: { id: "turn-emit" } },
+      });
+      queueMicrotask(() => {
+        process.send({
+          method: "item/reasoning/summaryTextDelta",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-emit",
+            delta: "thinking",
+          },
+        });
+        process.send({
+          method: "item/agentMessage/delta",
+          params: {
+            threadId: "thread-1",
+            turnId: "turn-emit",
+            delta: "hello",
+          },
+        });
+        process.send({
+          method: "turn/completed",
+          params: {
+            threadId: "thread-1",
+            turn: {
+              id: "turn-emit",
+              status: "completed",
+              items: [],
+            },
+          },
+        });
+      });
+      return true;
+    });
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("emit-isolation"),
+      spawnProcess: runtimeLaunch([child]),
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await expect(runtime.runTurn({
+        turnId: "turn",
+        conversationId: "conversation",
+        model: "gpt-5.6-codex",
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+        tools: [],
+        signal: new AbortController().signal,
+      }, {
+        emit(event) {
+          if (event.type === "thinking-delta") {
+            throw new Error("synchronous consumer emit failed");
+          }
+          if (event.type === "text-delta") {
+            return Promise.reject(new Error("consumer emit failed"));
+          }
+        },
+        async executeTool(call) { return { callId: call.id, content: [] }; },
+      })).resolves.toMatchObject({
+        status: "completed",
+        message: { content: [{ type: "text", text: "hello" }] },
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 
   it("bridges v2 command approvals through Core before Codex continues", async () => {
