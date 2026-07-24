@@ -11,7 +11,22 @@ import {
 } from "@mono-agent/module-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createSlackChannel, createSlackSocketModeTransport, createSlackWebApiClient, monoAgentModule, parseSlackConfig, SlackDelivery, slackConfigSchema, type SlackApiClient, type SlackSocketEvent, type SlackSocketEventHandler, type SlackSocketFailureHandler, type SlackSocketTransport } from "../index.js";
+import {
+  createSlackChannel,
+  createSlackSocketModeTransport,
+  createSlackWebApiClient,
+  monoAgentModule,
+  parseSlackConfig,
+  SlackDelivery,
+  slackConfigSchema,
+  type SlackActionEvent,
+  type SlackApiClient,
+  type SlackMessageEvent,
+  type SlackSocketEvent,
+  type SlackSocketEventHandler,
+  type SlackSocketFailureHandler,
+  type SlackSocketTransport,
+} from "../index.js";
 import { SlackInbox } from "../inbox.js";
 
 const CONFIG = { appToken: "xapp-000000000000000", botToken: "xoxb-000000000000000", allowedTeamIds: ["T1"], allowedChannelIds: ["C1"], defaultDestination: "C1" };
@@ -532,6 +547,784 @@ describe("slack channel", () => {
     await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
   });
 
+  it("terminally drains consecutive unmatched actions before later primary work", async () => {
+    const dataDirectory = temporaryDirectory();
+    const socket = durableAckSocket(dataDirectory);
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(
+      async () => ({ status: "completed", text: "done" }),
+    );
+    const channel = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        dispatch,
+        {
+          answerAsk: async () => ({ status: "accepted" }),
+        },
+        dataDirectory,
+      ),
+      socketFactory: () => socket.transport,
+      clientFactory: () => client(),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await Promise.all([
+      socket.emit(action("unmatched-action-1", "not-a-live-token-1")),
+      socket.emit(action("unmatched-action-2", "not-a-live-token-2")),
+      socket.emit(message("after-unmatched", "continue")),
+    ]);
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal }))
+        .toMatchObject({
+          status: "healthy",
+          details: {
+            pendingEvents: 0,
+            processingEvents: 0,
+            completedReceipts: 3,
+          },
+        });
+    });
+    const persisted = JSON.parse(
+      await readFile(join(dataDirectory, "inbox-v1.json"), "utf8"),
+    ) as { readonly receipts: readonly string[] };
+    expect(persisted.receipts).toEqual([
+      "unmatched-action-1",
+      "unmatched-action-2",
+      "after-unmatched",
+    ]);
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("renders every AskUser choice and resolves on a late one", async () => {
+    const dataDirectory = temporaryDirectory();
+    const socket = durableAckSocket(dataDirectory);
+    const now = new Date().toISOString();
+    const choices = Array.from({ length: 20 }, (_value, index) => ({
+      value: `choice-${String(index + 1)}`,
+      label: `Choice ${String(index + 1)}`,
+    }));
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({
+      messageId: "posted",
+    }));
+    let resolveAnswer!: () => void;
+    const answered = new Promise<void>((resolve) => {
+      resolveAnswer = resolve;
+    });
+    let dispatches = 0;
+    let maxDispatches = 0;
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async (request, reply) => {
+      dispatches += 1;
+      maxDispatches = Math.max(maxDispatches, dispatches);
+      try {
+        if (request.requestId === "ask-primary") {
+          await reply.emit({
+            type: "ask-user",
+            ask: {
+              interactionId: "ask-blocking",
+              requestedAt: now,
+              questions: [{
+                id: "choice",
+                prompt: "Choose one",
+                choices,
+                allowFreeText: false,
+                multiple: false,
+              }],
+            },
+          });
+          await answered;
+        }
+        return { status: "completed", text: request.requestId };
+      } finally {
+        dispatches -= 1;
+      }
+    });
+    const answerAsk = vi.fn<NonNullable<ChannelHost["answerAsk"]>>(async () => {
+      resolveAnswer();
+      return { status: "accepted" };
+    });
+    const channel = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        dispatch,
+        { answerAsk },
+        dataDirectory,
+      ),
+      socketFactory: () => socket.transport,
+      clientFactory: () => client({ postMessage }),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await socket.emit(message("ask-primary", "ask"));
+    await vi.waitFor(() => {
+      expect(postMessage.mock.calls.find(([request]) => request.buttons !== undefined))
+        .toBeDefined();
+    });
+    await socket.emit(message("queued-primary", "later"));
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal }))
+        .toMatchObject({
+          details: { pendingEvents: 1, processingEvents: 1 },
+        });
+    });
+    const askPost = postMessage.mock.calls.find(
+      ([request]) => request.buttons !== undefined,
+    )?.[0];
+    expect(askPost?.buttons).toHaveLength(20);
+    const late = askPost?.buttons?.[18];
+    expect(late?.label).toBe("Choice 19");
+    await socket.emit(action("ask-answer", late!.value));
+
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(2));
+    expect(answerAsk).toHaveBeenCalledWith(
+      "slack:C1:1",
+      expect.objectContaining({
+        interactionId: "ask-blocking",
+        answers: { choice: ["choice-19"] },
+      }),
+      expect.any(AbortSignal),
+    );
+    expect(maxDispatches).toBe(1);
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal }))
+        .toMatchObject({
+          status: "healthy",
+          details: {
+            pendingEvents: 0,
+            processingEvents: 0,
+            completedReceipts: 3,
+          },
+        });
+    });
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("does not consume input admitted before a free-text Ask is visible", async () => {
+    const dataDirectory = temporaryDirectory();
+    const socket = durableAckSocket(dataDirectory);
+    let releaseRender!: () => void;
+    const renderGate = new Promise<void>((resolve) => {
+      releaseRender = resolve;
+    });
+    let resolveAnswer!: () => void;
+    const answered = new Promise<void>((resolve) => {
+      resolveAnswer = resolve;
+    });
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async (request, reply) => {
+      if (request.requestId === "ask-primary") {
+        await renderGate;
+        await reply.emit({
+          type: "ask-user",
+          ask: {
+            interactionId: "free-text-order",
+            requestedAt: new Date().toISOString(),
+            questions: [{
+              id: "details",
+              prompt: "Add details",
+              allowFreeText: true,
+              multiple: false,
+            }],
+          },
+        });
+        await answered;
+      }
+      return { status: "completed", text: request.requestId };
+    });
+    const answerAsk = vi.fn<NonNullable<ChannelHost["answerAsk"]>>(async () => {
+      resolveAnswer();
+      return { status: "accepted" };
+    });
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({
+      messageId: "posted",
+    }));
+    const channel = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        dispatch,
+        { answerAsk },
+        dataDirectory,
+      ),
+      socketFactory: () => socket.transport,
+      clientFactory: () => client({ postMessage }),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await socket.emit(message("ask-primary", "ask"));
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    await socket.emit(message("older-help", "/help"));
+    releaseRender();
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        text: "Add details",
+      }));
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(answerAsk).not.toHaveBeenCalled();
+
+    await socket.emit(message("later-answer", "new details"));
+    await vi.waitFor(() => expect(answerAsk).toHaveBeenCalledOnce());
+    expect(answerAsk).toHaveBeenCalledWith(
+      "slack:C1:1",
+      expect.objectContaining({
+        interactionId: "free-text-order",
+        answers: { details: ["new details"] },
+      }),
+      expect.any(AbortSignal),
+    );
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        text: expect.stringContaining("Commands:"),
+      }));
+    });
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal }))
+        .toMatchObject({
+          status: "healthy",
+          details: {
+            pendingEvents: 0,
+            processingEvents: 0,
+            completedReceipts: 3,
+          },
+        });
+    });
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("does not let an old Ask completion clear a newer blocking Ask", async () => {
+    const dataDirectory = temporaryDirectory();
+    const socket = durableAckSocket(dataDirectory);
+    const now = new Date().toISOString();
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({
+      messageId: "posted",
+    }));
+    let resolveFirst!: () => void;
+    let resolveSecond!: () => void;
+    let markSecondRendered!: () => void;
+    const firstAnswered = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const secondAnswered = new Promise<void>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const secondRendered = new Promise<void>((resolve) => {
+      markSecondRendered = resolve;
+    });
+    const ask = (interactionId: string, prompt: string) => ({
+      interactionId,
+      requestedAt: now,
+      questions: [{
+        id: "choice",
+        prompt,
+        choices: [{ value: "yes", label: "Yes" }],
+        allowFreeText: false,
+        multiple: false,
+      }],
+    });
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async (_request, reply) => {
+      await reply.emit({ type: "ask-user", ask: ask("ask-one", "Question one") });
+      await firstAnswered;
+      await reply.emit({ type: "ask-user", ask: ask("ask-two", "Question two") });
+      markSecondRendered();
+      await secondAnswered;
+      return { status: "completed", text: "done" };
+    });
+    const answerAsk = vi.fn<NonNullable<ChannelHost["answerAsk"]>>(
+      async (_conversationId, answer) => {
+        if (answer.interactionId === "ask-one") {
+          resolveFirst();
+          await secondRendered;
+        } else {
+          resolveSecond();
+        }
+        return { status: "accepted" };
+      },
+    );
+    const channel = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        dispatch,
+        { answerAsk },
+        dataDirectory,
+      ),
+      socketFactory: () => socket.transport,
+      clientFactory: () => client({ postMessage }),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await socket.emit(message("two-asks", "start"));
+    await vi.waitFor(() => {
+      expect(postMessage.mock.calls.find(
+        ([request]) => request.text === "Question one",
+      )).toBeDefined();
+    });
+    const first = postMessage.mock.calls.find(
+      ([request]) => request.text === "Question one",
+    )?.[0].buttons?.[0];
+    await socket.emit(action("answer-one", first!.value));
+    await vi.waitFor(() => {
+      expect(postMessage.mock.calls.find(
+        ([request]) => request.text === "Question two",
+      )).toBeDefined();
+    });
+    const second = postMessage.mock.calls.find(
+      ([request]) => request.text === "Question two",
+    )?.[0].buttons?.[0];
+    await socket.emit(action("answer-two", second!.value));
+
+    await vi.waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(2));
+    expect(answerAsk.mock.calls.map((call) => call[1].interactionId)).toEqual([
+      "ask-one",
+      "ask-two",
+    ]);
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal }))
+        .toMatchObject({
+          status: "healthy",
+          details: {
+            pendingEvents: 0,
+            processingEvents: 0,
+            completedReceipts: 3,
+          },
+        });
+    });
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("keeps the channel healthy when a threadless action asks a question", async () => {
+    const dataDirectory = temporaryDirectory();
+    const socket = durableAckSocket(dataDirectory);
+    const now = new Date().toISOString();
+    let posted = 0;
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({
+      messageId: `posted-${String(++posted)}`,
+    }));
+    let resolveFirstAnswer!: () => void;
+    let resolveSecondAnswer!: () => void;
+    const firstAnswered = new Promise<void>((resolve) => {
+      resolveFirstAnswer = resolve;
+    });
+    const secondAnswered = new Promise<void>((resolve) => {
+      resolveSecondAnswer = resolve;
+    });
+    let releaseDispatch!: () => void;
+    const dispatchReleased = new Promise<void>((resolve) => {
+      releaseDispatch = resolve;
+    });
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async (_request, reply) => {
+      await reply.emit({
+        type: "ask-user",
+        ask: {
+          interactionId: "threadless-choice",
+          requestedAt: now,
+          questions: [{
+            id: "choice",
+            prompt: "Proceed?",
+            choices: [{ value: "yes", label: "Yes" }],
+            allowFreeText: false,
+            multiple: false,
+          }],
+        },
+      });
+      await firstAnswered;
+      await reply.emit({
+        type: "ask-user",
+        ask: {
+          interactionId: "threadless-details",
+          requestedAt: now,
+          questions: [{
+            id: "details",
+            prompt: "Add details",
+            allowFreeText: true,
+            multiple: false,
+          }],
+        },
+      });
+      await secondAnswered;
+      await dispatchReleased;
+      return { status: "completed", text: "done" };
+    });
+    const answerAsk = vi.fn<NonNullable<ChannelHost["answerAsk"]>>(async (
+      _conversationId,
+      answer,
+    ) => {
+      if (answer.interactionId === "threadless-choice") resolveFirstAnswer();
+      else resolveSecondAnswer();
+      return { status: "accepted" };
+    });
+    const cancel = vi.fn<NonNullable<ChannelHost["cancel"]>>(
+      async () => ({ status: "accepted" }),
+    );
+    const channel = createSlackChannel({
+      context: context(parseSlackConfig({
+        ...CONFIG,
+        homeTab: {
+          enabled: true,
+          buttons: [{
+            actionId: "threadless",
+            label: "Threadless",
+            prompt: "Run threadless action",
+            channelId: "C1",
+          }],
+        },
+      }), dispatch, { answerAsk, cancel }, dataDirectory),
+      socketFactory: () => socket.transport,
+      clientFactory: () => client({ postMessage }),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await socket.emit({
+      kind: "home-action",
+      envelopeId: "threadless-action",
+      teamId: "T1",
+      userId: "U",
+      actionId: "threadless",
+      receivedAt: now,
+    });
+    await vi.waitFor(() => {
+      expect(postMessage.mock.calls.find(([request]) => request.buttons !== undefined))
+        .toBeDefined();
+    });
+    const askPost = postMessage.mock.calls.find(
+      ([request]) => request.buttons !== undefined,
+    )?.[0];
+    expect(askPost).not.toHaveProperty("threadId");
+    await socket.emit({
+      ...action("threadless-answer", askPost!.buttons![0]!.value),
+      messageId: "posted-1",
+      threadId: "posted-1",
+    });
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        text: "Add details",
+      }));
+    });
+    await socket.emit({
+      ...message("threadless-old-thread-cancel", "/cancel"),
+      messageId: "posted-1-reply",
+      threadId: "posted-1",
+    });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    expect(cancel).toHaveBeenLastCalledWith(expect.objectContaining({
+      conversationId: "slack:C1:action-threadless-action",
+    }));
+    await socket.emit({
+      ...message("threadless-free-text", "extra context"),
+      messageId: "posted-2",
+      threadId: "posted-2",
+    });
+    await vi.waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(2));
+    expect(answerAsk.mock.calls.map((call) => [
+      call[0],
+      call[1].interactionId,
+      call[1].answers,
+    ])).toEqual([
+      [
+        "slack:C1:action-threadless-action",
+        "threadless-choice",
+        { choice: ["yes"] },
+      ],
+      [
+        "slack:C1:action-threadless-action",
+        "threadless-details",
+        { details: ["extra context"] },
+      ],
+    ]);
+    await socket.emit({
+      ...message("threadless-active-cancel", "/cancel"),
+      messageId: "posted-2-reply",
+      threadId: "posted-2",
+    });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(2));
+    expect(cancel).toHaveBeenLastCalledWith(expect.objectContaining({
+      conversationId: "slack:C1:action-threadless-action",
+    }));
+    releaseDispatch();
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal }))
+        .toMatchObject({
+          status: "healthy",
+          details: {
+            pendingEvents: 0,
+            processingEvents: 0,
+            completedReceipts: 5,
+          },
+        });
+    });
+    await socket.emit({
+      ...message("threadless-finished-cancel", "/cancel"),
+      messageId: "posted-2-later",
+      threadId: "posted-2",
+    });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledTimes(3));
+    expect(cancel).toHaveBeenLastCalledWith(expect.objectContaining({
+      conversationId: "slack:C1:posted-2",
+    }));
+    expect(channel.running).toBe(true);
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("does not retain a stale threadless alias when an Ask wins the post race", async () => {
+    const dataDirectory = temporaryDirectory();
+    const socket = durableAckSocket(dataDirectory);
+    let resolveAskPost!: (value: { readonly messageId: string }) => void;
+    const askPost = new Promise<{ readonly messageId: string }>((resolve) => {
+      resolveAskPost = resolve;
+    });
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async (request) =>
+      request.text === "Proceed?"
+        ? askPost
+        : { messageId: "final" });
+    const answerAsk = vi.fn<NonNullable<ChannelHost["answerAsk"]>>(
+      async () => ({ status: "accepted" }),
+    );
+    const cancel = vi.fn<NonNullable<ChannelHost["cancel"]>>(
+      async () => ({ status: "accepted" }),
+    );
+    const channel = createSlackChannel({
+      context: context(
+        parseSlackConfig({
+          ...CONFIG,
+          homeTab: {
+            enabled: true,
+            buttons: [{
+              actionId: "threadless-race",
+              label: "Threadless race",
+              prompt: "Run",
+              channelId: "C1",
+            }],
+          },
+        }),
+        async (_request, reply) => {
+          await reply.emit({
+            type: "ask-user",
+            ask: {
+              interactionId: "threadless-race-ask",
+              requestedAt: new Date().toISOString(),
+              questions: [{
+                id: "choice",
+                prompt: "Proceed?",
+                choices: [{ value: "yes", label: "Yes" }],
+                allowFreeText: false,
+                multiple: false,
+              }],
+            },
+          });
+          return { status: "completed", text: "done" };
+        },
+        { answerAsk, cancel },
+        dataDirectory,
+      ),
+      socketFactory: () => socket.transport,
+      clientFactory: () => client({ postMessage }),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await socket.emit({
+      kind: "home-action",
+      envelopeId: "threadless-race-action",
+      teamId: "T1",
+      userId: "U",
+      actionId: "threadless-race",
+      receivedAt: new Date().toISOString(),
+    });
+    await vi.waitFor(() => {
+      expect(postMessage.mock.calls.find(
+        ([request]) => request.text === "Proceed?",
+      )?.[0].buttons?.[0]).toBeDefined();
+    });
+    const token = postMessage.mock.calls.find(
+      ([request]) => request.text === "Proceed?",
+    )?.[0].buttons?.[0]?.value;
+    await socket.emit({
+      ...action("threadless-race-answer", token!),
+      messageId: "posted-race",
+      threadId: "posted-race",
+    });
+    await vi.waitFor(() => expect(answerAsk).toHaveBeenCalledOnce());
+    resolveAskPost({ messageId: "posted-race" });
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal }))
+        .toMatchObject({
+          status: "healthy",
+          details: {
+            pendingEvents: 0,
+            processingEvents: 0,
+            completedReceipts: 2,
+          },
+        });
+    });
+    await socket.emit({
+      ...message("threadless-race-cancel", "/cancel"),
+      messageId: "posted-race-reply",
+      threadId: "posted-race",
+    });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    expect(cancel).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "slack:C1:posted-race",
+    }));
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("settles a blocked Ask when Slack cannot render it", async () => {
+    const dataDirectory = temporaryDirectory();
+    const socket = durableAckSocket(dataDirectory);
+    const cancel = vi.fn<NonNullable<ChannelHost["cancel"]>>(
+      async () => ({ status: "accepted" }),
+    );
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => {
+      throw new Error("rate_limited");
+    });
+    const channel = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async (_request, reply) => {
+          await reply.emit({
+            type: "ask-user",
+            ask: {
+              interactionId: "unrenderable",
+              requestedAt: new Date().toISOString(),
+              questions: [{
+                id: "choice",
+                prompt: "Choose",
+                choices: [{ value: "yes", label: "Yes" }],
+                allowFreeText: false,
+                multiple: false,
+              }],
+            },
+          });
+          return { status: "completed", text: "unreachable" };
+        },
+        {
+          answerAsk: async () => ({ status: "accepted" }),
+          cancel,
+        },
+        dataDirectory,
+      ),
+      socketFactory: () => socket.transport,
+      clientFactory: () => client({ postMessage }),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await socket.emit(message("ask-render-failure", "start"));
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal }))
+        .toMatchObject({
+          status: "healthy",
+          details: {
+            pendingEvents: 0,
+            processingEvents: 0,
+            completedReceipts: 1,
+          },
+        });
+    });
+    expect(cancel).toHaveBeenCalledWith(expect.objectContaining({
+      conversationId: "slack:C1:1",
+    }));
+    expect(channel.running).toBe(true);
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("survives a rate-limited final reply", async () => {
+    const dataDirectory = temporaryDirectory();
+    const socket = durableAckSocket(dataDirectory);
+    const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => {
+      throw new Error("rate_limited");
+    });
+    const postFile = vi.fn<SlackApiClient["postFile"]>(async () => {
+      throw new Error("rate_limited");
+    });
+    const addReaction = vi.fn<NonNullable<SlackApiClient["addReaction"]>>(
+      async () => {
+        throw new Error("rate_limited");
+      },
+    );
+    const channel = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async (_request, reply) => {
+          await reply.emit({
+            type: "attachment",
+            attachment: {
+              id: "output",
+              kind: "file",
+              name: "output.txt",
+              mediaType: "text/plain",
+              sizeBytes: 1,
+              data: new Uint8Array([1]),
+            },
+          });
+          return { status: "completed", text: "answer" };
+        },
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => socket.transport,
+      clientFactory: () => client({
+        postMessage,
+        postFile,
+        async setAssistantStatus() {
+          throw new Error("rate_limited");
+        },
+        addReaction,
+      }),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await socket.emit(message("rate-limited", "hello"));
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal }))
+        .toMatchObject({
+          status: "healthy",
+          details: {
+            pendingEvents: 0,
+            processingEvents: 0,
+            completedReceipts: 1,
+          },
+        });
+    });
+    expect(postFile).toHaveBeenCalledOnce();
+    expect(postMessage).toHaveBeenCalledOnce();
+    expect(addReaction).toHaveBeenCalledOnce();
+    expect(channel.running).toBe(true);
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("bounds total inbound attachment bytes per message", async () => {
+    const dataDirectory = temporaryDirectory();
+    const socket = durableAckSocket(dataDirectory);
+    const download = vi.fn<SlackApiClient["download"]>();
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(
+      async () => ({ status: "completed" }),
+    );
+    const channel = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        dispatch,
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => socket.transport,
+      clientFactory: () => client({ download }),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await socket.emit({
+      ...message("oversized-aggregate", "files"),
+      files: [1, 2, 3].map((index) => ({
+        id: `F${String(index)}`,
+        name: `${String(index)}.bin`,
+        mediaType: "application/octet-stream",
+        sizeBytes: 20_000_000,
+        privateUrl: `https://files.slack.com/${String(index)}`,
+      })),
+    });
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal }))
+        .toMatchObject({
+          status: "healthy",
+          details: {
+            pendingEvents: 0,
+            processingEvents: 0,
+            completedReceipts: 1,
+          },
+        });
+    });
+    expect(download).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(channel.running).toBe(true);
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
   it("uses assistant-thread status, retains a transient activity ledger, and applies per-thread runtime controls", async () => {
     let handler: SlackSocketEventHandler | undefined;
     const socket: SlackSocketTransport = { async start(next) { handler = next; }, async stop() {} };
@@ -648,6 +1441,33 @@ describe("slack channel", () => {
         body: JSON.stringify({ channel_id: "C1", thread_ts: "1", status: "Reading files" }),
       }),
     );
+  });
+
+  it("renders every AskUser button across bounded Slack action blocks", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      ok: true,
+      ts: "1712345678.000100",
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    const client = createSlackWebApiClient(parseSlackConfig(CONFIG), fetchImpl);
+    const buttons = Array.from({ length: 20 }, (_value, index) => ({
+      label: `Choice ${String(index + 1)}`,
+      value: `token-${String(index + 1)}`,
+    }));
+    await client.postMessage({
+      channelId: "C1",
+      text: "Choose",
+      buttons,
+      signal: new AbortController().signal,
+    });
+    const body = JSON.parse(
+      String((fetchImpl.mock.calls[0]?.[1] as RequestInit | undefined)?.body),
+    ) as { readonly blocks: readonly { readonly type: string; readonly elements?: readonly unknown[] }[] };
+    expect(body.blocks.filter((block) => block.type === "actions").map(
+      (block) => block.elements?.length,
+    )).toEqual([5, 5, 5, 5]);
   });
 
   it("publishes App Home and runs configured shortcut and Home actions through allowlisted destinations", async () => {
@@ -809,6 +1629,69 @@ describe("slack channel", () => {
     await transport.stop();
   });
 
+  it("ignores the agent's own bot posts", async () => {
+    const sockets: FakeWebSocket[] = [];
+    vi.stubGlobal("WebSocket", fakeWebSocketClass(sockets));
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      ok: true,
+      url: "wss://wss-primary.slack.com/link",
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }));
+    const received: SlackSocketEvent[] = [];
+    const transport = createSlackSocketModeTransport(
+      parseSlackConfig(CONFIG),
+      fetchImpl,
+    );
+    await transport.start(async (event) => {
+      received.push(event);
+    }, new AbortController().signal);
+    sockets[0]?.emitEnvelope(slackEnvelope("human"));
+    sockets[0]?.emitEnvelope({
+      ...slackEnvelope("bot"),
+      payload: {
+        team_id: "T1",
+        event: {
+          type: "message",
+          channel: "C1",
+          ts: "2",
+          user: "U-BOT",
+          bot_id: "B1",
+          text: "self echo",
+        },
+      },
+    });
+    sockets[0]?.emitEnvelope({
+      ...slackEnvelope("app"),
+      payload: {
+        team_id: "T1",
+        event: {
+          type: "message",
+          channel: "C1",
+          ts: "3",
+          user: "U-APP",
+          app_id: "A1",
+          text: "app echo",
+        },
+      },
+    });
+    await vi.waitFor(() => {
+      expect(sockets[0]?.sent).toHaveLength(3);
+    });
+    expect(received).toEqual([
+      expect.objectContaining({ kind: "message", envelopeId: "human" }),
+    ]);
+    expect(sockets[0]?.sent.map((entry) => JSON.parse(entry)).sort(
+      (left, right) => String(left.envelope_id).localeCompare(String(right.envelope_id)),
+    )).toEqual([
+      { envelope_id: "app" },
+      { envelope_id: "bot" },
+      { envelope_id: "human" },
+    ]);
+    await transport.stop();
+  });
+
   it("durably admits before acknowledgement and deduplicates an envelope across restart", async () => {
     const dataDirectory = temporaryDirectory();
     let releaseDispatch!: () => void;
@@ -880,13 +1763,17 @@ describe("slack channel", () => {
   it("fails closed and retains an explicit failed record when queued processing becomes ambiguous", async () => {
     const dataDirectory = temporaryDirectory();
     const socket = durableAckSocket(dataDirectory);
-    const failingClient = client({
-      postMessage: vi.fn<SlackApiClient["postMessage"]>(async () => { throw new Error("ambiguous Slack post"); }),
-    });
     const channel = createSlackChannel({
-      context: context(parseSlackConfig(CONFIG), async () => ({ status: "completed", text: "answer" }), {}, dataDirectory),
+      context: context(
+        parseSlackConfig(CONFIG),
+        async () => {
+          throw new Error("ambiguous Core dispatch");
+        },
+        {},
+        dataDirectory,
+      ),
       socketFactory: () => socket.transport,
-      clientFactory: () => failingClient,
+      clientFactory: () => client(),
     });
     await channel.start?.({ signal: new AbortController().signal });
     await socket.emit(message("failed-1", "fail after admission"));
@@ -998,8 +1885,23 @@ function client(overrides: Partial<SlackApiClient> = {}): SlackApiClient {
   };
 }
 
-function message(envelopeId: string, text: string): SlackSocketEvent {
+function message(envelopeId: string, text: string): SlackMessageEvent {
   return { kind: "message", envelopeId, teamId: "T1", channelId: "C1", messageId: "1", threadId: "1", userId: "U", text, files: [], receivedAt: new Date().toISOString() };
+}
+
+function action(envelopeId: string, value: string): SlackActionEvent {
+  return {
+    kind: "action",
+    envelopeId,
+    teamId: "T1",
+    channelId: "C1",
+    messageId: "2",
+    threadId: "1",
+    userId: "U",
+    actionId: "mono_agent_ask",
+    value,
+    receivedAt: new Date().toISOString(),
+  };
 }
 
 function durableAckSocket(dataDirectory: string): {

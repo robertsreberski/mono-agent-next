@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { SlackInbox } from "../inbox.js";
-import type { SlackMessageEvent } from "../socket.js";
+import type {
+  SlackActionEvent,
+  SlackMessageEvent,
+  SlackSocketEvent,
+} from "../socket.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -33,14 +37,16 @@ describe("SlackInbox", () => {
     const directory = await dataDirectory();
     const inbox = await SlackInbox.open(directory);
     await inbox.enqueue(event("E-complete"));
-    await expect(inbox.claimNext()).resolves.toMatchObject({ envelopeId: "E-complete" });
+    await expect(inbox.claimNextPrimary(controlEligible)).resolves.toMatchObject({
+      envelopeId: "E-complete",
+    });
     await inbox.complete("E-complete");
     expect(inbox.snapshot()).toMatchObject({ pending: 0, processing: 0, failed: 0, completed: 1 });
     await inbox.close();
 
     const reopened = await SlackInbox.open(directory);
     await expect(reopened.enqueue(event("E-complete"))).resolves.toBe("duplicate");
-    await expect(reopened.claimNext()).resolves.toBeUndefined();
+    await expect(reopened.claimNextPrimary(controlEligible)).resolves.toBeUndefined();
     expect(reopened.snapshot().completed).toBe(1);
     await reopened.close();
   });
@@ -49,21 +55,84 @@ describe("SlackInbox", () => {
     const directory = await dataDirectory();
     const inbox = await SlackInbox.open(directory);
     await inbox.enqueue(event("E-uncertain"));
-    await inbox.claimNext();
+    await inbox.claimNextPrimary(controlEligible);
     await inbox.close();
 
     const uncertain = await SlackInbox.open(directory);
     expect(uncertain.snapshot()).toMatchObject({ processing: 1, blocked: expect.stringMatching(/uncertain/iu) });
-    await expect(uncertain.claimNext()).resolves.toBeUndefined();
+    await expect(uncertain.claimNextPrimary(controlEligible)).resolves.toBeUndefined();
     await expect(uncertain.enqueue(event("E-new"))).rejects.toMatchObject({ code: "blocked" });
     await uncertain.fail("E-uncertain");
     expect(uncertain.snapshot()).toMatchObject({ processing: 0, failed: 1, blocked: expect.stringMatching(/failed/iu) });
     await uncertain.close();
 
     const failed = await SlackInbox.open(directory);
-    await expect(failed.claimNext()).resolves.toBeUndefined();
+    await expect(failed.claimNextPrimary(controlEligible)).resolves.toBeUndefined();
     expect(failed.snapshot().failed).toBe(1);
     await failed.close();
+  });
+
+  it("durably bounds one primary and one control while preserving released order", async () => {
+    const directory = await dataDirectory();
+    const inbox = await SlackInbox.open(directory);
+    await inbox.enqueue(event("E-primary"));
+    await inbox.enqueue(event("E-probe"));
+    await inbox.enqueue(action("E-control"));
+    await inbox.enqueue(action("E-control-2"));
+
+    await expect(inbox.claimNextPrimary(controlEligible)).resolves.toMatchObject({
+      envelopeId: "E-primary",
+    });
+    await expect(inbox.claimNextControl(
+      (candidate) => candidate.envelopeId === "E-probe",
+    )).resolves.toMatchObject({ envelopeId: "E-probe" });
+    await expect(inbox.claimNextControl(controlEligible)).resolves.toBeUndefined();
+    expect(inbox.snapshot()).toMatchObject({ pending: 2, processing: 2 });
+
+    await inbox.release("E-probe");
+    await inbox.complete("E-primary");
+    await expect(inbox.claimNextControl(controlEligible)).resolves.toBeUndefined();
+    await expect(inbox.claimNextPrimary(controlEligible)).resolves.toMatchObject({
+      envelopeId: "E-probe",
+    });
+    await inbox.complete("E-probe");
+    await expect(inbox.claimNextControl(controlEligible)).resolves.toMatchObject({
+      envelopeId: "E-control",
+    });
+    await inbox.complete("E-control");
+    await expect(inbox.claimNextControl(controlEligible)).resolves.toMatchObject({
+      envelopeId: "E-control-2",
+    });
+    await inbox.complete("E-control-2");
+    expect(inbox.snapshot()).toMatchObject({ pending: 0, processing: 0, completed: 4 });
+    await inbox.close();
+  });
+
+  it("refuses a second control lane and blocks restart on two stranded lanes", async () => {
+    const directory = await dataDirectory();
+    const inbox = await SlackInbox.open(directory);
+    await inbox.enqueue(event("E-primary"));
+    await inbox.enqueue(action("E-control"));
+    await inbox.enqueue(action("E-second-control"));
+    await inbox.claimNextPrimary(controlEligible);
+    await inbox.claimNextControl(controlEligible);
+
+    await expect(inbox.claimNextControl(controlEligible)).resolves.toBeUndefined();
+    expect(inbox.snapshot()).toMatchObject({ pending: 1, processing: 2 });
+    await inbox.close();
+
+    const reopened = await SlackInbox.open(directory);
+    expect(reopened.snapshot()).toMatchObject({
+      pending: 1,
+      processing: 2,
+      blocked: expect.stringMatching(/uncertain|recovery/iu),
+    });
+    await expect(reopened.claimNextPrimary(controlEligible)).resolves.toBeUndefined();
+    await expect(reopened.claimNextControl(controlEligible)).resolves.toBeUndefined();
+    await expect(reopened.enqueue(event("E-new"))).rejects.toMatchObject({
+      code: "blocked",
+    });
+    await reopened.close();
   });
 
   it("fails closed on corrupt, broad-mode, and symlinked inbox state", async () => {
@@ -103,6 +172,25 @@ function event(envelopeId: string): SlackMessageEvent {
     files: [],
     receivedAt: new Date().toISOString(),
   };
+}
+
+function action(envelopeId: string): SlackActionEvent {
+  return {
+    kind: "action",
+    envelopeId,
+    teamId: "T1",
+    channelId: "C1",
+    messageId: "1",
+    threadId: "1",
+    userId: "U1",
+    actionId: "mono_agent_ask",
+    value: "ask-token",
+    receivedAt: new Date().toISOString(),
+  };
+}
+
+function controlEligible(candidate: SlackSocketEvent): boolean {
+  return candidate.kind === "action";
 }
 
 async function dataDirectory(): Promise<string> {

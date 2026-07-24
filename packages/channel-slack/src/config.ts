@@ -233,7 +233,9 @@ function parseConfiguredAction(
   if (channelId !== undefined && !allowAllChannels && !allowedChannelIds.includes(channelId)) {
     fail(`${label}.channelId must be authorized by allowedChannelIds.`);
   }
-  const ackText = input.ackText === undefined ? undefined : boundedText(input.ackText, `${label}.ackText`, 4_000);
+  const ackText = input.ackText === undefined
+    ? undefined
+    : boundedText(input.ackText, `${label}.ackText`, 4_000);
   const threadReply = bool(input.threadReply, `${label}.threadReply`, false);
   if (threadReply && ackText === undefined) fail(`${label}.threadReply requires ackText.`);
   return Object.freeze({
@@ -250,8 +252,28 @@ function record(value: unknown, label: string): Record<string, unknown> {
   if (prototype !== Object.prototype && prototype !== null) fail(`${label} must be a plain object.`);
   return value as Record<string, unknown>;
 }
-function exact(value: Record<string, unknown>, fields: readonly string[], label: string): void { const allowed = new Set(fields); const unknown = Object.keys(value).filter((key) => !allowed.has(key)).sort(); if (unknown.length > 0) fail(`${label} contains unknown field(s): ${unknown.join(", ")}.`); }
-function token(value: unknown, label: string, prefix: string): string { if (typeof value !== "string" || value.length < 20 || value.length > 4_096 || !value.startsWith(prefix) || /\s/u.test(value)) fail(`${label} must be a resolved ${prefix} env-only secret.`); return value; }
+function exact(
+  value: Record<string, unknown>,
+  fields: readonly string[],
+  label: string,
+): void {
+  const allowed = new Set(fields);
+  const unknown = Object.keys(value).filter((key) => !allowed.has(key)).sort();
+  if (unknown.length > 0) {
+    fail(`${label} contains unknown field(s): ${unknown.join(", ")}.`);
+  }
+}
+
+function token(value: unknown, label: string, prefix: string): string {
+  if (typeof value !== "string"
+    || value.length < 20
+    || value.length > 4_096
+    || !value.startsWith(prefix)
+    || /\s/u.test(value)) {
+    fail(`${label} must be a resolved ${prefix} env-only secret.`);
+  }
+  return value;
+}
 function id(value: unknown, label: string): string {
   try {
     return parseSlackIdentifier(value, label);
@@ -269,7 +291,9 @@ function destination(value: unknown, label: string): string {
 }
 function actionId(value: unknown, label: string): string {
   const result = id(value, label);
-  if (!/^[A-Za-z0-9_-]+$/u.test(result)) fail(`${label} must contain only letters, numbers, underscores, and hyphens.`);
+  if (!/^[A-Za-z0-9_-]+$/u.test(result)) {
+    fail(`${label} must contain only letters, numbers, underscores, and hyphens.`);
+  }
   return result;
 }
 function boundedText(value: unknown, label: string, max: number): string {
@@ -278,8 +302,41 @@ function boundedText(value: unknown, label: string, max: number): string {
   }
   return value;
 }
-function identifiers(value: unknown, label: string): string[] { if (!Array.isArray(value) || value.length > 1_000) fail(`${label} must be an array with at most 1000 entries.`); return value.map((entry, index) => id(entry, `${label}[${index}]`)); }
-function unique(values: string[], label: string): string[] { const result = [...new Set(values)]; if (result.length !== values.length) fail(`${label} must not contain duplicates.`); return result; }
-function bool(value: unknown, label: string, fallback: boolean): boolean { if (value === undefined) return fallback; if (typeof value !== "boolean") fail(`${label} must be a boolean.`); return value; }
-function integer(value: unknown, label: string, fallback: number, min: number, max: number): number { if (value === undefined) return fallback; if (!Number.isSafeInteger(value) || (value as number) < min || (value as number) > max) fail(`${label} must be an integer from ${min} through ${max}.`); return value as number; }
-function fail(message: string): never { throw new SlackConfigError(message); }
+function identifiers(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.length > 1_000) {
+    fail(`${label} must be an array with at most 1000 entries.`);
+  }
+  return value.map((entry, index) => id(entry, `${label}[${index}]`));
+}
+
+function unique(values: string[], label: string): string[] {
+  const result = [...new Set(values)];
+  if (result.length !== values.length) fail(`${label} must not contain duplicates.`);
+  return result;
+}
+
+function bool(value: unknown, label: string, fallback: boolean): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== "boolean") fail(`${label} must be a boolean.`);
+  return value;
+}
+
+function integer(
+  value: unknown,
+  label: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value)
+    || (value as number) < min
+    || (value as number) > max) {
+    fail(`${label} must be an integer from ${min} through ${max}.`);
+  }
+  return value as number;
+}
+
+function fail(message: string): never {
+  throw new SlackConfigError(message);
+}

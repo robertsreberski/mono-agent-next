@@ -12,6 +12,7 @@ import {
   type OwnerPrivatePathIdentity,
 } from "@mono-agent/module-sdk";
 
+import { boundedString, cloneEvent, exactKeys, hasCode, record, sameIdentity, throwIfAborted, validateEnvelopeId, validEnvelopeId, validTimestamp } from "./inbox-values.js";
 import type { SlackRemoteFile, SlackSocketEvent } from "./socket.js";
 
 export const SLACK_INBOX_SCHEMA_VERSION = 1;
@@ -28,6 +29,7 @@ type SlackInboxEntryStatus = "pending" | "processing" | "failed";
 interface SlackInboxEntry {
   readonly envelopeId: string;
   readonly status: SlackInboxEntryStatus;
+  readonly lane?: "primary" | "control";
   readonly admittedAt: string;
   readonly event: SlackSocketEvent;
 }
@@ -149,23 +151,39 @@ export class SlackInbox {
     }, signal);
   }
 
-  claimNext(signal?: AbortSignal): Promise<SlackSocketEvent | undefined> {
+  claimNextPrimary(
+    controlEligible: (event: SlackSocketEvent) => boolean,
+    signal?: AbortSignal,
+  ): Promise<SlackSocketEvent | undefined> {
+    return this.claimNext(
+      (event) => !controlEligible(event),
+      "primary",
+      signal,
+    );
+  }
+
+  claimNextControl(
+    eligible: (event: SlackSocketEvent) => boolean,
+    signal?: AbortSignal,
+  ): Promise<SlackSocketEvent | undefined> {
+    return this.claimNext(eligible, "control", signal);
+  }
+
+  release(envelopeId: string, signal?: AbortSignal): Promise<void> {
+    validateEnvelopeId(envelopeId);
     return this.mutate((current) => {
-      if (this.recoveryBlocked !== undefined
-        || failedReason(current) !== undefined
-        || current.entries.some((entry) => entry.status === "processing")) {
-        return { next: current, result: undefined, write: false };
+      const index = current.entries.findIndex((entry) => entry.envelopeId === envelopeId);
+      if (index === -1 || current.entries[index]?.status !== "processing") {
+        throw new SlackInboxError(
+          "corrupt",
+          "Slack durable inbox release did not match processing state.",
+        );
       }
-      const index = current.entries.findIndex((entry) => entry.status === "pending");
-      if (index === -1) return { next: current, result: undefined, write: false };
       const entry = current.entries[index]!;
       const entries = [...current.entries];
-      entries[index] = { ...entry, status: "processing" };
-      return {
-        next: { ...current, entries },
-        result: cloneEvent(entry.event),
-        write: true,
-      };
+      const { lane: _lane, ...released } = entry;
+      entries[index] = { ...released, status: "pending" };
+      return { next: { ...current, entries }, result: undefined, write: true };
     }, signal);
   }
 
@@ -212,7 +230,8 @@ export class SlackInbox {
         throw new SlackInboxError("corrupt", "Slack durable inbox failure did not match processing state.");
       }
       const entries = [...current.entries];
-      entries[index] = { ...entry, status: "failed" };
+      const { lane: _lane, ...failed } = entry;
+      entries[index] = { ...failed, status: "failed" };
       return { next: { ...current, entries }, result: undefined, write: true };
     }, signal);
   }
@@ -239,6 +258,43 @@ export class SlackInbox {
     this.closing = true;
     await this.tail;
     this.closed = true;
+  }
+
+  private claimNext(
+    eligible: (event: SlackSocketEvent) => boolean,
+    lane: "primary" | "control",
+    signal?: AbortSignal,
+  ): Promise<SlackSocketEvent | undefined> {
+    return this.mutate((current) => {
+      const processing = current.entries.filter((entry) => entry.status === "processing");
+      const laneBlocked = lane === "primary"
+        ? processing.length > 0
+        : processing.some((entry) => entry.lane !== "primary");
+      if (this.recoveryBlocked !== undefined
+        || failedReason(current) !== undefined
+        || laneBlocked) {
+        return { next: current, result: undefined, write: false };
+      }
+      const firstPending = current.entries.findIndex(
+        (entry) => entry.status === "pending",
+      );
+      const index = processing.length === 0
+        ? firstPending !== -1 && eligible(current.entries[firstPending]!.event)
+          ? firstPending
+          : -1
+        : current.entries.findIndex(
+            (entry) => entry.status === "pending" && eligible(entry.event),
+          );
+      if (index === -1) return { next: current, result: undefined, write: false };
+      const entry = current.entries[index]!;
+      const entries = [...current.entries];
+      entries[index] = { ...entry, status: "processing", lane };
+      return {
+        next: { ...current, entries },
+        result: cloneEvent(entry.event),
+        write: true,
+      };
+    }, signal);
   }
 
   private mutate<T>(
@@ -424,9 +480,17 @@ function validateState(value: unknown): asserts value is SlackInboxState {
   }
   const seen = new Set<string>();
   for (const rawEntry of value.entries) {
-    if (!record(rawEntry) || !exactKeys(rawEntry, ["envelopeId", "status", "admittedAt", "event"])
+    if (!record(rawEntry)
+      || !exactKeys(
+        rawEntry,
+        ["envelopeId", "status", "admittedAt", "event"],
+        ["lane"],
+      )
       || !validEnvelopeId(rawEntry.envelopeId)
       || (rawEntry.status !== "pending" && rawEntry.status !== "processing" && rawEntry.status !== "failed")
+      || (rawEntry.lane !== undefined
+        && (rawEntry.status !== "processing"
+          || (rawEntry.lane !== "primary" && rawEntry.lane !== "control")))
       || !validTimestamp(rawEntry.admittedAt)) {
       throw new SlackInboxError("corrupt", "Slack durable inbox contains an invalid entry.");
     }
@@ -441,6 +505,15 @@ function validateState(value: unknown): asserts value is SlackInboxState {
       throw new SlackInboxError("corrupt", "Slack durable inbox contains invalid deduplication receipts.");
     }
     seen.add(receipt);
+  }
+  const processing = value.entries.filter((entry) => entry.status === "processing");
+  if (processing.length > 2
+    || processing.filter((entry) => entry.lane === "primary").length > 1
+    || processing.filter((entry) => entry.lane === "control").length > 1
+    || (processing.length === 2
+      && (!processing.some((entry) => entry.lane === "primary")
+        || !processing.some((entry) => entry.lane === "control")))) {
+    throw new SlackInboxError("corrupt", "Slack durable inbox contains too many processing entries.");
   }
   if (new TextEncoder().encode(JSON.stringify(value)).byteLength > MAX_SLACK_INBOX_BYTES) {
     throw new SlackInboxError("corrupt", "Slack durable inbox exceeds its byte limit.");
@@ -544,16 +617,6 @@ function freezeState(state: SlackInboxState): SlackInboxState {
   });
 }
 
-function cloneEvent(event: SlackSocketEvent): SlackSocketEvent {
-  if (event.kind === "message") {
-    return Object.freeze({
-      ...event,
-      files: Object.freeze(event.files.map((file) => Object.freeze({ ...file }))),
-    });
-  }
-  return Object.freeze({ ...event });
-}
-
 function blockedReason(state: SlackInboxState): string | undefined {
   const failed = failedReason(state);
   if (failed !== undefined) return failed;
@@ -567,48 +630,4 @@ function failedReason(state: SlackInboxState): string | undefined {
   return state.entries.some((entry) => entry.status === "failed")
     ? "Slack durable inbox contains failed work; operator recovery is required."
     : undefined;
-}
-
-function validateEnvelopeId(value: string): void {
-  if (!validEnvelopeId(value)) throw new TypeError("Slack envelope id must be 1-512 printable characters.");
-}
-
-function validEnvelopeId(value: unknown): value is string {
-  return boundedString(value, 512) && !/[\u0000-\u001f\u007f]/u.test(value);
-}
-
-function validTimestamp(value: unknown): value is string {
-  return boundedString(value, 64) && Number.isFinite(Date.parse(value));
-}
-
-function boundedString(value: unknown, max: number): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= max;
-}
-
-function exactKeys(
-  value: Record<string, unknown>,
-  required: readonly string[],
-  optional: readonly string[] = [],
-): boolean {
-  const allowed = new Set([...required, ...optional]);
-  return required.every((key) => Object.hasOwn(value, key))
-    && Object.keys(value).every((key) => allowed.has(key));
-}
-
-function record(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function sameIdentity(left: OwnerPrivatePathIdentity, right: OwnerPrivatePathIdentity): boolean {
-  return left.device === right.device && left.inode === right.inode;
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted === true) {
-    throw signal.reason instanceof Error ? signal.reason : new Error("Slack durable inbox operation aborted.");
-  }
-}
-
-function hasCode(error: unknown, code: string): boolean {
-  return typeof error === "object" && error !== null && Reflect.get(error, "code") === code;
 }

@@ -18,10 +18,10 @@ import {
   slackConversationId,
   type SlackDestination,
 } from "./destination.js";
+import { MAX_TOTAL_SLACK_ATTACHMENT_BYTES } from "./limits.js";
 
 const MAX_DELIVERY_RECEIPTS = 1_000;
 const MAX_DELIVERY_ATTACHMENTS = 10;
-const MAX_TOTAL_ATTACHMENT_BYTES = 50_000_000;
 const MAX_METADATA_BYTES = 65_536;
 const MAX_METADATA_ITEMS = 2_048;
 const MAX_METADATA_DEPTH = 16;
@@ -115,7 +115,6 @@ export class SlackDelivery {
         const receipt = await this.client.postMessage({
           ...destination,
           text: message.text,
-          idempotencyKey: message.idempotencyKey,
           signal,
         });
         if (isSlackMessageTimestamp(receipt.messageId)) messageId = receipt.messageId;
@@ -124,7 +123,6 @@ export class SlackDelivery {
         const receipt = await this.client.postFile({
           ...destination,
           attachment,
-          idempotencyKey: message.idempotencyKey,
           signal,
         });
         if (isSlackMessageTimestamp(receipt.messageId)) messageId = receipt.messageId;
@@ -263,7 +261,7 @@ function snapshotAttachments(
       throw new TypeError("attachment data must be Uint8Array");
     }
     if (source.byteLength !== sizeBytes
-      || totalBytes + source.byteLength > MAX_TOTAL_ATTACHMENT_BYTES) {
+      || totalBytes + source.byteLength > MAX_TOTAL_SLACK_ATTACHMENT_BYTES) {
       throw new TypeError("attachment size does not match its bounded data");
     }
     const data = new Uint8Array(source);
