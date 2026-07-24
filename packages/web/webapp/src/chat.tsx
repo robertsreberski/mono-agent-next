@@ -9,14 +9,18 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
-import { type FormEvent, useMemo, useRef, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { OperatorActivity } from "@mono-agent/operator";
 
-import { useConsole } from "./console";
+import { useConsole, type ConsoleConnection } from "./console";
+import { Icon } from "./components/Icon";
 import type { AskQuestion, Attachment, Telemetry } from "./types";
 
 function QuoteBlock({ text }: QuoteMessagePartProps) {
-  return <blockquote className="message-quote"><span aria-hidden="true">❝</span>{text}</blockquote>;
+  return <blockquote className="message-quote">
+      <Icon name="quote" size={14} />
+      <span>{text}</span>
+    </blockquote>;
 }
 
 function MarkdownText() {
@@ -39,7 +43,7 @@ function MarkdownText() {
 function EmptyPart({ status }: EmptyMessagePartProps) {
   const role = useAuiState((state) => state.message.role);
   if (role !== "assistant" || status.type !== "running") return null;
-  return <span className="thinking" role="status" aria-label="Agent is thinking"><i /><i /><i /></span>;
+  return <span className="thinking-indicator" role="status" aria-label="Agent is thinking"><i /><i /><i /></span>;
 }
 
 const parts = { Text: MarkdownText, Quote: QuoteBlock, Empty: EmptyPart } as const;
@@ -48,9 +52,25 @@ function Attachments() {
   const raw = useAuiState((state) => state.message.metadata.custom?.attachments);
   if (!Array.isArray(raw) || raw.length === 0) return null;
   return (
-    <ul className="message-attachments">
+    <ul className="message-attachments" aria-label="Attachments">
       {(raw as readonly Attachment[]).map((attachment) => (
-        <li key={attachment.id}>📎 {attachment.name}</li>
+        <li className="attachment-chip" key={attachment.id}>
+          <span className="attachment-icon" aria-hidden="true">
+            <Icon name={attachment.mediaType.startsWith("image/") ? "spark" : "attach"} size={14} />
+          </span>
+          {attachment.url === undefined ? (
+            <span className="attachment-name" title={attachment.name}>{attachment.name}</span>
+          ) : (
+            <a
+              className="attachment-link"
+              href={attachment.url}
+              download={attachment.name}
+              rel="noreferrer"
+            >
+              <span className="attachment-name" title={attachment.name}>{attachment.name}</span>
+            </a>
+          )}
+        </li>
       ))}
     </ul>
   );
@@ -73,10 +93,10 @@ function ActivityFeed() {
   const raw = useAuiState((state) => state.message.metadata.custom?.activities);
   if (!Array.isArray(raw) || raw.length === 0) return null;
   return (
-    <div className="activity-feed" aria-label="Agent activity">
+    <div className="activity-list" aria-label="Agent activity">
       {(raw as readonly OperatorActivity[]).map((activity, index) => {
         if (activity.type === "activity") {
-          return <div className="activity-row" key={`${activity.type}:${index}`}><i />{activity.text}</div>;
+          return <div className="activity-line" key={`${activity.type}:${index}`}><i />{activity.text}</div>;
         }
         if (activity.type === "compaction") {
           const { compaction } = activity;
@@ -86,32 +106,48 @@ function ActivityFeed() {
               ? ` · ${compactCount(compaction.tokensBefore)} tokens before`
               : ` · ${compactCount(compaction.tokensBefore)} → ${compactCount(compaction.tokensAfter)} tokens`;
           return (
-            <div className="activity-row is-compaction" key={`${activity.type}:${index}`}>
-              <i />{compaction.compacted ? "Context compacted" : "Context compaction skipped"}{tokens}
+            <div className="context-compaction-row" key={`${activity.type}:${index}`}>
+              <i className="context-compaction-status" />{compaction.compacted ? "Context compacted" : "Context compaction skipped"}{tokens}
             </div>
           );
         }
         if (activity.type === "tool_call") {
           return (
-            <details className="tool-activity" key={`${activity.type}:${activity.call.id}:${index}`}>
-              <summary><i /><strong>{activity.call.name}</strong><span>tool call</span></summary>
-              <pre>{activity.call.inputOmitted ? "Input omitted by policy" : safeJson(activity.call.input)}</pre>
+            <details className="tool-call" key={`${activity.type}:${activity.call.id}:${index}`}>
+              <summary>
+                <i className="tool-status" />
+                <span className="tool-name">{activity.call.name}</span>
+                <span className="tool-state">tool call</span>
+                <Icon name="chevron" size={13} />
+              </summary>
+              <div className="tool-payload">
+                <span>Input</span>
+                <pre>{activity.call.inputOmitted ? "Input omitted by policy" : safeJson(activity.call.input)}</pre>
+              </div>
             </details>
           );
         }
         return (
           <details
-            className={`tool-activity${activity.result.isError ? " is-error" : ""}`}
+            className={`tool-call${activity.result.isError ? " is-error" : ""}`}
             key={`${activity.type}:${activity.result.callId}:${index}`}
           >
-            <summary><i /><strong>Tool result</strong><span>{activity.result.isError ? "failed" : "complete"}</span></summary>
-            <pre>
-              {activity.result.contentOmitted
-                ? "Output omitted by policy"
-                : activity.result.content?.map((part) =>
-                    part.type === "text" ? part.text : safeJson(part.value)
-                  ).join("\n\n") ?? "No output"}
-            </pre>
+            <summary>
+              <i className="tool-status" />
+              <span className="tool-name">Tool result</span>
+              <span className="tool-state">{activity.result.isError ? "failed" : "complete"}</span>
+              <Icon name="chevron" size={13} />
+            </summary>
+            <div className="tool-payload">
+              <span>Output</span>
+              <pre>
+                {activity.result.contentOmitted
+                  ? "Output omitted by policy"
+                  : activity.result.content?.map((part) =>
+                      part.type === "text" ? part.text : safeJson(part.value)
+                    ).join("\n\n") ?? "No output"}
+              </pre>
+            </div>
           </details>
         );
       })}
@@ -126,11 +162,13 @@ function CopyAction() {
   return (
     <ActionBarPrimitive.Root className="message-actions" autohide="never">
       <button
+        className="message-action"
         type="button"
         disabled={!text}
         onClick={() => void navigator.clipboard?.writeText(text)}
       >
-        Copy
+        <Icon name="copy" size={13} />
+        <span>Copy</span>
       </button>
     </ActionBarPrimitive.Root>
   );
@@ -139,7 +177,7 @@ function CopyAction() {
 function UserMessage() {
   return (
     <MessagePrimitive.Root className="message message-user">
-      <div className="message-bubble">
+      <div className="message-user-content">
         <Attachments />
         <MessagePrimitive.Parts components={parts} />
       </div>
@@ -151,8 +189,8 @@ function UserMessage() {
 function AssistantMessage() {
   return (
     <MessagePrimitive.Root className="message message-assistant">
-      <div className="assistant-avatar">m</div>
-      <div className="assistant-body">
+      <div className="assistant-mark" aria-hidden="true"><Icon name="spark" size={15} /></div>
+      <div className="assistant-content">
         <ActivityFeed />
         <MessagePrimitive.Parts components={parts} />
         <MessagePrimitive.Error>
@@ -182,8 +220,9 @@ function safeJson(value: unknown): string {
 function SelectionToolbar() {
   return (
     <SelectionToolbarPrimitive.Root className="selection-toolbar">
-      <SelectionToolbarPrimitive.Quote className="selection-toolbar-button">
-        ❝ Quote
+      <SelectionToolbarPrimitive.Quote className="selection-toolbar-quote">
+        <Icon name="quote" size={14} />
+        Quote
       </SelectionToolbarPrimitive.Quote>
     </SelectionToolbarPrimitive.Root>
   );
@@ -208,7 +247,7 @@ function AskUser() {
     }
   };
   return (
-    <form className="ask-card" onSubmit={(event) => void submit(event)}>
+    <form className="ask-user-card" onSubmit={(event) => void submit(event)}>
       <header><span>Input needed</span><small>{ask.questions.length} question{ask.questions.length === 1 ? "" : "s"}</small></header>
       {ask.questions.map((question) => (
         <AskQuestionField
@@ -218,7 +257,7 @@ function AskUser() {
           onChange={(values) => setAnswers((current) => ({ ...current, [question.id]: values }))}
         />
       ))}
-      <button className="primary" type="submit" disabled={!valid || submitting}>
+      <button className="ask-user-submit" type="submit" disabled={!valid || submitting}>
         {submitting ? "Submitting…" : "Submit answer"}
       </button>
     </form>
@@ -241,7 +280,7 @@ function AskQuestionField({
       {question.choices?.map((choice) => {
         const checked = values.includes(choice.value);
         return (
-          <label className={`ask-choice${checked ? " is-selected" : ""}`} key={choice.value}>
+          <label className={`ask-user-option${checked ? " is-selected" : ""}`} key={choice.value}>
             <input
               type={question.multiple ? "checkbox" : "radio"}
               name={question.id}
@@ -257,7 +296,7 @@ function AskQuestionField({
         );
       })}
       {question.allowFreeText && (
-        <label className="ask-custom">
+        <label className="ask-user-other">
           <span>Other</span>
           <textarea
             rows={2}
@@ -289,16 +328,16 @@ function Composer() {
   );
   const effortOptions = model?.efforts;
   return (
-    <div className="composer-area">
+    <div className="composer-shell">
       <AskUser />
-      <ComposerPrimitive.Root className="composer">
+      <ComposerPrimitive.Root className="composer-root">
         <ComposerPrimitive.Quote className="composer-quote">
           <span aria-hidden="true">❝</span>
           <ComposerPrimitive.QuoteText />
           <ComposerPrimitive.QuoteDismiss aria-label="Remove quote">×</ComposerPrimitive.QuoteDismiss>
         </ComposerPrimitive.Quote>
         {consoleState.pendingFiles.length > 0 && (
-          <ul className="pending-files">
+          <ul className="composer-attachments">
             {consoleState.pendingFiles.map((file, index) => (
               <li key={`${file.name}:${index}`}>
                 <span>{file.name}</span>
@@ -316,7 +355,7 @@ function Composer() {
           aria-label="Message"
         />
         <div className="composer-toolbar">
-          <div className="composer-settings">
+          <div className="model-controls">
             {canAttach && (
               <>
                 <input
@@ -387,11 +426,11 @@ function Composer() {
             )}
           </div>
           <div className="composer-actions">
-            <ComposerPrimitive.Send className="send-button" aria-label={isRunning ? "Send live input" : "Send message"}>
+            <ComposerPrimitive.Send className="composer-send" aria-label={isRunning ? "Send live input" : "Send message"}>
               Send
             </ComposerPrimitive.Send>
             {isRunning && (
-              <ComposerPrimitive.Cancel className="stop-button" aria-label="Stop response">
+              <ComposerPrimitive.Cancel className="composer-stop" aria-label="Stop response">
                 Stop
               </ComposerPrimitive.Cancel>
             )}
@@ -402,70 +441,266 @@ function Composer() {
   );
 }
 
-export function Chat() {
+const RUN_LABELS: Readonly<Record<string, string>> = {
+  idle: "Ready",
+  running: "Working",
+  complete: "Ready",
+  failed: "Failed",
+  cancelled: "Stopped",
+  interrupted: "Interrupted",
+};
+
+export const CONNECTION_NOTICE_DELAY_MS = 5_000;
+
+/**
+ * A brief reconnect is normal and not worth a banner, so only a connection
+ * that stays down past the delay surfaces. Offline is immediate because the
+ * browser already knows for certain.
+ */
+export function ConnectionBanner({ connection }: { readonly connection: ConsoleConnection }) {
+  const [visible, setVisible] = useState(connection === "offline");
+
+  useEffect(() => {
+    if (connection === "live") {
+      setVisible(false);
+      return;
+    }
+    if (connection === "offline") {
+      setVisible(true);
+      return;
+    }
+    setVisible(false);
+    const timer = window.setTimeout(() => setVisible(true), CONNECTION_NOTICE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [connection]);
+
+  if (!visible || connection === "live") return null;
+  return (
+    <div className="connection-banner" role="status">
+      <span className="connection-pulse" />
+      {connection === "offline"
+        ? "You\u2019re offline. Existing conversations remain readable; you can send again after reconnecting."
+        : "Live updates are reconnecting. The agent keeps working on the server."}
+    </div>
+  );
+}
+
+function ConversationTitle() {
   const consoleState = useConsole();
   const thread = consoleState.selectedThread;
-  const title = useMemo(() => thread?.title ?? "No conversation selected", [thread?.title]);
+  const [editing, setEditing] = useState(false);
+  const [title, setTitle] = useState(thread?.title ?? "New conversation");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setTitle(thread?.title ?? "New conversation");
+    setEditing(false);
+  }, [thread?.id, thread?.title]);
+
+  useEffect(() => {
+    if (editing) inputRef.current?.select();
+  }, [editing]);
+
+  const commit = () => {
+    setEditing(false);
+    if (thread === undefined) return;
+    const next = title.trim();
+    if (!next) {
+      setTitle(thread.title);
+      return;
+    }
+    if (next !== thread.title) {
+      void consoleState.renameThread(thread.id, next).catch(() => undefined);
+    }
+  };
+
+  const triggerBadge = thread?.trigger === undefined ? null : (
+    <span
+      className="trigger-badge trigger-badge-header"
+      aria-label={`${thread.trigger.kind} notification`}
+    >
+      {thread.trigger.kind}
+    </span>
+  );
+
+  if (editing && thread !== undefined) {
+    return (
+      <div className="conversation-title-group">
+        <input
+          ref={inputRef}
+          className="title-input"
+          value={title}
+          onChange={(event) => setTitle(event.target.value)}
+          onBlur={commit}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+            if (event.key === "Escape") {
+              setTitle(thread.title);
+              setEditing(false);
+            }
+          }}
+          maxLength={120}
+          aria-label="Conversation title"
+        />
+        {triggerBadge}
+      </div>
+    );
+  }
+
   return (
-    <main className="chat">
+    <div className="conversation-title-group">
+      <button
+        type="button"
+        className="conversation-title"
+        onClick={() => { if (thread !== undefined) setEditing(true); }}
+        disabled={thread === undefined}
+        title={thread === undefined ? undefined : "Rename conversation"}
+      >
+        {thread?.title ?? "New conversation"}
+      </button>
+      {triggerBadge}
+    </div>
+  );
+}
+
+function EmptyConversation() {
+  const consoleState = useConsole();
+  return (
+    <div className="chat-empty">
+      <div className="empty-orbit" aria-hidden="true">
+        <span />
+        <Icon name="spark" size={22} />
+      </div>
+      <span className="eyebrow">{consoleState.selectedAgent?.label ?? "mono-agent"}</span>
+      <h2>{consoleState.selectedThread === undefined ? "Start a new conversation" : "What should we work on?"}</h2>
+      <p>
+        {consoleState.selectedAgent === undefined
+          ? "No agents have been discovered yet. Start an agent and it will appear here automatically."
+          : "Messages, activity, tool calls, and files stay together in this conversation."}
+      </p>
+      {consoleState.selectedAgent !== undefined && consoleState.selectedThread === undefined && (
+        <button
+          type="button"
+          className="primary-button"
+          disabled={!consoleState.selectedAgent.online}
+          onClick={() => void consoleState.createThread().catch(() => undefined)}
+        >
+          <Icon name="new" size={16} />
+          New conversation
+        </button>
+      )}
+    </div>
+  );
+}
+
+export function Chat({
+  onOpenAgents,
+  onOpenThreads,
+}: {
+  readonly onOpenAgents: () => void;
+  readonly onOpenThreads: () => void;
+}) {
+  const consoleState = useConsole();
+  const thread = consoleState.selectedThread;
+  const runStatus = RUN_LABELS[thread?.status ?? "idle"] ?? "Ready";
+  const status = consoleState.selectedAgent?.online === false
+    ? "Offline"
+    : consoleState.connection === "offline"
+      ? "Browser offline"
+      : consoleState.connection === "reconnecting"
+        ? "Reconnecting"
+        : runStatus;
+  const statusTone = status.toLowerCase().replace(/\s+/gu, "-");
+
+  return (
+    <main className="chat-panel">
       <header className="chat-header">
-        <div>
-          <span className="eyebrow">{consoleState.selectedAgent?.label ?? "mono-agent"}</span>
-          <h1>{title}</h1>
-        </div>
-        {thread && (
-          <div className="thread-actions">
-            <button
-              type="button"
-              onClick={() => {
-                const next = window.prompt("Conversation title", thread.title)?.trim();
-                if (next) void consoleState.renameThread(thread.id, next);
-              }}
-            >Rename</button>
-            <button type="button" onClick={() => void consoleState.archiveThread(thread.id, !thread.archivedAt)}>
-              {thread.archivedAt ? "Restore" : "Archive"}
-            </button>
-            {thread.archivedAt && (
-              <button
-                type="button"
-                className="danger"
-                onClick={() => {
-                  if (window.confirm("Permanently delete this archived conversation?")) {
-                    void consoleState.deleteThread(thread.id);
-                  }
-                }}
-              >Delete</button>
-            )}
-          </div>
-        )}
-      </header>
-      {consoleState.error && <div className="error-banner" role="alert">{consoleState.error}</div>}
-      {thread === undefined ? (
-        <div className="empty-chat">
-          <div className="brand-mark">m</div>
-          <h2>Start a conversation</h2>
-          <p>Select an online agent and create a thread.</p>
-          <button className="primary" disabled={!consoleState.selectedAgent?.online} onClick={() => void consoleState.createThread()}>
-            New conversation
+        <div className="mobile-navigation">
+          <button type="button" className="icon-button" onClick={onOpenAgents} aria-label="Choose agent">
+            <Icon name="agent" size={19} />
+          </button>
+          <button type="button" className="icon-button" onClick={onOpenThreads} aria-label="Open conversations">
+            <Icon name="menu" size={19} />
           </button>
         </div>
+        <div className="chat-title-block">
+          <ConversationTitle />
+          <span className={`chat-status is-${statusTone}`}>
+            <i />
+            {status}
+          </span>
+        </div>
+        <div className="chat-header-actions">
+          {thread !== undefined && (
+            <button
+              type="button"
+              className="icon-button header-archive"
+              aria-label={thread.archivedAt === undefined ? "Archive conversation" : "Restore conversation"}
+              title={thread.archivedAt === undefined ? "Archive conversation" : "Restore conversation"}
+              onClick={() => void consoleState
+                .archiveThread(thread.id, thread.archivedAt === undefined)
+                .catch(() => undefined)}
+            >
+              <Icon name={thread.archivedAt === undefined ? "archive" : "restore"} size={17} />
+            </button>
+          )}
+          {thread?.archivedAt !== undefined && (
+            <button
+              type="button"
+              className="icon-button header-delete"
+              aria-label="Permanently delete conversation"
+              title="Permanently delete conversation"
+              onClick={() => {
+                if (!window.confirm("Permanently delete this conversation and its attachments? This cannot be undone.")) return;
+                void consoleState.deleteThread(thread.id).catch(() => undefined);
+              }}
+            >
+              <Icon name="trash" size={17} />
+            </button>
+          )}
+        </div>
+      </header>
+      <ConnectionBanner connection={consoleState.connection} />
+      {consoleState.error !== undefined && consoleState.bootstrap !== undefined && (
+        <div className="connection-banner" role="alert">
+          <span className="connection-pulse" />
+          {consoleState.error}
+        </div>
+      )}
+      {thread === undefined ? (
+        <EmptyConversation />
       ) : (
         <ThreadPrimitive.Root className="thread-root">
           <SelectionToolbar />
           <ThreadPrimitive.Viewport className="thread-viewport" autoScroll>
             <div className="message-column">
-              <ThreadPrimitive.Empty>
-                <div className="thread-empty"><span>New conversation</span><small>Send a message to begin.</small></div>
-              </ThreadPrimitive.Empty>
+              <ThreadPrimitive.Empty><EmptyConversation /></ThreadPrimitive.Empty>
               <ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
             </div>
-            <ThreadPrimitive.ScrollToBottom className="scroll-bottom" aria-label="Scroll to latest">↓</ThreadPrimitive.ScrollToBottom>
+            <ThreadPrimitive.ScrollToBottom className="scroll-bottom" aria-label="Scroll to latest message">
+              <Icon name="arrow-down" size={16} />
+            </ThreadPrimitive.ScrollToBottom>
             <ThreadPrimitive.ViewportFooter className="thread-footer">
-              {thread.archivedAt
-                ? <div className="archived-note">This conversation is archived. Restore it to continue.</div>
-                : <Composer />}
+              {thread.archivedAt === undefined ? (
+                <Composer />
+              ) : (
+                <div className="archived-footer">
+                  <span>This conversation is archived.</span>
+                  <button
+                    type="button"
+                    onClick={() => void consoleState.archiveThread(thread.id, false).catch(() => undefined)}
+                  >
+                    Restore to continue
+                  </button>
+                </div>
+              )}
             </ThreadPrimitive.ViewportFooter>
           </ThreadPrimitive.Viewport>
+          {consoleState.detail === undefined && (
+            <div className="detail-loading" role="status" aria-label="Loading conversation">
+              <span />
+            </div>
+          )}
         </ThreadPrimitive.Root>
       )}
     </main>

@@ -501,13 +501,20 @@ describe("standalone web product", () => {
     webServers.add(server);
 
     const open: AbortController[] = [];
+    // `fetch` resolves once headers arrive, which can race the server's own
+    // registration. Reading the first event proves this subscriber is counted
+    // before the next one is opened.
     const subscribe = async (): Promise<Response> => {
       const controller = new AbortController();
       open.push(controller);
-      return await fetch(`${server.url}api/v1/events`, {
+      const response = await fetch(`${server.url}api/v1/events`, {
         headers: { authorization: `Bearer ${WEB_TOKEN}` },
         signal: controller.signal,
       });
+      if (response.status === 200 && response.body !== null) {
+        await response.body.getReader().read();
+      }
+      return response;
     };
 
     try {
