@@ -15,7 +15,12 @@ import {
   MEMORY_LOCAL_DATABASE_FILENAME,
   type MemoryEmbeddingProvider,
 } from "../index.js";
-import { openBujoDatabase } from "../bujo-db.js";
+import {
+  captureReceiptKey,
+  getMetadata,
+  openBujoDatabase,
+  setMetadata,
+} from "../bujo-db.js";
 import { openMemoryLocalForTesting as openMemoryLocal } from "../store.js";
 
 const signal = new AbortController().signal;
@@ -120,6 +125,211 @@ describe("memory-local maintenance and recovery", () => {
         .toContain("apples");
     } finally {
       await backupMemory.stop();
+    }
+  });
+
+  it.each([
+    ["the last derived record", ["receipt fact alpha"]],
+    ["one of multiple derived records", ["receipt fact alpha", "receipt fact beta"]],
+  ])("keeps replay idempotent after forgetting %s", async (_case, facts) => {
+    const fixture = await createFixture();
+    const provider = new DeterministicEmbeddingProvider(3);
+    const source = record(
+      `forget-source-${String(facts.length)}`,
+      "completed turn for receipt-aware forgetting",
+      "2026-07-23T12:00:00.000Z",
+    );
+    let captureCalls = 0;
+    const grant: MemoryRuntimeCaptureGrant = {
+      async complete() {
+        captureCalls += 1;
+        return {
+          text: "",
+          structuredOutput: {
+            records: facts.map((text) => ({ text })),
+          },
+        };
+      },
+    };
+    const open = () => openMemoryLocal({
+      ...options(fixture, memoryConfig(3)),
+      host: runtimeHost(grant),
+      embeddingProvider: provider,
+    });
+
+    const original = await open();
+    const survivorCount = facts.length - 1;
+    try {
+      await original.capture?.({ record: source, signal });
+      expect(captureCalls).toBe(1);
+      const recalled = await original.recall({
+        query: "receipt fact",
+        limit: facts.length,
+        signal,
+      });
+      expect(recalled.records).toHaveLength(facts.length);
+      const target = recalled.records.find(({ text }) => text === facts[0])!;
+      await expect(original.previewForget(target.id, signal)).resolves.toMatchObject({
+        found: true,
+        vectorPresent: true,
+      });
+      await expect(original.forget?.({ recordId: target.id, signal })).resolves.toBe(true);
+      await expect(original.forget?.({ recordId: target.id, signal })).resolves.toBe(false);
+      await expect(original.audit({ signal, strict: true })).resolves.toMatchObject({
+        status: "healthy",
+        records: survivorCount,
+        fts: { indexed: survivorCount, missing: 0, orphaned: 0 },
+        vectors: { indexed: survivorCount, missing: 0 },
+        intake: { captures: 0, vectors: 0 },
+      });
+    } finally {
+      await original.stop();
+    }
+
+    const replayed = await open();
+    try {
+      await expect(replayed.capture?.({ record: source, signal })).resolves.toBeUndefined();
+      expect(captureCalls).toBe(1);
+      await expect(replayed.audit({ signal, strict: true })).resolves.toMatchObject({
+        status: "healthy",
+        records: survivorCount,
+        fts: { indexed: survivorCount, missing: 0, orphaned: 0 },
+        vectors: { indexed: survivorCount, missing: 0 },
+        intake: { captures: 0, vectors: 0 },
+      });
+      const recalled = await replayed.recall({
+        query: "receipt fact",
+        limit: Math.max(1, facts.length),
+        signal,
+      });
+      expect(recalled.records.map(({ text }) => text)).toEqual(facts.slice(1));
+    } finally {
+      await replayed.stop();
+    }
+  });
+
+  it("fails strict audit on dangling receipts and rolls back forget on malformed receipts", async () => {
+    const fixture = await createFixture();
+    const source = record(
+      "receipt-integrity-source",
+      "receipt integrity fact",
+      "2026-07-23T12:00:00.000Z",
+    );
+    const original = await openMemoryLocal({
+      ...options(fixture, memoryConfig(3)),
+      host: runtimeHost(passthroughGrant()),
+      embeddingProvider: new DeterministicEmbeddingProvider(3),
+    });
+    await original.capture?.({ record: source, signal });
+    const target = (await original.recall({
+      query: "receipt integrity",
+      limit: 1,
+      signal,
+    })).records[0]!;
+    await original.stop();
+
+    const databasePath = join(fixture.directory, MEMORY_LOCAL_DATABASE_FILENAME);
+    const corrupted = openBujoDatabase(databasePath);
+    const receiptKey = captureReceiptKey(source.id);
+    const receipt = JSON.parse(getMetadata(corrupted, receiptKey)!) as {
+      version: 1;
+      sourceHash: string;
+      recordIds: string[];
+    };
+    setMetadata(corrupted, receiptKey, JSON.stringify({
+      ...receipt,
+      recordIds: [...receipt.recordIds, `runtime:${"f".repeat(48)}`],
+    }));
+    corrupted.close();
+
+    const dangling = await openMemoryLocal({
+      ...options(fixture, memoryConfig(3)),
+      host: runtimeHost(passthroughGrant()),
+      embeddingProvider: new DeterministicEmbeddingProvider(3),
+    });
+    await expect(dangling.audit({ signal, strict: true }))
+      .rejects.toMatchObject({ code: "corrupt_store" });
+    await dangling.stop();
+
+    const malformed = openBujoDatabase(databasePath);
+    setMetadata(
+      malformed,
+      receiptKey,
+      JSON.stringify(receipt),
+    );
+    const malformedReceiptKey = captureReceiptKey("zzzz-unrelated-source");
+    expect(receiptKey < malformedReceiptKey).toBe(true);
+    setMetadata(malformed, malformedReceiptKey, "{");
+    malformed.close();
+
+    const protectedStore = await openMemoryLocal({
+      ...options(fixture, memoryConfig(3)),
+      host: runtimeHost(passthroughGrant()),
+      embeddingProvider: new DeterministicEmbeddingProvider(3),
+    });
+    try {
+      await expect(protectedStore.forget?.({ recordId: target.id, signal }))
+        .rejects.toMatchObject({ code: "corrupt_store" });
+      await expect(protectedStore.previewForget(target.id, signal)).resolves.toMatchObject({
+        found: true,
+        vectorPresent: true,
+      });
+      expect((await protectedStore.recall({
+        query: "receipt integrity",
+        limit: 1,
+        signal,
+      })).records[0]?.id).toBe(target.id);
+    } finally {
+      await protectedStore.stop();
+    }
+  });
+
+  it("checks capture-receipt integrity beyond the first bounded keyset page", async () => {
+    const fixture = await createFixture();
+    const initialized = await openMemoryLocal(options(
+      fixture,
+      { capture: { enabled: false } },
+    ));
+    await initialized.stop();
+
+    const database = openBujoDatabase(
+      join(fixture.directory, MEMORY_LOCAL_DATABASE_FILENAME),
+    );
+    const receipts = Array.from({ length: 513 }, (_, index) => ({
+      key: captureReceiptKey(`paged-receipt-${String(index).padStart(3, "0")}`),
+      sourceHash: index.toString(16).padStart(64, "0"),
+    })).sort((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0);
+    const insert = database.prepare(
+      "INSERT INTO index_metadata(key, value) VALUES (?, ?)",
+    );
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const [index, receipt] of receipts.entries()) {
+        insert.run(receipt.key, JSON.stringify({
+          recordIds: index === receipts.length - 1
+            ? [`runtime:${"f".repeat(48)}`]
+            : [],
+          sourceHash: receipt.sourceHash,
+          version: 1,
+        }));
+      }
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    } finally {
+      database.close();
+    }
+
+    const audited = await openMemoryLocal(options(
+      fixture,
+      { capture: { enabled: false } },
+    ));
+    try {
+      await expect(audited.audit({ signal, strict: true }))
+        .rejects.toMatchObject({ code: "corrupt_store" });
+    } finally {
+      await audited.stop();
     }
   });
 

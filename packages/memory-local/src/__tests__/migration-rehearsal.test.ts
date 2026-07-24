@@ -42,6 +42,7 @@ import {
   adoptV0MemoryLocalCopyForTesting,
   snapshotV0MemoryLocalRootForTesting,
 } from "../migration.js";
+import { captureReceiptKey } from "../bujo-db.js";
 
 const fixturePath = fileURLToPath(
   new URL("../../fixtures/v0-final-bujo.json", import.meta.url),
@@ -769,6 +770,49 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     expect(before.mode & 0o777).toBe(0o600);
     const after = await stat(markerPath);
     expect(after.ino).toBe(before.ino);
+  });
+
+  it("rejects dangling capture receipts before adoption commit", async () => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    const database = new DatabaseSync(managedDatabasePath(source, fixture));
+    try {
+      database.prepare(
+        "INSERT INTO index_metadata(key, value) VALUES (?, ?)",
+      ).run(
+        captureReceiptKey("migration-receipt-source"),
+        JSON.stringify({
+          recordIds: [`runtime:${"f".repeat(48)}`],
+          sourceHash: "a".repeat(64),
+          version: 1,
+        }),
+      );
+    } finally {
+      database.close();
+    }
+
+    const snapshot = await snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    });
+    await expect(adoptV0MemoryLocalCopy({
+      liveSourceRoot: source,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: snapshot.treeSha256,
+      signal,
+    })).rejects.toThrow(/invalid memory records or capture receipts/u);
+    const markerPath = join(rehearsal, MEMORY_LOCAL_MARKER_FILENAME);
+    const marker = await stat(markerPath);
+    expect(await readFile(markerPath, "utf8")).toMatch(
+      /^initializing:[0-9a-f-]{36}\n$/u,
+    );
+    expect(marker.mode & 0o777).toBe(0o600);
   });
 
   it("rejects semantically unreadable v0 records before adoption commit", async () => {

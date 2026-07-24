@@ -22,6 +22,7 @@ import type {
 import { HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE } from "@mono-agent/module-sdk";
 
 import {
+  assertCaptureReceiptIntegrity,
   assertReadableMemoryRows,
   auditBujoDatabase,
   captureIntakeKey,
@@ -37,6 +38,7 @@ import {
   insertMemoryRows,
   listMetadata,
   openBujoDatabase,
+  parseCaptureReceipt,
   quickCheck,
   readMemoryRow,
   readMemoryRows,
@@ -452,6 +454,7 @@ export class MemoryLocal implements Memory {
       const snapshot = auditBujoDatabase(this.#state.database);
       if (request.strict === true) {
         assertReadableMemoryRows(this.#state.database, this.config, snapshot);
+        assertCaptureReceiptIntegrity(this.#state.database);
       }
       const projections = await auditBujoProjections(this.#state.root);
       const compatible = vectorIdentityCompatible(
@@ -853,7 +856,7 @@ export class MemoryLocal implements Memory {
     const receiptKey = captureReceiptKey(source.record.id);
     const receipt = getMetadata(this.#state.database, receiptKey);
     if (receipt !== undefined) {
-      const parsed = parseReceipt(receipt);
+      const parsed = parseCaptureReceipt(receipt);
       if (parsed.sourceHash !== source.contentHash) {
         throw new MemoryLocalError(
           "duplicate_record",
@@ -1582,31 +1585,6 @@ function parseCaptureIntake(value: string, config: MemoryLocalConfig): CaptureIn
     sourceHash: source.contentHash,
     attempts: parsed.attempts as number,
     ...(parsed.lastFailureAt === undefined ? {} : { lastFailureAt: parsed.lastFailureAt as string }),
-  });
-}
-
-function parseReceipt(value: string): {
-  readonly sourceHash: string;
-  readonly recordIds: readonly string[];
-} {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(value);
-  } catch {
-    throw new MemoryLocalError("corrupt_store", "Memory capture receipt is malformed.");
-  }
-  if (!isPlainObject(parsed) || parsed.version !== 1
-    || typeof parsed.sourceHash !== "string" || !/^[a-f0-9]{64}$/u.test(parsed.sourceHash)
-    || !Array.isArray(parsed.recordIds)
-    || parsed.recordIds.length === 0
-    || parsed.recordIds.length > DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS
-    || parsed.recordIds.some((id) => typeof id !== "string")) {
-    throw new MemoryLocalError("corrupt_store", "Memory capture receipt has invalid bounded fields.");
-  }
-  for (const recordId of parsed.recordIds) validateRecordId(recordId as string);
-  return Object.freeze({
-    sourceHash: parsed.sourceHash,
-    recordIds: Object.freeze([...(parsed.recordIds as string[])]),
   });
 }
 

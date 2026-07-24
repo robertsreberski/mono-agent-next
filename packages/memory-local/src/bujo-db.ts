@@ -4,10 +4,14 @@ import { load as loadSqliteVec } from "sqlite-vec";
 
 import type { JsonObject, MemoryRecord } from "@mono-agent/module-sdk";
 
-import type { MemoryLocalConfig } from "./config.js";
+import {
+  DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS,
+  type MemoryLocalConfig,
+} from "./config.js";
 import { MemoryLocalError } from "./errors.js";
 import { toVectorBlob } from "./embeddings.js";
 import {
+  canonicalJson,
   validateMemoryRecord,
   type ValidatedMemoryRecord,
 } from "./records.js";
@@ -28,6 +32,12 @@ const REQUIRED_TABLES = [
 const APPLICATION_ID = 0x4d414d31;
 const MAX_METADATA_ROWS = 1_000_000;
 const MAX_STORED_TIMESTAMP_BYTES = 64;
+const MAX_CAPTURE_RECEIPT_BYTES = 4_096;
+const CAPTURE_RECEIPT_PREFIX = "memory-local:capture-receipt:";
+const CAPTURE_RECEIPT_KEY =
+  /^memory-local:capture-receipt:[A-Za-z0-9_-]{2,342}$/u;
+const CAPTURE_RECEIPT_PAGE_SIZE = 512;
+const MEMORY_RECORD_ID = /^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,255}$/u;
 const LEGACY_STORED_TIMESTAMP =
   /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/u;
 
@@ -583,6 +593,7 @@ export function forgetMemoryRow(database: DatabaseSync, recordId: string): boole
       database.exec("COMMIT");
       return false;
     }
+    forgetCaptureReceiptReferences(database, recordId);
     database.prepare("DELETE FROM memories_vec WHERE rowid = ?").run(BigInt(row.seq));
     database.prepare("DELETE FROM memories_fts WHERE id = ?").run(recordId);
     database.prepare("DELETE FROM content_hashes WHERE memory_id = ?").run(recordId);
@@ -593,6 +604,7 @@ export function forgetMemoryRow(database: DatabaseSync, recordId: string): boole
       vectorIntakeKey(recordId),
     );
     database.prepare("DELETE FROM memories WHERE id = ?").run(recordId);
+    assertCaptureReceiptIntegrity(database);
     database.exec("COMMIT");
     return true;
   } catch (error) {
@@ -740,7 +752,21 @@ export function captureIntakeKey(id: string): string {
 }
 
 export function captureReceiptKey(id: string): string {
-  return `memory-local:capture-receipt:${digestKey(id)}`;
+  return `${CAPTURE_RECEIPT_PREFIX}${digestKey(id)}`;
+}
+
+export function assertCaptureReceiptIntegrity(database: DatabaseSync): void {
+  const record = database.prepare("SELECT 1 AS present FROM memories WHERE id = ?");
+  for (const { value } of captureReceiptRows(database)) {
+    for (const recordId of new Set(parseCaptureReceipt(value).recordIds)) {
+      if (record.get(recordId) === undefined) {
+        throw new MemoryLocalError(
+          "corrupt_store",
+          "Memory capture receipt points to a missing canonical record.",
+        );
+      }
+    }
+  }
 }
 
 export function vectorIntakeKey(id: string): string {
@@ -749,6 +775,148 @@ export function vectorIntakeKey(id: string): string {
 
 function vectorIntakeValue(recordId: string): string {
   return JSON.stringify({ version: 1, recordId });
+}
+
+function forgetCaptureReceiptReferences(
+  database: DatabaseSync,
+  recordId: string,
+): void {
+  const update = database.prepare("UPDATE index_metadata SET value = ? WHERE key = ?");
+  for (const { key, value } of captureReceiptRows(database)) {
+    const receipt = parseCaptureReceipt(value);
+    const recordIds = receipt.recordIds.filter((candidate) => candidate !== recordId);
+    if (recordIds.length === receipt.recordIds.length) continue;
+    const result = update.run(canonicalJson({
+      recordIds,
+      sourceHash: receipt.sourceHash,
+      version: 1,
+    }), key);
+    if (Number(result.changes) !== 1) {
+      throw new MemoryLocalError(
+        "corrupt_store",
+        "Memory capture receipt changed during forgetting.",
+      );
+    }
+  }
+}
+
+function captureReceiptRows(
+  database: DatabaseSync,
+): Iterable<{ readonly key: string; readonly value: string }> {
+  const pattern = `${CAPTURE_RECEIPT_PREFIX}%`;
+  const preflight = database.prepare(`
+    SELECT
+      COUNT(*) AS receipt_count,
+      COALESCE(SUM(
+        CASE
+          WHEN typeof(key) != 'text'
+            OR typeof(value) != 'text'
+            OR LENGTH(CAST(key AS BLOB)) > 371
+            OR LENGTH(CAST(value AS BLOB)) > ?
+          THEN 1
+          ELSE 0
+        END
+      ), 0) AS invalid_count
+    FROM index_metadata
+    WHERE key LIKE ? ESCAPE '\\'
+  `).get(MAX_CAPTURE_RECEIPT_BYTES, pattern) as unknown as {
+    receipt_count: number;
+    invalid_count: number;
+  };
+  if (
+    number(preflight.receipt_count, "capture receipt count") > MAX_METADATA_ROWS
+    || number(preflight.invalid_count, "invalid capture receipt storage count") !== 0
+  ) {
+    throw new MemoryLocalError(
+      "corrupt_store",
+      "Memory capture receipt storage is invalid.",
+    );
+  }
+  const page = database.prepare(`
+    SELECT key, value
+    FROM index_metadata
+    WHERE key LIKE ? ESCAPE '\\' AND key > ?
+    ORDER BY key
+    LIMIT ?
+  `);
+  return {
+    *[Symbol.iterator]() {
+      let after = "";
+      while (true) {
+        const rows = page.all(
+          pattern,
+          after,
+          CAPTURE_RECEIPT_PAGE_SIZE,
+        ) as unknown as { key: unknown; value: unknown }[];
+        if (rows.length === 0) return;
+        for (const row of rows) {
+          if (
+            typeof row.key !== "string"
+            || !validCaptureReceiptKey(row.key)
+            || typeof row.value !== "string"
+          ) {
+            throw new MemoryLocalError(
+              "corrupt_store",
+              "Memory capture receipt storage is invalid.",
+            );
+          }
+          yield { key: row.key, value: row.value };
+        }
+        after = rows.at(-1)!.key as string;
+      }
+    },
+  };
+}
+
+export function parseCaptureReceipt(value: string): {
+  readonly sourceHash: string;
+  readonly recordIds: readonly string[];
+} {
+  if (Buffer.byteLength(value, "utf8") > MAX_CAPTURE_RECEIPT_BYTES) {
+    throw new MemoryLocalError(
+      "corrupt_store",
+      "Memory capture receipt exceeds its byte bound.",
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new MemoryLocalError("corrupt_store", "Memory capture receipt is malformed.");
+  }
+  if (
+    !isPlainObject(parsed)
+    || Object.keys(parsed).sort().join(",") !== "recordIds,sourceHash,version"
+    || parsed.version !== 1
+    || typeof parsed.sourceHash !== "string"
+    || !/^[a-f0-9]{64}$/u.test(parsed.sourceHash)
+    || !Array.isArray(parsed.recordIds)
+    || parsed.recordIds.length > DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS
+    || parsed.recordIds.some((id) => typeof id !== "string" || !MEMORY_RECORD_ID.test(id))
+  ) {
+    throw new MemoryLocalError(
+      "corrupt_store",
+      "Memory capture receipt has invalid bounded fields.",
+    );
+  }
+  return Object.freeze({
+    sourceHash: parsed.sourceHash,
+    recordIds: Object.freeze([...(parsed.recordIds as string[])]),
+  });
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value) as unknown;
+  return prototype === Object.prototype || prototype === null;
+}
+
+function validCaptureReceiptKey(value: string): boolean {
+  if (!CAPTURE_RECEIPT_KEY.test(value)) return false;
+  const encoded = value.slice(CAPTURE_RECEIPT_PREFIX.length);
+  const decoded = Buffer.from(encoded, "base64url").toString("utf8");
+  return MEMORY_RECORD_ID.test(decoded)
+    && Buffer.from(decoded, "utf8").toString("base64url") === encoded;
 }
 
 export function ftsMatchExpression(value: string): string {
