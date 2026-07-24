@@ -65,7 +65,14 @@ async function systemPromptFile(systemPrompt: string | undefined): Promise<{
 export function createClaudeCliTransport(options: ClaudeCliTransportOptions): ClaudeTransport {
   return {
     async run(request: ClaudeTransportRequest, events: ClaudeTransportEvents): Promise<ClaudeTransportResult> {
+      if (request.signal.aborted) {
+        throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
       const promptFile = await systemPromptFile(request.systemPrompt);
+      if (request.signal.aborted) {
+        await promptFile.cleanup();
+        throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
       const args = [
         "--print",
         "--input-format", "text",
@@ -172,8 +179,8 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
         if (!acceptEvents || terminalFailure) return;
         terminalFailure = true;
         acceptEvents = false;
-        terminate();
         rejectExit(error);
+        terminate();
       };
       const exit = new Promise<{ code: number; signal: NodeJS.Signals | null }>((resolve, reject) => {
         rejectExit = reject;
@@ -221,6 +228,7 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
       } catch (error) {
         rejectRun(error);
         await exit.catch(() => undefined);
+        await termination;
         throw error;
       }
       const onAbort = (): void => {
@@ -271,6 +279,7 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
         clearTimeout(timer);
         request.signal.removeEventListener("abort", onAbort);
         await chain.catch(() => undefined);
+        if (terminalFailure) await termination;
       }
     },
   };

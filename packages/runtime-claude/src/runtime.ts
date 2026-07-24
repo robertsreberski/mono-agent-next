@@ -233,6 +233,7 @@ function assertSessionLinkage(
 
 export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtime {
   let state: RuntimeState = "created";
+  let stopPromise: Promise<void> | undefined;
   const active = new Set<ActiveTurn>();
   const transport = options.config.mode === "sdk"
     ? options.sdkTransport ?? createClaudeSdkTransport()
@@ -256,20 +257,23 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
       if (state !== "stopped") state = "draining";
     },
 
-    async stop(_context: ModuleStopContext) {
-      if (state === "stopped") return;
-      state = "draining";
-      const turns = [...active];
-      for (const turn of turns) {
-        turn.abortController.abort(
-          new DOMException("runtime-claude stopped", "AbortError"),
-        );
-      }
-      await Promise.allSettled(turns.map(async (turn) => {
-        await Promise.allSettled([interruptTurn(turn), turn.settled]);
-        await interruptTurn(turn).catch(() => undefined);
-      }));
-      state = "stopped";
+    stop(_context: ModuleStopContext) {
+      stopPromise ??= (async () => {
+        if (state === "stopped") return;
+        state = "draining";
+        const turns = [...active];
+        for (const turn of turns) {
+          turn.abortController.abort(
+            new DOMException("runtime-claude stopped", "AbortError"),
+          );
+        }
+        await Promise.allSettled(turns.map(async (turn) => {
+          await Promise.allSettled([interruptTurn(turn), turn.settled]);
+          await interruptTurn(turn).catch(() => undefined);
+        }));
+        state = "stopped";
+      })();
+      return stopPromise;
     },
 
     health(_context: ModuleHealthContext): ModuleHealth {
@@ -425,9 +429,12 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
           cause: safeCause(error, options.config.auth?.token),
         });
       } finally {
-        unregisterLiveInput?.();
-        active.delete(currentTurn);
-        currentTurn.resolveSettled();
+        try {
+          unregisterLiveInput?.();
+        } finally {
+          active.delete(currentTurn);
+          currentTurn.resolveSettled();
+        }
       }
     },
   };

@@ -12,6 +12,9 @@ import {
   isClaudeSessionUnavailable,
 } from "./transport.js";
 
+const SDK_INTERRUPT_GRACE_MS = 1_000;
+const QUERY_CREATION_ABORTED = Symbol("query-creation-aborted");
+
 interface QueryLike extends AsyncIterable<unknown> {
   interrupt(): Promise<unknown>;
   close(): void;
@@ -89,21 +92,62 @@ export function createClaudeSdkTransport(options: ClaudeSdkTransportOptions = {}
       input.push(userMessage(request.prompt));
       const abortController = new AbortController();
       let query: QueryLike | undefined;
-      let interruptPromise: Promise<unknown> | undefined;
-      const interruptQuery = async (): Promise<void> => {
-        if (query === undefined) return;
-        interruptPromise ??= query.interrupt();
-        await interruptPromise;
+      let closeRequested = false;
+      let queryClosed = false;
+      let queryCloseError: unknown;
+      const closeQuery = (): void => {
+        closeRequested = true;
+        if (query === undefined || queryClosed) return;
+        queryClosed = true;
+        try {
+          query.close();
+        } catch (error) {
+          queryCloseError = error;
+        }
       };
+      let interruptPromise: Promise<unknown> | undefined;
+      const interruptQuery = (): Promise<void> => {
+        if (query === undefined) return Promise.resolve();
+        if (interruptPromise === undefined) {
+          const ownedQuery = query;
+          const rawInterrupt = Promise.resolve().then(async () => ownedQuery.interrupt());
+          void rawInterrupt.catch(() => undefined);
+          let timer!: NodeJS.Timeout;
+          const deadline = new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, SDK_INTERRUPT_GRACE_MS);
+          });
+          interruptPromise = Promise.race([
+            rawInterrupt.then(() => undefined),
+            deadline,
+          ]).finally(() => {
+            clearTimeout(timer);
+            closeQuery();
+          });
+          void interruptPromise.catch(() => undefined);
+        }
+        return interruptPromise.then(() => undefined);
+      };
+      let resolveCreationAbort!: (value: typeof QUERY_CREATION_ABORTED) => void;
+      const creationAbort = new Promise<typeof QUERY_CREATION_ABORTED>((resolve) => {
+        resolveCreationAbort = resolve;
+      });
       const onAbort = (): void => {
-        abortController.abort(request.signal.reason);
+        const reason = request.signal.reason
+          ?? new DOMException("Aborted", "AbortError");
+        abortController.abort(reason);
         input.close();
-        void interruptQuery().catch(() => undefined);
+        closeRequested = true;
+        resolveCreationAbort(QUERY_CREATION_ABORTED);
+        if (query !== undefined) void interruptQuery().catch(() => undefined);
       };
       request.signal.addEventListener("abort", onAbort, { once: true });
-      if (request.signal.aborted) onAbort();
+      let primaryFailure = false;
       try {
-        query = await createQuery({
+        if (request.signal.aborted) {
+          onAbort();
+          throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
+        }
+        const creation = Promise.resolve().then(async () => createQuery({
           prompt: input,
           options: {
             abortController,
@@ -120,34 +164,40 @@ export function createClaudeSdkTransport(options: ClaudeSdkTransportOptions = {}
             ...(request.effort === undefined ? {} : { effort: request.effort }),
             ...(request.responseSchema === undefined ? {} : { outputFormat: { type: "json_schema", schema: request.responseSchema } }),
           },
+        })).then((created) => {
+          query = created;
+          if (closeRequested) {
+            let lateInterrupt: Promise<unknown>;
+            try {
+              lateInterrupt = Promise.resolve(created.interrupt());
+            } catch (error) {
+              lateInterrupt = Promise.reject(error);
+            }
+            void lateInterrupt.catch(() => undefined);
+            closeQuery();
+          }
+          return created;
         });
-      } catch (error) {
-        request.signal.removeEventListener("abort", onAbort);
-        input.close();
-        if (isClaudeSessionUnavailable(error, request.sessionId)) {
-          throw new ClaudeSessionUnavailableError();
+        void creation.catch(() => undefined);
+        const created = await Promise.race([creation, creationAbort]);
+        if (created === QUERY_CREATION_ABORTED) {
+          throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
         }
-        throw error;
-      }
-      if (request.signal.aborted) {
-        await interruptQuery().catch(() => undefined);
-        request.signal.removeEventListener("abort", onAbort);
-        input.close();
-        query.close();
-        throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
-      }
-      events.control({
-        interrupt: interruptQuery,
-        async sendInput(text, receivedAt) { return input.push(userMessage(text, receivedAt)); },
-      });
+        query = created;
+        if (request.signal.aborted) {
+          throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
+        }
+        events.control({
+          interrupt: interruptQuery,
+          async sendInput(text, receivedAt) { return input.push(userMessage(text, receivedAt)); },
+        });
 
-      let streamed = "";
-      let finalText = "";
-      let sessionId: string | undefined;
-      let finalUsage: RuntimeUsage | undefined;
-      let structuredOutput: JsonValue | undefined;
-      let stopReason: string | undefined;
-      try {
+        let streamed = "";
+        let finalText = "";
+        let sessionId: string | undefined;
+        let finalUsage: RuntimeUsage | undefined;
+        let structuredOutput: JsonValue | undefined;
+        let stopReason: string | undefined;
         for await (const raw of query) {
           const message = record(raw);
           if (typeof message.session_id === "string" && message.session_id !== sessionId) {
@@ -193,7 +243,19 @@ export function createClaudeSdkTransport(options: ClaudeSdkTransportOptions = {}
             }
           }
         }
+        if (sessionId === undefined) throw new Error("Claude SDK completed without a session id");
+        return {
+          text: streamed === "" ? finalText : streamed,
+          sessionId,
+          ...(finalUsage === undefined ? {} : { usage: finalUsage }),
+          ...(structuredOutput === undefined ? {} : { structuredOutput }),
+          ...(stopReason === undefined ? {} : { stopReason }),
+        };
       } catch (error) {
+        primaryFailure = true;
+        if (request.signal.aborted) {
+          throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
+        }
         if (isClaudeSessionUnavailable(error, request.sessionId)) {
           throw new ClaudeSessionUnavailableError();
         }
@@ -201,16 +263,9 @@ export function createClaudeSdkTransport(options: ClaudeSdkTransportOptions = {}
       } finally {
         request.signal.removeEventListener("abort", onAbort);
         input.close();
-        query.close();
+        closeQuery();
+        if (!primaryFailure && queryCloseError !== undefined) throw queryCloseError;
       }
-      if (sessionId === undefined) throw new Error("Claude SDK completed without a session id");
-      return {
-        text: streamed === "" ? finalText : streamed,
-        sessionId,
-        ...(finalUsage === undefined ? {} : { usage: finalUsage }),
-        ...(structuredOutput === undefined ? {} : { structuredOutput }),
-        ...(stopReason === undefined ? {} : { stopReason }),
-      };
     },
   };
 }
