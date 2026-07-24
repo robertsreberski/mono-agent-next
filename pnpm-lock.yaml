@@ -247,6 +247,9 @@ importers:
       '@mono-agent/module-sdk':
         specifier: workspace:0.15.0
         version: link:../module-sdk
+      acorn:
+        specifier: 8.17.0
+        version: 8.17.0
 
   packages/service-macos:
     dependencies:

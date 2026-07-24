@@ -1,7 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import type {
   ModuleCommand,
@@ -13,6 +12,7 @@ import type {
 } from "@mono-agent/module-sdk";
 import type { Sandbox, SandboxCommand, SandboxResult } from "@mono-agent/module-sdk/internal";
 
+import { boundLaunch, closeBindings } from "./bound-launch.js";
 import {
   isReservedSandboxEnvironmentName,
   parseSandboxSrtConfig,
@@ -42,6 +42,8 @@ interface ActiveChild {
   readonly child: ChildProcessWithoutNullStreams;
   readonly done: Promise<void>;
 }
+
+const SIGKILL_GRACE_MS = 100;
 
 export class SandboxSrt implements Sandbox {
   readonly commands: readonly ModuleCommand[];
@@ -142,6 +144,7 @@ export class SandboxSrt implements Sandbox {
         this.#healthDetails("verified"),
       );
     } catch {
+      throwIfAborted(context.signal);
       return health(
         "unhealthy",
         "SRT executable or settings integrity could not be proven.",
@@ -225,7 +228,10 @@ export class SandboxSrt implements Sandbox {
     const active = [...this.#active];
     for (const { child } of active) terminate(child, "SIGTERM");
     const killTimers = active.map(({ child }) => {
-      const timer = setTimeout(() => terminate(child, "SIGKILL"), 100);
+      const timer = setTimeout(
+        () => terminate(child, "SIGKILL"),
+        SIGKILL_GRACE_MS,
+      );
       timer.unref();
       return timer;
     });
@@ -324,167 +330,6 @@ export async function openSandboxSrt(options: OpenSandboxSrtOptions): Promise<Sa
   return await SandboxSrt.open(options);
 }
 
-interface BoundLaunch {
-  readonly command: string;
-  readonly arguments: readonly string[];
-}
-
-const BOUND_EXECUTABLE_DESCRIPTOR = 3;
-const BOUND_SETTINGS_DESCRIPTOR = 4;
-const NODE_SRT_SHEBANG = "#!/usr/bin/env node";
-const BOUND_NODE_SPECIFIER = "mono-agent-srt:bound-entry";
-const UNBUNDLED_ENTRY_CODE = "ERR_MONO_AGENT_SRT_NOT_SELF_CONTAINED";
-
-function boundLaunch(
-  executable: TrustedFile,
-  executableBinding: TrustedFileBinding,
-  settingsBinding: TrustedFileBinding,
-): BoundLaunch {
-  if (
-    executableBinding.descriptor < 0
-    || settingsBinding.descriptor < 0
-  ) {
-    throw new SandboxSrtError(
-      "sandbox_unavailable",
-      "SRT descriptor binding is unavailable.",
-    );
-  }
-  if (
-    executableBinding.firstLine === NODE_SRT_SHEBANG
-    && (process.platform === "linux" || process.platform === "darwin")
-  ) {
-    return boundNodeLaunch(
-      executable,
-      process.platform === "linux" ? "/proc/self/fd" : "/dev/fd",
-    );
-  }
-  if (process.platform === "linux") {
-    if (executableBinding.firstLine?.startsWith("#!") === true) {
-      throw new SandboxSrtError(
-        "sandbox_unavailable",
-        "SRT descriptor-bound execution is unavailable for this executable.",
-      );
-    }
-    return Object.freeze({
-      command: `/proc/self/fd/${BOUND_EXECUTABLE_DESCRIPTOR}`,
-      arguments: Object.freeze([
-        "--settings",
-        `/proc/self/fd/${BOUND_SETTINGS_DESCRIPTOR}`,
-      ]),
-    });
-  }
-  if (process.platform === "darwin") {
-    throw new SandboxSrtError(
-      "sandbox_unavailable",
-      "SRT descriptor-bound execution is unavailable for this executable.",
-    );
-  }
-  throw new SandboxSrtError(
-    "sandbox_unavailable",
-    "SRT descriptor-bound execution is unavailable on this platform.",
-  );
-}
-
-function boundNodeLaunch(
-  executable: TrustedFile,
-  descriptorRoot: "/dev/fd" | "/proc/self/fd",
-): BoundLaunch {
-  const targetUrl = `${pathToFileURL(executable.path).href}?mono-agent-bound-entry`;
-  const loaderSource = [
-    'import { readFile } from "node:fs/promises";',
-    "function notSelfContained() {",
-    'const error = new Error("The bound SRT entrypoint must be self-contained.");',
-    `error.code = ${JSON.stringify(UNBUNDLED_ENTRY_CODE)};`,
-    "return error;",
-    "}",
-    "function hasDynamicImport(source) {",
-    "let cursor = 0;",
-    "while ((cursor = source.indexOf(\"import\", cursor)) >= 0) {",
-    "const before = cursor === 0 ? \"\" : source[cursor - 1];",
-    "const after = source[cursor + 6] ?? \"\";",
-    'if (/[A-Za-z0-9_$]/u.test(before) || /[A-Za-z0-9_$]/u.test(after)) { cursor += 6; continue; }',
-    "let next = cursor + 6;",
-    "for (;;) {",
-    'while (/\\s/u.test(source[next] ?? "")) next += 1;',
-    'if (source.startsWith("/*", next)) {',
-    'const end = source.indexOf("*/", next + 2);',
-    "if (end < 0) return true;",
-    "next = end + 2;",
-    "continue;",
-    "}",
-    'if (source.startsWith("//", next)) {',
-    'const end = source.indexOf("\\n", next + 2);',
-    "if (end < 0) return false;",
-    "next = end + 1;",
-    "continue;",
-    "}",
-    "break;",
-    "}",
-    'if (source[next] === "(") return true;',
-    "cursor += 6;",
-    "}",
-    "return false;",
-    "}",
-    "export async function resolve(specifier, context, nextResolve) {",
-    `if (specifier === ${JSON.stringify(BOUND_NODE_SPECIFIER)}) {`,
-    `return { url: ${JSON.stringify(targetUrl)}, shortCircuit: true };`,
-    "}",
-    `if (context.parentURL === ${JSON.stringify(targetUrl)} && !specifier.startsWith("node:")) {`,
-    "throw notSelfContained();",
-    "}",
-    "return nextResolve(specifier, context);",
-    "}",
-    "export async function load(url, context, nextLoad) {",
-    `if (url === ${JSON.stringify(targetUrl)}) {`,
-    `const source = await readFile("${descriptorRoot}/${BOUND_EXECUTABLE_DESCRIPTOR}", "utf8");`,
-    "if (hasDynamicImport(source)) throw notSelfContained();",
-    'return { format: "module", source, shortCircuit: true };',
-    "}",
-    "return nextLoad(url, context);",
-    "}",
-  ].join("");
-  const loaderUrl = `data:text/javascript,${encodeURIComponent(loaderSource)}`;
-  const registrationSource = [
-    'import { register } from "node:module";',
-    `register(${JSON.stringify(loaderUrl)}, import.meta.url);`,
-  ].join("");
-  const registrationUrl = `data:text/javascript,${encodeURIComponent(registrationSource)}`;
-  const bootstrap = [
-    `process.argv.splice(1, 0, ${JSON.stringify(executable.path)});`,
-    "try {",
-    `await import(${JSON.stringify(BOUND_NODE_SPECIFIER)});`,
-    "} catch (error) {",
-    `if (error?.code !== ${JSON.stringify(UNBUNDLED_ENTRY_CODE)}) throw error;`,
-    'process.stderr.write("The bound SRT entrypoint is not self-contained.");',
-    "process.exitCode = 126;",
-    "}",
-  ].join("");
-  return Object.freeze({
-    command: process.execPath,
-    arguments: Object.freeze([
-      "--disable-warning=DEP0205",
-      "--import",
-      registrationUrl,
-      "--input-type=module",
-      "--eval",
-      bootstrap,
-      "--",
-      "--settings",
-      `${descriptorRoot}/${BOUND_SETTINGS_DESCRIPTOR}`,
-    ]),
-  });
-}
-
-async function closeBindings(bindings: {
-  readonly executable: TrustedFileBinding;
-  readonly settings: TrustedFileBinding;
-}): Promise<void> {
-  await Promise.allSettled([
-    bindings.executable.close(),
-    bindings.settings.close(),
-  ]);
-}
-
 function buildEnvironment(
   supplied: Readonly<Record<string, string>> | undefined,
   config: SandboxSrtConfig,
@@ -543,7 +388,7 @@ async function collectChild(
     };
     const beginTermination = (): void => {
       terminate(child, "SIGTERM");
-      killTimer ??= setTimeout(forceKill, 100);
+      killTimer ??= setTimeout(forceKill, SIGKILL_GRACE_MS);
       killTimer.unref();
     };
     const onAbort = (): void => {
