@@ -79,8 +79,10 @@ retry remain explicit package operations. Running hosts expose the namespaced
 one-shot `mono-agent memory` route creates only the selected memory module, so
 it can run store-only maintenance but cannot recover runtime-backed capture
 intake; issue that retry through an AgentHost with the configured runtime
-loaded. `mono-agent doctor` performs read-only diagnostics and never captures,
-retries, rebuilds, consolidates, or repairs data.
+loaded and `lifecycleTimeoutMs` at least as large as the configured
+`capture.timeoutMs`. A default 10-second host cannot recover a slower capture.
+`mono-agent doctor` performs read-only diagnostics and never captures, retries,
+rebuilds, consolidates, or repairs data.
 
 ## Migration boundary
 
