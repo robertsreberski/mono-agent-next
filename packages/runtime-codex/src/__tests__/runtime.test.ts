@@ -674,6 +674,20 @@ describe("runtime-codex", () => {
       code: "ENOENT",
     });
     await expect(pending).resolves.toEqual({ status: "cancelled" });
+    await expect(runtime.runTurn({
+      turnId: "late-turn",
+      conversationId: "conversation",
+      model: "gpt-5.6-codex",
+      messages: [{ role: "user", content: [{ type: "text", text: "too late" }] }],
+      tools: [],
+      signal: new AbortController().signal,
+    }, {
+      emit() {},
+      async executeTool(call) { return { callId: call.id, content: [] }; },
+    })).rejects.toMatchObject({
+      code: "RUNTIME_NOT_RUNNING",
+      message: "runtime-codex is stopped",
+    });
   });
 
   it("steers live input into the active turn", async () => {
