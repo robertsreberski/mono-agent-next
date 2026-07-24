@@ -127,6 +127,11 @@ describe("trigger-cron config and module wiring", () => {
     expect(() => parseTriggerCronConfig({
       jobsDirectory: `${maximumDirectory}a`,
     })).toThrow(TriggerCronConfigError);
+    const astralBoundary = "😀".repeat(properties.jobsDirectory.maxLength);
+    expect(parseTriggerCronConfig({ jobsDirectory: astralBoundary }).jobsDirectory).toBe(astralBoundary);
+    expect(() => parseTriggerCronConfig({
+      jobsDirectory: `${astralBoundary}😀`,
+    })).toThrow(TriggerCronConfigError);
     expect(parseTriggerCronConfig({
       jobsDirectory: "cron",
       timezone: "Europe/Rome",

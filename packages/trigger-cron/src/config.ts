@@ -89,12 +89,21 @@ export function readString(value: unknown, field: string, maximumLength = 4_096)
     typeof value !== "string"
     || value.length === 0
     || value !== value.trim()
-    || value.length > maximumLength
+    || exceedsCodePointLimit(value, maximumLength)
     || /[\u0000-\u001f\u007f]/u.test(value)
   ) {
     throw new TriggerCronConfigError(`${field} must be a non-empty bounded string without surrounding whitespace.`);
   }
   return value;
+}
+
+function exceedsCodePointLimit(value: string, maximum: number): boolean {
+  let length = 0;
+  for (const _character of value) {
+    length += 1;
+    if (length > maximum) return true;
+  }
+  return false;
 }
 
 function readRelativeDirectory(value: unknown, field: string): string {

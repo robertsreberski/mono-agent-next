@@ -240,11 +240,15 @@ export function normalizeInstant(value: unknown): string {
   if (day > daysInMonth(year, month)) {
     throw new TypeError("scheduledAt must be an RFC3339 date-time string.");
   }
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) {
+  const leapSecond = match[6] === "60";
+  const normalizedInput = leapSecond
+    ? `${match[1]}-${match[2]}-${match[3]}T${match[4]}:${match[5]}:59${match[7] ?? ""}${match[8]}`
+    : value;
+  const parsed = new Date(normalizedInput);
+  if (!Number.isFinite(parsed.getTime()) || (leapSecond && !isLeapSecondBoundary(parsed))) {
     throw new TypeError("scheduledAt must be an RFC3339 date-time string.");
   }
-  return date.toISOString();
+  return new Date(parsed.getTime() + (leapSecond ? 1_000 : 0)).toISOString();
 }
 
 export function invocationResultToJson(result: CronInvocationResult): JsonValue {
@@ -340,11 +344,18 @@ export function throwIfAborted(signal: AbortSignal | undefined, message: string)
 }
 
 const RFC3339_INSTANT =
-  /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])[Tt](?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:[Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u;
+  /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])[Tt]([01]\d|2[0-3]):([0-5]\d):([0-5]\d|60)(\.\d+)?([Zz]|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u;
 
 function daysInMonth(year: number, month: number): number {
   if (month === 2) {
     return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
   }
   return [4, 6, 9, 11].includes(month) ? 30 : 31;
+}
+
+function isLeapSecondBoundary(value: Date): boolean {
+  return value.getUTCHours() === 23
+    && value.getUTCMinutes() === 59
+    && value.getUTCSeconds() === 59
+    && value.getUTCDate() === daysInMonth(value.getUTCFullYear(), value.getUTCMonth() + 1);
 }

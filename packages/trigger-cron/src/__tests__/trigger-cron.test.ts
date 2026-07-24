@@ -165,6 +165,36 @@ describe("trigger-cron lifecycle", () => {
     await trigger.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
   });
 
+  it("normalizes a valid RFC3339 leap second to its epoch boundary", async () => {
+    const clock = new TestClock("2016-12-31T23:59:59.000Z");
+    const host = new RecordingHost();
+    const trigger = createCronTrigger({
+      instanceId: "leap-second",
+      jobs: [job({ expression: "0 12 1 1 *" })],
+      host,
+      clock,
+    });
+    await trigger.start?.({ signal: new AbortController().signal });
+    clock.setNow("2017-01-01T00:01:00.000Z");
+
+    const leap = await trigger.invoke("heartbeat", "2016-12-31T23:59:60Z");
+    expect(leap).toMatchObject({
+      status: "accepted",
+      scheduledAt: "2017-01-01T00:00:00.000Z",
+    });
+    await expect(
+      trigger.invoke("heartbeat", "2017-01-01T00:00:00.000Z"),
+    ).resolves.toMatchObject({
+      status: "duplicate",
+      idempotencyKey: leap.idempotencyKey,
+    });
+    await expect(
+      trigger.invoke("heartbeat", "2016-12-31T12:00:60Z"),
+    ).rejects.toThrow(/RFC3339/u);
+    expect(host.events.map(scheduledAt)).toEqual(["2017-01-01T00:00:00.000Z"]);
+    await trigger.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
   it("bounds drain with its signal or deadline and still permits a final stop", async () => {
     const signalTrigger = createCronTrigger({
       instanceId: "drain-signal",
