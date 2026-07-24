@@ -346,7 +346,7 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
           control(value) {
             control = value;
             currentTurn.control = value;
-            if (currentTurn.abortController.signal.aborted) {
+            if (turnSignal.aborted) {
               void interruptTurn(currentTurn).catch(() => undefined);
             }
             if (

@@ -250,6 +250,76 @@ describe("runtime-claude failure paths", () => {
     }
   });
 
+  it.each(["abort", "timeout"] as const)(
+    "bounds %s when an active CLI event callback never settles",
+    async (trigger) => {
+      vi.useFakeTimers();
+      try {
+        const controller = new AbortController();
+        const child = new ControlledClaudeProcess();
+        let didLaunch!: () => void;
+        const launched = new Promise<void>((resolve) => {
+          didLaunch = resolve;
+        });
+        const transport = createClaudeCliTransport({
+          ...cliOptions(() => child),
+          timeoutMs: trigger === "timeout" ? 5 : 5_000,
+          spawnProcess() {
+            didLaunch();
+            return child;
+          },
+        });
+        let didStartEmit!: () => void;
+        const startedEmit = new Promise<void>((resolve) => {
+          didStartEmit = resolve;
+        });
+        const pending = transport.run(
+          transportRequest(controller.signal),
+          {
+            ...transportEvents,
+            text() {
+              didStartEmit();
+              return new Promise<void>(() => undefined);
+            },
+          },
+        );
+        const rejected = expect(pending).rejects.toThrow(
+          trigger === "abort"
+            ? "turn aborted"
+            : "Claude CLI timed out after 5ms",
+        );
+        let didSettle = false;
+        void pending.then(
+          () => { didSettle = true; },
+          () => { didSettle = true; },
+        );
+
+        await launched;
+        child.stdout.write(`${JSON.stringify({
+          type: "stream_event",
+          session_id: "cli-session",
+          event: {
+            type: "content_block_delta",
+            delta: { type: "text_delta", text: "blocked emit" },
+          },
+        })}\n`);
+        await startedEmit;
+        if (trigger === "abort") controller.abort(new Error("turn aborted"));
+        else await vi.advanceTimersByTimeAsync(5);
+
+        await vi.advanceTimersByTimeAsync(999);
+        expect(didSettle).toBe(false);
+        expect(child.signals).toEqual(["SIGTERM"]);
+        await vi.advanceTimersByTimeAsync(1);
+        await rejected;
+        expect(didSettle).toBe(true);
+        expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it("cli transport surfaces provider error with redacted stderr", async () => {
     const secret = "configured-provider-secret";
     const runtime = createRuntimeClaude({
@@ -555,6 +625,47 @@ describe("runtime-claude failure paths", () => {
     expect(cliResult.usage).toEqual(sdkResult.usage);
   });
 
+  it("omits usage when either primary metering field is missing", async () => {
+    const cliUsage = vi.fn();
+    const cli = createClaudeCliTransport(cliOptions(() => {
+      const child = new ControlledClaudeProcess();
+      queueMicrotask(() => child.finish([{
+        type: "result",
+        subtype: "success",
+        session_id: "cli-session",
+        result: "done",
+      }]));
+      return child;
+    }));
+    async function* messages(): AsyncGenerator<unknown> {
+      yield {
+        type: "result",
+        subtype: "success",
+        session_id: "sdk-session",
+        result: "done",
+        usage: { input_tokens: 1 },
+      };
+    }
+    const iterator = messages() as AsyncGenerator<unknown> & {
+      interrupt(): Promise<void>;
+      close(): void;
+    };
+    iterator.interrupt = async () => undefined;
+    iterator.close = () => undefined;
+    const sdkUsage = vi.fn();
+    const sdk = createClaudeSdkTransport({ query: () => iterator });
+
+    const [cliResult, sdkResult] = await Promise.all([
+      cli.run(transportRequest(), { ...transportEvents, usage: cliUsage }),
+      sdk.run(transportRequest(), { ...transportEvents, usage: sdkUsage }),
+    ]);
+
+    expect(cliResult.usage).toBeUndefined();
+    expect(sdkResult.usage).toBeUndefined();
+    expect(cliUsage).not.toHaveBeenCalled();
+    expect(sdkUsage).not.toHaveBeenCalled();
+  });
+
   it("redacts native Anthropic keys without configured auth", async () => {
     const nativeKey = `sk-ant-api03-${"x".repeat(32)}`;
     const runtime = createRuntimeClaude({
@@ -800,6 +911,59 @@ describe("runtime-claude failure paths", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("interrupts a late control after caller cancellation", async () => {
+    let didStartTransport!: () => void;
+    const startedTransport = new Promise<void>((resolve) => {
+      didStartTransport = resolve;
+    });
+    let didInterrupt!: () => void;
+    const interrupted = new Promise<void>((resolve) => {
+      didInterrupt = resolve;
+    });
+    const interrupt = vi.fn(async () => {
+      didInterrupt();
+    });
+    const transport: ClaudeTransport = {
+      async run(request, events) {
+        didStartTransport();
+        await new Promise<void>((resolve) => {
+          if (request.signal.aborted) resolve();
+          else request.signal.addEventListener("abort", () => resolve(), {
+            once: true,
+          });
+        });
+        events.control({ interrupt });
+        await interrupted;
+        return { text: "must be cancelled", sessionId: "late-session" };
+      },
+    };
+    const runtime = createRuntimeClaude({
+      config: parseRuntimeClaudeConfig({ mode: "sdk" }),
+      instanceId: "claude-runtime",
+      workspaceDirectory: process.cwd(),
+      sdkTransport: transport,
+    });
+    const signal = new AbortController().signal;
+    const turnController = new AbortController();
+    await runtime.start?.({ signal });
+    const inFlight = runtime.runTurn(
+      turnRequest(turnController.signal),
+      runtimeContext,
+    );
+    const settledInFlight = expect(inFlight).resolves.toMatchObject({
+      status: "cancelled",
+    });
+    await startedTransport;
+
+    turnController.abort(new Error("caller cancelled"));
+    await settledInFlight;
+
+    expect(interrupt).toHaveBeenCalledOnce();
+    expect(await runtime.health?.({ signal })).toMatchObject({
+      details: { state: "running", activeTurns: 0 },
+    });
   });
 
   it("stop owns a turn before transport control registers", async () => {
