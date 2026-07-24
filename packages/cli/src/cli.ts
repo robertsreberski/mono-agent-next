@@ -4,6 +4,7 @@ import {
   diagnoseAgent,
   explainAgentConfig,
   inspectAgent,
+  type AgentHost,
   type LoadedAgentConfig,
   type LoadedAgentModule,
   type ModuleKind,
@@ -14,51 +15,79 @@ import { randomUUID } from "node:crypto";
 import { lstat, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
-const VERSION = "0.15.0";
+
+import packageJson from "../package.json" with { type: "json" };
+
+const VERSION = packageJson.version;
+
 export type CliSignal = "SIGINT" | "SIGTERM";
+
 export interface CliSignalSource {
   once(signal: CliSignal, listener: () => void): unknown;
   removeListener(signal: CliSignal, listener: () => void): unknown;
 }
+
 export interface CliIo {
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
   cwd?: string;
   signalSource?: CliSignalSource;
 }
+
 interface ResolvedCliIo {
-  stdout: (text: string) => void; stderr: (text: string) => void;
-  cwd: string; signalSource: CliSignalSource;
+  stdout: (text: string) => void;
+  stderr: (text: string) => void;
+  cwd: string;
+  signalSource: CliSignalSource;
 }
+
 interface ParsedCommand {
-  configPath: string; json?: boolean; write?: boolean;
-  module?: string; command?: string; input?: unknown; path?: string;
+  configPath: string;
+  json?: boolean;
+  write?: boolean;
+  module?: string;
+  command?: string;
+  input?: unknown;
+  path?: string;
 }
+
 type ArgumentKey = Exclude<keyof ParsedCommand, "path">;
 type FlagKey = Extract<ArgumentKey, "json" | "write">;
 type ValueKey = Exclude<ArgumentKey, FlagKey>;
+
 interface ParseSpec {
-  readonly context?: "module command" | "route"; readonly flag?: FlagKey;
-  readonly positional?: "command" | "path"; readonly module?: "optional" | "required";
+  readonly context?: "module command" | "route";
+  readonly flag?: FlagKey;
+  readonly positional?: "command" | "path";
+  readonly module?: "optional" | "required";
 }
+
 interface CommandDescriptor {
-  readonly words: readonly string[]; readonly parse?: ParseSpec;
+  readonly words: readonly string[];
+  readonly parse?: ParseSpec;
   run(options: ParsedCommand, io: ResolvedCliIo): Promise<number>;
 }
+
 class UsageError extends Error {}
+
 const CLI_OPTIONS = {
   config: { type: "string", short: "c", key: "configPath" },
-  json: { type: "boolean", key: "json" }, write: { type: "boolean", key: "write" },
-  module: { type: "string", key: "module" }, name: { type: "string", key: "command" },
+  json: { type: "boolean", key: "json" },
+  write: { type: "boolean", key: "write" },
+  module: { type: "string", key: "module" },
+  name: { type: "string", key: "command" },
   "input-json": { type: "string", key: "input" },
 } as const;
+
 const ARGUMENT_MESSAGES: Record<ValueKey, readonly [value: string, required: string]> = {
   configPath: ["--config requires a path", "--config is required"],
   module: ["--module requires one instance id", "--module is required"],
   command: ["--name requires one command name", "--name is required"],
   input: ["--input-json requires one JSON value", "--input-json is required"],
 };
+
 const ROUTE_PARSE = { context: "route", positional: "command", module: "optional" } as const;
+
 const COMMANDS: readonly CommandDescriptor[] = [
   { words: ["validate"], parse: { flag: "json" }, run: runValidate },
   { words: ["doctor"], parse: { flag: "json" }, run: runDoctor },
@@ -66,13 +95,17 @@ const COMMANDS: readonly CommandDescriptor[] = [
   { words: ["config", "explain"], parse: { flag: "json", positional: "path" }, run: runExplain },
   { words: ["inspect"], parse: { flag: "json" }, run: runInspect },
   { words: ["module", "command"], parse: { context: "module command", module: "required" }, run: runModuleCommand },
-  { words: ["auth"], parse: { ...ROUTE_PARSE, module: "required" },
-    run: (options, io) => runRoutedCommand("auth", "runtime", options, io) },
+  {
+    words: ["auth"],
+    parse: { ...ROUTE_PARSE, module: "required" },
+    run: (options, io) => runRoutedCommand("auth", "runtime", options, io),
+  },
   { words: ["sandbox"], parse: ROUTE_PARSE, run: (options, io) => runRoutedCommand("sandbox", "sandbox", options, io) },
   { words: ["runs"], parse: ROUTE_PARSE, run: (options, io) => runRoutedCommand("runs", "state", options, io) },
   { words: ["memory"], parse: ROUTE_PARSE, run: (options, io) => runRoutedCommand("memory", "memory", options, io) },
   { words: ["start"], run: runStart },
 ];
+
 export async function runCli(argv: readonly string[], io: CliIo = {}): Promise<number> {
   const resolvedIo: ResolvedCliIo = {
     stdout: io.stdout ?? ((text) => process.stdout.write(text)),
@@ -80,8 +113,14 @@ export async function runCli(argv: readonly string[], io: CliIo = {}): Promise<n
     cwd: resolve(io.cwd ?? process.cwd()),
     signalSource: io.signalSource ?? process,
   };
-  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") { resolvedIo.stdout(usage()); return 0; }
-  if (argv.length === 1 && (argv[0] === "--version" || argv[0] === "-v")) { resolvedIo.stdout(`${VERSION}\n`); return 0; }
+  if (argv.length === 0 || argv[0] === "--help" || argv[0] === "-h") {
+    resolvedIo.stdout(usage());
+    return 0;
+  }
+  if (argv.length === 1 && (argv[0] === "--version" || argv[0] === "-v")) {
+    resolvedIo.stdout(`${VERSION}\n`);
+    return 0;
+  }
   const wantsJson = argv.includes("--json");
   try {
     const route = COMMANDS.find(({ words }) => words.every((word, index) => argv[index] === word));
@@ -176,24 +215,16 @@ async function runStart(options: ParsedCommand, io: ResolvedCliIo): Promise<numb
   if (validation.loaded === undefined) {
     throw new Error("Agent validation succeeded without an immutable loaded configuration");
   }
-  const host = await createAgentHost(validation.loaded);
-  io.stdout(`${stringifyJson({ event: "started", ...host.startInfo })}\n`);
-  await waitForShutdown(io.signalSource, async () => {
-    const failures: unknown[] = [];
-    try {
-      await host.drain();
-    } catch (error) {
-      failures.push(error);
-    }
-    try {
-      await host.stop();
-    } catch (error) {
-      failures.push(error);
-    }
-    if (failures.length === 1) throw failures[0];
-    if (failures.length > 1) throw new AggregateError(failures, "Agent drain and stop both failed");
-  });
-  return 0;
+  const shutdown = listenForShutdown(io.signalSource);
+  try {
+    const host = await createAgentHost(validation.loaded);
+    io.stdout(`${stringifyJson({ event: "started", ...host.startInfo })}\n`);
+    await shutdown.requested;
+    await stopHost(host);
+    return 0;
+  } finally {
+    shutdown.dispose();
+  }
 }
 async function runModuleCommand(options: ParsedCommand, io: ResolvedCliIo): Promise<number> {
   const result = await runAgentModuleCommand(options.configPath, options.module!, options.command!, options.input);
@@ -241,10 +272,7 @@ function parseArguments(argv: readonly string[], cwd: string, spec: ParseSpec = 
       throw new UsageError(`${unknown}: ${argument}`);
     }
     if (Object.hasOwn(values, key)) {
-      throw new UsageError(key === "configPath" && spec.context !== "module command"
-        ? "--config may be supplied only once"
-        : key === "json" || key === "write" ? `${argument} is not valid here`
-          : key === "configPath" ? "--config requires one path" : ARGUMENT_MESSAGES[key][0]);
+      throw new UsageError(duplicateOptionMessage(key, argument, spec));
     }
     if (key === "json" || key === "write") {
       values[key] = true;
@@ -253,9 +281,7 @@ function parseArguments(argv: readonly string[], cwd: string, spec: ParseSpec = 
     const value = token.value;
     if (typeof value !== "string" || value.length === 0
       || (!inlineConfig && key !== "input" && value.startsWith("-"))) {
-      throw new UsageError(key === "configPath" && spec.context === "module command"
-        ? "--config requires one path"
-        : ARGUMENT_MESSAGES[key][0]);
+      throw new UsageError(valueErrorMessage(key, spec));
     }
     if (key === "input") {
       try {
@@ -263,18 +289,55 @@ function parseArguments(argv: readonly string[], cwd: string, spec: ParseSpec = 
       } catch {
         throw new UsageError("--input-json must be valid JSON");
       }
+    } else if (key === "configPath") {
+      values.configPath = resolveConfigPath(value, cwd);
     } else {
-      values[key] = key === "configPath" ? isAbsolute(value) ? value : resolve(cwd, value) : value;
+      values[key] = value;
     }
   }
-  const required: readonly ValueKey[] = spec.context === "module command"
-    ? ["configPath", "module", "command"]
-    : spec.module === "required" ? ["configPath", "module"] : ["configPath"];
+  const required = requiredArgumentKeys(spec);
   for (const key of required) if (!Object.hasOwn(values, key)) throw new UsageError(ARGUMENT_MESSAGES[key][1]);
   if (spec.context === "route" && !Object.hasOwn(values, "command"))
     throw new UsageError("A module command name is required");
   return values as ParsedCommand;
 }
+
+function duplicateOptionMessage(key: ArgumentKey, argument: string, spec: ParseSpec): string {
+  if (key === "configPath") {
+    return spec.context === "module command"
+      ? "--config requires one path"
+      : "--config may be supplied only once";
+  }
+  if (key === "json" || key === "write") {
+    return `${argument} is not valid here`;
+  }
+  return ARGUMENT_MESSAGES[key][0];
+}
+
+function valueErrorMessage(key: ValueKey, spec: ParseSpec): string {
+  if (key === "configPath" && spec.context === "module command") {
+    return "--config requires one path";
+  }
+  return ARGUMENT_MESSAGES[key][0];
+}
+
+function resolveConfigPath(value: string, cwd: string): string {
+  if (isAbsolute(value)) {
+    return value;
+  }
+  return resolve(cwd, value);
+}
+
+function requiredArgumentKeys(spec: ParseSpec): readonly ValueKey[] {
+  if (spec.context === "module command") {
+    return ["configPath", "module", "command"];
+  }
+  if (spec.module === "required") {
+    return ["configPath", "module"];
+  }
+  return ["configPath"];
+}
+
 function selectModule(
   modules: readonly LoadedAgentModule[], instanceId: string | undefined, route: string, slot: ModuleKind,
 ): LoadedAgentModule {
@@ -322,22 +385,50 @@ async function writeSchemaFile(outputPath: string, contents: string): Promise<vo
     });
   }
 }
-async function waitForShutdown(signalSource: CliSignalSource, shutdown: () => Promise<void>): Promise<void> {
-  await new Promise<void>((resolvePromise, rejectPromise) => {
-    let settling = false;
-    const removeListeners = (): void => {
-      signalSource.removeListener("SIGINT", onSignal);
-      signalSource.removeListener("SIGTERM", onSignal);
-    };
-    const onSignal = (): void => {
-      if (settling) return;
-      settling = true;
-      removeListeners();
-      void shutdown().then(resolvePromise, rejectPromise);
-    };
-    signalSource.once("SIGINT", onSignal);
-    signalSource.once("SIGTERM", onSignal);
+function listenForShutdown(signalSource: CliSignalSource): {
+  readonly requested: Promise<void>;
+  dispose(): void;
+} {
+  let signaled = false;
+  let resolveRequest = (): void => undefined;
+  const requested = new Promise<void>((resolvePromise) => {
+    resolveRequest = resolvePromise;
   });
+  const dispose = (): void => {
+    signalSource.removeListener("SIGINT", onSignal);
+    signalSource.removeListener("SIGTERM", onSignal);
+  };
+  const onSignal = (): void => {
+    if (signaled) {
+      return;
+    }
+    signaled = true;
+    dispose();
+    resolveRequest();
+  };
+  signalSource.once("SIGINT", onSignal);
+  signalSource.once("SIGTERM", onSignal);
+  return { requested, dispose };
+}
+
+async function stopHost(host: AgentHost): Promise<void> {
+  const failures: unknown[] = [];
+  try {
+    await host.drain();
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await host.stop();
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length === 1) {
+    throw failures[0];
+  }
+  if (failures.length > 1) {
+    throw new AggregateError(failures, "Agent drain and stop both failed");
+  }
 }
 function renderIssues(issues: readonly unknown[]): string {
   if (issues.length === 0) return "Invalid mono-agent config.\n";

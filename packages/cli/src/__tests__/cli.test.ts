@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import packageJson from "../../package.json" with { type: "json" };
+
 const core = vi.hoisted(() => ({
   composeAgentConfigSchema: vi.fn(),
   createAgentHost: vi.fn(),
@@ -19,6 +21,22 @@ vi.mock("@mono-agent/core", () => core);
 import { runCli, type CliSignal, type CliSignalSource } from "../index.js";
 
 const temporaryDirectories: string[] = [];
+const expectedUsage = [
+  "Usage:",
+  "  mono-agent validate --config <file> [--json]",
+  "  mono-agent doctor --config <file> [--json]",
+  "  mono-agent config schema --config <file> [--write]",
+  "  mono-agent config explain --config <file> [path] [--json]",
+  "  mono-agent inspect --config <file> [--json]",
+  "  mono-agent module command --config <file> --module <id> --name <command> [--input-json <json>]",
+  "  mono-agent auth <command> --config <file> --module <runtime-id> [--input-json <json>]",
+  "  mono-agent sandbox <command> --config <file> [--input-json <json>]",
+  "  mono-agent runs <command> --config <file> [--input-json <json>]",
+  "  mono-agent memory <command> --config <file> [--input-json <json>]",
+  "  mono-agent start --config <file>",
+  "  mono-agent --version",
+  "",
+].join("\n");
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -38,6 +56,28 @@ afterEach(async () => {
 });
 
 describe("runCli", () => {
+  it("prints the package version exactly for both version flags", async () => {
+    for (const flag of ["--version", "-v"]) {
+      const output = captureOutput();
+
+      await expect(runCli([flag], output.io)).resolves.toBe(0);
+
+      expect(output.stdout).toEqual([`${packageJson.version}\n`]);
+      expect(output.stderr).toEqual([]);
+    }
+  });
+
+  it("prints exact usage for both help flags and bare invocation", async () => {
+    for (const argv of [["--help"], ["-h"], []] as const) {
+      const output = captureOutput();
+
+      await expect(runCli(argv, output.io)).resolves.toBe(0);
+
+      expect(output.stdout).toEqual([expectedUsage]);
+      expect(output.stderr).toEqual([]);
+    }
+  });
+
   it("returns usage exit 2 for an invalid invocation", async () => {
     const output = captureOutput();
     await expect(runCli(["validate"], output.io)).resolves.toBe(2);
@@ -144,6 +184,76 @@ describe("runCli", () => {
     const unhealthy = captureOutput();
     await expect(runCli(["doctor", "-c", "/agent/config.json", "--json"], unhealthy.io)).resolves.toBe(1);
     expect(JSON.parse(unhealthy.stdout.join(""))).toMatchObject({ ok: false });
+  });
+
+  it("removes startup signal listeners when host creation fails", async () => {
+    const signals = new TestSignalSource();
+    const existingListener = (): void => undefined;
+    signals.once("SIGINT", existingListener);
+    signals.once("SIGTERM", existingListener);
+    const baseline = {
+      SIGINT: signals.listenerCount("SIGINT"),
+      SIGTERM: signals.listenerCount("SIGTERM"),
+    };
+    core.createAgentHost.mockImplementation(async () => {
+      expect(signals.listenerCount("SIGINT")).toBe(baseline.SIGINT + 1);
+      expect(signals.listenerCount("SIGTERM")).toBe(baseline.SIGTERM + 1);
+      throw new Error("boot failed");
+    });
+    const output = captureOutput();
+
+    await expect(runCli(["start", "--config", "/agent/mono-agent.config.json"], {
+      ...output.io,
+      signalSource: signals,
+    })).resolves.toBe(1);
+
+    expect(output.stdout).toEqual([]);
+    expect(output.stderr).toEqual(["mono-agent: boot failed\n"]);
+    expect(signals.listenerCount("SIGINT")).toBe(baseline.SIGINT);
+    expect(signals.listenerCount("SIGTERM")).toBe(baseline.SIGTERM);
+  });
+
+  it("drains then stops when SIGTERM arrives before host creation resolves", async () => {
+    const calls: string[] = [];
+    const host = {
+      startInfo: {
+        agentId: "minimal-example",
+        configPath: "/agent/mono-agent.config.json",
+        projectRoot: "/agent",
+        channels: [],
+      },
+      start: vi.fn(async () => calls.push("start")),
+      drain: vi.fn(async () => calls.push("drain")),
+      stop: vi.fn(async () => calls.push("stop")),
+    };
+    let resolveHost: ((value: typeof host) => void) | undefined;
+    core.createAgentHost.mockImplementation(() => new Promise<typeof host>((resolvePromise) => {
+      resolveHost = resolvePromise;
+    }));
+    const signals = new TestSignalSource();
+    const output = captureOutput();
+    const result = runCli(["start", "--config", "/agent/mono-agent.config.json"], {
+      ...output.io,
+      signalSource: signals,
+    });
+
+    await vi.waitFor(() => expect(core.createAgentHost).toHaveBeenCalledOnce());
+    expect(signals.listenerCount("SIGINT")).toBe(1);
+    expect(signals.listenerCount("SIGTERM")).toBe(1);
+    signals.emit("SIGTERM");
+    expect(calls).toEqual([]);
+    expect(output.stdout).toEqual([]);
+
+    expect(resolveHost).toBeDefined();
+    resolveHost!(host);
+
+    await expect(result).resolves.toBe(0);
+    expect(calls).toEqual(["drain", "stop"]);
+    expect(host.start).not.toHaveBeenCalled();
+    expect(output.stdout).toHaveLength(1);
+    expect(JSON.parse(output.stdout[0]!)).toMatchObject({ event: "started" });
+    expect(signals.listenerCount("SIGINT")).toBe(0);
+    expect(signals.listenerCount("SIGTERM")).toBe(0);
   });
 
   it("prints exactly one started event and drains before stopping on SIGTERM", async () => {
@@ -272,6 +382,28 @@ describe("runCli", () => {
 
     await expect(readFile(join(external, "sentinel"), "utf8")).resolves.toBe("unchanged");
     await expect(readFile(join(external, "mono-agent.config.schema.json"), "utf8")).rejects.toThrow();
+  });
+
+  it("prints the composed schema without creating a file unless --write is set", async () => {
+    const root = await makeTemporaryDirectory();
+    const configPath = join(root, "mono-agent.config.json");
+    const schemaPath = join(root, ".mono-agent", "mono-agent.config.schema.json");
+    await writeFile(configPath, "{}\n", "utf8");
+    const output = captureOutput();
+
+    await expect(runCli([
+      "config",
+      "schema",
+      "--config",
+      configPath,
+    ], output.io)).resolves.toBe(0);
+
+    expect(output.stdout).toEqual([`${JSON.stringify({
+      type: "object",
+      additionalProperties: false,
+    }, null, 2)}\n`]);
+    expect(output.stderr).toEqual([]);
+    await expect(readFile(schemaPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("materializes the composed schema beside the config", async () => {
@@ -449,6 +581,10 @@ class TestSignalSource implements CliSignalSource {
 
   emit(signal: CliSignal): void {
     this.#events.emit(signal);
+  }
+
+  listenerCount(signal: CliSignal): number {
+    return this.#events.listenerCount(signal);
   }
 }
 
