@@ -18,7 +18,7 @@ pnpm run generate:source-beta-docs
 
 | Package | Public entrypoints | Named exports | Package API |
 | --- | ---: | ---: | --- |
-| `@mono-agent/module-sdk` | 5 | 342 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
+| `@mono-agent/module-sdk` | 5 | 343 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
 | `@mono-agent/core` | 1 | 59 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/core/README.md) |
 | `@mono-agent/cli` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/cli/README.md) |
 | `@mono-agent/runtime-pi` | 1 | 6 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-pi/README.md) |
@@ -35,7 +35,7 @@ pnpm run generate:source-beta-docs
 | `@mono-agent/state-local` | 1 | 26 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/state-local/README.md) |
 | `@mono-agent/exporter-otlp` | 1 | 13 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/exporter-otlp/README.md) |
 | `@mono-agent/sandbox-srt` | 1 | 14 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/sandbox-srt/README.md) |
-| `@mono-agent/operator` | 2 | 108 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/operator/README.md) |
+| `@mono-agent/operator` | 2 | 109 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/operator/README.md) |
 | `@mono-agent/tui` | 1 | 8 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/tui/README.md) |
 | `@mono-agent/web` | 1 | 36 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/web/README.md) |
 | `create-mono-agent` | 1 | 24 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/create-mono-agent/README.md) |
@@ -206,6 +206,7 @@ RuntimeIncompleteTurnResult
 RuntimeLiveInput
 RuntimeLiveInputDisposition
 RuntimeLiveInputHandler
+RuntimeModelDescriptor
 RuntimeModelPreflightRequest
 RuntimeModelPreflightResult
 RuntimeModelValidation
@@ -911,6 +912,7 @@ sandboxSrtJsonSchema
 DiscoverOperatorsOptions
 DiscoveredOperator
 NormalizeDiscoveredOperatorOptions
+OPERATOR_IDENTIFIER_PATTERN
 OPERATOR_LIMITS
 OPERATOR_PROTOCOL
 OPERATOR_REGISTRY_DETAILS_SCHEMA
