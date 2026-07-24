@@ -6,6 +6,7 @@ import { StringDecoder } from "node:string_decoder";
 
 import type { RuntimeUsage } from "@mono-agent/module-sdk";
 
+import { record, usage } from "./jsonl.js";
 import {
   ClaudeSessionUnavailableError,
   isClaudeSessionUnavailable,
@@ -42,18 +43,6 @@ function defaultSpawn(command: string, args: readonly string[], options: { cwd: 
   return spawn(command, [...args], { ...options, stdio: ["pipe", "pipe", "pipe"] }) as ChildProcessWithoutNullStreams;
 }
 
-function record(value: unknown): Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-}
-
-function usage(value: unknown): RuntimeUsage | undefined {
-  const item = record(value);
-  const inputTokens = Number(item.input_tokens ?? 0);
-  const outputTokens = Number(item.output_tokens ?? 0);
-  if (!Number.isFinite(inputTokens) || !Number.isFinite(outputTokens)) return undefined;
-  return { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens };
-}
-
 async function systemPromptFile(systemPrompt: string | undefined): Promise<{
   readonly path?: string;
   cleanup(): Promise<void>;
@@ -76,7 +65,14 @@ async function systemPromptFile(systemPrompt: string | undefined): Promise<{
 export function createClaudeCliTransport(options: ClaudeCliTransportOptions): ClaudeTransport {
   return {
     async run(request: ClaudeTransportRequest, events: ClaudeTransportEvents): Promise<ClaudeTransportResult> {
+      if (request.signal.aborted) {
+        throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
       const promptFile = await systemPromptFile(request.systemPrompt);
+      if (request.signal.aborted) {
+        await promptFile.cleanup();
+        throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
+      }
       const args = [
         "--print",
         "--input-format", "text",
@@ -110,29 +106,43 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
       let structuredOutput: unknown;
       let providerError: string | undefined;
       let providerSessionUnavailable = false;
+      let acceptEvents = true;
       let chain = Promise.resolve();
       const processLine = (line: string): void => {
+        if (!acceptEvents) return;
         if (Buffer.byteLength(line) > options.maxLineBytes) throw new Error("Claude CLI output exceeds the configured line limit");
         if (line.trim() === "") return;
         let message: Record<string, unknown>;
         try { message = record(JSON.parse(line)); } catch { throw new Error("Claude CLI emitted malformed JSONL"); }
-        chain = chain.then(async () => {
+        const next = chain.then(async () => {
+          if (!acceptEvents) return;
           if (typeof message.session_id === "string" && message.session_id !== sessionId) {
             sessionId = message.session_id;
-            await events.session(sessionId);
+            if (acceptEvents) await events.session(sessionId);
           }
           if (message.type === "stream_event") {
             const event = record(message.event);
             if (event.type === "content_block_delta") {
               const delta = record(event.delta);
-              if (delta.type === "text_delta" && typeof delta.text === "string") { streamed += delta.text; await events.text(delta.text); }
-              else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") await events.thinking(delta.thinking);
+              if (delta.type === "text_delta" && typeof delta.text === "string") {
+                streamed += delta.text;
+                if (acceptEvents) await events.text(delta.text);
+              } else if (
+                delta.type === "thinking_delta"
+                && typeof delta.thinking === "string"
+                && acceptEvents
+              ) {
+                await events.thinking(delta.thinking);
+              }
             }
           } else if (message.type === "result") {
             if (typeof message.result === "string") finalText = message.result;
             if (message.structured_output !== undefined) structuredOutput = message.structured_output;
             const measured = usage(message.usage);
-            if (measured !== undefined) { finalUsage = measured; await events.usage(measured); }
+            if (measured !== undefined) {
+              finalUsage = measured;
+              if (acceptEvents) await events.usage(measured);
+            }
             if (message.subtype !== "success") {
               const failures = Array.isArray(message.errors)
                 ? message.errors.filter((value): value is string => typeof value === "string")
@@ -145,19 +155,42 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
             }
           }
         });
+        chain = next;
+        void next.catch((error: unknown) => rejectRun(error));
       };
       let forceTimer: NodeJS.Timeout | undefined;
+      let processClosed = false;
+      let resolveTermination!: () => void;
+      const termination = new Promise<void>((resolve) => {
+        resolveTermination = resolve;
+      });
       const terminate = (): void => {
+        if (processClosed) return;
         child.kill("SIGTERM");
-        forceTimer ??= setTimeout(() => child.kill("SIGKILL"), 1_000);
+        forceTimer ??= setTimeout(() => {
+          child.kill("SIGKILL");
+          resolveTermination();
+        }, 1_000);
         forceTimer.unref?.();
       };
       let rejectExit!: (error: unknown) => void;
+      let terminalFailure = false;
+      const rejectRun = (error: unknown): void => {
+        if (!acceptEvents || terminalFailure) return;
+        terminalFailure = true;
+        acceptEvents = false;
+        rejectExit(error);
+        terminate();
+      };
       const exit = new Promise<{ code: number; signal: NodeJS.Signals | null }>((resolve, reject) => {
         rejectExit = reject;
         child.stdout.on("data", (chunk: Buffer | string) => {
+          if (!acceptEvents) return;
           stdout += typeof chunk === "string" ? chunk : decoder.write(chunk);
-          if (Buffer.byteLength(stdout) > options.maxLineBytes && !stdout.includes("\n")) { terminate(); reject(new Error("Claude CLI output exceeds the configured line limit")); return; }
+          if (Buffer.byteLength(stdout) > options.maxLineBytes && !stdout.includes("\n")) {
+            rejectRun(new Error("Claude CLI output exceeds the configured line limit"));
+            return;
+          }
           try {
             while (true) {
               const index = stdout.indexOf("\n");
@@ -165,42 +198,54 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
               processLine(stdout.slice(0, index));
               stdout = stdout.slice(index + 1);
             }
-          } catch (error) { terminate(); reject(error); }
+          } catch (error) {
+            rejectRun(error);
+          }
         });
         child.stderr.on("data", (chunk: Buffer | string) => {
           stderr += String(chunk);
           const bytes = Buffer.byteLength(stderr);
           if (bytes > options.maxStderrBytes) stderr = Buffer.from(stderr).subarray(bytes - options.maxStderrBytes).toString("utf8");
         });
-        child.once("error", reject);
+        child.stdout.on("error", rejectRun);
+        child.stderr.on("error", rejectRun);
+        child.once("error", rejectRun);
         child.once("close", (code, signal) => {
+          processClosed = true;
           if (forceTimer !== undefined) clearTimeout(forceTimer);
+          resolveTermination();
           resolve({ code: code ?? 1, signal });
         });
       }).finally(async () => promptFile.cleanup());
+      child.stdin.on("error", rejectRun);
       try {
-        events.control({ async interrupt() { child.kill("SIGTERM"); } });
+        events.control({
+          async interrupt() {
+            rejectRun(new DOMException("Claude CLI interrupted", "AbortError"));
+            await Promise.all([exit.catch(() => undefined), termination]);
+          },
+        });
       } catch (error) {
-        terminate();
-        rejectExit(error);
+        rejectRun(error);
         await exit.catch(() => undefined);
+        await termination;
         throw error;
       }
       const onAbort = (): void => {
-        terminate();
-        rejectExit(request.signal.reason ?? new DOMException("Aborted", "AbortError"));
+        rejectRun(request.signal.reason ?? new DOMException("Aborted", "AbortError"));
       };
       request.signal.addEventListener("abort", onAbort, { once: true });
       if (request.signal.aborted) onAbort();
       const timer = setTimeout(() => {
-        terminate();
-        rejectExit(new Error(`Claude CLI timed out after ${options.timeoutMs}ms`));
+        rejectRun(new Error(`Claude CLI timed out after ${options.timeoutMs}ms`));
       }, options.timeoutMs);
       timer.unref?.();
-      try { child.stdin.end(request.prompt); }
-      catch (error) {
-        terminate();
-        rejectExit(error);
+      if (acceptEvents) {
+        try {
+          child.stdin.end(request.prompt);
+        } catch (error) {
+          rejectRun(error);
+        }
       }
       try {
         const settled = await exit;
@@ -230,8 +275,11 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
           ...(structuredOutput === undefined ? {} : { structuredOutput: structuredOutput as never }),
         };
       } finally {
+        acceptEvents = false;
         clearTimeout(timer);
         request.signal.removeEventListener("abort", onAbort);
+        await chain.catch(() => undefined);
+        if (terminalFailure) await termination;
       }
     },
   };

@@ -85,6 +85,7 @@ expose only bounded, redacted, accessor-free `Error` cause snapshots.
 | --- | --- |
 | `config.ts` | Strict configuration and secret annotations. |
 | `transport.ts` | Transport-neutral request, event, and result seam. |
+| `jsonl.ts` | Shared Claude JSONL value and usage normalization. |
 | `sdk.ts` | Lazy Agent SDK adapter and live-input queue. |
 | `cli.ts` | Bounded direct-process stream-JSON adapter. |
 | `auth-command.ts` | Non-serving, redacted authentication status and unsupported-action results. |
