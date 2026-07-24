@@ -140,6 +140,10 @@ Perform this work in a copy while v0 remains the unchanged live source.
     duplicate admission, forget preview, and rebuild results against v0. Any
     format mutation, integrity failure, missing behavior, or unresolved
     lite/journal dependency blocks migration.
+    Historical v0 canonical rows can contain timezone-bearing ISO timestamps
+    without milliseconds or with explicit offsets; v1 preserves those copied
+    database bytes and canonicalizes them only in returned API records. New
+    records remain strict, and malformed stored timestamps block adoption.
 11. Exercise product boundaries independently: operator discovery, TUI/web
     connection, service-macos read-only inspect/plan, and docs-mcp client
     registration. Do not apply host mutations.

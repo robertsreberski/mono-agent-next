@@ -27,6 +27,9 @@ const REQUIRED_TABLES = [
 ] as const;
 const APPLICATION_ID = 0x4d414d31;
 const MAX_METADATA_ROWS = 1_000_000;
+const MAX_STORED_TIMESTAMP_BYTES = 64;
+const LEGACY_STORED_TIMESTAMP =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(?:Z|[+-](\d{2}):(\d{2}))$/u;
 
 export interface BujoMemoryRow {
   readonly id: string;
@@ -52,6 +55,20 @@ export interface BujoMemoryRow {
   readonly dim: number | null;
   readonly tags: string;
 }
+
+type ReadableBujoMemoryRow = Pick<
+  BujoMemoryRow,
+  | "id"
+  | "type"
+  | "status"
+  | "text"
+  | "salience"
+  | "is_insight"
+  | "created_at"
+  | "collection"
+  | "source_session"
+  | "tags"
+>;
 
 export interface BujoAuditSnapshot {
   readonly recordCount: number;
@@ -235,8 +252,96 @@ export function readMemoryRows(
   ).all(maximum) as unknown as BujoMemoryRow[];
 }
 
-export function decodeMemoryRow(row: BujoMemoryRow, config: MemoryLocalConfig): MemoryRecord {
-  if (!MEMORY_TYPES.includes(row.type as never) || !MEMORY_STATUSES.includes(row.status as never)) {
+export function assertReadableMemoryRows(
+  database: DatabaseSync,
+  config: MemoryLocalConfig,
+  snapshot: BujoAuditSnapshot,
+): void {
+  if (
+    snapshot.recordCount > DEFAULT_CAPACITY.maxRecords
+    || snapshot.recordBytes > DEFAULT_CAPACITY.maxTotalBytes
+  ) {
+    throw new MemoryLocalError("corrupt_store", "Memory records exceed their bounded capacity.");
+  }
+  const storage = database.prepare(`
+    SELECT COUNT(*) AS invalid_storage
+    FROM memories
+    WHERE typeof(id) != 'text'
+      OR typeof(type) != 'text'
+      OR typeof(status) != 'text'
+      OR typeof(text) != 'text'
+      OR typeof(salience) NOT IN ('integer', 'real')
+      OR typeof(is_insight) != 'integer'
+      OR typeof(created_at) != 'text'
+      OR typeof(tags) != 'text'
+      OR (source_session IS NOT NULL AND typeof(source_session) != 'text')
+      OR (collection IS NOT NULL AND typeof(collection) != 'text')
+  `).get() as unknown as { invalid_storage: number };
+  if (number(storage.invalid_storage, "record storage-class count") !== 0) {
+    throw new MemoryLocalError("corrupt_store", "Stored BuJo memory row has an invalid storage class.");
+  }
+  const maximums = database.prepare(`
+    SELECT
+      COALESCE(MAX(LENGTH(CAST(id AS BLOB))), 0) AS id_bytes,
+      COALESCE(MAX(LENGTH(CAST(type AS BLOB))), 0) AS type_bytes,
+      COALESCE(MAX(LENGTH(CAST(status AS BLOB))), 0) AS status_bytes,
+      COALESCE(MAX(LENGTH(CAST(text AS BLOB))), 0) AS text_bytes,
+      COALESCE(MAX(LENGTH(CAST(created_at AS BLOB))), 0) AS created_at_bytes,
+      COALESCE(MAX(LENGTH(CAST(tags AS BLOB))), 0) AS tags_bytes,
+      COALESCE(MAX(LENGTH(CAST(source_session AS BLOB))), 0) AS source_session_bytes,
+      COALESCE(MAX(LENGTH(CAST(collection AS BLOB))), 0) AS collection_bytes
+    FROM memories
+  `).get() as unknown as Record<string, number>;
+  if (
+    number(maximums.id_bytes, "record id byte bound") > 256
+    || number(maximums.type_bytes, "record type byte bound") > 32
+    || number(maximums.status_bytes, "record status byte bound") > 32
+    || number(maximums.text_bytes, "record text byte bound") > DEFAULT_CAPACITY.maxTextBytes
+    || number(maximums.created_at_bytes, "record timestamp byte bound") > MAX_STORED_TIMESTAMP_BYTES
+    || number(maximums.tags_bytes, "record tags byte bound") > DEFAULT_CAPACITY.maxMetadataBytes
+    || number(maximums.source_session_bytes, "record session byte bound") > DEFAULT_CAPACITY.maxMetadataBytes
+    || number(maximums.collection_bytes, "record collection byte bound") > DEFAULT_CAPACITY.maxMetadataBytes
+  ) {
+    throw new MemoryLocalError("corrupt_store", "Stored BuJo memory row exceeds its field bounds.");
+  }
+  let count = 0;
+  const rows = database.prepare(`
+    SELECT
+      id, type, status, text, salience, is_insight, created_at,
+      collection, source_session, tags
+    FROM memories
+    ORDER BY seq ASC
+    LIMIT ?
+  `).iterate(snapshot.recordCount + 1);
+  for (const row of rows as unknown as Iterable<ReadableBujoMemoryRow>) {
+    count += 1;
+    if (count > snapshot.recordCount) {
+      throw new MemoryLocalError("corrupt_store", "Memory record count changed during semantic validation.");
+    }
+    decodeMemoryRow(row, config);
+  }
+  if (count !== snapshot.recordCount) {
+    throw new MemoryLocalError("corrupt_store", "Memory record count changed during semantic validation.");
+  }
+}
+
+export function decodeMemoryRow(row: ReadableBujoMemoryRow, config: MemoryLocalConfig): MemoryRecord {
+  if (
+    typeof row.id !== "string"
+    || typeof row.type !== "string"
+    || typeof row.status !== "string"
+    || typeof row.text !== "string"
+    || typeof row.salience !== "number"
+    || !Number.isFinite(row.salience)
+    || typeof row.is_insight !== "number"
+    || typeof row.created_at !== "string"
+    || typeof row.tags !== "string"
+    || (row.source_session !== null && typeof row.source_session !== "string")
+    || (row.collection !== null && typeof row.collection !== "string")
+    || !MEMORY_TYPES.includes(row.type as never)
+    || !MEMORY_STATUSES.includes(row.status as never)
+    || (row.is_insight !== 0 && row.is_insight !== 1)
+  ) {
     corruptRow();
   }
   let tags: unknown;
@@ -258,12 +363,55 @@ export function decodeMemoryRow(row: BujoMemoryRow, config: MemoryLocalConfig): 
     ...(row.source_session === null ? {} : { conversationId: row.source_session }),
     ...(row.collection === null ? {} : { collection: row.collection }),
   };
-  return validateMemoryRecord({
-    id: row.id,
-    text: row.text,
-    createdAt: row.created_at,
-    metadata,
-  }, recordLimits(config)).record;
+  try {
+    return validateMemoryRecord({
+      id: row.id,
+      text: row.text,
+      createdAt: canonicalStoredTimestamp(row.created_at),
+      metadata,
+    }, recordLimits(config)).record;
+  } catch (error) {
+    if (error instanceof MemoryLocalError && error.code === "invalid_record") corruptRow();
+    throw error;
+  }
+}
+
+function canonicalStoredTimestamp(value: string): string {
+  // v0-final admitted timezone-bearing ISO timestamps that were not always in
+  // toISOString() form. Adoption keeps those bytes unchanged and normalizes
+  // only the public v1 projection.
+  const match = LEGACY_STORED_TIMESTAMP.exec(value);
+  if (match === null) return value;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[7] === undefined ? 0 : Number(match[7]);
+  const offsetMinute = match[8] === undefined ? 0 : Number(match[8]);
+  if (
+    month < 1
+    || month > 12
+    || day < 1
+    || day > daysInMonth(year, month)
+    || hour > 23
+    || minute > 59
+    || second > 59
+    || offsetHour > 23
+    || offsetMinute > 59
+  ) {
+    return value;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : value;
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) {
+    return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  }
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
 }
 
 export function insertMemoryRows(

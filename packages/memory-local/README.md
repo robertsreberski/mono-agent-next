@@ -125,6 +125,11 @@ copied root only: the same exclusively created marker inode advances from
 `initializing:<uuid>` to
 `initialized:<same-uuid>` after the strict pre-commit audit. Keep the original
 v0 root and a separate restorable backup through rollback.
+Valid v0 timestamps that omitted milliseconds or used another offset remain
+byte-for-byte unchanged in the adopted database and are projected as canonical
+UTC timestamps by the v1 API. New v1 records still require exact
+millisecond-UTC timestamps, while malformed stored timestamps fail semantic
+adoption, strict audit, and existing-store admission.
 
 ## Architecture
 

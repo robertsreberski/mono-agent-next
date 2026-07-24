@@ -22,6 +22,7 @@ import type {
 import { HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE } from "@mono-agent/module-sdk";
 
 import {
+  assertReadableMemoryRows,
   auditBujoDatabase,
   captureIntakeKey,
   captureReceiptKey,
@@ -449,6 +450,9 @@ export class MemoryLocal implements Memory {
       throwIfAborted(request.signal);
       await this.#verifyStore();
       const snapshot = auditBujoDatabase(this.#state.database);
+      if (request.strict === true) {
+        assertReadableMemoryRows(this.#state.database, this.config, snapshot);
+      }
       const projections = await auditBujoProjections(this.#state.root);
       const compatible = vectorIdentityCompatible(
         this.#state.database,
@@ -1136,7 +1140,7 @@ async function openStore(
     }
     await readSecureFile(markerPath, MARKER_MAX_BYTES);
     lease = await acquireMemoryWriterLease(root, hooks.writerLease);
-    return await openExistingStore(root, databasePath, markerPath, lease, hooks);
+    return await openExistingStore(root, databasePath, markerPath, lease, config, hooks);
   } catch (error) {
     await lease?.release().catch(() => undefined);
     await root.handle.close().catch(() => undefined);
@@ -1257,6 +1261,7 @@ async function openExistingStore(
   databasePath: string,
   markerPath: string,
   lease: MemoryWriterLease,
+  config: MemoryLocalConfig,
   hooks: MemoryLocalOpenHooks,
 ): Promise<StoreState> {
   const markerFile = await openPinnedSecureFile(markerPath);
@@ -1284,6 +1289,8 @@ async function openExistingStore(
     await sidecars.verify();
     configureBujoDatabase(database);
     await sidecars.captureNew();
+    const snapshot = auditBujoDatabase(database);
+    assertReadableMemoryRows(database, config, snapshot);
     const vectorDimensions = verifyBujoSchema(database);
     await sidecars.captureNew();
     await verifySecureRoot(root);
