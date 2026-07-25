@@ -71,21 +71,38 @@ export async function loadWebhookRoutesFromDirectory(
     throw new WebhookConfigError(`Webhook routes directory exceeds the ${String(MAX_WEBHOOK_ROUTES)} route limit.`);
   }
   const routes: WebhookRoute[] = [];
+  // Every rejected route is reported in one pass. Failing at the first bad file
+  // meant a directory with four incompatible routes took four start attempts to
+  // fully diagnose.
+  const rejected: string[] = [];
   for (const entry of markdown) {
     const path = join(directory, entry.name);
-    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch((error: unknown) => {
-      throw new WebhookConfigError(`Unable to open webhook route ${path}: ${errorMessage(error)}`);
-    });
     try {
-      const stats = await file.stat();
-      if (!stats.isFile() || stats.size > MAX_WEBHOOK_ROUTE_BYTES) {
-        throw new WebhookConfigError(`${path} must be a regular file no larger than ${String(MAX_WEBHOOK_ROUTE_BYTES)} bytes.`);
+      const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch((error: unknown) => {
+        throw new WebhookConfigError(`Unable to open webhook route ${path}: ${errorMessage(error)}`);
+      });
+      try {
+        const stats = await file.stat();
+        if (!stats.isFile() || stats.size > MAX_WEBHOOK_ROUTE_BYTES) {
+          throw new WebhookConfigError(`${path} must be a regular file no larger than ${String(MAX_WEBHOOK_ROUTE_BYTES)} bytes.`);
+        }
+        const route = parseWebhookRouteMarkdown(entry.name, await file.readFile("utf8"), defaultMode);
+        if (route !== undefined) routes.push(Object.freeze({ ...route, source: path }));
+      } finally {
+        await file.close();
       }
-      const route = parseWebhookRouteMarkdown(entry.name, await file.readFile("utf8"), defaultMode);
-      if (route !== undefined) routes.push(Object.freeze({ ...route, source: path }));
-    } finally {
-      await file.close();
+    } catch (error) {
+      // Within an aggregate list an entry that does not name its file is
+      // useless, and not every parse failure mentions one.
+      rejected.push(error instanceof WebhookConfigError
+        ? error.message.includes(entry.name) ? error.message : `${entry.name}: ${error.message}`
+        : `Unable to load webhook route ${path}: ${errorMessage(error)}`);
     }
+  }
+  if (rejected.length > 0) {
+    throw new WebhookConfigError(rejected.length === 1
+      ? rejected[0]!
+      : `${String(rejected.length)} webhook routes were rejected:\n${rejected.map((entry) => `- ${entry}`).join("\n")}`);
   }
   if (routes.length === 0) {
     throw new WebhookConfigError(`${directory} must contain at least one enabled Markdown webhook route.`);

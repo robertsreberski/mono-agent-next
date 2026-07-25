@@ -90,6 +90,10 @@ export async function loadCronJobsFromDirectory(
   }
   const jobs: CronJob[] = [];
   const ids = new Map<string, string>();
+  // Every rejected file is reported in one pass. Failing at the first bad file
+  // meant a directory with four incompatible jobs took four start attempts to
+  // fully diagnose.
+  const rejected: string[] = [];
   for (const name of names) {
     const path = join(directory, name);
     try {
@@ -111,9 +115,17 @@ export async function loadCronJobsFromDirectory(
         await file.close();
       }
     } catch (error) {
-      if (error instanceof TriggerCronConfigError) throw error;
-      throw new TriggerCronConfigError(`Unable to load cron job ${path}: ${errorMessage(error)}`);
+      // Within an aggregate list an entry that does not name its file is
+      // useless, and not every parse failure mentions one.
+      rejected.push(error instanceof TriggerCronConfigError
+        ? error.message.includes(name) ? error.message : `${name}: ${error.message}`
+        : `Unable to load cron job ${path}: ${errorMessage(error)}`);
     }
+  }
+  if (rejected.length > 0) {
+    throw new TriggerCronConfigError(rejected.length === 1
+      ? rejected[0]!
+      : `${String(rejected.length)} cron jobs were rejected:\n${rejected.map((entry) => `- ${entry}`).join("\n")}`);
   }
   return Object.freeze(jobs);
 }

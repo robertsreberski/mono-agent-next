@@ -56,7 +56,8 @@ import {
 } from "./host-tool-catalog.js";
 import {
   cacheableAssistantMessage, decodeCachedAgentResponse, encodeCachedAgentResponse,
-  renderAskUserAnswer, renderAskUserRequest, renderRecalledMemory, snapshotMemoryRecallRecords,
+  renderAskUserAnswer, renderAskUserRequest, renderRecalledMemory, renderRouteIdentity,
+  snapshotMemoryRecallRecords,
   textFromMessage, turnMessagesFromTranscript,
 } from "./host-transcript.js";
 import {
@@ -1744,6 +1745,11 @@ class AgentHostImplementation implements AgentHost {
       model: route.model,
       messages: immutableClone([
         { role: "system" as const, content: [{ type: "text" as const, text: this.#instructions }] },
+        {
+          role: "system" as const,
+          name: "route",
+          content: [{ type: "text" as const, text: renderRouteIdentity(route, effort) }],
+        },
         ...(recalled.length === 0
           ? []
           : [{
