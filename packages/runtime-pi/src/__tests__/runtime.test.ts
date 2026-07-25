@@ -1319,6 +1319,32 @@ describe("Pi-native runtime module", () => {
     });
   });
 
+  it("does not enter the provider when stop is requested during harness setup", async () => {
+    const { runtime, faux } = fauxRuntime();
+    const providerAttempt = vi.fn(() =>
+      fauxAssistantMessage([fauxText("must not run")]));
+    faux.setResponses([providerAttempt]);
+    const { context } = turnContext();
+    let stopping: Promise<void> | undefined;
+    await start(runtime);
+
+    const turn = runtime.runTurn(request("stop during setup"), {
+      ...context,
+      registerLiveInput() {
+        stopping = stop(runtime);
+        return () => undefined;
+      },
+    });
+
+    await expect(turn).resolves.toMatchObject({ status: "cancelled" });
+    expect(stopping).toBeDefined();
+    await expect(stopping).resolves.toBeUndefined();
+    expect(providerAttempt).not.toHaveBeenCalled();
+    expect(await runtime.health?.({ signal: abortSignal() })).toMatchObject({
+      details: { state: "stopped", activeTurns: 0 },
+    });
+  });
+
   it("classifies typed model-discovery failures for safe fallback", async () => {
     for (const [status, retryable] of [[503, true], [401, false]] as const) {
       const fetchAttempt = vi.spyOn(globalThis, "fetch").mockResolvedValue(

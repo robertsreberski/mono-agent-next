@@ -626,7 +626,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                       ),
                     });
                   }
-                  if (request.signal.aborted) {
+                  if (stopRequested || request.signal.aborted) {
                     return {
                       completed: false,
                       value: { status: "cancelled" },
