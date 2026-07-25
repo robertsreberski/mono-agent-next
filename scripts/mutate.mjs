@@ -38,15 +38,52 @@ const DEFAULT_TARGETS = Object.freeze([
   "state-local",
 ]);
 
+/**
+ * Per-package logic-score floors, in percent. `--enforce` fails below them.
+ *
+ * Per package, not one global number, because the packages are 18 points apart:
+ * a single threshold low enough for the weakest lets the strongest regress by
+ * that whole margin without anyone noticing. A floor that only binds the worst
+ * package is not a floor, it is a note about the worst package.
+ *
+ * The *logic* score, not the overall one, because a StringLiteral mutant is
+ * usually a reworded message and almost never a defect -- state-local scores
+ * 46.7% on string literals against 71.0% on logic, and gating on the blend
+ * would mostly measure how many of its error messages happen to be asserted.
+ * Branch, operator and statement mutants are decisions; those are the ones
+ * worth requiring a test to notice.
+ *
+ * A ratchet, like the line budgets: each number sits below the score as
+ * measured, so the next change has to hold the line. Raise one whenever the
+ * score rises. Lowering one is the diff to argue about in review.
+ *
+ * Measured 2026-07-25 on this tree: core 67.5, state-local 71.0,
+ * channel-slack 64.6, channel-telegram 51.3. Each floor sits ~3.5 points under
+ * its measurement, and the margin is not politeness -- a Timeout mutant counts
+ * as detected, so a loaded machine scores *higher* than an idle one, and these
+ * four ran while the rest of this work competed for the same cores. The first
+ * scheduled run on a clean runner is the real calibration.
+ */
+const LOGIC_SCORE_FLOORS = Object.freeze({
+  "@mono-agent/core": 64,
+  "@mono-agent/channel-telegram": 48,
+  "@mono-agent/channel-slack": 61,
+  "@mono-agent/state-local": 67,
+});
+
 function usage() {
   return [
     "mutate — mutation testing over workspace packages",
     "",
     "  pnpm run mutate                     mutate the default high-risk packages",
     "  pnpm run mutate <dir> [<dir>...]    mutate the named package directories",
+    "  pnpm run mutate --enforce           fail below the per-package logic-score floor",
     "  pnpm run mutate --list              list mutatable package directories",
     "",
     `Default targets: ${DEFAULT_TARGETS.join(", ")}`,
+    "",
+    "Floors (logic score, percent):",
+    ...Object.entries(LOGIC_SCORE_FLOORS).map(([name, floor]) => `  ${name.padEnd(28)} ${String(floor)}`),
   ].join("\n");
 }
 
@@ -189,6 +226,31 @@ function renderSummary(runs) {
   return lines.join("\n");
 }
 
+/**
+ * Floor violations, as printable lines. Empty means every measured package held.
+ *
+ * A package with a floor and no score is a violation, not a pass. Otherwise the
+ * cheapest way past this gate is a run that produces no report.
+ */
+export function collectFloorViolations(runs, floors = LOGIC_SCORE_FLOORS) {
+  const violations = [];
+  for (const run of runs) {
+    const floor = floors[run.target.name];
+    if (floor === undefined) continue;
+    const score = run.report?.logicScore;
+    if (score === undefined) {
+      violations.push(`${run.target.name} produced no mutation score; floor ${String(floor)}% cannot be checked.`);
+      continue;
+    }
+    if (score + 1e-9 < floor) {
+      violations.push(
+        `${run.target.name} logic score ${score.toFixed(1)}% is below its ${String(floor)}% floor.`,
+      );
+    }
+  }
+  return violations;
+}
+
 function main(argv) {
   if (argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(`${usage()}\n`);
@@ -202,7 +264,18 @@ function main(argv) {
   const targets = (requested.length > 0 ? requested : DEFAULT_TARGETS).map(resolveTarget);
   const runs = targets.map(mutatePackage);
   process.stdout.write(`${renderSummary(runs)}\n`);
-  return runs.some((run) => run.exitCode !== 0) ? 1 : 0;
+  if (runs.some((run) => run.exitCode !== 0)) return 1;
+  if (!argv.includes("--enforce")) return 0;
+
+  const violations = collectFloorViolations(runs);
+  if (violations.length === 0) {
+    process.stdout.write("\nEvery measured package held its logic-score floor.\n");
+    return 0;
+  }
+  process.stderr.write(`\nMutation floor violations:\n${violations.map((line) => `- ${line}`).join("\n")}\n`);
+  return 1;
 }
 
-process.exitCode = main(process.argv.slice(2));
+if (import.meta.url === `file://${process.argv[1]}`) {
+  process.exitCode = main(process.argv.slice(2));
+}

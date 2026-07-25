@@ -17,17 +17,17 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `413ef3ae537f1b84ae7b4a01f49cac37798ac4803a16d86383b2f8fd0b4eae7d`
+Source manifest digest: `8f71b3b9880c6facd81063edcf220bce877c325238f3150087e9a1f84cacebe2`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
 | Production | 311 | 95293 |
-| Tests | 159 | 74961 |
-| Repository and product tooling | 56 | 18732 |
+| Tests | 160 | 75031 |
+| Repository and product tooling | 56 | 18805 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **526** | **188986** |
+| **Total executable source** | **527** | **189129** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
@@ -50,7 +50,7 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 74961 | 71470 | within limit |
+| test source, at 0.75 of production | 75031 | 71470 | within limit |
 
 The current ratio is 0.787.
 

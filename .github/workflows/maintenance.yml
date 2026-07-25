@@ -1,0 +1,103 @@
+name: maintenance
+
+# Two gates that cannot live on the pull-request path, for two different reasons.
+#
+# `mutation` costs 25-60 minutes per package. No PR gate can absorb that, and a
+# gate that gets skipped for being slow is not a gate.
+#
+# `gate-shape` exists because of a hole this repository cannot close any other
+# way: a pull request can edit `ci.yml` to delete the `scripts:test` step, and
+# `scripts:test` is the only thing running the tests that pin `ci.yml`'s shape.
+# Required-reviewer rules cannot help -- a solo owner reviewing their own work
+# deadlocks `main`. Running the same test from a different workflow file means
+# gutting `ci.yml` surfaces within a week instead of never. A week is not
+# immediate; it is finite, which is the whole difference.
+
+on:
+  schedule:
+    # Mondays, 04:17 UTC. Off the hour on purpose: scheduled runs pile up at :00
+    # and GitHub drops them under load.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintenance
+  cancel-in-progress: false
+
+jobs:
+  gate-shape:
+    name: Prove the gate definitions still hold
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.28.2"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm run build
+
+      # Includes `verify-all.test.mjs`, which asserts that every gate in
+      # `createRepoGate` reaches CI. If a pull request removes a step from
+      # `ci.yml`, this is the run that says so.
+      - name: Run the repository script tests
+        run: pnpm run scripts:test
+
+  mutation:
+    name: Measure mutation score (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ["core", "state-local", "channel-slack", "channel-telegram"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.28.2"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install workspace
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm run build
+
+      - name: Mutate and enforce the floor
+        run: pnpm run mutate -- ${{ matrix.package }} --enforce
+
+      - name: Upload the mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-${{ matrix.package }}
+          path: packages/${{ matrix.package }}/reports/mutation/mutation.json
+          if-no-files-found: warn
+          retention-days: 30
