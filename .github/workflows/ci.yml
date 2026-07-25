@@ -88,6 +88,10 @@ jobs:
       - name: Check built package exports and import safety
         run: pnpm run check:deep-imports
 
+      - name: Prove scaffolded consumer contracts
+        if: ${{ matrix.node-version == '22.19.0' }}
+        run: pnpm run verify:consumers
+
       - name: Test the complete v1 workspace
         run: |
           pnpm run scripts:test

@@ -88,6 +88,42 @@ describe("verify-all", () => {
     expect(labels).not.toContain("release:test");
   });
 
+  it("runs every local gate in CI, or names why it does not", () => {
+    // A gate that is not itself executed by a gate is not a gate. The hand-picked
+    // `.some()` assertions elsewhere in this file check individual gates; they are
+    // why eight gates could sit in `verify:all` and never run on a pull request.
+    // This asserts the whole set, so a new gate cannot be added to the local lane
+    // without either reaching CI or being given a reason here.
+    const workflow = readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
+    const releaseWorkflow = readFileSync(
+      resolve(repoRoot, ".github/workflows/npm-release.yml"),
+      "utf8",
+    );
+    const manifest = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8"));
+
+    /** Gates CI covers by another name or on another workflow. */
+    const coveredElsewhere = new Map([
+      ["check:pnpm-policy", () => manifest.scripts.preinstall.includes("pnpm-release-age-policy.mjs")],
+      ["check:secrets", () => workflow.includes("ghcr.io/gitleaks/gitleaks")],
+      ["check:dependency-vulnerabilities", () => workflow.includes("pnpm run check:v1-dependency-vulnerabilities")],
+      ["release:validate", () => releaseWorkflow.includes("pnpm run release:validate")],
+      ["release:pack", () => releaseWorkflow.includes("pnpm run release:pack")],
+      ["release:consumer", () => releaseWorkflow.includes("pnpm run release:consumer")],
+      ["git diff --check", () => workflow.includes("git diff --check")],
+    ]);
+
+    const gate = createRepoGate({ releaseTag: "v0.0.0", nodeVersion: MINIMUM_NODE_VERSION });
+    const uncovered = gate
+      .map((step) => step.label)
+      .filter((label) => !workflow.includes(label))
+      .filter((label) => {
+        const covered = coveredElsewhere.get(label);
+        return covered === undefined || !covered();
+      });
+
+    expect(uncovered).toEqual([]);
+  });
+
   it("keeps provenance and release contract tests wired into automated verification", () => {
     const manifest = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8"));
     const workflow = readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
