@@ -92,6 +92,10 @@ describe("website CI contract", () => {
     );
 
     const verdict = workflow.jobs.verdict;
+    // The branch ruleset requires a status check by this exact name. Renaming
+    // the job would silently un-require it, leaving `main` unguarded while CI
+    // still looks green, so the name is pinned here alongside the wiring.
+    expect(verdict.name).toBe("Required verdict");
     expect(verdict.needs).toEqual(["verify", "website"]);
     expect(verdict.steps[0].env).toEqual({
       VERIFY_RESULT: "${{ needs.verify.result }}",
