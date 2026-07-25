@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";
 import { link, lstat, mkdir, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
+import { boundedInteger } from "./bounded-integer.js";
 const READ_CHUNK_BYTES = 64 * 1024;
 export const OWNER_PRIVATE_DIRECTORY_MODE = 0o700;
 export const OWNER_PRIVATE_FILE_MODE = 0o600;
@@ -31,7 +32,7 @@ export interface OwnerPrivatePathIdentity {
 export class OwnerPrivatePathError extends Error {
   readonly code: OwnerPrivatePathErrorCode;
   readonly path: string;
-  /** True only when an atomic rename committed before a later durability check failed. */
+  /** True when the destination was atomically published before a later operation failed. */
   readonly committed: boolean;
   constructor(options: {
     readonly code: OwnerPrivatePathErrorCode;
@@ -109,6 +110,7 @@ export async function readOwnerPrivateFile(
     "maxBytes",
     1,
     1_073_741_824,
+    (message) => new RangeError(message),
   );
   throwIfAborted(options.signal);
   await inspectOwnerPrivateDirectory(dirname(absolutePath), options);
@@ -230,7 +232,7 @@ export async function atomicReplaceOwnerPrivateFile(
         throw error;
       }
       committed = true;
-      await unlink(temporaryPath);
+      await unlinkCommittedTemporary(temporary);
     } else {
       await rename(temporaryPath, absolutePath);
       committed = true;
@@ -244,7 +246,7 @@ export async function atomicReplaceOwnerPrivateFile(
     throwIfAborted(options.signal);
     return result;
   } catch (error) {
-    if (!committed && temporary !== undefined) await unlinkIfSameIdentity(temporary);
+    if (temporary !== undefined) await unlinkIfSameIdentity(temporary);
     if (error instanceof OwnerPrivatePathError) {
       if (!committed || error.committed) throw error;
       throw new OwnerPrivatePathError({
@@ -360,6 +362,20 @@ async function unlinkIfSameIdentity(identity: OwnerPrivatePathIdentity): Promise
     // Cleanup is best-effort and must never unlink an identity we did not create.
   }
 }
+async function unlinkCommittedTemporary(identity: OwnerPrivatePathIdentity): Promise<void> {
+  try {
+    await unlink(identity.path);
+  } catch (error) {
+    await unlinkIfSameIdentity(identity);
+    try {
+      const remaining = await lstat(identity.path);
+      if (!remaining.isSymbolicLink() && remaining.dev === identity.device
+        && remaining.ino === identity.inode) throw error;
+    } catch (inspectionError) {
+      if (!hasErrorCode(inspectionError, "ENOENT")) throw inspectionError;
+    }
+  }
+}
 function assertExpectedIdentity(
   path: string,
   current: OwnerPrivatePathIdentity | undefined,
@@ -427,12 +443,6 @@ function checkedAbsolutePath(path: string): string {
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted !== true) return;
   throw signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError");
-}
-function boundedInteger(value: number, name: string, minimum: number, maximum: number): number {
-  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
-    throw new RangeError(`${name} must be an integer from ${minimum} through ${maximum}`);
-  }
-  return value;
 }
 function hasErrorCode(value: unknown, code: string): boolean {
   return value !== null && typeof value === "object" && Reflect.get(value, "code") === code;

@@ -1,8 +1,18 @@
-import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   OwnerPrivatePathError,
@@ -12,6 +22,42 @@ import {
   inspectOwnerPrivateFile,
   readOwnerPrivateFile,
 } from "../secure-fs.js";
+
+const fsHooks = vi.hoisted(() => ({
+  afterOpen: undefined as ((path: string) => Promise<void>) | undefined,
+  afterLink: undefined as ((source: string, destination: string) => Promise<void>) | undefined,
+  afterRename: undefined as ((source: string, destination: string) => Promise<void>) | undefined,
+  beforeUnlink: undefined as ((path: string) => Promise<void>) | undefined,
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    open: async (...arguments_: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...arguments_);
+      try {
+        await fsHooks.afterOpen?.(String(arguments_[0]));
+        return handle;
+      } catch (error) {
+        await handle.close();
+        throw error;
+      }
+    },
+    link: async (...arguments_: Parameters<typeof actual.link>) => {
+      await actual.link(...arguments_);
+      await fsHooks.afterLink?.(String(arguments_[0]), String(arguments_[1]));
+    },
+    rename: async (...arguments_: Parameters<typeof actual.rename>) => {
+      await actual.rename(...arguments_);
+      await fsHooks.afterRename?.(String(arguments_[0]), String(arguments_[1]));
+    },
+    unlink: async (...arguments_: Parameters<typeof actual.unlink>) => {
+      await fsHooks.beforeUnlink?.(String(arguments_[0]));
+      await actual.unlink(...arguments_);
+    },
+  };
+});
 
 const roots: string[] = [];
 
@@ -23,6 +69,10 @@ async function privateRoot(): Promise<string> {
 }
 
 afterEach(async () => {
+  fsHooks.afterOpen = undefined;
+  fsHooks.afterLink = undefined;
+  fsHooks.afterRename = undefined;
+  fsHooks.beforeUnlink = undefined;
   await Promise.all(roots.splice(0).map(async (root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -95,6 +145,113 @@ describe("owner-private filesystem helpers", () => {
       committed: false,
     });
     expect(new TextDecoder().decode(await readOwnerPrivateFile(path))).toBe("created");
+  });
+
+  it("rechecks create and replacement identities immediately before commit", async () => {
+    const root = await privateRoot();
+    const directory = join(root, "state");
+    await ensureOwnerPrivateDirectory(directory);
+
+    const createPath = join(directory, "created.json");
+    let createRaceInjected = false;
+    fsHooks.afterOpen = async (openedPath) => {
+      if (!createRaceInjected
+        && openedPath.startsWith(join(directory, ".created.json."))
+        && openedPath.endsWith(".tmp")) {
+        createRaceInjected = true;
+        await writeFile(createPath, "competitor", { mode: 0o600 });
+      }
+    };
+    await expect(atomicReplaceOwnerPrivateFile(
+      createPath,
+      "ours",
+      { expected: null },
+    )).rejects.toMatchObject({
+      code: "already_exists",
+      committed: false,
+    });
+    expect(await readFile(createPath, "utf8")).toBe("competitor");
+
+    fsHooks.afterOpen = undefined;
+    const replacePath = join(directory, "replaced.json");
+    const displacedPath = join(directory, "displaced.json");
+    const initial = await createOwnerPrivateFile(replacePath, "initial");
+    let replacementRaceInjected = false;
+    fsHooks.afterOpen = async (openedPath) => {
+      if (!replacementRaceInjected
+        && openedPath.startsWith(join(directory, ".replaced.json."))
+        && openedPath.endsWith(".tmp")) {
+        replacementRaceInjected = true;
+        await rename(replacePath, displacedPath);
+        await writeFile(replacePath, "competitor", { mode: 0o600 });
+      }
+    };
+    await expect(atomicReplaceOwnerPrivateFile(
+      replacePath,
+      "ours",
+      { expected: initial },
+    )).rejects.toMatchObject({
+      code: "version_conflict",
+      committed: false,
+    });
+    expect(await readFile(replacePath, "utf8")).toBe("competitor");
+  });
+
+  it("retries committed hardlink cleanup and leaves one readable target link", async () => {
+    const root = await privateRoot();
+    const directory = join(root, "state");
+    const path = join(directory, "created.json");
+    await ensureOwnerPrivateDirectory(directory);
+
+    let failedUnlinks = 0;
+    fsHooks.afterLink = async (source, destination) => {
+      if (destination !== path) return;
+      fsHooks.beforeUnlink = async (candidate) => {
+        if (candidate === source && failedUnlinks === 0) {
+          failedUnlinks += 1;
+          throw Object.assign(new Error("transient unlink failure"), { code: "EIO" });
+        }
+      };
+    };
+
+    await expect(atomicReplaceOwnerPrivateFile(
+      path,
+      "created",
+      { expected: null },
+    )).resolves.toMatchObject({ links: 1 });
+    expect(failedUnlinks).toBe(1);
+    expect((await lstat(path)).nlink).toBe(1);
+    expect((await readdir(directory)).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(new TextDecoder().decode(await readOwnerPrivateFile(path))).toBe("created");
+  });
+
+  it("classifies post-commit durability failures as committed", async () => {
+    const root = await privateRoot();
+    const directory = join(root, "state");
+    const path = join(directory, "replaced.json");
+    await ensureOwnerPrivateDirectory(directory);
+    const initial = await createOwnerPrivateFile(path, "initial");
+
+    fsHooks.afterRename = async (_source, destination) => {
+      if (destination !== path) return;
+      fsHooks.afterOpen = async (openedPath) => {
+        if (openedPath === directory) {
+          throw Object.assign(new Error("directory sync unavailable"), { code: "EIO" });
+        }
+      };
+    };
+
+    await expect(atomicReplaceOwnerPrivateFile(
+      path,
+      "committed",
+      { expected: initial },
+    )).rejects.toMatchObject({
+      code: "io_failed",
+      committed: true,
+    });
+
+    fsHooks.afterOpen = undefined;
+    expect(new TextDecoder().decode(await readOwnerPrivateFile(path))).toBe("committed");
   });
 
   it("reads exactly the configured byte bound and rejects limit plus one", async () => {

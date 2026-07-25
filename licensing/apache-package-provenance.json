@@ -63,7 +63,7 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/compliance.test.ts",
-      "sha256": "0686ab965e7d003fe9c22e0d7d5dcce312ec4269e968c17600e2aa943582ea52",
+      "sha256": "3bb32f6097b702acca974c11b159f6d1d44a9fbbc57672711fd890fa6c559036",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -75,7 +75,7 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/contract-codecs.test.ts",
-      "sha256": "1fd7974142cef193a8c707b57bca774dc5900b26217af02ad0b974e9661f8d82",
+      "sha256": "d298bad935e9dae58d55421c780ef05557d44ac50c14ae6510436d933e907fdd",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -99,7 +99,7 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/http.test.ts",
-      "sha256": "b696cf4d138b8b31e49c259c845afbf5efaa1e72fc5bf2513ec7f63aadcc2a7b",
+      "sha256": "b23a05390949d8b2b517132f1dec128fcea4ee2e8bc0a50012c4ec8d10a0299f",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -111,7 +111,7 @@
     },
     {
       "path": "packages/module-sdk/src/__tests__/secure-fs.test.ts",
-      "sha256": "48361095e0de8dcdec66206637cb32553e6493976ba59a22494bf0fa6b9e9d81",
+      "sha256": "9fb6bf531126f768f5b61cebcf5c09d91c56cc8e13929f2df35ca15e41e45c98",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -122,8 +122,32 @@
       "authorityBasis": "robert-sreberski-original-apache-2.0"
     },
     {
+      "path": "packages/module-sdk/src/bounded-integer.ts",
+      "sha256": "7591f9e61a8ff8f7f89e60787197e8d3d27c9c7108684f014cd6b2939c36d3d8",
+      "origin": {
+        "classification": "successor-original",
+        "repository": "mono-agent-next",
+        "commit": "f76feaa7b5085016d60fd9c8cd1a776bf3c3d536",
+        "path": "packages/module-sdk/src/bounded-integer.ts"
+      },
+      "copyrightHolder": "Robert Sreberski",
+      "authorityBasis": "robert-sreberski-original-apache-2.0"
+    },
+    {
+      "path": "packages/module-sdk/src/config.ts",
+      "sha256": "92de98cda38b6263b592205d6766b802e5f120ac0a70b9e39cf26af8e51ab26b",
+      "origin": {
+        "classification": "successor-original",
+        "repository": "mono-agent-next",
+        "commit": "f76feaa7b5085016d60fd9c8cd1a776bf3c3d536",
+        "path": "packages/module-sdk/src/config.ts"
+      },
+      "copyrightHolder": "Robert Sreberski",
+      "authorityBasis": "robert-sreberski-original-apache-2.0"
+    },
+    {
       "path": "packages/module-sdk/src/http.ts",
-      "sha256": "a01663cc3a394c9b30ac0330b97d3488d5fc9beba88e7243fdce566c54c9ad8d",
+      "sha256": "138c7d9ba52819ff51cf44d5b61c9cbe157e8721e80981f3643afb22045f8d3f",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -135,12 +159,24 @@
     },
     {
       "path": "packages/module-sdk/src/index.ts",
-      "sha256": "87d87902a78c8a5679b54bba4c0289a305548d7ab3bf6ef62fd5070bc7b04867",
+      "sha256": "8ec04317b24c42c73f787cb3203bdbd71cab5ea0f4b985f5d70d60b9d21a9ac3",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
         "commit": "1faf50a5bb3c7f6296e26d65494976899a13c133",
         "path": "packages/module-sdk/src/index.ts"
+      },
+      "copyrightHolder": "Robert Sreberski",
+      "authorityBasis": "robert-sreberski-original-apache-2.0"
+    },
+    {
+      "path": "packages/module-sdk/src/interactions.ts",
+      "sha256": "8d859ccec3bb4bbf1faa697fab0aa568594399f98e93e66894e329385879d825",
+      "origin": {
+        "classification": "successor-original",
+        "repository": "mono-agent-next",
+        "commit": "f76feaa7b5085016d60fd9c8cd1a776bf3c3d536",
+        "path": "packages/module-sdk/src/interactions.ts"
       },
       "copyrightHolder": "Robert Sreberski",
       "authorityBasis": "robert-sreberski-original-apache-2.0"
@@ -158,8 +194,20 @@
       "authorityBasis": "robert-sreberski-original-apache-2.0"
     },
     {
+      "path": "packages/module-sdk/src/modules.ts",
+      "sha256": "215180a2045616f1f70fdc02bc0cf5aa1236325f4ab45262fb85ef9ee043d74e",
+      "origin": {
+        "classification": "successor-original",
+        "repository": "mono-agent-next",
+        "commit": "f76feaa7b5085016d60fd9c8cd1a776bf3c3d536",
+        "path": "packages/module-sdk/src/modules.ts"
+      },
+      "copyrightHolder": "Robert Sreberski",
+      "authorityBasis": "robert-sreberski-original-apache-2.0"
+    },
+    {
       "path": "packages/module-sdk/src/secure-fs.ts",
-      "sha256": "f83b4a1b60a58c0962f9fc21f77f4a64e796aa3244161f484de4f4691d9cf670",
+      "sha256": "0e44a4a47a5231a089f8ae6af003e62a8e50d96676424a1057ecfdfeb75276d0",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
@@ -171,7 +219,7 @@
     },
     {
       "path": "packages/module-sdk/src/testing.ts",
-      "sha256": "af846b87a5113253cfb7e52081bc447530cac11c3718563493854af3a14b257a",
+      "sha256": "bbbc2132cca0117b3c25c2b0cca43576bf949d911c4fa5d6f0b4b1cfbb0dc0e5",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",

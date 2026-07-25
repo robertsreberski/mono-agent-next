@@ -14,21 +14,32 @@ import {
 const RESERVED_DIRECTIVES = new Set(["$schema", "$use", "$env"]);
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const INSTANCE_METHODS = ["start", "drain", "stop", "health", "diagnostics"] as const;
-const RUNTIME_CAPABILITIES = ["tools", "mcp", "attachments", "approvals", "structuredOutput", "sandbox", "sessions"] as const;
-const CHANNEL_CAPABILITIES = ["attachments", "liveInput", "askUser", "proactive", "runtimeControl", "verbatim", "cancellation"] as const;
+const RUNTIME_CAPABILITIES = [
+  "tools", "mcp", "attachments", "approvals", "structuredOutput", "sandbox", "sessions",
+] as const;
+const CHANNEL_CAPABILITIES = [
+  "attachments", "liveInput", "askUser", "proactive", "runtimeControl", "verbatim", "cancellation",
+] as const;
 export interface ModuleComplianceOptions {
-  readonly expectedKind?: ModuleKind; readonly expectedPackageName?: string;
+  readonly expectedKind?: ModuleKind;
+  readonly expectedPackageName?: string;
   readonly expectedPackageVersion?: string;
 }
 export class ModuleComplianceError extends Error {
   readonly code = "MODULE_COMPLIANCE_FAILED";
-  constructor(message: string) { super(message); this.name = "ModuleComplianceError"; }
+  constructor(message: string) {
+    super(message);
+    this.name = "ModuleComplianceError";
+  }
 }
 export interface ChannelBehaviorComplianceOptions {
-  create(signal: AbortSignal): Awaitable<Channel>; exercise(instance: Channel, signal: AbortSignal): Awaitable<void>;
-  readonly delivery?: { readonly delivered: ChannelOutboundMessage; readonly conflicting: ChannelOutboundMessage;
+  create(signal: AbortSignal): Awaitable<Channel>;
+  exercise(instance: Channel, signal: AbortSignal): Awaitable<void>;
+  readonly delivery?: { readonly delivered: ChannelOutboundMessage;
+    readonly conflicting: ChannelOutboundMessage;
     readonly unknown: ChannelOutboundMessage };
-  readonly secrets?: readonly string[]; readonly timeoutMs?: number;
+  readonly secrets?: readonly string[];
+  readonly timeoutMs?: number;
 }
 /** Reusable channel lane; adapter suites supply normalization/auth probes in `exercise`. */
 export async function assertChannelBehaviorCompliance(options: ChannelBehaviorComplianceOptions): Promise<void> {
@@ -61,11 +72,15 @@ export async function assertChannelBehaviorCompliance(options: ChannelBehaviorCo
     results.push(await instance.health({ signal }), ...(await instance.diagnostics?.({ signal, verbose: true }) ?? []));
     const report = JSON.stringify(results);
     if (new TextEncoder().encode(report).byteLength > 64 * 1024) fail("channel behavior reports exceed 64 KiB");
-    for (const secret of options.secrets ?? []) if (secret.length > 0 && report.includes(secret))
-      fail("channel behavior reports contain a configured secret");
+    for (const secret of options.secrets ?? []) {
+      const escapedSecret = JSON.stringify(secret).slice(1, -1);
+      if (secret.length > 0 && (report.includes(secret) || report.includes(escapedSecret)))
+        fail("channel behavior reports contain a configured secret");
+    }
     await instance.drain?.({ signal });
   } finally {
-    await instance.stop?.({ signal, reason: "shutdown" }); await instance.stop?.({ signal, reason: "shutdown" });
+    await instance.stop?.({ signal, reason: "shutdown" });
+    await instance.stop?.({ signal, reason: "shutdown" });
   }
 }
 export function assertModuleDefinitionCompliance(value: unknown, options: ModuleComplianceOptions = {}):
@@ -220,7 +235,8 @@ function assertChannelSendTools(value: unknown): number {
     const description = readOwnDataProperty(tool, "description", `channel instance sendTools[${index}]`, true);
     if (typeof name !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(name)) fail(`channel instance sendTools[${index}].name must be a portable tool name`);
     if (names.has(name)) fail(`channel instance sendTools contains duplicate ${name}`);
-    names.add(name); requireNonEmptyString(description, `channel instance sendTools[${index}].description`);
+    names.add(name);
+    requireNonEmptyString(description, `channel instance sendTools[${index}].description`);
     const schema = requirePlainRecord(readOwnDataProperty(
       tool, "inputSchema", `channel instance sendTools[${index}]`, true,
     ), `channel instance sendTools[${index}].inputSchema`);
@@ -449,16 +465,26 @@ function assertBoundedModuleToolSchema(value: Record<string, unknown>, label: st
   };
   const visit = (current: unknown, path: string, depth: number): void => {
     if (depth === 0) addItems(1);
-    if (current === null) { charge(8); chargeSerialized(4); return; }
+    if (current === null) {
+      charge(8);
+      chargeSerialized(4);
+      return;
+    }
     if (typeof current === "boolean") {
-      charge(8); chargeSerialized(current ? 4 : 5); return;
+      charge(8);
+      chargeSerialized(current ? 4 : 5);
+      return;
     }
     if (typeof current === "number") {
       if (!Number.isFinite(current)) fail(`${path} must contain only finite numbers`);
-      charge(16); chargeSerialized(jsonScalarBytes(current)); return;
+      charge(16);
+      chargeSerialized(jsonScalarBytes(current));
+      return;
     }
     if (typeof current === "string") {
-      charge(utf8Bytes(current)); chargeSerialized(jsonScalarBytes(current)); return;
+      charge(utf8Bytes(current));
+      chargeSerialized(jsonScalarBytes(current));
+      return;
     }
     if (current === null || typeof current !== "object") {
       fail(`${path} must contain only JSON values`);
