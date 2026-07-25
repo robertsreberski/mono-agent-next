@@ -54,6 +54,12 @@ import {
 } from "./execution.js";
 import type { ExecutionMaintenanceResult } from "./execution-journal.js";
 import {
+  createStateLocalInternalAccessor,
+  stateLocalInternalAccess,
+  type StateLocalInternalAccessor,
+  type StateLocalInternalAccessHost,
+} from "./internal-state-access.js";
+import {
   normalizeStateLocalMaintenanceRequest,
   stateLocalMaintenanceInputSchema,
   stateLocalMaintenanceRequestFromCommand,
@@ -77,11 +83,13 @@ import {
   type ProcessLease,
   verifySecureDirectoryIdentity,
 } from "./secure-fs.js";
+import { isStateIndexCapacityError } from "./index-log-limits.js";
 import {
   emptySnapshot,
   decodePresenceRecord,
   encodePresenceRecord,
   INTERNAL_PRESENCE_PREFIX,
+  isExecutionStateKey,
   isInternalStateKey,
   nextListGeneration,
   nextVersion,
@@ -93,8 +101,11 @@ import {
   type StateSnapshot,
   type StoredRecord,
   validateExpectedVersion,
+  validateExecutionStateKey,
+  validateExecutionStatePrefix,
   presenceStorageKey,
   validateStateKey,
+  validateStateKeySyntax,
   validateStatePrefix,
 } from "./snapshot.js";
 
@@ -122,6 +133,8 @@ export interface StateLocalStoreHooks {
   readonly lease?: LeaseHooks;
   readonly snapshot?: AtomicReplaceHooks;
   readonly presence?: AtomicReplaceHooks;
+  /** Adversarial seam for proving pre-append snapshot capacity behavior. */
+  readonly snapshotByteLimit?: number;
 }
 
 export interface StateLocalStoreOpenOptions {
@@ -131,12 +144,13 @@ export interface StateLocalStoreOpenOptions {
   readonly hooks?: StateLocalStoreHooks;
 }
 
-export class StateLocalStore implements StateStore {
+export class StateLocalStore implements StateStore, StateLocalInternalAccessHost {
   readonly root: string;
   readonly snapshotPath: string;
   readonly commands: readonly ModuleCommand[];
   readonly execution: StateLocalExecution;
   readonly toolContributions: readonly ModuleToolContribution[];
+  readonly [stateLocalInternalAccess]: StateLocalInternalAccessor;
   private readonly config: ResolvedStateLocalConfig;
   private readonly rootIdentity: FileIdentity;
   private readonly lease: ProcessLease;
@@ -173,6 +187,14 @@ export class StateLocalStore implements StateStore {
     this.snapshotByteLimit = snapshotByteLimit;
     this.clock = options.clock ?? (() => new Date());
     this.snapshotHooks = options.hooks?.snapshot;
+    this[stateLocalInternalAccess] = createStateLocalInternalAccessor({
+      read: (request) => this.readInternal(request),
+      scan: (request) => this.scanInternal(request),
+      transaction: (request) => this.transactionInternal(request),
+      putArtifact: (request) => this.putArtifact(request),
+      readArtifact: (request) => this.readArtifact(request),
+      deleteArtifact: (request) => this.deleteArtifact(request),
+    });
     this.commands = Object.freeze([{
       name: "state-local:maintain",
       kind: "maintenance",
@@ -198,7 +220,7 @@ export class StateLocalStore implements StateStore {
           index: lease,
           ...(options.hooks?.presence === undefined ? {} : { hooks: options.hooks.presence }),
         });
-    this.execution = new StateLocalExecution(this, {
+    this.execution = new StateLocalExecution(this[stateLocalInternalAccess], {
       clock: this.clock,
       releaseArtifact: (ref, signal) => this.runExclusive(signal, async () => {
         await this.guardPaths();
@@ -224,7 +246,19 @@ export class StateLocalStore implements StateStore {
     let artifacts: StateLocalArtifacts | undefined;
     try {
       throwIfAborted(options.signal);
-      const snapshotByteLimit = stateSnapshotByteLimit(effectiveConfig);
+      const configuredSnapshotByteLimit = stateSnapshotByteLimit(effectiveConfig);
+      const snapshotByteLimit = options.hooks?.snapshotByteLimit
+        ?? configuredSnapshotByteLimit;
+      if (
+        !Number.isSafeInteger(snapshotByteLimit)
+        || snapshotByteLimit < 1
+        || snapshotByteLimit > configuredSnapshotByteLimit
+      ) {
+        throw new StateLocalError(
+          "STATE_INVALID_CONFIG",
+          "The snapshot byte-limit test seam is outside the configured durable bound.",
+        );
+      }
       const indexedKeys = lease.listIndexKeys("", STATE_INDEX_MAX_ENTRIES);
       if (indexedKeys.some((key) =>
         key !== SNAPSHOT_INDEX_KEY && !key.startsWith(PRESENCE_INDEX_PREFIX))) {
@@ -291,7 +325,18 @@ export class StateLocalStore implements StateStore {
   read(request: StateReadRequest): Promise<StateRecord | undefined> {
     return this.runExclusive(request.signal, async () => {
       await this.guardPaths();
-      const key = validateStateKey(request.key);
+      const key = validateStateKeySyntax(request.key);
+      if (isExecutionStateKey(key)) return undefined;
+      validateStateKey(key);
+      const found = this.snapshot.records.get(key);
+      return found === undefined ? undefined : toStateRecord(found);
+    });
+  }
+
+  private readInternal(request: StateReadRequest): Promise<StateRecord | undefined> {
+    return this.runExclusive(request.signal, async () => {
+      await this.guardPaths();
+      const key = validateExecutionStateKey(request.key);
       const found = this.snapshot.records.get(key);
       return found === undefined ? undefined : toStateRecord(found);
     });
@@ -423,10 +468,25 @@ export class StateLocalStore implements StateStore {
   }
 
   transaction(request: StateTransactionRequest): Promise<StateTransactionResult> {
+    return this.transactionWithValidator(request, validateStateKey, true);
+  }
+
+  private transactionInternal(
+    request: StateTransactionRequest,
+  ): Promise<StateTransactionResult> {
+    return this.transactionWithValidator(request, validateExecutionStateKey, false);
+  }
+
+  private transactionWithValidator(
+    request: StateTransactionRequest,
+    keyValidator: (value: unknown) => string,
+    affectsPublicList: boolean,
+  ): Promise<StateTransactionResult> {
     const normalized = normalizeTransactionRequest(
       request,
       this.config.maxRecordBytes,
       this.config.maxTotalBytes,
+      keyValidator,
     );
     return this.runExclusive(normalized.signal, async () => {
       await this.guardPaths();
@@ -504,7 +564,9 @@ export class StateLocalStore implements StateStore {
 
       await this.commit({
         generation,
-        listGeneration: nextListGeneration(this.snapshot),
+        listGeneration: affectsPublicList
+          ? nextListGeneration(this.snapshot)
+          : this.snapshot.listGeneration,
         records,
         totalBytes,
       });
@@ -517,13 +579,40 @@ export class StateLocalStore implements StateStore {
   }
 
   scan(request: StateScanRequest): Promise<StateScanResult> {
-    const normalized = normalizeScanRequest(request);
+    return this.scanWithMode(
+      request,
+      validateStatePrefix,
+      validateStateKey,
+      false,
+    );
+  }
+
+  private scanInternal(request: StateScanRequest): Promise<StateScanResult> {
+    return this.scanWithMode(
+      request,
+      validateExecutionStatePrefix,
+      validateExecutionStateKey,
+      true,
+    );
+  }
+
+  private scanWithMode(
+    request: StateScanRequest,
+    prefixValidator: (value: unknown) => string,
+    keyValidator: (value: unknown) => string,
+    includeInternal: boolean,
+  ): Promise<StateScanResult> {
+    const normalized = normalizeScanRequest(request, prefixValidator);
     return this.runExclusive(normalized.signal, async () => {
       await this.guardPaths();
-      const afterKey = decodeScanCursor(normalized.cursor, normalized.prefix);
+      const afterKey = decodeScanCursor(
+        normalized.cursor,
+        normalized.prefix,
+        keyValidator,
+      );
       const matching = [...this.snapshot.records.values()]
         .filter((record) =>
-          !isInternalStateKey(record.key) &&
+          (includeInternal ? isExecutionStateKey(record.key) : !isInternalStateKey(record.key)) &&
           record.key.startsWith(normalized.prefix) &&
           (afterKey === undefined || record.key > afterKey))
         .sort(compareStoredRecords);
@@ -798,7 +887,8 @@ export class StateLocalStore implements StateStore {
           summary: "Local state is owner-private, consistent, and exclusively leased.",
           details: {
             records: [...this.snapshot.records.keys()].filter((key) => !isInternalStateKey(key)).length,
-            presence: [...this.snapshot.records.keys()].filter((key) => isInternalStateKey(key)).length,
+            presence: [...this.snapshot.records.keys()]
+              .filter((key) => key.startsWith(INTERNAL_PRESENCE_PREFIX)).length,
             bytes: this.snapshot.totalBytes,
             generation: this.snapshot.generation,
           },
@@ -961,6 +1051,7 @@ export class StateLocalStore implements StateStore {
       await this.lease.verify();
       this.snapshot = draft;
     } catch (error) {
+      if (isStateIndexCapacityError(error)) throw error;
       this.poisoned = new StateLocalError(
         "STATE_POISONED",
         "A local state commit did not complete safely; close and reopen before retrying.",
@@ -1038,6 +1129,7 @@ function normalizeTransactionRequest(
   request: StateTransactionRequest,
   maxRecordBytes: number,
   maxTotalBytes: number,
+  keyValidator: (value: unknown) => string,
 ): NormalizedTransactionRequest {
   const value = readOwnDataRecord(
     request,
@@ -1069,10 +1161,15 @@ function normalizeTransactionRequest(
   }
 
   const checks = checkInputs.map((operation, index) =>
-    normalizeTransactionOperation(operation, "check", index));
+    normalizeTransactionOperation(operation, "check", index, keyValidator));
   let putBytes = 0;
   const puts = putInputs.map((operation, index) => {
-    const normalized = normalizeTransactionOperation(operation, "put", index);
+    const normalized = normalizeTransactionOperation(
+      operation,
+      "put",
+      index,
+      keyValidator,
+    );
     const data = readOwnDataRecord(
       operation,
       ["expectedVersion", "key", "value"],
@@ -1090,7 +1187,7 @@ function normalizeTransactionRequest(
     return { ...normalized, value: bytes };
   });
   const deletes = deleteInputs.map((operation, index) =>
-    normalizeTransactionOperation(operation, "delete", index));
+    normalizeTransactionOperation(operation, "delete", index, keyValidator));
   const keys = new Set<string>();
   for (const operation of [...checks, ...puts, ...deletes]) {
     if (keys.has(operation.key)) {
@@ -1113,6 +1210,7 @@ function normalizeTransactionOperation(
   operation: StateTransactionCheck | StateTransactionPut | StateTransactionDelete,
   kind: "check" | "put" | "delete",
   index: number,
+  keyValidator: (value: unknown) => string,
 ): NormalizedTransactionCheck {
   const keys = kind === "put"
     ? ["expectedVersion", "key", "value"]
@@ -1123,7 +1221,7 @@ function normalizeTransactionOperation(
     keys,
     `State transaction ${kind} ${index}`,
   );
-  const key = validateStateKey(value.key);
+  const key = keyValidator(value.key);
   const expectedVersion = value.expectedVersion === null
     ? null
     : validateExpectedVersion(value.expectedVersion);
@@ -1206,14 +1304,17 @@ function cloneTransactionBytes(
   }
 }
 
-function normalizeScanRequest(request: StateScanRequest): NormalizedScanRequest {
+function normalizeScanRequest(
+  request: StateScanRequest,
+  prefixValidator: (value: unknown) => string,
+): NormalizedScanRequest {
   const value = readOwnDataRecord(
     request,
     ["limit", "prefix", "signal"],
     ["cursor", "limit", "prefix", "signal"],
     "State scan",
   );
-  const prefix = validateStatePrefix(value.prefix);
+  const prefix = prefixValidator(value.prefix);
   if (!Number.isSafeInteger(value.limit) || (value.limit as number) < 1 || (value.limit as number) > 1_000) {
     throw new StateLocalError(
       "STATE_LIMIT_EXCEEDED",
@@ -1460,7 +1561,11 @@ function encodeScanCursor(prefix: string, key: string | undefined): string | und
   return cursor;
 }
 
-function decodeScanCursor(cursor: string | undefined, prefix: string): string | undefined {
+function decodeScanCursor(
+  cursor: string | undefined,
+  prefix: string,
+  keyValidator: (value: unknown) => string,
+): string | undefined {
   if (cursor === undefined) return undefined;
   let raw: unknown;
   try {
@@ -1482,7 +1587,7 @@ function decodeScanCursor(cursor: string | undefined, prefix: string): string | 
     throw new StateLocalError("STATE_INVALID_CURSOR", "State scan cursor does not match this query.");
   }
   try {
-    const key = validateStateKey((raw as { k?: unknown }).k);
+    const key = keyValidator((raw as { k?: unknown }).k);
     if (!key.startsWith(prefix)) {
       throw new StateLocalError("STATE_INVALID_CURSOR", "State scan cursor does not match this prefix.");
     }

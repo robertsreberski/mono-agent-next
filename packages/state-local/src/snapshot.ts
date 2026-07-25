@@ -5,6 +5,7 @@ import type {
 
 import type { ResolvedStateLocalConfig } from "./config.js";
 import { StateLocalError } from "./errors.js";
+import { isPlainRecord } from "./validation.js";
 
 const SNAPSHOT_SCHEMA = "mono-agent.state-local.v1";
 const STATE_SNAPSHOT_MAX_BYTES = 2_147_483_647;
@@ -15,6 +16,8 @@ const JSON_STRING_MAX_BYTES_PER_CODE_UNIT = 6;
 const INTERNAL_PRESENCE_SUFFIX_MAX_CODE_UNITS = 512;
 export const INTERNAL_STATE_PREFIX = "@mono-agent/internal/";
 export const INTERNAL_PRESENCE_PREFIX = `${INTERNAL_STATE_PREFIX}presence/`;
+export const EXECUTION_STATE_PREFIX = "core/";
+export const LEGACY_EXECUTION_STATE_PREFIX = "@core/";
 
 export interface StoredRecord {
   readonly key: string;
@@ -190,6 +193,39 @@ export function toStateRecord(record: StoredRecord): StateRecord {
 }
 
 export function validateStateKey(value: unknown): string {
+  const key = validateStateKeySyntax(value);
+  if (isInternalStateKey(key)) {
+    throw new StateLocalError(
+      "STATE_INVALID_KEY",
+      "State keys must not use a reserved internal namespace.",
+    );
+  }
+  return key;
+}
+
+export function validateExecutionStateKey(value: unknown): string {
+  const key = validateStateKeySyntax(value);
+  if (!isExecutionStateKey(key)) {
+    throw new StateLocalError(
+      "STATE_INVALID_KEY",
+      "Execution state keys must use the reserved execution namespace.",
+    );
+  }
+  return key;
+}
+
+export function validateExecutionStatePrefix(value: unknown): string {
+  const prefix = validateStatePrefix(value);
+  if (!isExecutionStateKey(prefix)) {
+    throw new StateLocalError(
+      "STATE_INVALID_KEY",
+      "Execution state prefixes must use the reserved execution namespace.",
+    );
+  }
+  return prefix;
+}
+
+export function validateStateKeySyntax(value: unknown): string {
   if (
     typeof value !== "string" ||
     value.length === 0 ||
@@ -204,9 +240,6 @@ export function validateStateKey(value: unknown): string {
   const segments = value.split("/");
   if (segments.some((segment) => segment === "." || segment === "..")) {
     throw new StateLocalError("STATE_INVALID_KEY", "State keys must not contain dot segments.");
-  }
-  if (value.startsWith(INTERNAL_STATE_PREFIX)) {
-    throw new StateLocalError("STATE_INVALID_KEY", "State keys must not use the reserved internal namespace.");
   }
   return value;
 }
@@ -258,7 +291,12 @@ export function nextListGeneration(snapshot: StateSnapshot): number {
 }
 
 export function isInternalStateKey(key: string): boolean {
-  return key.startsWith(INTERNAL_STATE_PREFIX);
+  return key.startsWith(INTERNAL_STATE_PREFIX) || isExecutionStateKey(key);
+}
+
+export function isExecutionStateKey(key: string): boolean {
+  return key.startsWith(EXECUTION_STATE_PREFIX)
+    || key.startsWith(LEGACY_EXECUTION_STATE_PREFIX);
 }
 
 export function presenceStorageKey(presenceId: string): string {
@@ -365,6 +403,9 @@ function validateStoredStateKey(value: unknown): string {
   if (typeof value === "string" && value.startsWith(INTERNAL_STATE_PREFIX)) {
     throw new StateLocalError("STATE_INVALID_KEY", "Internal state namespace is invalid.");
   }
+  if (typeof value === "string" && isExecutionStateKey(value)) {
+    return validateExecutionStateKey(value);
+  }
   return validateStateKey(value);
 }
 
@@ -421,12 +462,6 @@ function validateCanonicalTimestamp(value: unknown, key: string): string {
     throw corrupt(`Local state record ${key} has a non-canonical timestamp.`);
   }
   return value;
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const prototype = Object.getPrototypeOf(value) as unknown;
-  return prototype === Object.prototype || prototype === null;
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {

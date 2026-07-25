@@ -7,7 +7,6 @@ import type {
 import type {
   StateExecution,
   StateExecutionRequest,
-  StateStore,
 } from "@mono-agent/module-sdk/internal";
 
 import {
@@ -23,6 +22,7 @@ import {
   type StageRunArtifactsInput,
 } from "./execution-journal.js";
 import { ExecutionStore } from "./execution-store.js";
+import type { StateLocalInternalAccessor } from "./internal-state-access.js";
 import {
   appendCanonicalTranscript,
   type CanonicalTranscript,
@@ -86,7 +86,7 @@ export class StateLocalExecution implements StateExecution {
   readonly #journal: DurableRunJournal;
   #operation: Promise<void> = Promise.resolve();
 
-  constructor(state: StateStore, options: StateLocalExecutionOptions = {}) {
+  constructor(state: StateLocalInternalAccessor, options: StateLocalExecutionOptions = {}) {
     this.#journal = new DurableRunJournal(new ExecutionStore(state), options);
     this.toolContributions = Object.freeze([
       createRunHistoryToolContribution({

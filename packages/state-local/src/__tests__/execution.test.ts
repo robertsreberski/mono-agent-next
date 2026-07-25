@@ -6,6 +6,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { ResolvedStateLocalConfig } from "../config.js";
 import { StateLocalExecution } from "../execution.js";
+import {
+  stateLocalInternalAccess,
+  type StateLocalInternalAccessor,
+} from "../internal-state-access.js";
 import { acquireProcessLease } from "../secure-fs.js";
 import { StateLocalStore } from "../store.js";
 
@@ -151,7 +155,7 @@ describe("state-local execution ownership", () => {
         metadata: { owner: "B" },
       },
     );
-    const records = await store.scan({
+    const records = await internalState(store).scan({
       prefix: "core/conversations/",
       limit: 10,
       signal,
@@ -168,11 +172,10 @@ describe("state-local execution ownership", () => {
     if (firstRecord === undefined || secondRecord === undefined) {
       throw new Error("Expected both conversation records.");
     }
-    await store.write({
+    await writeInternal(store, {
       key: firstRecord.key,
       value: secondRecord.value,
       expectedVersion: firstRecord.version,
-      signal,
     });
 
     await expect(perform(store, "conversation.load", {
@@ -419,7 +422,7 @@ describe("state-local execution ownership", () => {
     })).transcript.entries).toEqual([
       expect.objectContaining({ entryId: "delivery-entry-1", recordedAt: NOW }),
     ]);
-    expect((await reopened.scan({
+    expect((await internalState(reopened).scan({
       prefix: "core/conversation-delivery-entries/",
       limit: 10,
       signal,
@@ -467,7 +470,7 @@ describe("state-local execution ownership", () => {
       transcript,
       responseBytes: Buffer.from('{"status":"ok"}', "utf8"),
     });
-    const beforeRecords = await store.scan({
+    const beforeRecords = await internalState(store).scan({
       prefix: "core/conversations/",
       limit: 10,
       signal,
@@ -527,7 +530,7 @@ describe("state-local execution ownership", () => {
         ],
       },
     });
-    const afterRecords = await store.scan({
+    const afterRecords = await internalState(store).scan({
       prefix: "core/conversations/",
       limit: 10,
       signal,
@@ -559,7 +562,7 @@ describe("state-local execution ownership", () => {
       "delivery.settle-with-history",
       deliveryHistoryInput(delivery, conversationId, entry, fingerprint),
     );
-    const bindings = await store.scan({
+    const bindings = await internalState(store).scan({
       prefix: "core/conversation-delivery-entries/",
       limit: 10,
       signal,
@@ -570,11 +573,10 @@ describe("state-local execution ownership", () => {
       Buffer.from(binding.value).toString("utf8"),
     ) as Record<string, unknown>;
     tampered.entryId = "tampered-entry-id";
-    await store.write({
+    await writeInternal(store, {
       key: binding.key,
       value: Buffer.from(JSON.stringify(tampered), "utf8"),
       expectedVersion: binding.version,
-      signal,
     });
 
     await expect(perform(
@@ -607,7 +609,7 @@ describe("state-local execution ownership", () => {
       "delivery.settle-with-history",
       deliveryHistoryInput(delivery, conversationId, entry, fingerprint),
     );
-    const receipts = await store.scan({
+    const receipts = await internalState(store).scan({
       prefix: "core/deliveries/",
       limit: 10,
       signal,
@@ -618,11 +620,10 @@ describe("state-local execution ownership", () => {
       Buffer.from(receipt.value).toString("utf8"),
     ) as Record<string, unknown>;
     tampered.idempotencyKey = "tampered-delivery-idempotency-key";
-    await store.write({
+    await writeInternal(store, {
       key: receipt.key,
       value: Buffer.from(JSON.stringify(tampered), "utf8"),
       expectedVersion: receipt.version,
-      signal,
     });
 
     await expect(perform(store, "delivery.prepare", {
@@ -683,16 +684,15 @@ describe("state-local execution ownership", () => {
       "delivery.settle-with-history",
       missingBindingInput,
     );
-    const bindings = await missingBindingStore.scan({
+    const bindings = await internalState(missingBindingStore).scan({
       prefix: "core/conversation-delivery-entries/",
       limit: 10,
       signal,
     });
     expect(bindings.records).toHaveLength(1);
-    await missingBindingStore.delete({
+    await deleteInternal(missingBindingStore, {
       key: bindings.records[0]!.key,
       expectedVersion: bindings.records[0]!.version,
-      signal,
     });
     await expect(perform(
       missingBindingStore,
@@ -733,7 +733,7 @@ describe("state-local execution ownership", () => {
       "delivery.settle-with-history",
       missingReceiptInput,
     );
-    const receipts = await missingReceiptStore.scan({
+    const receipts = await internalState(missingReceiptStore).scan({
       prefix: "core/deliveries/",
       limit: 10,
       signal,
@@ -750,11 +750,10 @@ describe("state-local execution ownership", () => {
     delete downgraded.historyConversationId;
     delete downgraded.historyEntryFingerprint;
     delete downgraded.historyEntryDigest;
-    await missingReceiptStore.write({
+    await writeInternal(missingReceiptStore, {
       key: receipt.key,
       value: Buffer.from(JSON.stringify(downgraded), "utf8"),
       expectedVersion: receipt.version,
-      signal,
     });
     await expect(perform(
       missingReceiptStore,
@@ -1141,7 +1140,7 @@ describe("state-local execution ownership", () => {
         model: model4096,
       },
     })).rejects.toThrow(/between 1 and 256 characters/u);
-    expect((await store.scan({
+    expect((await internalState(store).scan({
       prefix: "core/sessions/",
       limit: 10,
       signal,
@@ -1180,8 +1179,14 @@ describe("state-local execution ownership", () => {
 
   it("CAS-converges concurrent first deliveries without losing destination history", async () => {
     const store = await open(await createConfig(), () => new Date(NOW));
-    const first = new StateLocalExecution(store, { clock: () => new Date(NOW) });
-    const second = new StateLocalExecution(store, { clock: () => new Date(NOW) });
+    const first = new StateLocalExecution(
+      internalState(store),
+      { clock: () => new Date(NOW) },
+    );
+    const second = new StateLocalExecution(
+      internalState(store),
+      { clock: () => new Date(NOW) },
+    );
     const conversationId = "telegram:concurrent-create";
     const fingerprintA = await perform<string>(store, "fingerprint.create", {
       delivery: "concurrent-a",
@@ -1458,7 +1463,7 @@ describe("state-local execution ownership", () => {
     await expect(perform(clean, "conversation.load", {
       conversationId: rejectedConversationId,
     })).resolves.toBeUndefined();
-    expect((await clean.scan({
+    expect((await internalState(clean).scan({
       prefix: "core/conversation-delivery-entries/",
       limit: 10,
       signal,
@@ -1496,7 +1501,7 @@ describe("state-local execution ownership", () => {
     await expect(perform(clean, "conversation.load", {
       conversationId: rejectedConversationId,
     })).resolves.toBeUndefined();
-    expect((await clean.scan({
+    expect((await internalState(clean).scan({
       prefix: "core/conversation-delivery-entries/",
       limit: 10,
       signal,
@@ -1513,7 +1518,7 @@ describe("state-local execution ownership", () => {
       title: "Near-limit seed",
       initialText,
     });
-    const initialChunks = await first.scan({
+    const initialChunks = await internalState(first).scan({
       prefix: "core/conversation-chunks/",
       limit: 100,
       signal,
@@ -1567,7 +1572,7 @@ describe("state-local execution ownership", () => {
       transcript: settledTranscript,
       responseBytes: Buffer.from('{"status":"ok"}', "utf8"),
     });
-    expect((await second.scan({
+    expect((await internalState(second).scan({
       prefix: "core/conversation-chunks/",
       limit: 100,
       signal,
@@ -1620,7 +1625,7 @@ describe("state-local execution ownership", () => {
     expect(recoveredConversation.transcript.entries).toEqual([
       expect.objectContaining({ text: initialText }),
     ]);
-    expect((await recovered.scan({
+    expect((await internalState(recovered).scan({
       prefix: "core/conversation-chunks/",
       limit: 100,
       signal,
@@ -1651,7 +1656,7 @@ describe("state-local execution ownership", () => {
     expect(await perform(clean, "conversation.list")).toEqual({
       conversations: [],
     });
-    expect((await clean.scan({
+    expect((await internalState(clean).scan({
       prefix: "core/conversation-chunks/",
       limit: 100,
       signal,
@@ -2224,4 +2229,45 @@ function open(
     signal,
     clock,
   });
+}
+
+function internalState(store: StateLocalStore): StateLocalInternalAccessor {
+  return store[stateLocalInternalAccess];
+}
+
+async function writeInternal(
+  store: StateLocalStore,
+  request: {
+    readonly key: string;
+    readonly value: Uint8Array;
+    readonly expectedVersion: string;
+  },
+): Promise<void> {
+  const result = await internalState(store).transaction({
+    checks: [],
+    puts: [{ ...request }],
+    deletes: [],
+    signal,
+  });
+  if (result.status !== "applied") {
+    throw new Error("Internal test write conflicted.");
+  }
+}
+
+async function deleteInternal(
+  store: StateLocalStore,
+  request: {
+    readonly key: string;
+    readonly expectedVersion: string;
+  },
+): Promise<void> {
+  const result = await internalState(store).transaction({
+    checks: [],
+    puts: [],
+    deletes: [{ ...request }],
+    signal,
+  });
+  if (result.status !== "applied") {
+    throw new Error("Internal test delete conflicted.");
+  }
 }

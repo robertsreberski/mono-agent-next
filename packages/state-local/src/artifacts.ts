@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   link,
   opendir,
@@ -22,6 +22,7 @@ import {
   type ProcessLease,
   verifySecureDirectoryIdentity,
 } from "./secure-fs.js";
+import { isPlainRecord, sha256 } from "./validation.js";
 
 const ARTIFACT_MARKER_FILE = ".mono-agent-artifacts";
 const ARTIFACT_MARKER_CONTENT = '{"kind":"mono-agent-state-artifacts","schemaVersion":1}\n';
@@ -1081,10 +1082,6 @@ function validateFileName(value: string): string {
   return value;
 }
 
-function sha256(value: Uint8Array): string {
-  return createHash("sha256").update(value).digest("hex");
-}
-
 function encodeStoredArtifact(artifact: StoredArtifact): Buffer {
   const value = {
     schemaVersion: 2,
@@ -1261,13 +1258,6 @@ function isCanonicalTimestamp(value: string): boolean {
 
 function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
   return left.device === right.device && left.inode === right.inode;
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" &&
-    value !== null &&
-    !Array.isArray(value) &&
-    Object.getPrototypeOf(value) === Object.prototype;
 }
 
 function hasExactKeys(

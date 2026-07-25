@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import type { JsonObject } from "@mono-agent/module-sdk";
@@ -15,6 +14,7 @@ import {
   type ProcessLease,
   verifySecureDirectoryIdentity,
 } from "./secure-fs.js";
+import { sha256 } from "./validation.js";
 
 const PRESENCE_FILE_BYTES = 64 * 1024;
 const PRESENCE_INDEX_BYTES = PRESENCE_FILE_BYTES + 4 * 1024;
@@ -314,10 +314,6 @@ function checksumDescriptor(descriptor: StatePresenceDescriptor, generation: num
   };
   if (Object.keys(details).length === 0) delete (base as { details?: JsonObject }).details;
   return sha256(Buffer.from(JSON.stringify({ generation, descriptor: base }), "utf8"));
-}
-
-function sha256(value: Uint8Array): string {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 function validateUpdate(update: StatePresenceUpdate): void {
