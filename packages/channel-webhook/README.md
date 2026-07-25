@@ -94,8 +94,7 @@ after a successful non-empty turn. It may also be the channel-instance string
 alone when that channel owns a configured default destination. The invocation
 does not report success unless Core confirms both transport delivery and its
 canonical conversation history.
-Without `routesDirectory`, the source-compatible single `path` route remains;
-`mode` is retained only as an alias for `defaultMode`.
+Without `routesDirectory`, the source-compatible single `path` route remains.
 
 Invoke the channel with a bearer token:
 

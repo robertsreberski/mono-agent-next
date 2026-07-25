@@ -243,7 +243,6 @@ Kind: `channel`. Canonical selected path: `channels.{id}`.
 | `channels.{id}.maxBodyBytes` | `integer` | no | `262144` | `maximum 1048576; minimum 1` | no | no | — |
 | `channels.{id}.maxRunMs` | `integer` | no | `1200000` | `maximum 86400000; minimum 1` | no | no | — |
 | `channels.{id}.maxStoredRequests` | `integer` | no | `100` | `maximum 10000; minimum 1` | no | no | — |
-| `channels.{id}.mode` | `string` | no | `"sync"` | `enum ["sync","async"]` | no | no | — |
 | `channels.{id}.outbound` | `object` | no | — | `closed object` | no | no | — |
 | `channels.{id}.outbound.apiKey` | `string` | no | — | `maxLength 4096; minLength 1` | yes | yes | — |
 | `channels.{id}.outbound.maxResponseBytes` | `integer` | no | `262144` | `maximum 1048576; minimum 1` | no | no | — |

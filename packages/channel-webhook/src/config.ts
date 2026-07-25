@@ -35,8 +35,6 @@ export interface WebhookConfig {
   readonly routesDirectory?: string;
   readonly path: string;
   readonly defaultMode: WebhookMode;
-  /** Source-compatible alias for defaultMode. */
-  readonly mode: WebhookMode;
   readonly maxBodyBytes: number;
   readonly maxRunMs: number;
   readonly retentionMs: number;
@@ -69,7 +67,6 @@ const CONFIG_KEYS = new Set([
   "routesDirectory",
   "path",
   "defaultMode",
-  "mode",
   "maxBodyBytes",
   "maxRunMs",
   "retentionMs",
@@ -89,11 +86,8 @@ export function parseWebhookConfig(value: unknown): WebhookConfig {
   if (routesDirectory !== undefined && input.path !== undefined) {
     throw new WebhookConfigError("routesDirectory and the legacy single-route path cannot be configured together.");
   }
-  if (input.defaultMode !== undefined && input.mode !== undefined) {
-    throw new WebhookConfigError("defaultMode and the legacy mode alias cannot be configured together.");
-  }
   const path = parsePath(input.path);
-  const defaultMode = parseMode(input.defaultMode ?? input.mode);
+  const defaultMode = parseMode(input.defaultMode);
   const maxBodyBytes = readBoundedInteger(
     input.maxBodyBytes,
     "maxBodyBytes",
@@ -141,7 +135,6 @@ export function parseWebhookConfig(value: unknown): WebhookConfig {
     ...(routesDirectory === undefined ? {} : { routesDirectory }),
     path,
     defaultMode,
-    mode: defaultMode,
     maxBodyBytes,
     maxRunMs,
     retentionMs,
@@ -179,7 +172,6 @@ export const webhookConfigSchema = Object.freeze({
       },
       path: { type: "string", default: DEFAULT_WEBHOOK_PATH },
       defaultMode: { enum: ["sync", "async"], default: DEFAULT_WEBHOOK_MODE },
-      mode: { enum: ["sync", "async"], default: DEFAULT_WEBHOOK_MODE },
       maxBodyBytes: {
         type: "integer",
         minimum: 1,
@@ -324,7 +316,7 @@ export function parseWebhookMode(value: unknown): WebhookMode {
     return DEFAULT_WEBHOOK_MODE;
   }
   if (value !== "sync" && value !== "async") {
-    throw new WebhookConfigError('mode must be either "sync" or "async".');
+    throw new WebhookConfigError('defaultMode must be either "sync" or "async".');
   }
   return value;
 }

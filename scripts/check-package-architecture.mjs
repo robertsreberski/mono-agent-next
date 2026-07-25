@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: MIT
-import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, existsSync } from "node:fs";
 import { join, relative } from "node:path";
 
 import {
@@ -104,15 +104,6 @@ for (const catalogEntry of packageCatalog) {
   for (const channelId of catalogEntry.channelIds) {
     if (typeof channelId !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(channelId)) {
       errors.push(`${packagePath} has invalid shipped channel id ${JSON.stringify(channelId)}.`);
-      continue;
-    }
-    if (catalogEntry.supersededBy !== undefined) {
-      const replacement = catalogByName.get(catalogEntry.supersededBy);
-      if (replacement === undefined || replacement.category !== "communication") {
-        errors.push(`${packagePath} has invalid communication replacement ${catalogEntry.supersededBy}.`);
-      } else if (!replacement.channelIds?.includes(channelId)) {
-        errors.push(`${packagePath} replacement ${catalogEntry.supersededBy} does not own channel id ${channelId}.`);
-      }
       continue;
     }
     const existingOwner = channelOwnerById.get(channelId);
@@ -243,49 +234,6 @@ function workspacePackagePaths() {
     }
   }
   return paths;
-}
-
-function walkTextFiles(dir) {
-  const ignoredDirs = new Set([
-    ".claude",
-    ".codex",
-    ".git",
-    ".mono-agent",
-    ".omx",
-    ".superpowers",
-    ".ultrawork",
-    ".workflow",
-    ".worklab-tmp",
-    ".worktrees",
-    "node_modules",
-    "dist",
-  ]);
-  const files = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    if (ignoredDirs.has(entry.name)) {
-      continue;
-    }
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...walkTextFiles(path));
-      continue;
-    }
-    if (!entry.isFile()) {
-      continue;
-    }
-    if (!isTextFile(path)) {
-      continue;
-    }
-    files.push(path);
-  }
-  return files;
-}
-
-function isTextFile(path) {
-  if (statSync(path).size > 1_000_000) {
-    return false;
-  }
-  return /\.(?:cjs|css|html|js|json|md|mjs|ts|tsx|yaml|yml)$/u.test(path);
 }
 
 function isPackageDirectory(dir) {
