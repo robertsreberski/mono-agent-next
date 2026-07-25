@@ -488,7 +488,6 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                 return { completed: false, value: { status: "cancelled" } };
               }
               const harness = new AgentHarness({
-                env: sessions.env,
                 session: attempt.session,
                 models: registry.models,
                 model,

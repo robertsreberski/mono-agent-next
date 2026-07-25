@@ -31,11 +31,30 @@ import {
 } from "../coding-tools.js";
 import type { WebFetchAddress, WebFetchResponse } from "../web-fetch.js";
 
+const childProcessControl = vi.hoisted(() => ({
+  actual: undefined as ((...args: unknown[]) => unknown) | undefined,
+  override: undefined as ((...args: unknown[]) => unknown) | undefined,
+}));
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  childProcessControl.actual = (...args: unknown[]) =>
+    Reflect.apply(actual.spawn, actual, args);
+  return {
+    ...actual,
+    spawn: (...args: unknown[]) => childProcessControl.override === undefined
+      ? childProcessControl.actual?.(...args)
+      : childProcessControl.override(...args),
+  };
+});
+
 const roots: string[] = [];
 const PUBLIC_ADDRESS: WebFetchAddress = { address: "93.184.216.34", family: 4 };
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  childProcessControl.override = undefined;
   await Promise.all(roots.splice(0).map((root) =>
     rm(root, { recursive: true, force: true })));
 });
@@ -44,6 +63,74 @@ async function temporaryRoot(prefix: string): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), prefix));
   roots.push(root);
   return root;
+}
+
+interface FakeRipgrepCall {
+  readonly args: readonly string[];
+  readonly command: string;
+  readonly options: unknown;
+}
+
+const FAKE_RIPGREP_PROGRAM = [
+  "const { join } = require('node:path');",
+  "const input = JSON.parse(process.argv[1]);",
+  "const match = (path, line, text) => `${JSON.stringify({",
+  "  type: 'match',",
+  "  data: { path: { text: path }, lines: { text }, line_number: line },",
+  "})}\\n`;",
+  "const records = input.oversized",
+  "  ? [match(input.path, 1, `needle ${'x'.repeat(512 * 1024)}\\n`)]",
+  "  : [",
+  "      match(join(input.path, 'a.txt'), 1, 'needle one\\n'),",
+  "      match(join(input.path, 'a.txt'), 3, 'needle two\\n'),",
+  "      ...(input.ignoreCase",
+  "        ? [match(join(input.path, 'b.txt'), 1, 'NEEDLE three\\n')]",
+  "        : []),",
+  "    ];",
+  "const first = records[0];",
+  "process.stdout.on('error', () => process.exit(0));",
+  "process.stdout.write(first.slice(0, Math.floor(first.length / 2)));",
+  "setImmediate(() => {",
+  "  process.stdout.write(first.slice(Math.floor(first.length / 2)));",
+  "  for (const record of records.slice(1)) process.stdout.write(record);",
+  "});",
+].join("\n");
+
+function installFakeRipgrep(): { readonly calls: FakeRipgrepCall[] } {
+  const calls: FakeRipgrepCall[] = [];
+  childProcessControl.override = (...spawnArgs: unknown[]) => {
+    const [command, args, options] = spawnArgs;
+    if (command !== "rg"
+      || !Array.isArray(args)
+      || !args.every((value) => typeof value === "string")) {
+      throw new Error("Unexpected fake ripgrep invocation.");
+    }
+    const stringArgs = args as string[];
+    calls.push({ command, args: [...stringArgs], options });
+    const separator = stringArgs.indexOf("--");
+    if (separator < 0 || stringArgs.length !== separator + 3) {
+      throw new Error("Fake ripgrep requires a bounded pattern and path.");
+    }
+    const searchPath = stringArgs[separator + 2] as string;
+    const actualSpawn = childProcessControl.actual;
+    if (actualSpawn === undefined) {
+      throw new Error("Actual child-process spawn is unavailable.");
+    }
+    return actualSpawn(
+      process.execPath,
+      [
+        "-e",
+        FAKE_RIPGREP_PROGRAM,
+        JSON.stringify({
+          path: searchPath,
+          ignoreCase: stringArgs.includes("--ignore-case"),
+          oversized: searchPath.endsWith("oversized-line.txt"),
+        }),
+      ],
+      options,
+    );
+  };
+  return { calls };
 }
 
 function fixture(
@@ -141,7 +228,7 @@ describe("Personal-compatible Pi coding tools", () => {
       {
         id: "Grep",
         displayName: "Grep",
-        effects: ["read", "write", "execute", "network"],
+        effects: ["read", "execute"],
         approval: "core-callback",
         sandbox: "unsupported",
       },
@@ -259,6 +346,25 @@ describe("Personal-compatible Pi coding tools", () => {
       text: expect.stringContaining("Read image file [image/png]"),
     }));
 
+    const bmpPath = join(outside, "unsupported.bmp");
+    const bmpHeader = Buffer.alloc(26);
+    bmpHeader.write("BM", 0, "ascii");
+    bmpHeader.writeUInt32LE(26, 10);
+    bmpHeader.writeUInt32LE(12, 14);
+    bmpHeader.writeUInt16LE(1, 22);
+    bmpHeader.writeUInt16LE(24, 24);
+    await writeFile(bmpPath, bmpHeader);
+    const bmp = await tool(approved, "Read").execute("read-bmp", {
+      file_path: bmpPath,
+      max_output_chars: 1_024,
+      workdir: workspace,
+    }, signal());
+    expect(bmp.content).toEqual([{
+      type: "text",
+      text: "Read image file [image/bmp]\n"
+        + "[Image omitted: configure an imageProcessor to convert BMP images.]",
+    }]);
+
     const oversizedPath = join(outside, "oversized-source.txt");
     await writeFile(oversizedPath, "");
     await truncate(oversizedPath, RUNTIME_PI_MAX_READ_SOURCE_BYTES + 1);
@@ -308,7 +414,7 @@ describe("Personal-compatible Pi coding tools", () => {
     expect(value.authorize).toHaveBeenCalledTimes(approvedCalls);
   });
 
-  it("wraps Pi Find as Glob without downloading a helper binary", async () => {
+  it("runs bounded local Glob traversal without a helper binary", async () => {
     const root = await temporaryRoot("runtime-pi-coding-glob-");
     await mkdir(join(root, "src"), { recursive: true });
     await mkdir(join(root, "node_modules", "pkg"), { recursive: true });
@@ -391,11 +497,12 @@ describe("Personal-compatible Pi coding tools", () => {
 
   it("preserves Personal Grep content, files, and count output modes", async () => {
     const root = await temporaryRoot("runtime-pi-coding-grep-");
+    const fakeRipgrep = installFakeRipgrep();
     await writeFile(join(root, "a.txt"), "needle one\nnot this\nneedle two\n");
     await writeFile(join(root, "b.txt"), "NEEDLE three\n");
     const value = fixture(root);
     const base = {
-      pattern: "needle",
+      pattern: "-needle",
       path: root,
       head_limit: 100,
       max_output_chars: 8_192,
@@ -416,6 +523,7 @@ describe("Personal-compatible Pi coding tools", () => {
       ...base,
       output_mode: "files_with_matches",
       case_insensitive: true,
+      glob: "*.txt",
     }, signal());
     expect(files.content).toEqual([{
       type: "text",
@@ -430,6 +538,17 @@ describe("Personal-compatible Pi coding tools", () => {
     expect(count.content).toEqual([{
       type: "text",
       text: "a.txt:2\nb.txt:1",
+    }]);
+
+    await writeFile(join(root, "oversized-line.txt"), `needle ${"x".repeat(512 * 1024)}\n`);
+    const boundedStream = await tool(value, "Grep").execute("grep-bounded-stream", {
+      ...base,
+      path: join(root, "oversized-line.txt"),
+      output_mode: "content",
+    }, signal());
+    expect(boundedStream.content).toEqual([{
+      type: "text",
+      text: expect.stringContaining("Ripgrep output exceeded the bounded stream limit"),
     }]);
 
     await writeFile(
@@ -468,6 +587,67 @@ describe("Personal-compatible Pi coding tools", () => {
         text: "No matches found.",
       }]);
     }
+
+    const commonArgs = [
+      "--json",
+      "--line-number",
+      "--color=never",
+      "--hidden",
+      "--max-columns",
+      "4096",
+      "--max-columns-preview",
+    ];
+    const caseInsensitiveArgs = [
+      ...commonArgs,
+      "--ignore-case",
+      "--",
+      "-needle",
+      root,
+    ];
+    const options = { stdio: ["ignore", "pipe", "pipe"], windowsHide: true };
+    expect(fakeRipgrep.calls.map(({ command, options: spawnOptions }) => ({
+      command,
+      options: spawnOptions,
+    }))).toEqual(Array.from({ length: 6 }, () => ({ command: "rg", options })));
+    expect(fakeRipgrep.calls.map(({ args }) => args)).toEqual([
+      [...commonArgs, "--", "-needle", root],
+      [
+        ...commonArgs,
+        "--ignore-case",
+        "--glob",
+        "*.txt",
+        "--",
+        "-needle",
+        root,
+      ],
+      caseInsensitiveArgs,
+      [...commonArgs, "--", "-needle", join(root, "oversized-line.txt")],
+      caseInsensitiveArgs,
+      caseInsensitiveArgs,
+    ]);
+  });
+
+  it("fails explicitly when ripgrep is absent from PATH", async () => {
+    const root = await temporaryRoot("runtime-pi-coding-grep-missing-");
+    const emptyBin = join(root, "empty-bin");
+    await mkdir(emptyBin);
+    vi.stubEnv("PATH", emptyBin);
+    const value = fixture(root);
+
+    await expect(tool(value, "Grep").execute("grep-missing", {
+      pattern: "needle",
+      path: root,
+      output_mode: "content",
+      workdir: root,
+    }, signal())).rejects.toThrow(
+      "Grep failed: ripgrep (rg) is required but was not found on PATH.",
+    );
+    expect(value.authorize).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "Grep", effects: ["read", "execute"] }),
+      "grep-missing",
+      expect.any(String),
+      expect.any(AbortSignal),
+    );
   });
 
   it("normalizes and caps Bash timeout, output, and cancellation", async () => {

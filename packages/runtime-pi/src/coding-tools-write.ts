@@ -1,8 +1,9 @@
-import { createWriteTool } from "@earendil-works/pi-coding-agent";
-import type {
-  AgentTool,
-  AgentToolUpdateCallback,
+import {
+  createWriteTool,
+  type AgentTool,
+  type AgentToolUpdateCallback,
 } from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { TSchema } from "@earendil-works/pi-ai";
 
 import { runtimePiWriteTool } from "./coding-tool-descriptors.js";
@@ -21,11 +22,15 @@ import {
 } from "./coding-tools-shared.js";
 
 const WRITE_MAX_CONTENT_BYTES = 256 * 1024;
+// Pi 0.82 serializes mutations by execution-environment identity. Reuse one
+// headless environment and pass absolute paths so writes remain ordered across
+// concurrent tools and turns without retaining per-workspace resources.
+const writeExecutionEnv = new NodeExecutionEnv({ cwd: process.cwd() });
 
 export function createRuntimePiWriteAgentTool(
   options: RuntimePiCodingToolsOptions,
 ): AgentTool {
-  const template = createWriteTool(options.workspaceDirectory);
+  const template = createWriteTool();
   const parameters = {
     type: "object",
     additionalProperties: false,
@@ -53,7 +58,8 @@ export function createRuntimePiWriteAgentTool(
       true,
     );
     const workdir = effectiveWorkdir(input, "Write", options.workspaceDirectory);
-    const tool = createWriteTool(workdir);
+    const tool = createWriteTool();
+    const absolutePath = displayPath(path, workdir);
     const executionSignal = combinedSignal(options.turnSignal, signal);
     return approvedExecution(
       options,
@@ -61,15 +67,16 @@ export function createRuntimePiWriteAgentTool(
       toolCallId,
       [
         "Allow this unsandboxed file creation or complete overwrite?",
-        `path: ${JSON.stringify(displayPath(path, workdir))}`,
+        `path: ${JSON.stringify(absolutePath)}`,
         evidence("content", content),
       ].join("\n"),
       executionSignal,
       () => tool.execute(
         toolCallId,
-        { path, content },
+        { path: absolutePath, content },
         executionSignal,
         onUpdate as AgentToolUpdateCallback<unknown> | undefined,
+        { env: writeExecutionEnv },
       ),
     );
   });

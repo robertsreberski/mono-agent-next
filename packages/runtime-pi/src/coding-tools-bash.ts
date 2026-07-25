@@ -2,15 +2,14 @@ import { Buffer } from "node:buffer";
 
 import {
   createBashTool,
-  createLocalBashOperations,
-  DEFAULT_MAX_BYTES,
-  DEFAULT_MAX_LINES,
-  type BashOperations,
-} from "@earendil-works/pi-coding-agent";
-import type {
-  AgentTool,
-  AgentToolUpdateCallback,
+  err,
+  ExecutionError,
+  type AgentTool,
+  type AgentToolUpdateCallback,
+  type Result,
+  type ShellExecOptions,
 } from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { TSchema } from "@earendil-works/pi-ai";
 
 import { runtimePiBashTool } from "./coding-tool-descriptors.js";
@@ -33,91 +32,47 @@ import { WEB_FETCH_MAX_OUTPUT_BYTES } from "./web-fetch.js";
 
 const BASH_MAX_TIMEOUT_SECONDS = 600;
 export const RUNTIME_PI_MAX_BASH_CAPTURE_BYTES = 1024 * 1024;
-const BASH_FORWARD_MAX_BYTES = DEFAULT_MAX_BYTES - 1024;
-const BASH_FORWARD_MAX_NEWLINES = DEFAULT_MAX_LINES - 3;
 
-function boundedBashOperations(): BashOperations {
-  const local = createLocalBashOperations();
-  return {
-    async exec(command, cwd, input) {
-      const overflowController = new AbortController();
-      const executionSignal = input.signal === undefined
-        ? overflowController.signal
-        : AbortSignal.any([input.signal, overflowController.signal]);
-      let capturedBytes = 0;
-      let forwardedBytes = 0;
-      let forwardedNewlines = 0;
-      let truncated = false;
-      let overflowed = false;
-      const onData = (data: Buffer): void => {
-        if (overflowed) return;
-        capturedBytes += data.byteLength;
-
-        let end = Math.min(
-          data.byteLength,
-          Math.max(0, BASH_FORWARD_MAX_BYTES - forwardedBytes),
-        );
-        let newlines = 0;
-        const remainingNewlines = Math.max(
-          0,
-          BASH_FORWARD_MAX_NEWLINES - forwardedNewlines,
-        );
-        for (let index = 0; index < end; index += 1) {
-          if (data[index] !== 0x0a) continue;
-          if (newlines >= remainingNewlines) {
-            end = index;
-            break;
-          }
-          newlines += 1;
-        }
-        if (end > 0) {
-          input.onData(data.subarray(0, end));
-          forwardedBytes += end;
-          forwardedNewlines += newlines;
-        }
-        if (end < data.byteLength) truncated = true;
-        if (capturedBytes > RUNTIME_PI_MAX_BASH_CAPTURE_BYTES) {
-          overflowed = true;
-          overflowController.abort(new Error("Bash output capture limit exceeded."));
-        }
-      };
-
-      try {
-        const result = await local.exec(command, cwd, {
-          ...input,
-          onData,
-          signal: executionSignal,
-        });
-        if (overflowed) {
-          throw toolError(
-            "Bash",
-            `command output exceeded the ${
-              String(RUNTIME_PI_MAX_BASH_CAPTURE_BYTES)
-            }-byte hard capture limit.`,
-          );
-        }
-        if (truncated) {
-          input.onData(Buffer.from(
-            `\n\n[Bash output preview bounded to ${
-              String(BASH_FORWARD_MAX_BYTES)
-            } bytes; execution produced more output.]`,
-            "utf8",
-          ));
-        }
-        return result;
-      } catch (error) {
-        if (overflowed) {
-          throw toolError(
-            "Bash",
-            `command output exceeded the ${
-              String(RUNTIME_PI_MAX_BASH_CAPTURE_BYTES)
-            }-byte hard capture limit.`,
-          );
-        }
-        throw error;
+class BoundedBashExecutionEnv extends NodeExecutionEnv {
+  override async exec(
+    command: string,
+    options?: ShellExecOptions,
+  ): Promise<Result<{ stdout: string; stderr: string; exitCode: number }, ExecutionError>> {
+    const overflowController = new AbortController();
+    const executionSignal = options?.abortSignal === undefined
+      ? overflowController.signal
+      : AbortSignal.any([options.abortSignal, overflowController.signal]);
+    let capturedBytes = 0;
+    let overflowed = false;
+    const forward = (
+      callback: ((chunk: string) => void) | undefined,
+      chunk: string,
+    ): void => {
+      capturedBytes += Buffer.byteLength(chunk, "utf8");
+      if (capturedBytes > RUNTIME_PI_MAX_BASH_CAPTURE_BYTES) {
+        overflowed = true;
+        overflowController.abort();
+        return;
       }
-    },
-  };
+      callback?.(chunk);
+    };
+    const result = await super.exec(command, {
+      ...options,
+      abortSignal: executionSignal,
+      onStdout: (chunk) => forward(options?.onStdout, chunk),
+      onStderr: (chunk) => forward(options?.onStderr, chunk),
+    });
+    if (!overflowed) return result;
+    return err(new ExecutionError(
+      "callback_error",
+      toolError(
+        "Bash",
+        `command output exceeded the ${
+          String(RUNTIME_PI_MAX_BASH_CAPTURE_BYTES)
+        }-byte hard capture limit.`,
+      ).message,
+    ));
+  }
 }
 
 function normalizeBashTimeout(value: number | undefined): number {
@@ -129,7 +84,7 @@ function normalizeBashTimeout(value: number | undefined): number {
 export function createRuntimePiBashAgentTool(
   options: RuntimePiCodingToolsOptions,
 ): AgentTool {
-  const upstream = createBashTool(options.workspaceDirectory);
+  const upstream = createBashTool();
   const template = {
     ...upstream,
     description:
@@ -165,7 +120,8 @@ export function createRuntimePiBashAgentTool(
     const workdir = effectiveWorkdir(input, "Bash", options.workspaceDirectory);
     const description = optionalString(input, "description", "Bash", 4 * 1024);
     const maxOutputBytes = outputLimit(input, "Bash");
-    const tool = createBashTool(workdir, { operations: boundedBashOperations() });
+    const tool = createBashTool();
+    const env = new BoundedBashExecutionEnv({ cwd: workdir });
     const executionSignal = combinedSignal(options.turnSignal, signal);
     const summary = [
       "Allow this unsandboxed shell command with inherited process authority?",
@@ -180,15 +136,22 @@ export function createRuntimePiBashAgentTool(
       toolCallId,
       summary,
       executionSignal,
-      async () => capRuntimePiAgentResult(
-        await tool.execute(
-          toolCallId,
-          { command, timeout },
-          executionSignal,
-          onUpdate as AgentToolUpdateCallback<unknown> | undefined,
-        ),
-        maxOutputBytes,
-      ),
+      async () => {
+        try {
+          return capRuntimePiAgentResult(
+            await tool.execute(
+              toolCallId,
+              { command, timeout },
+              executionSignal,
+              onUpdate as AgentToolUpdateCallback<unknown> | undefined,
+              { env },
+            ),
+            maxOutputBytes,
+          );
+        } finally {
+          await env.cleanup();
+        }
+      },
     );
   });
 }

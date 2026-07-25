@@ -2,10 +2,11 @@ import type { Dir, Dirent } from "node:fs";
 import { access, opendir } from "node:fs/promises";
 import { isAbsolute, matchesGlob, relative, resolve, sep } from "node:path";
 
-import { createFindTool } from "@earendil-works/pi-coding-agent";
-import type {
-  AgentTool,
-  AgentToolUpdateCallback,
+import {
+  DEFAULT_MAX_BYTES,
+  truncateHead,
+  type AgentTool,
+  type TruncationResult,
 } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "@earendil-works/pi-ai";
 
@@ -193,9 +194,7 @@ export async function runRuntimePiGlobTraversal(
 export function createRuntimePiGlobAgentTool(
   options: RuntimePiCodingToolsOptions,
 ): AgentTool {
-  const upstream = createFindTool(options.workspaceDirectory);
   const template = {
-    ...upstream,
     description:
       "Search for files by glob pattern without following directory symlinks. "
       + "Excludes node_modules and .git, caps traversal at 100,000 entries and 15 seconds, "
@@ -257,47 +256,57 @@ export function createRuntimePiGlobAgentTool(
       async () => {
         const deadlineSignal = AbortSignal.timeout(timeoutMs);
         const traversalSignal = AbortSignal.any([executionSignal, deadlineSignal]);
-        const tool = createFindTool(workdir, {
-          operations: {
-            async exists(searchPath: string) {
-              traversalSignal.throwIfAborted();
-              try {
-                await access(searchPath);
-                traversalSignal.throwIfAborted();
-                return true;
-              } catch (error) {
-                if (traversalSignal.aborted) throw traversalSignal.reason ?? error;
-                return false;
-              }
-            },
-            async glob(globPattern, searchPath, globInput) {
-              try {
-                return await runRuntimePiGlobTraversal(globPattern, searchPath, {
-                  ...globInput,
-                  maxVisitedEntries,
-                  signal: traversalSignal,
-                });
-              } catch (error) {
-                if (deadlineSignal.aborted && !executionSignal.aborted) {
-                  throw toolError(
-                    "Glob",
-                    `traversal exceeded the ${String(timeoutMs)}-millisecond deadline.`,
-                  );
-                }
-                throw error;
-              }
-            },
-          },
-        });
-        return capRuntimePiAgentResult(
-          await tool.execute(
-            toolCallId,
-            { pattern, ...(path === undefined ? {} : { path }), limit },
-            executionSignal,
-            onUpdate as AgentToolUpdateCallback<unknown> | undefined,
-          ),
-          maxOutputBytes,
-        );
+        const searchPath = displayPath(path ?? ".", workdir);
+        try {
+          traversalSignal.throwIfAborted();
+          await access(searchPath);
+          const results = await runRuntimePiGlobTraversal(pattern, searchPath, {
+            ignore: ["**/node_modules/**", "**/.git/**"],
+            limit,
+            maxVisitedEntries,
+            signal: traversalSignal,
+          });
+          const relativized = results.map((result) =>
+            relative(searchPath, result).split(sep).join("/"));
+          if (relativized.length === 0) {
+            return {
+              content: [{ type: "text", text: "No files found matching pattern" }],
+              details: undefined,
+            };
+          }
+          const limitReached = relativized.length >= limit;
+          const truncation = truncateHead(relativized.join("\n"), {
+            maxLines: Number.MAX_SAFE_INTEGER,
+          });
+          const notices: string[] = [];
+          const details: {
+            resultLimitReached?: number;
+            truncation?: TruncationResult;
+          } = {};
+          if (limitReached) {
+            details.resultLimitReached = limit;
+            notices.push(`${String(limit)} results limit reached`);
+          }
+          if (truncation.truncated) {
+            details.truncation = truncation;
+            notices.push(`${String(DEFAULT_MAX_BYTES)}-byte output limit reached`);
+          }
+          const text = notices.length === 0
+            ? truncation.content
+            : `${truncation.content}\n\n[${notices.join(". ")}]`;
+          return capRuntimePiAgentResult({
+            content: [{ type: "text", text }],
+            details: Object.keys(details).length === 0 ? undefined : details,
+          }, maxOutputBytes);
+        } catch (error) {
+          if (deadlineSignal.aborted && !executionSignal.aborted) {
+            throw toolError(
+              "Glob",
+              `traversal exceeded the ${String(timeoutMs)}-millisecond deadline.`,
+            );
+          }
+          throw error;
+        }
       },
     );
   });

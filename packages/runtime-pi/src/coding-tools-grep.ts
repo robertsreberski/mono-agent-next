@@ -1,8 +1,15 @@
-import { createGrepTool } from "@earendil-works/pi-coding-agent";
-import type {
-  AgentTool,
-  AgentToolResult,
-  AgentToolUpdateCallback,
+import { Buffer } from "node:buffer";
+import { spawn } from "node:child_process";
+import { open, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+
+import {
+  DEFAULT_MAX_BYTES,
+  truncateHead,
+  truncateLine,
+  type AgentTool,
+  type AgentToolResult,
+  type TruncationResult,
 } from "@earendil-works/pi-agent-core";
 import type { TextContent, TSchema } from "@earendil-works/pi-ai";
 
@@ -28,6 +35,352 @@ import {
 import { WEB_FETCH_MAX_OUTPUT_BYTES } from "./web-fetch.js";
 
 const SEARCH_MAX_RESULTS = 1_000;
+const GREP_MAX_FILE_BYTES = 16 * 1024 * 1024;
+const GREP_MAX_STDERR_BYTES = 64 * 1024;
+const GREP_MAX_MATCH_COLUMNS = 4_096;
+const GREP_MAX_JSON_LINE_BYTES = 256 * 1024;
+const GREP_MAX_STDOUT_BYTES = 8 * 1024 * 1024;
+
+interface GrepMatch {
+  readonly filePath: string;
+  readonly lineNumber: number;
+  readonly lineText: string;
+}
+
+interface GrepDetails {
+  readonly matchLimitReached?: number;
+  readonly streamTruncated?: boolean;
+  readonly truncation?: TruncationResult;
+  readonly linesTruncated?: boolean;
+}
+
+function grepPath(searchPath: string, isDirectory: boolean, filePath: string): string {
+  return (isDirectory ? relative(searchPath, filePath) : basename(filePath))
+    .split(sep)
+    .join("/");
+}
+
+function absoluteGrepMatchPath(
+  searchPath: string,
+  searchIsDirectory: boolean,
+  filePath: string,
+): string {
+  if (isAbsolute(filePath)) return resolve(filePath);
+  return resolve(searchIsDirectory ? searchPath : dirname(searchPath), filePath);
+}
+
+async function grepFileLines(path: string, signal: AbortSignal): Promise<string[]> {
+  signal.throwIfAborted();
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(path, "r");
+    const metadata = await handle.stat();
+    signal.throwIfAborted();
+    if (!metadata.isFile()
+      || !Number.isSafeInteger(metadata.size)
+      || metadata.size > GREP_MAX_FILE_BYTES) {
+      return [];
+    }
+    const content = Buffer.alloc(metadata.size);
+    let offset = 0;
+    while (offset < content.byteLength) {
+      signal.throwIfAborted();
+      const { bytesRead } = await handle.read(
+        content,
+        offset,
+        content.byteLength - offset,
+        offset,
+      );
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return content.subarray(0, offset)
+      .toString("utf8")
+      .replace(/\r\n/gu, "\n")
+      .replace(/\r/gu, "\n")
+      .split("\n");
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function formatGrepMatches(
+  matches: readonly GrepMatch[],
+  searchPath: string,
+  searchIsDirectory: boolean,
+  context: number,
+  signal: AbortSignal,
+): Promise<{ readonly lines: string[]; readonly truncated: boolean }> {
+  const output: string[] = [];
+  let outputBytes = 0;
+  let loadedPath: string | undefined;
+  let loadedLines: string[] = [];
+  let truncated = false;
+  const append = (line: string): boolean => {
+    outputBytes += Buffer.byteLength(line, "utf8") + (output.length === 0 ? 0 : 1);
+    output.push(line);
+    return outputBytes <= DEFAULT_MAX_BYTES;
+  };
+  matchLoop:
+  for (const match of matches) {
+    signal.throwIfAborted();
+    const path = grepPath(searchPath, searchIsDirectory, match.filePath);
+    if (context === 0) {
+      const normalized = match.lineText
+        .replace(/\r\n/gu, "\n")
+        .replace(/\r/gu, "")
+        .replace(/\n$/u, "");
+      const line = truncateLine(normalized);
+      truncated ||= line.wasTruncated;
+      if (!append(`${path}:${String(match.lineNumber)}: ${line.text}`)) break;
+      continue;
+    }
+    if (loadedPath !== match.filePath) {
+      try {
+        loadedLines = await grepFileLines(match.filePath, signal);
+      } catch (error) {
+        if (signal.aborted) throw signal.reason ?? error;
+        loadedLines = [];
+      }
+      loadedPath = match.filePath;
+    }
+    if (loadedLines.length === 0) {
+      if (!append(`${path}:${String(match.lineNumber)}: (unable to read file)`)) break;
+      continue;
+    }
+    const start = Math.max(1, match.lineNumber - context);
+    const end = Math.min(loadedLines.length, match.lineNumber + context);
+    for (let lineNumber = start; lineNumber <= end; lineNumber += 1) {
+      const line = truncateLine((loadedLines[lineNumber - 1] ?? "").replace(/\r/gu, ""));
+      truncated ||= line.wasTruncated;
+      if (!append(
+        lineNumber === match.lineNumber
+          ? `${path}:${String(lineNumber)}: ${line.text}`
+          : `${path}-${String(lineNumber)}- ${line.text}`,
+      )) break matchLoop;
+    }
+  }
+  return { lines: output, truncated };
+}
+
+async function runRipgrep(input: {
+  readonly context: number;
+  readonly glob?: string;
+  readonly ignoreCase: boolean;
+  readonly limit: number;
+  readonly pattern: string;
+  readonly searchPath: string;
+  readonly signal: AbortSignal;
+}): Promise<AgentToolResult<GrepDetails | undefined>> {
+  input.signal.throwIfAborted();
+  const metadata = await stat(input.searchPath);
+  if (!metadata.isDirectory() && !metadata.isFile()) {
+    throw toolError("Grep", "path must be a regular file or directory.");
+  }
+  input.signal.throwIfAborted();
+  return new Promise((resolvePromise, reject) => {
+    const args = [
+      "--json",
+      "--line-number",
+      "--color=never",
+      "--hidden",
+      "--max-columns",
+      String(GREP_MAX_MATCH_COLUMNS),
+      "--max-columns-preview",
+      ...(input.ignoreCase ? ["--ignore-case"] : []),
+      ...(input.glob === undefined ? [] : ["--glob", input.glob]),
+      "--",
+      input.pattern,
+      input.searchPath,
+    ];
+    const child = spawn("rg", args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const matches: GrepMatch[] = [];
+    let pendingStdout = "";
+    let stdoutBytes = 0;
+    let stderr = "";
+    let settled = false;
+    let killedForLimit = false;
+    let killedForStreamLimit = false;
+    const cleanup = (): void => {
+      input.signal.removeEventListener("abort", onAbort);
+    };
+    const settle = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const stop = (): void => {
+      if (!child.killed) child.kill();
+    };
+    const onAbort = (): void => {
+      stop();
+      settle(() => reject(input.signal.reason ?? toolError("Grep", "operation aborted.")));
+    };
+    input.signal.addEventListener("abort", onAbort, { once: true });
+    if (input.signal.aborted) {
+      onAbort();
+      return;
+    }
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      if (Buffer.byteLength(stderr, "utf8") >= GREP_MAX_STDERR_BYTES) return;
+      stderr += chunk;
+      if (Buffer.byteLength(stderr, "utf8") > GREP_MAX_STDERR_BYTES) {
+        stderr = Buffer.from(stderr, "utf8")
+          .subarray(0, GREP_MAX_STDERR_BYTES)
+          .toString("utf8");
+      }
+    });
+    const acceptJsonLine = (line: string): void => {
+      if (matches.length >= input.limit) return;
+      try {
+        const event = JSON.parse(line) as {
+          readonly type?: string;
+          readonly data?: {
+            readonly path?: { readonly text?: string };
+            readonly line_number?: number;
+            readonly lines?: { readonly text?: string };
+          };
+        };
+        const filePath = event.data?.path?.text;
+        const lineNumber = event.data?.line_number;
+        const lineText = event.data?.lines?.text;
+        if (event.type !== "match"
+          || typeof filePath !== "string"
+          || !Number.isSafeInteger(lineNumber)
+          || typeof lineText !== "string") return;
+        matches.push({
+          filePath: absoluteGrepMatchPath(
+            input.searchPath,
+            metadata.isDirectory(),
+            filePath,
+          ),
+          lineNumber: lineNumber as number,
+          lineText,
+        });
+        if (matches.length >= input.limit) {
+          killedForLimit = true;
+          stop();
+        }
+      } catch {
+        // Ignore non-JSON diagnostic lines; a non-zero exit still fails below.
+      }
+    };
+    const stopForStreamLimit = (): void => {
+      if (killedForStreamLimit) return;
+      killedForStreamLimit = true;
+      pendingStdout = "";
+      stop();
+    };
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      if (killedForLimit || killedForStreamLimit) return;
+      stdoutBytes += Buffer.byteLength(chunk, "utf8");
+      if (stdoutBytes > GREP_MAX_STDOUT_BYTES) {
+        stopForStreamLimit();
+        return;
+      }
+      let start = 0;
+      for (;;) {
+        const newline = chunk.indexOf("\n", start);
+        if (newline < 0) break;
+        const line = `${pendingStdout}${chunk.slice(start, newline)}`.replace(/\r$/u, "");
+        pendingStdout = "";
+        if (Buffer.byteLength(line, "utf8") > GREP_MAX_JSON_LINE_BYTES) {
+          stopForStreamLimit();
+          return;
+        }
+        acceptJsonLine(line);
+        if (killedForLimit) return;
+        start = newline + 1;
+      }
+      pendingStdout += chunk.slice(start);
+      if (Buffer.byteLength(pendingStdout, "utf8") > GREP_MAX_JSON_LINE_BYTES) {
+        stopForStreamLimit();
+      }
+    });
+    child.once("error", (error) => {
+      settle(() => reject(
+        error instanceof Error && "code" in error && error.code === "ENOENT"
+          ? toolError("Grep", "ripgrep (rg) is required but was not found on PATH.")
+          : toolError("Grep", error.message),
+      ));
+    });
+    child.once("close", (code) => {
+      void (async () => {
+        if (!killedForLimit && !killedForStreamLimit && pendingStdout.length > 0) {
+          acceptJsonLine(pendingStdout.replace(/\r$/u, ""));
+        }
+        pendingStdout = "";
+        if (!killedForLimit && !killedForStreamLimit && code !== 0 && code !== 1) {
+          throw toolError(
+            "Grep",
+            stderr.trim() || `ripgrep exited with code ${String(code)}.`,
+          );
+        }
+        if (matches.length === 0) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: killedForStreamLimit
+                ? "No complete matches available\n\n"
+                  + "[Ripgrep output exceeded the bounded stream limit; results are partial]"
+                : "No matches found",
+            }],
+            details: killedForStreamLimit ? { streamTruncated: true } : undefined,
+          };
+        }
+        const formatted = await formatGrepMatches(
+          matches,
+          input.searchPath,
+          metadata.isDirectory(),
+          input.context,
+          input.signal,
+        );
+        const truncation = truncateHead(formatted.lines.join("\n"), {
+          maxLines: Number.MAX_SAFE_INTEGER,
+        });
+        const details: {
+          matchLimitReached?: number;
+          streamTruncated?: boolean;
+          truncation?: TruncationResult;
+          linesTruncated?: boolean;
+        } = {};
+        const notices: string[] = [];
+        if (killedForLimit) {
+          details.matchLimitReached = input.limit;
+          notices.push(`${String(input.limit)} matches limit reached`);
+        }
+        if (killedForStreamLimit) {
+          details.streamTruncated = true;
+          notices.push("ripgrep output exceeded the bounded stream limit");
+        }
+        if (truncation.truncated) {
+          details.truncation = truncation;
+          notices.push(`${String(DEFAULT_MAX_BYTES)}-byte output limit reached`);
+        }
+        if (formatted.truncated) {
+          details.linesTruncated = true;
+          notices.push("some matching lines were truncated");
+        }
+        const text = notices.length === 0
+          ? truncation.content
+          : `${truncation.content}\n\n[${notices.join(". ")}]`;
+        return {
+          content: [{ type: "text" as const, text }],
+          details: Object.keys(details).length === 0 ? undefined : details,
+        };
+      })().then(
+        (result) => settle(() => resolvePromise(result)),
+        (error: unknown) => settle(() => reject(error)),
+      );
+    });
+  });
+}
 
 function matchedLines(text: string): { readonly path: string; readonly line: string }[] {
   return text.split("\n").flatMap((line) => {
@@ -48,6 +401,7 @@ function dataProperty(value: unknown, key: string): unknown {
 
 function grepPartialNotice(result: AgentToolResult<unknown>): string | undefined {
   const matchLimit = dataProperty(result.details, "matchLimitReached");
+  const streamTruncated = dataProperty(result.details, "streamTruncated");
   const truncation = dataProperty(result.details, "truncation");
   const reasons: string[] = [];
   if (Number.isSafeInteger(matchLimit) && (matchLimit as number) > 0) {
@@ -55,6 +409,9 @@ function grepPartialNotice(result: AgentToolResult<unknown>): string | undefined
   }
   if (dataProperty(truncation, "truncated") === true) {
     reasons.push("upstream output reached its byte limit");
+  }
+  if (streamTruncated === true) {
+    reasons.push("ripgrep output reached its stream limit");
   }
   return reasons.length === 0
     ? undefined
@@ -95,7 +452,11 @@ export function grepOutputMode(
 export function createRuntimePiGrepAgentTool(
   options: RuntimePiCodingToolsOptions,
 ): AgentTool {
-  const template = createGrepTool(options.workspaceDirectory);
+  const template = {
+    description:
+      "Search file contents with ripgrep. Returns bounded matching lines with file paths "
+      + "and line numbers while respecting ignore files.",
+  };
   const parameters = {
     type: "object",
     additionalProperties: false,
@@ -118,7 +479,6 @@ export function createRuntimePiGrepAgentTool(
     toolCallId,
     params,
     signal,
-    onUpdate,
   ) => {
     const input = ownRecord(params, "Grep", [
       "pattern", "path", "glob", "output_mode", "context", "case_insensitive",
@@ -156,7 +516,6 @@ export function createRuntimePiGrepAgentTool(
     const limit = headLimit ?? nativeLimit ?? 100;
     const workdir = effectiveWorkdir(input, "Grep", options.workspaceDirectory);
     const maxOutputBytes = outputLimit(input, "Grep");
-    const tool = createGrepTool(workdir);
     const executionSignal = combinedSignal(options.turnSignal, signal);
     return approvedExecution(
       options,
@@ -173,19 +532,15 @@ export function createRuntimePiGrepAgentTool(
       executionSignal,
       async () => capRuntimePiAgentResult(
         grepOutputMode(
-          await tool.execute(
-            toolCallId,
-            {
-              pattern,
-              ...(path === undefined ? {} : { path }),
-              ...(glob === undefined ? {} : { glob }),
-              ...(ignoreCase === undefined ? {} : { ignoreCase }),
-              ...(context === undefined || outputMode !== "content" ? {} : { context }),
-              limit,
-            },
-            executionSignal,
-            onUpdate as AgentToolUpdateCallback<unknown> | undefined,
-          ),
+          await runRipgrep({
+            pattern,
+            searchPath: displayPath(path ?? ".", workdir),
+            ...(glob === undefined ? {} : { glob }),
+            ignoreCase: ignoreCase ?? false,
+            context: context === undefined || outputMode !== "content" ? 0 : context,
+            limit,
+            signal: executionSignal,
+          }),
           outputMode,
         ),
         maxOutputBytes,

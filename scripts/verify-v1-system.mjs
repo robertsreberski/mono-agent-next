@@ -9,7 +9,7 @@ import {
   readFile,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
@@ -172,6 +172,7 @@ async function main() {
     await importAllPackages(consumerDirectory);
     await proveDocsMcpPackedClient(
       workspace.checkout,
+      consumerDirectory,
       tarballs.get("@mono-agent/docs-mcp"),
     );
     const configs = await scaffoldAndValidateTemplates(
@@ -493,7 +494,10 @@ async function importAllPackages(directory) {
   assertV1PublicExportSpecifiers(parsed.imported);
 }
 
-async function proveDocsMcpPackedClient(checkout, tarballPath) {
+async function proveDocsMcpPackedClient(checkout, consumerDirectory, tarballPath) {
+  if (typeof consumerDirectory !== "string" || !isAbsolute(consumerDirectory)) {
+    throw new Error("Packed docs-mcp install root must be an absolute path");
+  }
   if (typeof tarballPath !== "string") {
     throw new Error("Packed docs-mcp artifact is unavailable for the client-registration smoke");
   }
@@ -504,6 +508,7 @@ async function proveDocsMcpPackedClient(checkout, tarballPath) {
     {
       ...process.env,
       CI: "1",
+      MONO_AGENT_DOCS_MCP_INSTALL_ROOT: consumerDirectory,
       MONO_AGENT_DOCS_MCP_TARBALL: tarballPath,
       NPM_CONFIG_OFFLINE: "true",
       npm_config_offline: "true",
@@ -514,6 +519,8 @@ async function proveDocsMcpPackedClient(checkout, tarballPath) {
   if (
     proof?.ok !== true
     || proof.package !== "@mono-agent/docs-mcp"
+    || proof.execution !== "package-bin"
+    || proof.installation !== "preinstalled"
     || proof.transport !== "packed-stdio"
     || proof.registration !== "mcpServers.mono-agent-docs"
     || proof.artifact !== basename(tarballPath)

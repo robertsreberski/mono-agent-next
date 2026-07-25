@@ -1,16 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-const dependencyImports = vi.hoisted(() => ({
-  piCodingAgent: vi.fn(),
-}));
-
-vi.mock("@earendil-works/pi-coding-agent", () => {
-  dependencyImports.piCodingAgent();
-  throw new Error("pi-coding-agent must be lazy-loaded after package import");
-});
-
 describe("runtime-pi module import", () => {
-  it("validates model syntax synchronously without loading effectful coding tools", async () => {
+  it("validates model syntax synchronously without network effects", async () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network access during import"));
     const module = await import("../index.js");
     const config = module.monoAgentModule.schema.parse({});
@@ -67,7 +58,7 @@ describe("runtime-pi module import", () => {
       }, {
         id: "Grep",
         displayName: "Grep",
-        effects: ["read", "write", "execute", "network"],
+        effects: ["read", "execute"],
         approval: "core-callback",
         sandbox: "unsupported",
       }, {
@@ -109,7 +100,6 @@ describe("runtime-pi module import", () => {
       config: { unexpected: true },
     })).toThrow("is not a supported field");
     expect(fetch).not.toHaveBeenCalled();
-    expect(dependencyImports.piCodingAgent).not.toHaveBeenCalled();
     fetch.mockRestore();
   });
 });
