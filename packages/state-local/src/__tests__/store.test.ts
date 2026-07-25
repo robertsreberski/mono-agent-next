@@ -2,10 +2,12 @@ import { appendFile, chmod, link, mkdtemp, open as openFile, readFile, readdir, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ResolvedStateLocalConfig } from "../config.js";
 import { StateLocalError } from "../errors.js";
+import { ExecutionStore } from "../execution-store.js";
+import { stateLocalInternalAccess } from "../internal-state-access.js";
 import { acquireProcessLease } from "../secure-fs.js";
 import { StateLocalStore, type StateLocalStoreHooks } from "../store.js";
 
@@ -78,6 +80,200 @@ describe("StateLocalStore", () => {
     await reopened.close();
   });
 
+  it("reserves core namespaces while the explicit execution accessor round-trips them", async () => {
+    const config = await createConfig();
+    const store = await open(config);
+    const execution = new ExecutionStore(store[stateLocalInternalAccess]);
+    await expect(execution.transaction({
+      puts: [{
+        key: "core/runs/internal",
+        expectedVersion: null,
+        value: { status: "private" },
+      }],
+      bytePuts: [{
+        key: "@core/transcript",
+        expectedVersion: null,
+        value: bytes("private-bytes"),
+      }],
+      signal,
+    })).resolves.toMatchObject({ status: "applied" });
+
+    await expect(execution.read(
+      "core/runs/internal",
+      (value) => value as { readonly status: string },
+      signal,
+    )).resolves.toMatchObject({ value: { status: "private" } });
+    expect(text((await execution.readBytes("@core/transcript", signal))?.value))
+      .toBe("private-bytes");
+    await expect(store.read({ key: "core/runs/internal", signal }))
+      .resolves.toBeUndefined();
+    await expect(store.read({ key: "@core/transcript", signal }))
+      .resolves.toBeUndefined();
+    for (const prefix of ["core/", "@core/"]) {
+      await expect(store.list({ prefix, limit: 10, signal }))
+        .resolves.toEqual({ records: [] });
+      await expect(store.scan({ prefix, limit: 10, signal }))
+        .resolves.toEqual({ records: [] });
+    }
+    await expect(store.write({
+      key: "core/user-collision",
+      value: bytes("blocked"),
+      signal,
+    })).rejects.toMatchObject({ code: "STATE_INVALID_KEY" });
+    await expect(store.write({
+      key: "@core/user-collision",
+      value: bytes("blocked"),
+      signal,
+    })).rejects.toMatchObject({ code: "STATE_INVALID_KEY" });
+    await expect(execution.transaction({
+      puts: [{
+        key: "public/internal-bypass",
+        expectedVersion: null,
+        value: { status: "blocked" },
+      }],
+      signal,
+    })).rejects.toMatchObject({ code: "STATE_INVALID_KEY" });
+
+    await store.write({ key: "public/alpha", value: bytes("a"), signal });
+    await store.write({ key: "public/bravo", value: bytes("b"), signal });
+    const firstPublicPage = await store.list({ prefix: "public/", limit: 1, signal });
+    expect(firstPublicPage.records.map(({ key }) => key)).toEqual(["public/alpha"]);
+    expect(firstPublicPage.cursor).toEqual(expect.any(String));
+    const publicCursor = firstPublicPage.cursor;
+    if (publicCursor === undefined) throw new Error("Expected a public list cursor.");
+    await expect(execution.transaction({
+      puts: [{
+        key: "core/runs/internal-after-page",
+        expectedVersion: null,
+        value: { status: "private" },
+      }],
+      signal,
+    })).resolves.toMatchObject({ status: "applied" });
+    await expect(store.list({
+      prefix: "public/",
+      cursor: publicCursor,
+      limit: 1,
+      signal,
+    })).resolves.toMatchObject({
+      records: [{ key: "public/bravo" }],
+    });
+    await expect(store.health({ signal })).resolves.toMatchObject({
+      status: "healthy",
+      details: { records: 2, presence: 0 },
+    });
+
+    await store.close();
+    const reopened = await open(config);
+    const reopenedExecution = new ExecutionStore(reopened[stateLocalInternalAccess]);
+    await expect(reopenedExecution.read(
+      "core/runs/internal",
+      (value) => value as { readonly status: string },
+      signal,
+    )).resolves.toMatchObject({ value: { status: "private" } });
+    expect(text((await reopenedExecution.readBytes("@core/transcript", signal))?.value))
+      .toBe("private-bytes");
+    await reopened.close();
+  });
+
+  it("commit-capacity-does-not-poison", async () => {
+    const config = await createConfig();
+    const store = await StateLocalStore.open(config, {
+      instanceId: "snapshot-capacity-test",
+      signal,
+      clock: () => new Date("2026-07-23T12:00:00.000Z"),
+      hooks: { snapshotByteLimit: 256 },
+    });
+
+    await expect(store.write({
+      key: "capacity/oversized",
+      value: Buffer.alloc(200, 1),
+      signal,
+    })).rejects.toMatchObject({ code: "STATE_LIMIT_EXCEEDED" });
+    await expect(store.write({
+      key: "capacity/healthy",
+      value: bytes("ok"),
+      signal,
+    })).resolves.toMatchObject({ version: "v1" });
+    expect(text((await store.read({ key: "capacity/healthy", signal }))?.value)).toBe("ok");
+    await store.close();
+  });
+
+  it("heartbeat-poisons-and-refreshes", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const healthyConfig = await createConfig(true);
+      let healthyCommits = 0;
+      let expectHealthyHeartbeat = false;
+      let resolveHealthyHeartbeat: (() => void) | undefined;
+      const healthyHeartbeat = new Promise<void>((resolve) => {
+        resolveHealthyHeartbeat = resolve;
+      });
+      const healthy = await StateLocalStore.open(healthyConfig, {
+        instanceId: "heartbeat-refresh-test",
+        signal,
+        clock: () => new Date("2026-07-23T12:00:00.000Z"),
+        hooks: {
+          presence: {
+            afterCommit: () => {
+              healthyCommits += 1;
+              if (expectHealthyHeartbeat) resolveHealthyHeartbeat?.();
+            },
+          },
+        },
+      });
+      await healthy.start({ signal });
+      const beforeHeartbeat = healthyCommits;
+      expectHealthyHeartbeat = true;
+      await vi.advanceTimersByTimeAsync(60_000);
+      await healthyHeartbeat;
+      expect(healthyCommits).toBeGreaterThan(beforeHeartbeat);
+      await expect(healthy.write({
+        key: "heartbeat/still-writable",
+        value: bytes("yes"),
+        signal,
+      })).resolves.toMatchObject({ version: expect.any(String) });
+      await healthy.close();
+
+      const poisonedConfig = await createConfig(true);
+      let poisonNextHeartbeat = false;
+      let resolveFailedHeartbeat: (() => void) | undefined;
+      const failedHeartbeat = new Promise<void>((resolve) => {
+        resolveFailedHeartbeat = resolve;
+      });
+      const poisoned = await StateLocalStore.open(poisonedConfig, {
+        instanceId: "heartbeat-poison-test",
+        signal,
+        clock: () => new Date("2026-07-23T12:00:00.000Z"),
+        hooks: {
+          presence: {
+            afterCommit: () => {
+              if (poisonNextHeartbeat) {
+                resolveFailedHeartbeat?.();
+                throw new Error("simulated heartbeat publication failure");
+              }
+            },
+          },
+        },
+      });
+      await poisoned.start({ signal });
+      poisonNextHeartbeat = true;
+      await vi.advanceTimersByTimeAsync(60_000);
+      await failedHeartbeat;
+      await Promise.resolve();
+      await expect(poisoned.read({ key: "heartbeat/blocked", signal }))
+        .rejects.toMatchObject({ code: "STATE_POISONED" });
+      await expect(poisoned.write({
+        key: "heartbeat/also-blocked",
+        value: bytes("no"),
+        signal,
+      })).rejects.toMatchObject({ code: "STATE_POISONED" });
+      poisonNextHeartbeat = false;
+      await poisoned.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("fails a second writer while the process lease is live and allows reopening after release", async () => {
     const config = await createConfig();
     const first = await open(config);
@@ -86,6 +282,309 @@ describe("StateLocalStore", () => {
     const reopened = await open(config);
     await reopened.close();
   });
+
+  it("compacts repeatedly before injected frame and byte ceilings", async () => {
+    for (const [name, indexLimits] of [
+      [
+        "frames",
+        {
+          maximumFrames: 5,
+          compactAfterObsoleteFrames: 2,
+        },
+      ],
+      [
+        "bytes",
+        {
+          maximumBytes: 4_096,
+          maximumFrames: 100,
+          compactAfterObsoleteFrames: 99,
+          compactAfterReclaimableBytes: 256,
+        },
+      ],
+    ] as const) {
+      const config = await createConfig();
+      const store = await StateLocalStore.open(config, {
+        instanceId: `index-${name}-ceiling-test`,
+        signal,
+        clock: () => new Date("2026-07-23T12:00:00.000Z"),
+        hooks: { lease: { indexLimits } },
+      });
+      const indexPath = join(config.root, "lease.sqlite.index");
+      const witnessPath = `${indexPath}.witness`;
+      const beforeIndex = await stat(indexPath);
+      const beforeWitness = await stat(witnessPath);
+      for (let revision = 0; revision < 20; revision += 1) {
+        await store.write({
+          key: "compaction/latest",
+          value: bytes(`${name}-${String(revision)}`),
+          signal,
+        });
+      }
+      const afterIndex = await stat(indexPath);
+      const afterWitness = await stat(witnessPath);
+      expect({
+        device: afterIndex.dev,
+        inode: afterIndex.ino,
+        links: afterIndex.nlink,
+      }).toEqual({
+        device: beforeIndex.dev,
+        inode: beforeIndex.ino,
+        links: 2,
+      });
+      expect({
+        device: afterWitness.dev,
+        inode: afterWitness.ino,
+        links: afterWitness.nlink,
+      }).toEqual({
+        device: beforeWitness.dev,
+        inode: beforeWitness.ino,
+        links: 2,
+      });
+      await store.close();
+
+      const reopened = await StateLocalStore.open(config, {
+        instanceId: `index-${name}-ceiling-reopen-test`,
+        signal,
+        clock: () => new Date("2026-07-23T12:00:00.000Z"),
+        hooks: { lease: { indexLimits } },
+      });
+      expect(text((await reopened.read({
+        key: "compaction/latest",
+        signal,
+      }))?.value)).toBe(`${name}-19`);
+      await reopened.write({
+        key: "compaction/after-reopen",
+        value: bytes("healthy"),
+        signal,
+      });
+      await reopened.close();
+    }
+  });
+
+  it("uses expanded staging for large overwrites and recovers a partial in-place copy", async () => {
+    const config = await createConfig();
+    await writePrivateDirectory(config.root);
+    const leasePath = join(config.root, "large-index.sqlite");
+    const indexLimits = {
+      maximumBytes: 150_000,
+      maximumFrames: 100,
+      compactAfterReclaimableBytes: 1,
+      compactAfterObsoleteFrames: 1,
+    };
+    const firstValue = Buffer.alloc(100_000, 1);
+    const committedValue = Buffer.alloc(100_000, 2);
+    const finalValue = Buffer.alloc(100_000, 3);
+    let crashDuringCopy = true;
+    const lease = await acquireProcessLease(leasePath, {
+      indexLimits,
+      afterIndexCompactionCopyChunk: (_target, copiedBytes, totalBytes) => {
+        if (!crashDuringCopy || copiedBytes >= totalBytes) return;
+        crashDuringCopy = false;
+        throw new Error("simulated crash during compaction copy");
+      },
+    });
+    lease.writeIndex("large", firstValue);
+    expect(() => lease.writeIndex("large", committedValue))
+      .toThrow("simulated crash during compaction copy");
+    await lease.release();
+
+    const reopened = await acquireProcessLease(leasePath, { indexLimits });
+    expect(reopened.readIndex("large", committedValue.byteLength))
+      .toEqual(committedValue);
+    reopened.writeIndex("large", finalValue);
+    expect(reopened.readIndex("large", finalValue.byteLength)).toEqual(finalValue);
+    await reopened.release();
+
+    const verified = await acquireProcessLease(leasePath, { indexLimits });
+    expect(verified.readIndex("large", finalValue.byteLength)).toEqual(finalValue);
+    await verified.release();
+  });
+
+  it("truncates a near-ceiling staged body when its commit footer is absent", async () => {
+    const config = await createConfig();
+    await writePrivateDirectory(config.root);
+    const leasePath = join(config.root, "near-ceiling-index.sqlite");
+    const indexLimits = {
+      maximumBytes: 1_024,
+      maximumFrames: 100,
+      compactAfterReclaimableBytes: 1,
+      compactAfterObsoleteFrames: 1,
+    };
+    const retainedValue = Buffer.alloc(900, 1);
+    const pendingValue = Buffer.alloc(900, 2);
+    let crashAfterBody = true;
+    const lease = await acquireProcessLease(leasePath, {
+      indexLimits,
+      afterIndexCompactionBody: () => {
+        if (!crashAfterBody) return;
+        crashAfterBody = false;
+        throw new Error("simulated crash after near-ceiling compaction body");
+      },
+    });
+    lease.writeIndex("near-ceiling", retainedValue);
+    expect(() => lease.writeIndex("near-ceiling", pendingValue))
+      .toThrow("simulated crash after near-ceiling compaction body");
+    await lease.release();
+
+    const reopened = await acquireProcessLease(leasePath, { indexLimits });
+    expect(reopened.readIndex("near-ceiling", retainedValue.byteLength))
+      .toEqual(retainedValue);
+    reopened.writeIndex("near-ceiling", pendingValue);
+    expect(reopened.readIndex("near-ceiling", pendingValue.byteLength))
+      .toEqual(pendingValue);
+    await reopened.release();
+  });
+
+  it("does not poison the lease when a non-shrinking compact image cannot fit", async () => {
+    const config = await createConfig();
+    await writePrivateDirectory(config.root);
+    const leasePath = join(config.root, "non-shrinking-index.sqlite");
+    const indexLimits = {
+      maximumBytes: 1_024,
+      maximumFrames: 100,
+      compactAfterReclaimableBytes: 1,
+      compactAfterObsoleteFrames: 1,
+    };
+    const retainedValue = Buffer.alloc(300, 1);
+    const oversizedReplacement = Buffer.alloc(900, 2);
+    const healthyReplacement = Buffer.alloc(300, 3);
+    const lease = await acquireProcessLease(leasePath, { indexLimits });
+    lease.writeIndex("capacity", retainedValue);
+    let capacityError: unknown;
+    try {
+      lease.writeIndex("capacity", oversizedReplacement);
+    } catch (error) {
+      capacityError = error;
+    }
+    expect(capacityError).toMatchObject({ code: "STATE_LIMIT_EXCEEDED" });
+    expect(lease.readIndex("capacity", retainedValue.byteLength)).toEqual(retainedValue);
+    lease.writeIndex("capacity", healthyReplacement);
+    expect(lease.readIndex("capacity", healthyReplacement.byteLength))
+      .toEqual(healthyReplacement);
+    await lease.release();
+
+    const reopened = await acquireProcessLease(leasePath, { indexLimits });
+    expect(reopened.readIndex("capacity", healthyReplacement.byteLength))
+      .toEqual(healthyReplacement);
+    await reopened.release();
+  });
+
+  it("rejects live-frame corruption before compaction can re-sign it", async () => {
+    const config = await createConfig();
+    const indexLimits = {
+      maximumFrames: 10,
+      compactAfterReclaimableBytes: 1,
+      compactAfterObsoleteFrames: 1,
+    };
+    const store = await StateLocalStore.open(config, {
+      instanceId: "index-corruption-before-compaction-test",
+      signal,
+      clock: () => new Date("2026-07-23T12:00:00.000Z"),
+      hooks: { lease: { indexLimits } },
+    });
+    await store.write({
+      key: "compaction/victim",
+      value: bytes("safe-latest"),
+      signal,
+    });
+    const indexPath = join(config.root, "lease.sqlite.index");
+    const encodedValue = Buffer.from("safe-latest", "utf8").toString("base64");
+    const indexBytes = await readFile(indexPath);
+    const valueOffset = indexBytes.lastIndexOf(encodedValue);
+    if (valueOffset < 0) throw new Error("Expected the live snapshot bytes in the index.");
+    const handle = await openFile(indexPath, "r+");
+    try {
+      await handle.write(Buffer.from(encodedValue[0] === "A" ? "B" : "A"), 0, 1, valueOffset);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    const corruptedBytes = await readFile(indexPath);
+
+    await expect(store.write({
+      key: "compaction/victim",
+      value: bytes("must-not-be-signed"),
+      signal,
+    })).rejects.toMatchObject({ code: "STATE_CORRUPT" });
+    await expect(store.read({ key: "compaction/victim", signal }))
+      .rejects.toMatchObject({ code: "STATE_POISONED" });
+    expect(await readFile(indexPath)).toEqual(corruptedBytes);
+    await store.close();
+    await expect(open(config)).rejects.toMatchObject({ code: "STATE_CORRUPT" });
+    expect(await readFile(indexPath)).toEqual(corruptedBytes);
+  });
+
+  it.each(["body", "prepared", "copy", "rewritten"] as const)(
+    "recovers a crash at the %s compaction boundary",
+    async (boundary) => {
+      const config = await createConfig();
+      const indexLimits = {
+        maximumFrames: 5,
+        compactAfterObsoleteFrames: 2,
+      };
+      let crash = true;
+      const crashAtBoundary = (): void => {
+        if (!crash) return;
+        crash = false;
+        throw new Error(`simulated crash at compaction ${boundary}`);
+      };
+      const boundaryHooks = boundary === "body"
+        ? { afterIndexCompactionBody: crashAtBoundary }
+        : boundary === "prepared"
+          ? { afterIndexCompactionPrepared: crashAtBoundary }
+          : boundary === "copy"
+            ? { afterIndexCompactionCopyChunk: crashAtBoundary }
+            : { afterIndexCompactionRewritten: crashAtBoundary };
+      const store = await StateLocalStore.open(config, {
+        instanceId: `index-compaction-${boundary}-test`,
+        signal,
+        clock: () => new Date("2026-07-23T12:00:00.000Z"),
+        hooks: {
+          lease: {
+            indexLimits,
+            ...boundaryHooks,
+          },
+        },
+      });
+      await store.write({
+        key: "compaction/crash",
+        value: bytes("one"),
+        signal,
+      });
+      await store.write({
+        key: "compaction/crash",
+        value: bytes("two"),
+        signal,
+      });
+      await expect(store.write({
+        key: "compaction/crash",
+        value: bytes("pending"),
+        signal,
+      })).rejects.toMatchObject({ code: "STATE_POISONED" });
+      await store.close();
+
+      const reopened = await StateLocalStore.open(config, {
+        instanceId: `index-compaction-${boundary}-reopen-test`,
+        signal,
+        clock: () => new Date("2026-07-23T12:00:00.000Z"),
+        hooks: { lease: { indexLimits } },
+      });
+      expect(text((await reopened.read({
+        key: "compaction/crash",
+        signal,
+      }))?.value)).toBe(boundary === "body" ? "two" : "pending");
+      await reopened.write({
+        key: "compaction/crash",
+        value: bytes("after-recovery"),
+        signal,
+      });
+      expect(text((await reopened.read({
+        key: "compaction/crash",
+        signal,
+      }))?.value)).toBe("after-recovery");
+      await reopened.close();
+    },
+  );
 
   it("recovers a complete committed snapshot after an injected post-rename crash", async () => {
     const config = await createConfig();

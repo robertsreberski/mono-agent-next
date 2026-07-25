@@ -19,10 +19,11 @@ First-party reserved state module in the execution layer.
 
 Own the local `StateStore` implementation: atomic records, exact compare-and-swap
 (CAS), bounded multi-key transactions, deterministic list and forward-scan
-cursors, a live process lease, corruption detection, and optional lifecycle
-presence publication, the state-owned `RunHistory` model tool, plus bounded
-package-owned maintenance. The on-disk directory and every file are private to
-the current operating-system owner.
+cursors, a live process lease, a bounded self-compacting transactional index,
+corruption detection, and optional lifecycle presence publication, the
+state-owned `RunHistory` model tool, plus bounded package-owned maintenance.
+The on-disk directory and every file are private to the current operating-system
+owner.
 
 ## Install / Usage
 
@@ -86,6 +87,12 @@ or mutable generation. Intervening commits therefore do not repeat previously
 returned keys; a cursor cannot be reused with another prefix. Use `list` when a
 page must instead be rejected after any intervening user-record mutation.
 
+The `core/` and legacy `@core/` prefixes are reserved for state-local's durable
+execution protocol. Public writes to either prefix fail with
+`STATE_INVALID_KEY`; public reads, lists, and scans never expose those records.
+Only the package-private execution accessor can address them, and its commits
+do not invalidate a public list cursor.
+
 The store creates its root and discovery registry with mode `0700`; its marker,
 transactional index, immutable artifact blobs, and presence descriptors use
 mode `0600`. Existing paths with different owners, modes, link counts, types,
@@ -142,18 +149,21 @@ state APIs.
   identifier contract; runtime-owned session IDs, entry IDs, request IDs, run
   IDs, delivery IDs, and receipt message IDs retain a 512-byte bound.
 - **Atomicity and idempotency:** record changes use the descriptor-bound
-  transactional index and exact versions. Artifact publication first commits a
-  reservation, then descriptor identity, then published status. Repeating
-  maintenance after a crash resumes an exact removal claim or observes an
-  already removed reservation. `delivery.settle-with-history` commits the
-  delivered transport receipt, one assistant destination-history entry, and
-  their global delivery/`entryId`/fingerprint/content binding in the same
-  transaction. The operation creates an exact first-seen destination
-  conversation when needed; exact replay is a duplicate, while any reuse with
-  a different receipt, destination, or content fails closed. State-local stamps
-  the canonical `recordedAt` on the successful first commit, preserving
-  chronology without making a later crash replay depend on a caller's wall
-  clock.
+  transactional index and exact versions. Obsolete index frames are compacted
+  before the fixed frame and byte ceilings: a complete compact image is first
+  committed inside the same pinned inode, then replayed in place. Reopening
+  finishes a committed compaction or removes only a proven incomplete staging
+  tail. Artifact publication first commits a reservation, then descriptor
+  identity, then published status. Repeating maintenance after a crash resumes
+  an exact removal claim or observes an already removed reservation.
+  `delivery.settle-with-history` commits the delivered transport receipt, one
+  assistant destination-history entry, and their global
+  delivery/`entryId`/fingerprint/content binding in the same transaction. The
+  operation creates an exact first-seen destination conversation when needed;
+  exact replay is a duplicate, while any reuse with a different receipt,
+  destination, or content fails closed. State-local stamps the canonical
+  `recordedAt` on the successful first commit, preserving chronology without
+  making a later crash replay depend on a caller's wall clock.
 - **Retention:** `retentionDays` applies only to unpublished, package-proven
   artifact reservations. Core owns terminal run/index/reference retirement and
   must release those records before any future referenced-artifact collection.
@@ -182,19 +192,26 @@ state APIs.
    read-only transaction and never writes database pages; rollback, WAL, and
    shared-memory sidecar paths are reserved and must remain absent. A second
    writer fails immediately.
-3. Startup streams a descriptor-bound framed index log through a pinned
-   two-link inode, verifies every frame digest and commit footer, repairs only an
-   incomplete final frame, and validates every snapshot bound, version, key,
-   timestamp, base64 value, ordering invariant, and duplicate constraint.
+3. After acquiring the exclusive process lock, startup streams a
+   descriptor-bound framed index log through a pinned two-link inode, verifies
+   every frame digest and commit footer, finishes a committed in-place
+   compaction, repairs only a proven incomplete final frame, and validates every
+   snapshot bound, version, key, timestamp, base64 value, ordering invariant,
+   and duplicate constraint.
 4. Each mutation rechecks the root and index identity, applies CAS or all
    transaction preconditions to an isolated draft, and serializes it under the
    same worst-case JSON/base64 byte ceiling used by startup reads. Only then
    does it append and sync one frame and digest, sync its commit footer
-   separately, recheck every path witness, and advance in-memory state.
-   Commits never reopen, rename, unlink, or truncate a pathname.
-5. Presence contract records share the same atomic snapshot under a reserved
-   collision-proof namespace. Ordinary keys cannot address or enumerate that
-   namespace; expiry and agent filtering happen through `listPresence` only.
+   separately, recheck every path witness, and advance in-memory state. Ordinary
+   commits never reopen, rename, unlink, or truncate a pathname. A bounded
+   compaction instead appends and verifies a complete canonical image, copies it
+   toward offset zero through the already pinned descriptor, syncs it, then
+   truncates the same inode.
+5. Presence contract records and execution records share the same atomic
+   snapshot under separate reserved namespaces. Ordinary keys cannot address or
+   enumerate either namespace; expiry and agent filtering happen through
+   `listPresence`, while the package-private execution accessor is the only
+   route to `core/` and legacy `@core/` records.
 6. Reads return byte copies. Lists sort by binary key order and issue a cursor
    bound to the exact prefix and user-record generation. Forward scans bind the
    prefix and last key without an offset or generation. Presence heartbeats do
@@ -236,14 +253,25 @@ state APIs.
 | `execution.ts` | Strict versioned dispatch for the opaque state-execution protocol and serialized journal access for state-owned tools. |
 | `execution-types.ts` | Package-private execution input, record, and result contracts. |
 | `execution-store.ts` | Bounded typed record/transaction adapter over the local state store. |
+| `internal-state-access.ts` | Package-private capability that admits only reserved execution records and artifact operations. |
 | `execution-transcript.ts` | Canonical transcript and conversation persistence owned by state-local. |
-| `execution-journal.ts` | Run admission/events/settlement, sessions, artifact intents, delivery idempotency, and confirmed destination-history appends. |
+| `execution-journal.ts` | Thin durable-journal composition and package-private contract exports. |
+| `execution-journal-constants.ts` | Shared execution record bounds and reserved slot names. |
+| `execution-journal-records.ts` | Package-private stored execution record shapes. |
+| `execution-codec.ts` | Strict bounded execution record codecs and durable fingerprinting. |
+| `execution-journal-concern.ts` | Admission, session, artifact-intent, fingerprint, and retention concerns. |
+| `execution-journal-conversations.ts` | Conversation creation, transcript chunking, reads, and scans. |
+| `execution-journal-delivery.ts` | Delivery idempotency and atomic destination-history settlement. |
+| `execution-journal-maintenance.ts` | Bounded package-owned execution maintenance. |
+| `execution-journal-runs.ts` | Run admission, event, settlement, and history operations. |
 | `run-history-tool.ts` | Turn-scoped list/search/inspect projection over safe terminal prior-run evidence. |
 | `maintenance.ts` | Strict bounded maintenance request/command contracts and result counters. |
+| `index-log-limits.ts` | Fixed production index ceilings and validated low-threshold proof seams. |
 | `secure-fs.ts` | Owner/mode/link checks, no-follow reads, pinned framed index log, reserved-sidecar checks, and process lease. |
 | `snapshot.ts` | Canonical snapshot validation, serialization, keys, versions, and record copies. |
 | `presence.ts` | Private lifecycle heartbeat descriptors. |
 | `store.ts` | Linearized StateStore operations, CAS, pagination, poisoning, non-serving diagnostics, and lifecycle. |
+| `validation.ts` | Shared strict record, array, timestamp, text, and digest validators. |
 | `index.ts` | The typed reserved `monoAgentModule` definition. |
 
 ## Public API
@@ -342,5 +370,7 @@ operator-replacement preservation, generic and presence corruption
 preservation, duplicate writer exclusion, exact/create-only CAS, hidden
 presence expiry and instance-safe removal, deterministic cursors, owner-private
 modes, symlink and hard-link rejection, final directory/index device-inode
-swaps, and redacted diagnostics over path, lease, and execution protocol
-identity.
+swaps, repeated low-ceiling index compaction, prepared/rewrite crash recovery,
+reserved execution namespace isolation, non-poisoning capacity rejection,
+heartbeat refresh failure poisoning, and redacted diagnostics over path, lease,
+and execution protocol identity.

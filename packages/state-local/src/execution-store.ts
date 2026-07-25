@@ -7,9 +7,10 @@ import {
 } from "@mono-agent/module-sdk";
 import type {
   StateRecord,
-  StateStore,
   StateTransactionConflict,
 } from "@mono-agent/module-sdk/internal";
+
+import type { StateLocalInternalAccessor } from "./internal-state-access.js";
 
 const EXECUTION_RECORD_MAX_BYTES = 1024 * 1024;
 const EXECUTION_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024;
@@ -94,9 +95,9 @@ export interface ExecutionScanResult<T> {
 export type ExecutionRecordParser<T> = (value: unknown) => T;
 
 export class ExecutionStore {
-  readonly #state: StateStore;
+  readonly #state: StateLocalInternalAccessor;
 
-  constructor(state: StateStore) {
+  constructor(state: StateLocalInternalAccessor) {
     this.#state = state;
   }
 

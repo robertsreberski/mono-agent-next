@@ -227,7 +227,7 @@ function projectTimeline(record: AgentRunRecord): readonly JsonObject[] {
         recordedAt: entry.recordedAt,
         ...(entry.kind === "interaction" ? { evidence: entry.evidence } : {}),
         content: entry.content.map((part) =>
-          part.type === "text" ? boundedText(part.text) : "[artifact omitted]"),
+          part.type === "text" ? truncateHistoryText(part.text) : "[artifact omitted]"),
       }) as JsonObject;
     }),
   ];
@@ -241,7 +241,7 @@ function sanitize(value: unknown, key = "", depth = 0): JsonValue {
     if (/runhistory/iu.test(value) && /untrusted historical evidence/iu.test(value)) {
       return RUN_HISTORY_NESTED_RESULT_OMISSION;
     }
-    return boundedText(value.replace(SECRET_ASSIGNMENT, "$1=[redacted]"));
+    return truncateHistoryText(value.replace(SECRET_ASSIGNMENT, "$1=[redacted]"));
   }
   if (Array.isArray(value)) {
     return value.slice(0, 100).map((entry) => sanitize(entry, key, depth + 1));
@@ -274,7 +274,7 @@ function remember(cursors: Map<string, Cursor>, value: Cursor): string {
   cursors.set(token, value);
   return token;
 }
-function boundedText(value: string): string {
+function truncateHistoryText(value: string): string {
   const bytes = Buffer.from(value, "utf8");
   return bytes.byteLength <= TEXT_LIMIT
     ? value
