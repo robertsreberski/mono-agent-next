@@ -36,6 +36,7 @@ import {
   publishFrozenTarball,
   publicNpmEnvironment,
   resolveTrustedGitExecutable,
+  resolveTrustedPnpmEntrypoint,
   runReleaseBuildWithProvenance,
   runWorkspaceBuild,
   stagingDistTagForRelease,
@@ -1043,8 +1044,15 @@ describe("hardened local release publish", () => {
     for (const { env } of childEnvironments.filter(({ kind }) => kind === "git")) {
       expect(env).toEqual({ PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" });
     }
-    expect(childEnvironments.find(({ kind }) => kind === "build").env.PATH)
-      .toBe([path.dirname(process.execPath), "/usr/bin", "/bin"].join(path.delimiter));
+    const buildPath = childEnvironments.find(({ kind }) => kind === "build")
+      .env.PATH.split(path.delimiter);
+    expect(buildPath[0]).toBe(path.dirname(process.execPath));
+    expect(buildPath.slice(-2)).toEqual(["/usr/bin", "/bin"]);
+    expect(new Set(buildPath).size).toBe(buildPath.length);
+    const pnpmEntrypoint = resolveTrustedPnpmEntrypoint(REPO_ROOT);
+    for (const directory of buildPath.slice(1, -2)) {
+      expect(fs.realpathSync.native(path.join(directory, "pnpm"))).toBe(pnpmEntrypoint);
+    }
     expect(childEnvironments.find(({ kind }) => kind === "pack").env.PATH).toBe("/bin");
   });
 
@@ -1083,6 +1091,49 @@ describe("hardened local release publish", () => {
     } finally {
       fs.rmSync(repo, { recursive: true, force: true });
       fs.rmSync(shadow, { recursive: true, force: true });
+    }
+  });
+
+  test("runs through pnpm action shell shims with the marker-producing Node", () => {
+    const actionRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-pnpm-action-"));
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "mono-agent-pnpm-action-repo-"));
+    const binDirectory = path.join(actionRoot, "node_modules", ".bin");
+    const packageBinDirectory = path.join(actionRoot, "node_modules", "pnpm", "bin");
+    const wrapper = path.join(binDirectory, "pnpm");
+    const entrypoint = path.join(packageBinDirectory, "pnpm.cjs");
+    const proof = path.join(repo, "build-proof.json");
+    try {
+      fs.mkdirSync(binDirectory, { recursive: true });
+      fs.mkdirSync(packageBinDirectory, { recursive: true });
+      fs.writeFileSync(
+        wrapper,
+        "#!/bin/sh\nbasedir=$(dirname \"$0\")\nexec node \"$basedir/../pnpm/bin/pnpm.cjs\" \"$@\"\n",
+        { mode: 0o700 },
+      );
+      fs.writeFileSync(
+        entrypoint,
+        `require("node:fs").writeFileSync(${JSON.stringify(proof)}, JSON.stringify({ argv: process.argv.slice(2), execPath: process.execPath, path: process.env.PATH }));\n`,
+        { mode: 0o600 },
+      );
+
+      runWorkspaceBuild({
+        repo,
+        log: () => {},
+        resolvePnpmEntrypoint: () => fs.realpathSync.native(wrapper),
+      });
+      const result = JSON.parse(fs.readFileSync(proof, "utf8"));
+      expect(result.argv).toEqual(["run", "build"]);
+      expect(fs.realpathSync.native(result.execPath))
+        .toBe(fs.realpathSync.native(process.execPath));
+      expect(result.path).toBe([
+        path.dirname(process.execPath),
+        fs.realpathSync.native(binDirectory),
+        "/usr/bin",
+        "/bin",
+      ].join(path.delimiter));
+    } finally {
+      fs.rmSync(actionRoot, { recursive: true, force: true });
+      fs.rmSync(repo, { recursive: true, force: true });
     }
   });
 
@@ -1129,8 +1180,9 @@ describe("hardened local release publish", () => {
         },
         log: () => {},
         spawn: (command, args, options) => {
-          expect(command).toBe(process.execPath);
-          expect(args.slice(1)).toEqual(["run", "build"]);
+          expect(fs.realpathSync.native(command))
+            .toBe(fs.realpathSync.native(resolveTrustedPnpmEntrypoint(REPO_ROOT)));
+          expect(args).toEqual(["run", "build"]);
           const probe = spawnSync(probePath, [], {
             encoding: "utf8",
             env: options.env,
