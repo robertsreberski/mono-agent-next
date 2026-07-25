@@ -1261,13 +1261,31 @@ class AgentHostImplementation implements AgentHost {
                       ? error
                       : undefined;
                   if (classified !== undefined) {
+                    // The rejection is captured rather than caught so this keeps
+                    // the original promise shape: a `try`/`await`/`catch` here
+                    // removes the tick `.catch()` adds, and the surrounding turn
+                    // loop is microtask-order sensitive.
+                    let settlementError: unknown;
                     await this.#persistRunSettlement({
                       input,
                       runId: active.id,
                       status: classified.status,
                       failureCode: classified.failureCode,
                       signal: settlementSignal,
-                    }).catch(() => undefined);
+                    }).catch((error: unknown) => { settlementError = error; });
+                    // A definitive status asserts that settlement was proved.
+                    // Discarding the write reported `failed` while the durable
+                    // run stayed `running`, wedging the requestId behind a live
+                    // admission lease. An already `uncertain` classification is
+                    // already honest and proceeds unchanged.
+                    if (settlementError !== undefined && classified.status !== "uncertain") {
+                      throw turnExecutionError(
+                        "uncertain",
+                        "classified-settlement-failed",
+                        "The run was classified but durable settlement could not be proven",
+                        input, active, this.#safePublicCause(settlementError),
+                      );
+                    }
                     throw classified;
                   }
                   if (signal.aborted || isAbort(error)) {
