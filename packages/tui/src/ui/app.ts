@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
-import { basename, extname } from "node:path";
+import { basename } from "node:path";
 
 import {
   Container,
@@ -9,6 +9,7 @@ import {
   matchesKey,
   Text,
   TUI,
+  type Component,
   type Terminal,
 } from "@earendil-works/pi-tui";
 import {
@@ -17,13 +18,10 @@ import {
   evaluateOperatorRuntimeOverride,
   initialOperatorState,
   OPERATOR_LIMITS,
-  parseAskAnswerRequest,
   parseTurnRequest,
   reduceOperatorFrame,
   type OperatorAction,
-  type OperatorAsk,
   type OperatorAskAnswerRequest,
-  type OperatorCapabilities,
   type OperatorClient,
   type OperatorConversationState,
   type OperatorAttachment,
@@ -31,14 +29,23 @@ import {
   type OperatorFrame,
   type OperatorInfo,
   type OperatorQuote,
-  type OperatorToolResult,
 } from "@mono-agent/operator";
 
+import { parseTuiAskAnswer } from "./ask-answer.js";
+import {
+  attachmentMediaType,
+  buildTurnRequest,
+  boundedStatus,
+  boundedView,
+  errorMessage,
+  latestActivity,
+  toolResultText,
+} from "./format.js";
 import { editorTheme, markdownTheme, style } from "./theme.js";
 import { sanitizeTerminalText } from "./terminal-text.js";
 
 const MAX_INLINE_ATTACHMENT_BYTES = 512 * 1_024;
-
+const MAX_TRANSCRIPT_CHILDREN = 256;
 export interface MonoAgentTuiAppOptions {
   readonly terminal: Terminal;
   readonly client: OperatorClient;
@@ -215,6 +222,10 @@ export class MonoAgentTuiApp {
   }
 
   private async runTurn(text: string): Promise<void> {
+    if (this.turnStarting || this.turnAbort !== undefined) {
+      this.addNotice("A turn is starting or already active; wait for it to finish or cancel it.", "warning");
+      return;
+    }
     this.turnStarting = true;
     try {
       await this.refreshDiscoveredIdentity();
@@ -246,19 +257,14 @@ export class MonoAgentTuiApp {
     }
     const turnAttachments = [...this.attachments];
     const turnQuote = this.quote;
-    const requestPreview = {
+    const request = buildTurnRequest(text, turnAttachments, turnQuote, {
       conversationId: this.options.conversationId,
-      input: {
-        ...(text.length === 0 ? {} : { text }),
-        ...(turnAttachments.length === 0 ? {} : { attachments: turnAttachments }),
-        ...(turnQuote === undefined ? {} : { quote: turnQuote }),
-      },
       ...(this.runtimeOverride === undefined ? {} : { runtime: this.runtimeOverride }),
       ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
       ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
       metadata: { source: "tui" },
-    };
-    if (Buffer.byteLength(JSON.stringify(requestPreview)) > OPERATOR_LIMITS.requestBytes) {
+    });
+    if (Buffer.byteLength(JSON.stringify(request)) > OPERATOR_LIMITS.requestBytes) {
       this.addNotice("Queued input exceeds the shared operator request bound; remove an attachment or shorten the text.", "warning");
       return;
     }
@@ -267,31 +273,20 @@ export class MonoAgentTuiApp {
       turnAttachments.length === 0 ? "" : `[attachments: ${turnAttachments.map((item) => item.name).join(", ")}]`,
       turnQuote === undefined ? "" : `[quote: ${turnQuote.messageId}]`,
     ].filter(Boolean).join("\n");
-    this.transcript.addChild(new Text(
+    this.addTranscriptChild(new Text(
       style.user(`you  ${sanitizeTerminalText(inputSummary, { multiline: true })}`),
       1,
       1,
     ));
     this.assistant = new Markdown("", 1, 0, markdownTheme, { color: style.assistant });
-    this.transcript.addChild(this.assistant);
+    this.addTranscriptChild(this.assistant);
     const controller = new AbortController();
     this.turnAbort = controller;
     this.setStatus(this.statusText("starting turn…"));
 
     try {
       let accepted = false;
-      const frames = this.options.client.streamTurn({
-        conversationId: this.options.conversationId,
-        input: {
-          ...(text.length === 0 ? {} : { text }),
-          ...(turnAttachments.length === 0 ? {} : { attachments: turnAttachments }),
-          ...(turnQuote === undefined ? {} : { quote: turnQuote }),
-        },
-        ...(this.runtimeOverride === undefined ? {} : { runtime: this.runtimeOverride }),
-        ...(this.modelOverride === undefined ? {} : { model: this.modelOverride }),
-        ...(this.effortOverride === undefined ? {} : { effort: this.effortOverride }),
-        metadata: { source: "tui" },
-      }, { signal: controller.signal });
+      const frames = this.options.client.streamTurn(request, { signal: controller.signal });
       for await (const frame of frames) {
         if (frame.type === "accepted" && !accepted) {
           accepted = true;
@@ -308,6 +303,7 @@ export class MonoAgentTuiApp {
       }
     } finally {
       if (this.turnAbort === controller) this.turnAbort = undefined;
+      this.assistant = undefined;
       this.tui.requestRender();
     }
   }
@@ -355,7 +351,7 @@ export class MonoAgentTuiApp {
         this.setStatus(this.statusText(
           frame.target === "thought"
             ? `reasoning… ${boundedStatus(frame.text)}`
-            : this.latestActivity("streaming…"),
+            : latestActivity(this.state, "streaming…"),
         ));
         break;
       case "activity":
@@ -430,7 +426,7 @@ export class MonoAgentTuiApp {
       '    /answer {"question":"value","other-question":["value-1","value-2"]}',
       "Legacy question=value; other=value remains available for simple values.",
     ];
-    this.transcript.addChild(new Text(style.warning(lines.join("\n")), 1, 1));
+    this.addTranscriptChild(new Text(style.warning(lines.join("\n")), 1, 1));
   }
 
   private async offerLiveInput(text: string): Promise<void> {
@@ -438,12 +434,16 @@ export class MonoAgentTuiApp {
       this.addNotice("A turn is active and this agent does not accept live input.", "warning");
       return;
     }
-    const result = await this.options.client.offerLiveInput(this.options.conversationId, {
-      id: crypto.randomUUID(),
-      text,
-      receivedAt: new Date().toISOString(),
-    });
-    this.addNotice(`live input ${result.status}`);
+    try {
+      const result = await this.options.client.offerLiveInput(this.options.conversationId, {
+        id: crypto.randomUUID(),
+        text,
+        receivedAt: new Date().toISOString(),
+      });
+      this.addNotice(`live input ${result.status}`);
+    } catch (error) {
+      if (!this.stopped) this.addNotice(errorMessage(error), "warning");
+    }
   }
 
   private async cancelTurn(): Promise<void> {
@@ -581,15 +581,19 @@ export class MonoAgentTuiApp {
       this.addNotice(errorMessage(error), "warning");
       return;
     }
-    const result = await this.options.client.answerAsk(
-      this.options.conversationId,
-      request,
-    );
-    if (result.status === "accepted") {
-      const { pendingAsk: _pendingAsk, ...next } = this.state;
-      this.state = { ...next, status: next.activeTurnId === undefined ? next.status : "streaming" };
+    try {
+      const result = await this.options.client.answerAsk(
+        this.options.conversationId,
+        request,
+      );
+      if (result.status === "accepted") {
+        const { pendingAsk: _pendingAsk, ...next } = this.state;
+        this.state = { ...next, status: next.activeTurnId === undefined ? next.status : "streaming" };
+      }
+      this.addNotice(`answer ${result.status}`);
+    } catch (error) {
+      if (!this.stopped) this.addNotice(errorMessage(error), "warning");
     }
-    this.addNotice(`answer ${result.status}`);
   }
 
   private async attachFile(path: string): Promise<void> {
@@ -733,19 +737,9 @@ export class MonoAgentTuiApp {
   }
 
   private can(action: OperatorAction): boolean {
-    const capabilities = this.state.capabilities ?? this.info?.capabilities ?? NO_CAPABILITIES;
-    return availableOperatorActions(this.state, capabilities).includes(action);
-  }
-
-  private latestActivity(fallback: string): string {
-    const latest = this.state.activities.at(-1);
-    if (latest === undefined) return fallback;
-    switch (latest.type) {
-      case "activity": return latest.text;
-      case "tool_call": return `calling ${latest.call.name}…`;
-      case "tool_result": return `tool ${latest.result.callId} ${latest.result.isError === true ? "failed" : "completed"}`;
-      case "compaction": return latest.compaction.compacted ? "context compacted" : "context compaction skipped";
-    }
+    const capabilities = this.state.capabilities ?? this.info?.capabilities;
+    return capabilities !== undefined
+      && availableOperatorActions(this.state, capabilities).includes(action);
   }
 
   private statusText(prefix: string): string {
@@ -762,139 +756,16 @@ export class MonoAgentTuiApp {
 
   private addNotice(value: string, kind: "info" | "warning" | "error" = "info"): void {
     const paint = kind === "error" ? style.error : kind === "warning" ? style.warning : style.muted;
-    this.transcript.addChild(new Text(paint(sanitizeTerminalText(value)), 1, 1));
+    this.addTranscriptChild(new Text(paint(sanitizeTerminalText(value, { multiline: true })), 1, 1));
     this.tui.requestRender();
   }
-}
 
-function parseTuiAskAnswer(value: string, ask: OperatorAsk): OperatorAskAnswerRequest {
-  if (value.length === 0) {
-    throw new Error('Use /answer {"question":"value","other-question":["value-1","value-2"]}.');
-  }
-  if (Buffer.byteLength(value) > OPERATOR_LIMITS.askAnswerRequestBytes) {
-    throw new Error("AskUser answer exceeds the shared operator request bound.");
-  }
-  const questions = new Map(ask.questions.map((question) => [question.id, question]));
-  const answerEntries = value.startsWith("{")
-    ? structuredAnswerEntries(value)
-    : legacyAnswerEntries(value);
-  const answers = new Map<string, readonly string[]>();
-  for (const [questionId, values] of answerEntries) {
-    if (answers.has(questionId)) {
-      throw new Error(`Question ${JSON.stringify(questionId)} is answered more than once.`);
+  private addTranscriptChild(child: Component): void {
+    this.transcript.addChild(child);
+    while (this.transcript.children.length > MAX_TRANSCRIPT_CHILDREN) {
+      const oldest = this.transcript.children.find((candidate) => candidate !== this.assistant);
+      if (oldest === undefined) break;
+      this.transcript.removeChild(oldest);
     }
-    const question = questions.get(questionId);
-    if (question === undefined) {
-      throw new Error(`Question ${JSON.stringify(questionId)} is not pending.`);
-    }
-    if (values.length === 0) {
-      throw new Error(`Question ${JSON.stringify(questionId)} requires an answer.`);
-    }
-    if (!question.multiple && values.length !== 1) {
-      throw new Error(`Question ${JSON.stringify(questionId)} accepts exactly one answer.`);
-    }
-    if (!question.allowFreeText) {
-      const choices = new Set(question.choices?.map((choice) => choice.value) ?? []);
-      const unknown = values.find((answer) => !choices.has(answer));
-      if (unknown !== undefined) {
-        throw new Error(`Answer ${JSON.stringify(unknown)} is not a choice for ${JSON.stringify(questionId)}.`);
-      }
-    }
-    answers.set(questionId, values);
-  }
-  const missing = ask.questions.filter((question) => !answers.has(question.id)).map((question) => question.id);
-  if (missing.length > 0) {
-    throw new Error(`Answer every pending question; missing ${missing.map((id) => JSON.stringify(id)).join(", ")}.`);
-  }
-  const parsed = parseAskAnswerRequest({
-    interactionId: ask.interactionId,
-    answers: Object.fromEntries(answers),
-  });
-  if (Buffer.byteLength(JSON.stringify(parsed)) > OPERATOR_LIMITS.askAnswerRequestBytes) {
-    throw new Error("AskUser answer exceeds the shared operator request bound.");
-  }
-  return parsed;
-}
-
-function structuredAnswerEntries(value: string): Array<[string, readonly string[]]> {
-  let input: unknown;
-  try {
-    input = JSON.parse(value) as unknown;
-  } catch {
-    throw new Error("Structured /answer input must be valid JSON.");
-  }
-  if (typeof input !== "object" || input === null || Array.isArray(input)) {
-    throw new Error("Structured /answer input must be a JSON object.");
-  }
-  return Object.entries(input).map(([questionId, answer]) => {
-    if (typeof answer === "string") return [questionId, [answer]];
-    if (Array.isArray(answer) && answer.every((item) => typeof item === "string")) {
-      return [questionId, answer];
-    }
-    throw new Error(`Answer for ${JSON.stringify(questionId)} must be a string or string array.`);
-  });
-}
-
-function legacyAnswerEntries(value: string): Array<[string, readonly string[]]> {
-  return value.split(";").map((rawAssignment) => {
-    const assignment = rawAssignment.trim();
-    const separator = assignment.indexOf("=");
-    if (separator <= 0 || separator === assignment.length - 1) {
-      throw new Error('Use /answer {"question":"value","other-question":["value-1","value-2"]}.');
-    }
-    const questionId = assignment.slice(0, separator).trim();
-    const values = assignment.slice(separator + 1).split(",")
-      .map((answer) => answer.trim())
-      .filter(Boolean);
-    return [questionId, values];
-  });
-}
-
-const NO_CAPABILITIES: OperatorCapabilities = {
-  attachments: false,
-  liveInput: false,
-  askUser: false,
-  cancellation: false,
-  quotes: false,
-  runtimeOverrides: false,
-  proactive: false,
-  configView: false,
-  replay: false,
-  health: false,
-};
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function boundedView(value: string): string {
-  return value.length <= 32_768 ? value : `${value.slice(0, 32_760)}\n[truncated]`;
-}
-
-function boundedStatus(value: string): string {
-  const compact = value.replace(/\s+/gu, " ").trim();
-  return compact.length <= 160 ? compact : `${compact.slice(0, 159)}…`;
-}
-
-function toolResultText(result: OperatorToolResult): string {
-  if (result.contentOmitted) return "[content omitted by operator boundary]";
-  return result.content?.map((part) =>
-    part.type === "text" ? part.text : JSON.stringify(part.value, null, 2)
-  ).join("\n") ?? "";
-}
-
-function attachmentMediaType(name: string): string {
-  switch (extname(name).toLowerCase()) {
-    case ".png": return "image/png";
-    case ".jpg":
-    case ".jpeg": return "image/jpeg";
-    case ".gif": return "image/gif";
-    case ".webp": return "image/webp";
-    case ".mp3": return "audio/mpeg";
-    case ".wav": return "audio/wav";
-    case ".json": return "application/json";
-    case ".md": return "text/markdown";
-    case ".txt": return "text/plain";
-    default: return "application/octet-stream";
   }
 }
