@@ -22,6 +22,7 @@ import {
   assertMonoAgentModuleExport,
   assertRuntimeInstanceCompliance,
   assertRuntimeModuleCompliance,
+  snapshotSelectedModuleInstanceCompliance,
 } from "../testing.js";
 
 const schema = defineModuleSchema({
@@ -220,6 +221,20 @@ describe("public compliance assertions", () => {
         ),
       },
     }])).toThrow("exceeds 10000 JSON items");
+
+    const mutable = { ...contribution, effects: ["read"] as ("read" | "write")[] };
+    const instance = { ...validRuntimeInstance(), toolContributions: [mutable] };
+    const snapshot = snapshotSelectedModuleInstanceCompliance("runtime", instance);
+    mutable.description = "mutated after validation";
+    mutable.effects.push("write");
+    expect(snapshot).toHaveLength(1);
+    expect(snapshot[0]).toMatchObject({
+      name: "Lookup",
+      description: "Look up bounded fixture data.",
+      effects: ["read"],
+    });
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(Object.isFrozen(snapshot[0])).toBe(true);
   });
 
   it("rejects getter-backed and exotic module tool contributions without invoking accessors", () => {
@@ -383,6 +398,26 @@ describe("public compliance assertions", () => {
       ...reservedSchema,
       schema,
     })).toThrow("manifest.kind must be channel");
+  });
+
+  it("fails a 20,000-level schema graph at the deterministic iterative bound", () => {
+    const jsonSchema: Record<string, unknown> = { type: "array" };
+    let cursor = jsonSchema;
+    for (let depth = 0; depth < 20_000; depth += 1) {
+      const next: Record<string, unknown> = { type: "array" };
+      cursor.items = next;
+      cursor = next;
+    }
+    expect(() => assertRuntimeModuleCompliance({
+      manifest: {
+        ...manifestBase,
+        packageName: "@example/runtime-deep-schema",
+        kind: "runtime",
+        responsibility: "Exercises bounded schema traversal.",
+      },
+      schema: { jsonSchema, parse: () => ({}) },
+      create() {},
+    })).toThrow("module schema graph exceeds 10000 nodes");
   });
 
   it("requires proactive channels to implement delivery", () => {

@@ -625,6 +625,7 @@ assertMonoAgentModuleExport
 assertRuntimeInstanceCompliance
 assertRuntimeModuleCompliance
 assertSchemaCompliance
+snapshotSelectedModuleInstanceCompliance
 ```
 
 <!-- public-api-inventory:end -->

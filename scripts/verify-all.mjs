@@ -45,6 +45,11 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
       args: ["run", "check:getting-started-version-pins"],
     },
     {
+      label: "check:source-line-length",
+      command: "pnpm",
+      args: ["run", "check:source-line-length"],
+    },
+    {
       label: "check:source-beta-budgets",
       command: "pnpm",
       args: ["run", "check:source-beta-budgets"],

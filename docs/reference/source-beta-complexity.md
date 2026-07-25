@@ -17,38 +17,38 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `657a2088a3b9d20afdb4b63255bdca60bc78b88a3bc0b1228bcc3d98393ef0dc`
+Source manifest digest: `5c1853572faed8a022ec8ad6fc4c69d8967306c35e69f221047b1cfa8cf0cee5`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 290 | 94220 |
-| Tests | 145 | 72521 |
-| Repository and product tooling | 53 | 18339 |
+| Production | 295 | 94227 |
+| Tests | 147 | 73299 |
+| Repository and product tooling | 54 | 18406 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **488** | **185080** |
+| **Total executable source** | **496** | **185932** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 324.9 lines.
+Average production file size is 319.4 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 94220 | 130000 | within limit |
-| kernel-production | 15390 | 15500 | within limit |
+| repository-production | 94227 | 130000 | within limit |
+| kernel-production | 15397 | 15500 | within limit |
 
 ## Largest package ownership surfaces
 
 | Package | Production files | Production lines | Test lines |
 | --- | ---: | ---: | ---: |
 | `@mono-agent/state-local` | 27 | 14300 | 5459 |
-| `@mono-agent/core` | 18 | 12130 | 16840 |
+| `@mono-agent/core` | 23 | 12144 | 17501 |
 | `@mono-agent/runtime-pi` | 28 | 8832 | 4966 |
 | `@mono-agent/memory-local` | 19 | 7721 | 4133 |
 | `@mono-agent/web` | 28 | 7147 | 2341 |
@@ -67,7 +67,7 @@ The complete package table is retained in the generated report model exposed by
 | First-party dependency edges | 22 |
 | First-party dependency cycles | 0 |
 | Public code entrypoints | 28 |
-| Public named exports | 990 |
+| Public named exports | 991 |
 | Distinct scaffold config paths | 104 |
 
 The first-party package graph is acyclic.

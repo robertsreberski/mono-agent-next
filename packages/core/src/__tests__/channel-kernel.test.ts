@@ -409,6 +409,96 @@ describe("channel kernel", () => {
     );
   });
 
+  it("completes concurrent cyclic channel-tool deliveries without a turn-tail lock cycle", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-channel-cycle-${suffix}`;
+    const channelName = `@fixture/channel-cycle-${suffix}`;
+    const results: unknown[] = [];
+    let sends = 0;
+    let release!: () => void;
+    let bothEntered!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const entered = new Promise<void>((resolve) => { bothEntered = resolve; });
+    const project = await tracked([
+      {
+        name: runtime, kind: "runtime",
+        controller: runtimeController(async (rawRequest, context) => {
+          const request = rawRequest as {
+            readonly turnId: string;
+            readonly conversationId: string;
+            readonly signal: AbortSignal;
+          };
+          const destination = request.conversationId === "cycle-a" ? "cycle-b" : "cycle-a";
+          results.push(await method(context, "executeTool")({
+            id: `${request.turnId}:cyclic-send`,
+            name: "ChannelSend",
+            input: { destination, text: `from-${request.conversationId}` },
+          }, request.signal));
+          return completed(`done-${request.conversationId}`);
+        }),
+      },
+      {
+        name: channelName, kind: "channel",
+        controller: {
+          create: () => channel([{
+            name: "ChannelSend",
+            description: "Send to the selected conversation.",
+            inputSchema: { type: "object", additionalProperties: true },
+            prepare(input: unknown) {
+              const record = isRecord(input) ? input : {};
+              return {
+                conversationId: String(record.destination),
+                text: String(record.text),
+              };
+            },
+          }], async (message) => {
+            sends += 1;
+            if (sends === 2) bothEntered();
+            await released;
+            return { status: "delivered", idempotencyKey: message.idempotencyKey };
+          }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      channels: { notify: { $use: channelName } }, policy: allowPolicy(),
+    }));
+    const host = await createAgentHost(project.configPath, {
+      lifecycleTimeoutMs: 20,
+    });
+    hosts.push(host);
+    const turns = Promise.all([
+      host.submit({ requestId: "cycle-a", conversationId: "cycle-a", text: "go-a" }),
+      host.submit({ requestId: "cycle-b", conversationId: "cycle-b", text: "go-b" }),
+    ]);
+
+    await entered;
+    release();
+    await expect(settleWithin(turns, 500)).resolves.toMatchObject([
+      { status: "completed" },
+      { status: "completed" },
+    ]);
+    expect(sends).toBe(2);
+    expect(results.every((result) =>
+      !isRecord(result) || result.isError !== true)).toBe(true);
+    for (const [conversationId, incoming] of [
+      ["cycle-a", "from-cycle-b"],
+      ["cycle-b", "from-cycle-a"],
+    ] as const) {
+      const messages = (await host.replay(conversationId)).messages;
+      expect(messages.filter((message) => message.id?.startsWith("delivery:"))).toHaveLength(1);
+      expect(messages.map((message) => message.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join(""))).toEqual([
+        incoming,
+        `go-${conversationId.at(-1)!}`,
+        `done-${conversationId}`,
+      ]);
+    }
+    await expect(host.health()).resolves.toMatchObject({ pending: 0, active: 0 });
+  });
+
   it("does not let a delayed state revision overwrite newer destination history", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtime = `@fixture/runtime-channel-revisions-${suffix}`;
@@ -708,6 +798,22 @@ function allowPolicy() {
     tools: { default: "allow" as const }, approvals: { default: "allow" as const },
     sandbox: { mode: "off" as const },
   };
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(
+          `operation did not settle within ${String(timeoutMs)}ms`,
+        )), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function tracked(options: Parameters<typeof createFixtureProject>[0]): Promise<FixtureProject> {

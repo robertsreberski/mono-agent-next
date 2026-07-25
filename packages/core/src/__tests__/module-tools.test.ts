@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { RuntimeTurnError } from "@mono-agent/module-sdk";
 import type {
   AgentInteractionHandler,
   Channel,
@@ -35,6 +36,79 @@ afterEach(async () => {
 });
 
 describe("selected-module tools", () => {
+  it("takes one SDK contribution snapshot from each selected open-slot instance", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtimeName = `@fixture/runtime-module-snapshot-${suffix}`;
+    const channelName = `@fixture/channel-module-snapshot-${suffix}`;
+    const memoryName = `@fixture/memory-module-snapshot-${suffix}`;
+    const instances: object[] = [];
+    const project = await tracked([
+      {
+        name: runtimeName,
+        kind: "runtime",
+        controller: {
+          create: () => {
+            const instance = {
+              capabilities: {
+                tools: false, mcp: false, attachments: false, approvals: false,
+                structuredOutput: false, sandbox: false, sessions: false,
+              },
+              runTurn: () => completed("unused"),
+              toolContributions: [tool("RuntimeProbe", [], () => ({ ok: true }))],
+            };
+            instances.push(instance);
+            return instance;
+          },
+        },
+      },
+      {
+        name: channelName,
+        kind: "channel",
+        controller: {
+          create: () => {
+            const instance = {
+              capabilities: {
+                attachments: false, liveInput: false, askUser: false, approvals: false,
+                proactive: false, runtimeControl: false, verbatim: false, cancellation: false,
+              },
+              toolContributions: [tool("ChannelProbe", [], () => ({ ok: true }))],
+            };
+            instances.push(instance);
+            return instance;
+          },
+        },
+      },
+      {
+        name: memoryName,
+        kind: "memory",
+        controller: {
+          create: () => {
+            const instance = memory([
+              tool("MemoryProbe", [], () => ({ ok: true })),
+            ]);
+            instances.push(instance);
+            return instance;
+          },
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtimeName, {
+      channels: { probe: { $use: channelName } },
+      memory: { $use: memoryName },
+      policy: allowPolicy(),
+    }));
+    const descriptorSpy = vi.spyOn(Object, "getOwnPropertyDescriptor");
+    try {
+      await started(project);
+      expect(instances).toHaveLength(3);
+      expect(instances.map((instance) => descriptorSpy.mock.calls.filter(
+        ([target, key]) => target === instance && key === "toolContributions",
+      ).length)).toEqual([1, 1, 1]);
+    } finally {
+      descriptorSpy.mockRestore();
+    }
+  });
+
   it("snapshots, binds, executes, and revokes a selected instance per logical turn", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtimeName = `@fixture/runtime-module-tool-${suffix}`;
@@ -151,6 +225,100 @@ describe("selected-module tools", () => {
       text: "no selected contributor",
     });
     expect(observedNames.at(-1)).toEqual([]);
+  });
+
+  it("reuses one selected-module binding across runtime fallback and revokes it once", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const primaryName = `@fixture/runtime-module-fallback-primary-${suffix}`;
+    const fallbackName = `@fixture/runtime-module-fallback-secondary-${suffix}`;
+    const memoryName = `@fixture/memory-module-fallback-${suffix}`;
+    const observedNames: string[][] = [];
+    const observedTools: RuntimeTurnRequest["tools"][number][] = [];
+    const results: RuntimeToolResult[] = [];
+    let bindings = 0;
+    let executions = 0;
+    let revocations = 0;
+    const descriptor = mutableTool("FallbackEcho", [], (turn) => {
+      bindings += 1;
+      turn.signal.addEventListener("abort", () => {
+        revocations += 1;
+      }, { once: true });
+      return {
+        execute(input) {
+          executions += 1;
+          return { input, runId: turn.runId };
+        },
+      };
+    });
+    const observe = (
+      rawRequest: unknown,
+    ): RuntimeTurnRequest => {
+      const request = rawRequest as RuntimeTurnRequest;
+      observedNames.push(request.tools.map((entry) => entry.name));
+      observedTools.push(request.tools[0]!);
+      return request;
+    };
+    const project = await tracked([
+      {
+        name: primaryName,
+        kind: "runtime",
+        controller: runtimeController((request) => {
+          observe(request);
+          throw new RuntimeTurnError({
+            code: "fixture_primary_failed",
+            message: "primary failed safely",
+            retryability: "retryable",
+            sideEffects: "none",
+          });
+        }),
+      },
+      {
+        name: fallbackName,
+        kind: "runtime",
+        controller: runtimeController(async (rawRequest, rawContext) => {
+          const request = observe(rawRequest);
+          const context = rawContext as RuntimeTurnContext;
+          results.push(await context.executeTool({
+            id: `${request.turnId}:fallback`,
+            name: "FallbackEcho",
+            input: { runtime: "fallback" },
+          }, request.signal));
+          return completed("fallback");
+        }),
+      },
+      {
+        name: memoryName,
+        kind: "memory",
+        controller: { create: () => memory([descriptor as ModuleToolContribution]) },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(primaryName, {
+      runtimes: {
+        primary: { $use: primaryName },
+        fallback: { $use: fallbackName },
+      },
+      routing: {
+        primary: { runtime: "primary", model: "fixture:primary" },
+        fallbacks: [{ runtime: "fallback", model: "fixture:fallback" }],
+      },
+      memory: { $use: memoryName },
+      policy: allowPolicy(),
+    }));
+    const host = await started(project);
+
+    descriptor.name = "Mutated";
+    await expect(host.submit({
+      requestId: "module-fallback",
+      conversationId: "module-fallback",
+      text: "fall back",
+    })).resolves.toMatchObject({ runtime: "fallback", text: "fallback" });
+
+    expect(observedNames).toEqual([["FallbackEcho"], ["FallbackEcho"]]);
+    expect(observedTools[1]).toStrictEqual(observedTools[0]);
+    expect(bindings).toBe(1);
+    expect(executions).toBe(1);
+    expect(results.every((result) => result.isError !== true)).toBe(true);
+    expect(revocations).toBe(1);
   });
 
   it("applies tool policy and exact effects to approval without governing effect-free reads", async () => {

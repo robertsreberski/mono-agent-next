@@ -38,6 +38,113 @@ afterEach(async () => {
 });
 
 describe("durable proactive delivery", () => {
+  it("concurrent delivery and live turn keep transcript consistent (local mode)", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtimeName = `@fixture/runtime-local-delivery-${suffix}`;
+    const channelName = `@fixture/channel-local-delivery-${suffix}`;
+    let markStarted!: () => void;
+    let releaseTurn!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    let sends = 0;
+    const project = await createFixtureProject([
+      {
+        name: runtimeName,
+        kind: "runtime",
+        controller: runtimeController(async () => {
+          markStarted();
+          await released;
+          return completed("turn response");
+        }),
+      },
+      {
+        name: channelName,
+        kind: "channel",
+        controller: {
+          create: () => ({
+            capabilities: {
+              attachments: false,
+              liveInput: false,
+              askUser: false,
+              approvals: false,
+              proactive: true,
+              runtimeControl: false,
+              verbatim: true,
+              cancellation: false,
+            },
+            resolveDeliveryHistory: (message: ChannelOutboundMessage) => ({
+              conversationId: message.conversationId,
+            }),
+            async deliver(message: ChannelOutboundMessage) {
+              sends += 1;
+              return {
+                status: "delivered" as const,
+                idempotencyKey: message.idempotencyKey,
+                messageId: "local-delivery-message",
+              };
+            },
+          }),
+        },
+      },
+    ]);
+    projects.push(project);
+    await project.writeConfig(minimalConfig(runtimeName, {
+      channels: { notify: { $use: channelName } },
+    }));
+    const host = await createAgentHost(project.configPath, {
+      lifecycleTimeoutMs: 20,
+    });
+    hosts.push(host);
+
+    const turn = host.submit({
+      requestId: "local-live-turn",
+      conversationId: "conversation-1",
+      text: "turn request",
+    });
+    await started;
+    let turnSettled = false;
+    void turn.then(
+      () => { turnSettled = true; },
+      () => { turnSettled = true; },
+    );
+    const delivery = host.deliver(
+      "notify",
+      outboundMessage("local-concurrent-delivery", "delivery response"),
+    );
+    await expect(settleWithin(delivery, 500)).resolves.toMatchObject({
+      status: "delivered",
+    });
+    expect(turnSettled).toBe(false);
+    expect(sends).toBe(1);
+    releaseTurn();
+    await expect(turn).resolves.toMatchObject({ status: "completed" });
+    const replay = await host.replay("conversation-1");
+    expect(replay.messages.map((message) => ({
+      id: message.id,
+      role: message.role,
+      text: message.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join(""),
+    }))).toEqual([
+      {
+        id: expect.stringMatching(/^delivery:/u),
+        role: "assistant",
+        text: "delivery response",
+      },
+      { id: undefined, role: "user", text: "turn request" },
+      {
+        id: expect.stringMatching(/:assistant$/u),
+        role: "assistant",
+        text: "turn response",
+      },
+    ]);
+  });
+
   it("sends once and returns a durable duplicate receipt for the same idempotency key", async () => {
     let sends = 0;
     const fixture = await createDurableDeliveryFixture({
@@ -471,4 +578,20 @@ function diagnostic(code: string) {
     severity: "error" as const,
     message: code,
   };
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(
+          `operation did not settle within ${String(timeoutMs)}ms`,
+        )), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }

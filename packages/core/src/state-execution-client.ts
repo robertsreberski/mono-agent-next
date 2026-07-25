@@ -1,33 +1,92 @@
-import { parseArtifactRef, parseRouteIdentity, type ArtifactRef, type JsonObject, type RouteIdentity, type RuntimeSession } from "@mono-agent/module-sdk";
+import {
+  parseArtifactRef, parseRouteIdentity, type ArtifactRef, type JsonObject, type RouteIdentity, type RuntimeSession,
+} from "@mono-agent/module-sdk";
 import type { StateExecution } from "@mono-agent/module-sdk/internal";
 
-import { assertOwnKeys, snapshotBoundedValue } from "./bounded-value.js";
-import type { AgentInteractionEvidence, AgentRunAttemptEvidence, AgentRunHistoryPage, AgentRunRecord, AgentRunStatus, AgentRunSummary, AgentTranscriptEntry } from "./types.js";
+import { assertOwnKeys, ownDataRecord, snapshotBoundedValue } from "./bounded-value.js";
+import type {
+  AgentInteractionEvidence, AgentRunAttemptEvidence, AgentRunHistoryPage, AgentRunRecord,
+  AgentRunStatus, AgentRunSummary, AgentTranscriptEntry,
+} from "./types.js";
 
 export type DurableFingerprint = `sha256:${string}`;
 export interface CanonicalTranscript {
-  readonly schemaVersion: 1; readonly kind: "mono-agent.canonical-transcript";
-  readonly conversationId: string; readonly revision: number;
+  readonly schemaVersion: 1;
+  readonly kind: "mono-agent.canonical-transcript";
+  readonly conversationId: string;
+  readonly revision: number;
   readonly entries: readonly AgentTranscriptEntry[];
 }
 export interface ConversationView {
-  readonly conversationId: string; readonly createdAt: string; readonly updatedAt: string;
-  readonly transcript: CanonicalTranscript; readonly title?: string; readonly metadata?: JsonObject;
+  readonly conversationId: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly transcript: CanonicalTranscript;
+  readonly title?: string;
+  readonly metadata?: JsonObject;
 }
 export interface ConversationPage {
-  readonly conversations: readonly Omit<ConversationView, "transcript">[]; readonly nextCursor?: string;
+  readonly conversations: readonly Omit<ConversationView, "transcript">[];
+  readonly nextCursor?: string;
 }
 
 type Signalled<T> = T & { readonly signal: AbortSignal };
-type AdmissionInput = Signalled<{ readonly requestId: string; readonly conversationId: string; readonly fingerprint: DurableFingerprint; readonly runId?: string }>;
-type SettlementInput = Signalled<{ readonly runId: string; readonly requestId: string; readonly status: Exclude<AgentRunStatus, "running">; readonly transcript?: CanonicalTranscript; readonly responseBytes?: Uint8Array; readonly session?: { readonly value: RuntimeSession; readonly updatedAt: string }; readonly sessionEviction?: RouteIdentity; readonly failureCode?: string }>;
-type StagingInput = Signalled<{ readonly runId: string; readonly requestId: string; readonly artifacts: readonly { readonly slot: string; readonly data: Uint8Array; readonly mediaType: string; readonly fileName?: string }[] }>;
-type DeliveryInput = Signalled<{ readonly idempotencyKey: string; readonly fingerprint: DurableFingerprint; readonly channelInstanceId: string; readonly runId?: string }>;
-type DeliverySettlement = Signalled<{ readonly idempotencyKey: string; readonly fingerprint: DurableFingerprint; readonly attempt: number; readonly token: string; readonly status: "delivered" | "failed" | "unknown"; readonly messageId?: string; readonly code?: string }>;
-type DeliveryWithHistoryInput = Signalled<{ readonly idempotencyKey: string; readonly fingerprint: DurableFingerprint; readonly attempt: number; readonly token: string; readonly messageId?: string; readonly conversationId: string; readonly entry:
-  | Omit<Extract<AgentTranscriptEntry, { readonly kind: "message" }>, "recordedAt">
-  | Omit<Extract<AgentTranscriptEntry, { readonly kind: "verbatim" }>, "recordedAt">;
-readonly entryFingerprint: DurableFingerprint }>;
+type AdmissionInput = Signalled<{
+  readonly requestId: string;
+  readonly conversationId: string;
+  readonly fingerprint: DurableFingerprint;
+  readonly runId?: string;
+}>;
+type SettlementInput = Signalled<{
+  readonly runId: string;
+  readonly requestId: string;
+  readonly status: Exclude<AgentRunStatus, "running">;
+  readonly transcript?: CanonicalTranscript;
+  readonly responseBytes?: Uint8Array;
+  readonly session?: {
+    readonly value: RuntimeSession;
+    readonly updatedAt: string;
+  };
+  readonly sessionEviction?: RouteIdentity;
+  readonly failureCode?: string;
+}>;
+type StagingInput = Signalled<{
+  readonly runId: string;
+  readonly requestId: string;
+  readonly artifacts: readonly {
+    readonly slot: string;
+    readonly data: Uint8Array;
+    readonly mediaType: string;
+    readonly fileName?: string;
+  }[];
+}>;
+type DeliveryInput = Signalled<{
+  readonly idempotencyKey: string;
+  readonly fingerprint: DurableFingerprint;
+  readonly channelInstanceId: string;
+  readonly runId?: string;
+}>;
+type DeliverySettlement = Signalled<{
+  readonly idempotencyKey: string;
+  readonly fingerprint: DurableFingerprint;
+  readonly attempt: number;
+  readonly token: string;
+  readonly status: "delivered" | "failed" | "unknown";
+  readonly messageId?: string;
+  readonly code?: string;
+}>;
+type DeliveryWithHistoryInput = Signalled<{
+  readonly idempotencyKey: string;
+  readonly fingerprint: DurableFingerprint;
+  readonly attempt: number;
+  readonly token: string;
+  readonly messageId?: string;
+  readonly conversationId: string;
+  readonly entry:
+    | Omit<Extract<AgentTranscriptEntry, { readonly kind: "message" }>, "recordedAt">
+    | Omit<Extract<AgentTranscriptEntry, { readonly kind: "verbatim" }>, "recordedAt">;
+  readonly entryFingerprint: DurableFingerprint;
+}>;
 type Admission = { readonly status: "accepted"; readonly summary: AgentRunSummary }
   | { readonly status: "join" | "conflict" | "uncertain"; readonly runId: string }
   | { readonly status: "cached"; readonly summary: AgentRunSummary; readonly responseRef?: ArtifactRef };
@@ -67,10 +126,20 @@ export class StateExecutionClient {
     }
   }
 
-  async appendTranscript(current: CanonicalTranscript | undefined, conversationId: string, entries: readonly AgentTranscriptEntry[], signal: AbortSignal): Promise<CanonicalTranscript> { return transcript(await this.call("transcript.append", { current, conversationId, entries }, signal)); }
-  async openConversation(input: { readonly title?: string; readonly initialText?: string; readonly metadata?: JsonObject }, signal: AbortSignal): Promise<ConversationView> { return conversation(await this.call("conversation.open", input, signal), false)!; }
-  async loadConversation(id: string, signal: AbortSignal): Promise<ConversationView | undefined> { return conversation(await this.call("conversation.load", { conversationId: id }, signal), true, id); }
-  async listConversations(cursor: string | undefined, signal: AbortSignal): Promise<ConversationPage> { return conversationPage(await this.call("conversation.list", { cursor }, signal)); }
+  async appendTranscript(current: CanonicalTranscript | undefined, conversationId: string,
+    entries: readonly AgentTranscriptEntry[], signal: AbortSignal): Promise<CanonicalTranscript> {
+    return transcript(await this.call("transcript.append", { current, conversationId, entries }, signal));
+  }
+  async openConversation(input: { readonly title?: string; readonly initialText?: string;
+    readonly metadata?: JsonObject }, signal: AbortSignal): Promise<ConversationView> {
+    return conversation(await this.call("conversation.open", input, signal), false)!;
+  }
+  async loadConversation(id: string, signal: AbortSignal): Promise<ConversationView | undefined> {
+    return conversation(await this.call("conversation.load", { conversationId: id }, signal), true, id);
+  }
+  async listConversations(cursor: string | undefined, signal: AbortSignal): Promise<ConversationPage> {
+    return conversationPage(await this.call("conversation.list", { cursor }, signal));
+  }
   async admit(input: AdmissionInput): Promise<Admission> {
     const { signal, ...payload } = input;
     return admission(await this.call("run.admit", payload, signal));
@@ -79,8 +148,14 @@ export class StateExecutionClient {
     const { signal, ...payload } = input;
     return runSummary(await this.call("run.settle", payload, signal));
   }
-  async recordAttempt(runId: string, attempt: AgentRunAttemptEvidence, signal: AbortSignal): Promise<AgentRunSummary> { return runSummary(await this.call("run.record-attempt", { runId, attempt }, signal)); }
-  async recordInteraction(runId: string, evidence: AgentInteractionEvidence, signal: AbortSignal): Promise<AgentRunSummary> { return runSummary(await this.call("run.record-interaction", { runId, evidence }, signal)); }
+  async recordAttempt(runId: string, attempt: AgentRunAttemptEvidence,
+    signal: AbortSignal): Promise<AgentRunSummary> {
+    return runSummary(await this.call("run.record-attempt", { runId, attempt }, signal));
+  }
+  async recordInteraction(runId: string, evidence: AgentInteractionEvidence,
+    signal: AbortSignal): Promise<AgentRunSummary> {
+    return runSummary(await this.call("run.record-interaction", { runId, evidence }, signal));
+  }
   async stageRunArtifacts(input: StagingInput): Promise<readonly { readonly slot: string; readonly ref: ArtifactRef }[]> {
     const { signal, ...payload } = input;
     return staged(await this.call("run.stage-artifacts", payload, signal));
@@ -94,12 +169,16 @@ export class StateExecutionClient {
     const value = await this.call("run.read", { runId }, signal);
     return value === undefined ? undefined : runRecord(value);
   }
-  async listRuns(cursor: string | undefined, signal: AbortSignal): Promise<AgentRunHistoryPage> { return runPage(await this.call("run.list", { cursor }, signal)); }
-  async loadSession(conversationId: string, route: RouteIdentity, signal: AbortSignal): Promise<{ readonly value: RuntimeSession; readonly updatedAt: string } | undefined> {
+  async listRuns(cursor: string | undefined, signal: AbortSignal): Promise<AgentRunHistoryPage> {
+    return runPage(await this.call("run.list", { cursor }, signal));
+  }
+  async loadSession(conversationId: string, route: RouteIdentity,
+    signal: AbortSignal): Promise<{ readonly value: RuntimeSession; readonly updatedAt: string } | undefined> {
     const value = await this.call("session.load", { conversationId, route }, signal);
     return value === undefined ? undefined : session(value);
   }
-  async evictSession(conversationId: string, route: RouteIdentity, expected: { readonly sessionId: string; readonly updatedAt: string }, signal: AbortSignal): Promise<boolean> {
+  async evictSession(conversationId: string, route: RouteIdentity,
+    expected: { readonly sessionId: string; readonly updatedAt: string }, signal: AbortSignal): Promise<boolean> {
     const value = await this.call("session.evict", { conversationId, route, expected }, signal);
     if (typeof value !== "boolean") malformed("session eviction");
     return value;
@@ -140,14 +219,7 @@ export class StateExecutionClient {
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) malformed(label);
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) malformed(label);
-  for (const key of Reflect.ownKeys(value)) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (typeof key !== "string" || descriptor === undefined || !("value" in descriptor)) malformed(label);
-  }
-  return value as Record<string, unknown>;
+  try { return ownDataRecord(value, label); } catch { return malformed(label); }
 }
 function keys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   try { assertOwnKeys(value, allowed, label); } catch { malformed(label); }
@@ -159,12 +231,27 @@ function text(value: unknown, label: string, maxBytes = 1_000_000, allowEmpty = 
     || Buffer.byteLength(value, "utf8") > maxBytes) malformed(label);
   return value;
 }
-function textFields(value: Record<string, unknown>, fields: readonly string[], label: string): void { for (const field of fields) text(value[field], `${label} ${field}`, 512); }
-function array(value: unknown, label: string, maxItems: number): readonly unknown[] { if (!Array.isArray(value) || value.length > maxItems) malformed(label); return value; }
-function integer(value: unknown, label: string, minimum: number): number { if (!Number.isSafeInteger(value) || (value as number) < minimum) malformed(label); return value as number; }
-function oneOf<T extends string>(value: unknown, choices: readonly T[], label: string): T { if (typeof value !== "string" || !choices.includes(value as T)) malformed(label); return value as T; }
-function routeIdentity(value: unknown, label: string): RouteIdentity { try { return parseRouteIdentity(value); } catch { return malformed(label); } }
-function artifactRef(value: unknown, label: string): ArtifactRef { try { return parseArtifactRef(value); } catch { return malformed(label); } }
+function textFields(value: Record<string, unknown>, fields: readonly string[], label: string): void {
+  for (const field of fields) text(value[field], `${label} ${field}`, 512);
+}
+function array(value: unknown, label: string, maxItems: number): readonly unknown[] {
+  if (!Array.isArray(value) || value.length > maxItems) malformed(label);
+  return value;
+}
+function integer(value: unknown, label: string, minimum: number): number {
+  if (!Number.isSafeInteger(value) || (value as number) < minimum) malformed(label);
+  return value as number;
+}
+function oneOf<T extends string>(value: unknown, choices: readonly T[], label: string): T {
+  if (typeof value !== "string" || !choices.includes(value as T)) malformed(label);
+  return value as T;
+}
+function routeIdentity(value: unknown, label: string): RouteIdentity {
+  try { return parseRouteIdentity(value); } catch { return malformed(label); }
+}
+function artifactRef(value: unknown, label: string): ArtifactRef {
+  try { return parseArtifactRef(value); } catch { return malformed(label); }
+}
 function jsonObject(value: unknown, label: string): JsonObject {
   const out = object(value, label);
   for (const [key, child] of Object.entries(out)) jsonValue(child, `${label}.${key}`);
@@ -187,7 +274,8 @@ function runAttempt(value: unknown): void {
   text(attempt.startedAt, "run attempt startedAt", 512);
   if (attempt.endedAt !== undefined) text(attempt.endedAt, "run attempt endedAt", 512);
   if (attempt.code !== undefined) text(attempt.code, "run attempt code", 512);
-  if (attempt.retryability !== undefined) oneOf(attempt.retryability, ["retryable", "not-retryable", "unknown"], "run attempt retryability");
+  if (attempt.retryability !== undefined)
+    oneOf(attempt.retryability, ["retryable", "not-retryable", "unknown"], "run attempt retryability");
   if (attempt.sideEffects !== undefined) oneOf(attempt.sideEffects, ["none", "committed", "unknown"], "run attempt sideEffects");
 }
 function transcriptEntry(value: unknown): void {
@@ -207,7 +295,8 @@ function transcriptEntry(value: unknown): void {
     oneOf(entry.role, ["user", "assistant"], "verbatim role");
     text(entry.text, "verbatim text", 1_000_000, true);
   } else malformed("transcript entry");
-  textFields(entry, ["entryId", "runId", "requestId", "recordedAt"], "transcript entry"); text(entry.conversationId, "transcript entry conversationId", 4_096);
+  textFields(entry, ["entryId", "runId", "requestId", "recordedAt"], "transcript entry");
+  text(entry.conversationId, "transcript entry conversationId", 4_096);
 }
 function transcriptContent(value: unknown): void {
   for (const partValue of array(value, "transcript entry content", 100_000)) {
@@ -225,7 +314,10 @@ function transcriptContent(value: unknown): void {
 function interactionEvidence(value: unknown): void {
   const evidence = object(value, "interaction evidence");
   if (evidence.kind === "ask-user") {
-    keys(evidence, ["kind", "interactionId", "phase", "requestedAt", "settledAt", "questionCount", "answeredQuestionCount"], "interaction evidence");
+    keys(evidence, [
+      "kind", "interactionId", "phase", "requestedAt", "settledAt",
+      "questionCount", "answeredQuestionCount",
+    ], "interaction evidence");
     oneOf(evidence.phase, ["requested", "answered", "expired", "cancelled"], "ask-user phase");
     integer(evidence.questionCount, "ask-user questionCount", 0);
     if (evidence.answeredQuestionCount !== undefined) integer(evidence.answeredQuestionCount, "ask-user answeredQuestionCount", 0);
@@ -233,7 +325,8 @@ function interactionEvidence(value: unknown): void {
     keys(evidence, ["kind", "interactionId", "phase", "requestedAt", "settledAt", "toolId", "effects", "decision"], "interaction evidence");
     oneOf(evidence.phase, ["requested", "answered", "expired", "cancelled"], "approval phase");
     text(evidence.toolId, "approval toolId", 512);
-    for (const effect of array(evidence.effects, "approval effects", 4)) oneOf(effect, ["read", "write", "execute", "network"], "approval effect");
+    for (const effect of array(evidence.effects, "approval effects", 4))
+      oneOf(effect, ["read", "write", "execute", "network"], "approval effect");
     if (evidence.decision !== undefined) oneOf(evidence.decision, ["allow_once", "deny"], "approval decision");
   } else if (evidence.kind === "live-input") {
     keys(evidence, ["kind", "interactionId", "phase", "receivedAt", "settledAt"], "interaction evidence");
@@ -284,7 +377,10 @@ function conversationPage(value: unknown): ConversationPage {
 }
 function runSummary(value: unknown): AgentRunSummary {
   const out = object(value, "run summary");
-  keys(out, ["runId", "requestId", "conversationId", "status", "startedAt", "updatedAt", "endedAt", "attempts", "transcriptRevision", "failureCode"], "run summary");
+  keys(out, [
+    "runId", "requestId", "conversationId", "status", "startedAt", "updatedAt",
+    "endedAt", "attempts", "transcriptRevision", "failureCode",
+  ], "run summary");
   textFields(out, ["runId", "requestId", "startedAt", "updatedAt"], "run"); text(out.conversationId, "run conversationId", 4_096);
   oneOf(out.status, ["running", "completed", "cancelled", "max-turns", "failed", "uncertain"], "run status");
   for (const key of ["endedAt", "transcriptRevision", "failureCode"]) if (out[key] !== undefined) text(out[key], `run ${key}`, 512);
@@ -384,7 +480,11 @@ function deliveryWithHistory(value: unknown): DeliveryWithHistory {
     ? ["status", "conversationId", "entryId"]
     : ["status", "conversationId", "entryId", "revision", "entryCount", "messageId"], "delivery with history");
   text(out.conversationId, "delivery with history conversationId", 4_096); textFields(out, ["entryId"], "delivery with history");
-  if (status !== "conflict") { integer(out.revision, "delivery history revision", 1); integer(out.entryCount, "delivery history entryCount", 1); if (out.messageId !== undefined) text(out.messageId, "delivery history messageId", 512); }
+  if (status !== "conflict") {
+    integer(out.revision, "delivery history revision", 1);
+    integer(out.entryCount, "delivery history entryCount", 1);
+    if (out.messageId !== undefined) text(out.messageId, "delivery history messageId", 512);
+  }
   return value as DeliveryWithHistory;
 }
 function malformed(label: string): never { throw new TypeError(`state execution returned malformed ${label}`); }

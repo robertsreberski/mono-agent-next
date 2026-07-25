@@ -50,6 +50,7 @@ describe("verify-all", () => {
       "check:codex-discoverability",
       "check:consumer-docs-consistency",
       "check:getting-started-version-pins",
+      "check:source-line-length",
       "check:source-beta-budgets",
       "check:source-beta-docs",
       "check:docs",

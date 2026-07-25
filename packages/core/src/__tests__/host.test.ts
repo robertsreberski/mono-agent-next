@@ -7,6 +7,7 @@ import {
   RuntimeTurnError,
   type AgentInteractionHandler,
   type ApprovalDecision,
+  type MemoryRecord,
 } from "@mono-agent/module-sdk";
 
 const mcpMocks = vi.hoisted(() => ({
@@ -1280,6 +1281,173 @@ describe("agent host lifecycle", () => {
       expect(captureCompleted).toBe(true);
       expect(captureSignal?.aborted).toBe(false);
       await expect(host.health()).resolves.toMatchObject({ status: "healthy" });
+    } finally {
+      await host.stop();
+    }
+  });
+
+  it("blocking exporter does not stall turn completion", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-${suffix}`;
+    const exporter = `@fixture/exporter-${suffix}`;
+    let exports = 0;
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create: () => runtimeInstance(async (request) => completed(requestText(request))),
+        },
+      },
+      {
+        name: exporter,
+        kind: "exporter",
+        controller: {
+          create: () => ({
+            export() {
+              exports += 1;
+              return new Promise<never>(() => {});
+            },
+            async flush() {},
+          }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      observability: { exporters: { blocked: { $use: exporter } } },
+    }));
+    const host = await createAgentHost(project.configPath, {
+      drainTimeoutMs: 20,
+      lifecycleTimeoutMs: 20,
+      maxConcurrentTurns: 1,
+    });
+
+    try {
+      await expect(settleWithin(host.submit({
+        requestId: "blocked-export-1",
+        conversationId: "blocked-export-1",
+        text: "first",
+      }), 500)).resolves.toMatchObject({ status: "completed", text: "first" });
+      await expect(host.health()).resolves.toMatchObject({
+        status: "degraded",
+        pending: 0,
+        active: 0,
+      });
+      await expect(settleWithin(host.submit({
+        requestId: "blocked-export-2",
+        conversationId: "blocked-export-2",
+        text: "second",
+      }), 500)).resolves.toMatchObject({ status: "completed", text: "second" });
+      expect(exports).toBe(2);
+    } finally {
+      await host.stop();
+    }
+  });
+
+  it("automatic pre-turn recall rejects non-array records", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-${suffix}`;
+    const memory = `@fixture/memory-${suffix}`;
+    let renderedRequest = "";
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create: () => runtimeInstance(async (request) => {
+            renderedRequest = JSON.stringify(request);
+            return completed("continued");
+          }),
+        },
+      },
+      {
+        name: memory,
+        kind: "memory",
+        controller: {
+          create: () => ({
+            capabilities: { capture: false, forget: false },
+            async recall() {
+              return { records: "not-an-array" };
+            },
+          }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      memory: { $use: memory },
+    }));
+    const host = await createAgentHost(project.configPath);
+
+    try {
+      await expect(host.submit({
+        requestId: "invalid-auto-recall",
+        conversationId: "invalid-auto-recall",
+        text: "continue safely",
+      })).resolves.toMatchObject({ status: "completed", text: "continued" });
+      expect(renderedRequest).not.toContain("- undefined");
+      expect(renderedRequest).not.toContain("Relevant memory");
+      await expect(host.health()).resolves.toMatchObject({ status: "degraded" });
+    } finally {
+      await host.stop();
+    }
+  });
+
+  it("fails closed on accessor-backed recalled records without reading them", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-${suffix}`;
+    const memory = `@fixture/memory-${suffix}`;
+    let renderedRequest = "";
+    let accessorReads = 0;
+    const record = {
+      id: "unsafe-memory",
+      createdAt: "2026-07-25T00:00:00.000Z",
+    } as unknown as MemoryRecord;
+    Object.defineProperty(record, "text", {
+      enumerable: true,
+      get() {
+        accessorReads += 1;
+        return "accessor-backed memory";
+      },
+    });
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create: () => runtimeInstance(async (request) => {
+            renderedRequest = JSON.stringify(request);
+            return completed("continued");
+          }),
+        },
+      },
+      {
+        name: memory,
+        kind: "memory",
+        controller: {
+          create: () => ({
+            capabilities: { capture: false, forget: false },
+            async recall() {
+              return { records: [record] };
+            },
+          }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      memory: { $use: memory },
+    }));
+    const host = await createAgentHost(project.configPath);
+
+    try {
+      await expect(host.submit({
+        requestId: "accessor-auto-recall",
+        conversationId: "accessor-auto-recall",
+        text: "continue safely",
+      })).resolves.toMatchObject({ status: "completed", text: "continued" });
+      expect(accessorReads).toBe(0);
+      expect(renderedRequest).not.toContain("Relevant memory");
+      expect(renderedRequest).not.toContain("accessor-backed memory");
+      await expect(host.health()).resolves.toMatchObject({ status: "degraded" });
     } finally {
       await host.stop();
     }
