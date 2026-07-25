@@ -398,7 +398,7 @@ function packedSmokeConfig(providerBaseUrl) {
         $use: "@mono-agent/channel-webhook",
         listen: { host: "127.0.0.1", port: 0 },
         apiKey: { $env: "WEBHOOK_API_KEY" },
-        mode: "sync",
+        defaultMode: "sync",
         maxRunMs: 10_000,
       },
     },
