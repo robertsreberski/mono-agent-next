@@ -35,10 +35,7 @@ export const runtimePiGlobTool: RuntimeNativeToolDescriptor = Object.freeze({
 export const runtimePiGrepTool: RuntimeNativeToolDescriptor = Object.freeze({
   id: "Grep",
   displayName: "Grep",
-  // Pi's public Grep implementation executes ripgrep and can install it if it
-  // is absent. Advertise the complete possible authority rather than the
-  // common already-installed case.
-  effects: Object.freeze(["read", "write", "execute", "network"] as const),
+  effects: Object.freeze(["read", "execute"] as const),
   approval: "core-callback",
   sandbox: "unsupported",
 });

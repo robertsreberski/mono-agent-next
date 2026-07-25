@@ -1,15 +1,16 @@
 import { Buffer } from "node:buffer";
-import { constants } from "node:fs";
-import { access, open } from "node:fs/promises";
+import { open } from "node:fs/promises";
 
 import {
   createReadTool,
-  type ReadOperations,
-} from "@earendil-works/pi-coding-agent";
-import type {
-  AgentTool,
-  AgentToolUpdateCallback,
+  err,
+  FileError,
+  ok,
+  type AgentTool,
+  type AgentToolUpdateCallback,
+  type Result,
 } from "@earendil-works/pi-agent-core";
+import { NodeExecutionEnv } from "@earendil-works/pi-agent-core/node";
 import type { TSchema } from "@earendil-works/pi-ai";
 
 import { runtimePiReadTool } from "./coding-tool-descriptors.js";
@@ -32,41 +33,22 @@ import { WEB_FETCH_MAX_OUTPUT_BYTES } from "./web-fetch.js";
 
 export const RUNTIME_PI_MAX_READ_SOURCE_BYTES = 16 * 1024 * 1024;
 
-function supportedImageMimeType(header: Buffer): string | undefined {
-  if (header.subarray(0, 8).equals(
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-  )) return "image/png";
-  if (header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
-    return "image/jpeg";
-  }
-  const six = header.subarray(0, 6).toString("ascii");
-  if (six === "GIF87a" || six === "GIF89a") return "image/gif";
-  if (header.subarray(0, 4).toString("ascii") === "RIFF"
-    && header.subarray(8, 12).toString("ascii") === "WEBP") {
-    return "image/webp";
-  }
-  if (header[0] === 0x42 && header[1] === 0x4d) return "image/bmp";
-  return undefined;
-}
-
-const boundedReadOperations: ReadOperations = {
-  async access(path) {
-    await access(path, constants.R_OK);
-  },
-  async detectImageMimeType(path) {
-    const handle = await open(path, "r");
-    try {
-      const header = Buffer.alloc(12);
-      const { bytesRead } = await handle.read(header, 0, header.byteLength, 0);
-      return supportedImageMimeType(header.subarray(0, bytesRead));
-    } finally {
-      await handle.close();
+class BoundedReadExecutionEnv extends NodeExecutionEnv {
+  override async readBinaryFile(
+    path: string,
+    abortSignal?: AbortSignal,
+  ): Promise<Result<Uint8Array, FileError>> {
+    const aborted = (): boolean => abortSignal?.aborted === true;
+    if (aborted()) {
+      return err(new FileError("aborted", "aborted", path));
     }
-  },
-  async readFile(path) {
-    const handle = await open(path, "r");
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
+      handle = await open(path, "r");
       const metadata = await handle.stat();
+      if (aborted()) {
+        return err(new FileError("aborted", "aborted", path));
+      }
       if (!metadata.isFile()
         || !Number.isSafeInteger(metadata.size)
         || metadata.size > RUNTIME_PI_MAX_READ_SOURCE_BYTES) {
@@ -80,6 +62,9 @@ const boundedReadOperations: ReadOperations = {
       const content = Buffer.alloc(metadata.size);
       let offset = 0;
       while (offset < content.byteLength) {
+        if (aborted()) {
+          return err(new FileError("aborted", "aborted", path));
+        }
         const { bytesRead } = await handle.read(
           content,
           offset,
@@ -89,17 +74,26 @@ const boundedReadOperations: ReadOperations = {
         if (bytesRead === 0) break;
         offset += bytesRead;
       }
-      return content.subarray(0, offset);
+      return ok(content.subarray(0, offset));
+    } catch (error) {
+      return err(error instanceof FileError
+        ? error
+        : new FileError(
+            "unknown",
+            error instanceof Error ? error.message : "Read failed.",
+            path,
+            error instanceof Error ? error : undefined,
+          ));
     } finally {
-      await handle.close();
+      await handle?.close().catch(() => undefined);
     }
-  },
-};
+  }
+}
 
 export function createRuntimePiReadAgentTool(
   options: RuntimePiCodingToolsOptions,
 ): AgentTool {
-  const upstream = createReadTool(options.workspaceDirectory);
+  const upstream = createReadTool();
   const template = {
     ...upstream,
     description:
@@ -141,7 +135,8 @@ export function createRuntimePiReadAgentTool(
     const upstreamOffset = startLine ?? offsetLine;
     const limit = optionalInteger(input, "limit", "Read", { minimum: 1, maximum: 100_000 });
     const maxOutputBytes = outputLimit(input, "Read");
-    const tool = createReadTool(workdir, { operations: boundedReadOperations });
+    const tool = createReadTool();
+    const env = new BoundedReadExecutionEnv({ cwd: workdir });
     const executionSignal = combinedSignal(options.turnSignal, signal);
     return approvedExecution(
       options,
@@ -154,19 +149,26 @@ export function createRuntimePiReadAgentTool(
         `limit: ${limit === undefined ? "<default>" : String(limit)}`,
       ].join("\n"),
       executionSignal,
-      async () => capRuntimePiAgentResult(
-        await tool.execute(
-          toolCallId,
-          {
-            path,
-            ...(upstreamOffset === undefined ? {} : { offset: upstreamOffset }),
-            ...(limit === undefined ? {} : { limit }),
-          },
-          executionSignal,
-          onUpdate as AgentToolUpdateCallback<unknown> | undefined,
-        ),
-        maxOutputBytes,
-      ),
+      async () => {
+        try {
+          return capRuntimePiAgentResult(
+            await tool.execute(
+              toolCallId,
+              {
+                path,
+                ...(upstreamOffset === undefined ? {} : { offset: upstreamOffset }),
+                ...(limit === undefined ? {} : { limit }),
+              },
+              executionSignal,
+              onUpdate as AgentToolUpdateCallback<unknown> | undefined,
+              { env },
+            ),
+            maxOutputBytes,
+          );
+        } finally {
+          await env.cleanup();
+        }
+      },
     );
   });
 }

@@ -408,8 +408,8 @@ describe("release graph validation", () => {
     const runtime = packageRecord({
       name: "@mono-agent/runtime-pi",
       dependencies: {
-        "@earendil-works/pi-agent-core": "~0.81.1",
-        "@earendil-works/pi-ai": "0.81.2",
+        "@earendil-works/pi-agent-core": "~0.82.0",
+        "@earendil-works/pi-ai": "0.82.1",
       },
     });
     const tui = packageRecord({
@@ -427,8 +427,8 @@ describe("release graph validation", () => {
       throw new Error("validateRelease did not reject floating Pi dependencies");
     } catch (error) {
       expect(error.issues).toEqual([
-        "@mono-agent/runtime-pi dependencies.@earendil-works/pi-agent-core must pin known-compatible version 0.81.1 exactly; found ~0.81.1",
-        "@mono-agent/runtime-pi dependencies.@earendil-works/pi-ai must pin known-compatible version 0.81.1 exactly; found 0.81.2",
+        "@mono-agent/runtime-pi dependencies.@earendil-works/pi-agent-core must pin known-compatible version 0.82.0 exactly; found ~0.82.0",
+        "@mono-agent/runtime-pi dependencies.@earendil-works/pi-ai must pin known-compatible version 0.82.0 exactly; found 0.82.1",
         "@mono-agent/tui dependencies.@earendil-works/pi-tui must pin known-compatible version 0.79.10 exactly; found ^0.79.1",
       ]);
     }

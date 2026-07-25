@@ -92,6 +92,10 @@ jobs:
       - name: Prove standalone operator products
         run: pnpm run verify:v1-operator-products
 
+      - name: Prove packed minimal v1 consumer
+        if: ${{ matrix.node-version == '22.19.0' }}
+        run: pnpm run verify:v1-minimal
+
       - name: Prove packed complete v1 system
         if: ${{ matrix.node-version == '22.19.0' }}
         run: pnpm run verify:v1-system

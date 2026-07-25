@@ -1039,7 +1039,7 @@ describe("Pi-native runtime module", () => {
       }, {
         id: "Grep",
         displayName: "Grep",
-        effects: ["read", "write", "execute", "network"],
+        effects: ["read", "execute"],
         approval: "core-callback",
         sandbox: "unsupported",
       }, {

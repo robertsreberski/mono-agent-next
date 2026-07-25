@@ -141,7 +141,7 @@ describe("Personal-compatible Pi coding tools", () => {
       {
         id: "Grep",
         displayName: "Grep",
-        effects: ["read", "write", "execute", "network"],
+        effects: ["read", "execute"],
         approval: "core-callback",
         sandbox: "unsupported",
       },
@@ -259,6 +259,25 @@ describe("Personal-compatible Pi coding tools", () => {
       text: expect.stringContaining("Read image file [image/png]"),
     }));
 
+    const bmpPath = join(outside, "unsupported.bmp");
+    const bmpHeader = Buffer.alloc(26);
+    bmpHeader.write("BM", 0, "ascii");
+    bmpHeader.writeUInt32LE(26, 10);
+    bmpHeader.writeUInt32LE(12, 14);
+    bmpHeader.writeUInt16LE(1, 22);
+    bmpHeader.writeUInt16LE(24, 24);
+    await writeFile(bmpPath, bmpHeader);
+    const bmp = await tool(approved, "Read").execute("read-bmp", {
+      file_path: bmpPath,
+      max_output_chars: 1_024,
+      workdir: workspace,
+    }, signal());
+    expect(bmp.content).toEqual([{
+      type: "text",
+      text: "Read image file [image/bmp]\n"
+        + "[Image omitted: configure an imageProcessor to convert BMP images.]",
+    }]);
+
     const oversizedPath = join(outside, "oversized-source.txt");
     await writeFile(oversizedPath, "");
     await truncate(oversizedPath, RUNTIME_PI_MAX_READ_SOURCE_BYTES + 1);
@@ -308,7 +327,7 @@ describe("Personal-compatible Pi coding tools", () => {
     expect(value.authorize).toHaveBeenCalledTimes(approvedCalls);
   });
 
-  it("wraps Pi Find as Glob without downloading a helper binary", async () => {
+  it("runs bounded local Glob traversal without a helper binary", async () => {
     const root = await temporaryRoot("runtime-pi-coding-glob-");
     await mkdir(join(root, "src"), { recursive: true });
     await mkdir(join(root, "node_modules", "pkg"), { recursive: true });
@@ -430,6 +449,17 @@ describe("Personal-compatible Pi coding tools", () => {
     expect(count.content).toEqual([{
       type: "text",
       text: "a.txt:2\nb.txt:1",
+    }]);
+
+    await writeFile(join(root, "oversized-line.txt"), `needle ${"x".repeat(512 * 1024)}\n`);
+    const boundedStream = await tool(value, "Grep").execute("grep-bounded-stream", {
+      ...base,
+      path: join(root, "oversized-line.txt"),
+      output_mode: "content",
+    }, signal());
+    expect(boundedStream.content).toEqual([{
+      type: "text",
+      text: expect.stringContaining("Ripgrep output exceeded the bounded stream limit"),
     }]);
 
     await writeFile(

@@ -25,9 +25,8 @@ import {
 
 export const PATH_MAX_BYTES = 4 * 1024;
 const STRING_PREVIEW_MAX_BYTES = 1_024;
-// Pi 0.81.1 resizes images below a 4.5 MiB encoded payload. Keep the same
-// explicit ceiling locally so a future upstream regression cannot place an
-// unbounded image in the provider context or the recorded runtime result.
+// Keep an explicit encoded-image ceiling locally so an upstream regression
+// cannot place an unbounded image in provider context or the recorded result.
 export const RUNTIME_PI_MAX_IMAGE_BASE64_BYTES = Math.floor(4.5 * 1024 * 1024);
 
 export interface RuntimePiCodingToolsOptions {
