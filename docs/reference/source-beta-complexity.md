@@ -17,17 +17,17 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `a8d9c05b0e7a7547f1849df50eedf49fa7006536e56bdf94d0381fa33b25cdd3`
+Source manifest digest: `5b95e3d7ac240dbd560ea5e229acbd53cc5a3630eec38fb2af041ede4e10c629`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
 | Production | 311 | 95271 |
-| Tests | 154 | 74304 |
+| Tests | 154 | 74308 |
 | Repository and product tooling | 55 | 18464 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **520** | **188039** |
+| **Total executable source** | **520** | **188043** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
