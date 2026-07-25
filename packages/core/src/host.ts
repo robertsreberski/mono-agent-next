@@ -6,7 +6,7 @@ import {
   AGENT_INTERACTION_LIMITS, DEFAULT_APPROVAL_TIMEOUT_MS, HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE,
   MODULE_TOOL_LIMITS,
   RUNTIME_SESSION_UNAVAILABLE_CODE, parseApprovalDecision, parseApprovalRequest, parseArtifactRef,
-  parseAskUserRequest, parseAskUserAnswer, snapshotRuntimeTurnError,
+  parseAskUserAnswer, parseAskUserRequest, snapshotRuntimeTurnError,
   type ArtifactRef, type ApprovalDecision, type ApprovalRequest, type AskUserAnswer, type AskUserRequest,
   type Channel, type ChannelAttachment, type ChannelCapabilities, type ChannelCompletionDelivery,
   type ChannelConversationListRequest, type ChannelConversationListResult, type ChannelDeliveryResult, type ChannelHost,
@@ -16,7 +16,7 @@ import {
   type JsonObject, type JsonValue, type Memory, type MemoryHost, type MemoryModuleDefinition, type MemoryRecord,
   type MemoryRuntimeCaptureRequest, type MemoryRuntimeCaptureResult, type ModuleDiagnostic,
   type ModuleHost, type ModuleHealth, type ModuleInstance, type ModuleLogger, type Runtime, type RuntimeLiveInputHandler,
-  type ModuleToolBinding, type ModuleToolContribution, type ModuleToolTurnContext,
+  type ModuleToolContribution, type ModuleToolTurnContext,
   type RuntimeModuleDefinition,
   type RuntimeNativeToolDescriptor, type RuntimeNativeToolEffect, type RuntimeSession,
   type RuntimeTurnErrorSnapshot, type RuntimeToolCall,
@@ -35,6 +35,27 @@ import { cloneIntrinsicUint8Array } from "./binary.js";
 import { assertOwnKeys, denseOwnDataArray as boundedOwnDataArray, ownDataRecord as boundedOwnDataRecord, snapshotBoundedValue } from "./bounded-value.js";
 import { AgentAdmissionError, AgentConfigError, AgentModuleError, RunExecutionError, errorMessage } from "./errors.js";
 import { escalateMessageEffort } from "./effort.js";
+import { ConversationTails, durableFingerprint } from "./host-admission.js";
+import {
+  HostDelivery,
+} from "./host-delivery.js";
+import {
+  HostHealthMonitor,
+  normalizeModuleJson,
+  normalizeModuleHealth,
+  redactJson,
+  type HostLifecycleState,
+} from "./host-health.js";
+import {
+  HostLifecycleCalls,
+  TurnSemaphore,
+  abortError,
+  isAbort,
+  throwIfAborted,
+  waitForValueWithAbort,
+  withTimeoutSignal,
+} from "./host-lifecycle.js";
+import { ActiveTurn } from "./host-turn.js";
 import { connectProjectMcpTools, type ConnectedMcpTools, type CoreRuntimeTool } from "./mcp.js";
 import { decodeAuthorityText, readAuthorityFile } from "./authority-read.js";
 import { createCurrentRunFiles, type CurrentRunFiles } from "./current-run-output.js";
@@ -57,14 +78,13 @@ const DEFAULT_INSTRUCTION_BYTES = 1_000_000, DEFAULT_MESSAGE_BYTES = 1_000_000;
 const DEFAULT_MAX_ATTACHMENTS = 10, DEFAULT_ATTACHMENT_BYTES = 25_000_000, DEFAULT_TOTAL_ATTACHMENT_BYTES = 50_000_000;
 const SUBMIT_SNAPSHOT_MAX_ITEMS = 20_000, SUBMIT_SNAPSHOT_MAX_BYTES = 16 * 1024 * 1024, SUBMIT_SNAPSHOT_MAX_DEPTH = 64;
 const CACHED_RESPONSE_MAX_BYTES = 8 * 1024 * 1024, MAX_TRANSCRIPT_ARTIFACT_BYTES = 64 * 1024 * 1024;
-const MODULE_OUTPUT_MAX_BYTES = 1024 * 1024, MODULE_OUTPUT_MAX_ITEMS = 10_000, MODULE_OUTPUT_MAX_DEPTH = 32, MODULE_DIAGNOSTIC_MAX_ITEMS = 100;
+const MODULE_DIAGNOSTIC_MAX_ITEMS = 100;
 const MAX_CONFIGURED_SKILLS = 256, MAX_SKILL_ROOT_ENTRIES = 1_024;
 const ASK_USER_TOOL_NAME = "AskUser", MEMORY_RECALL_TOOL_NAME = "MemoryRecall", PROACTIVE_SUPPRESSION_SENTINEL = "NOTHING_TO_REPORT";
 const MODULE_TOOL_CALL_TIMEOUT_MS = 120_000;
 type SessionDisposition = "retain" | "isolate" | "evict";
 interface RunningModule { readonly loaded: LoadedAgentModule; readonly instance: ModuleInstance }
 type VerbatimEntry = Extract<AgentTranscriptEntry, { readonly kind: "verbatim" }>;
-type DeliveryIntent = Awaited<ReturnType<StateExecutionClient["prepareDelivery"]>> | undefined;
 interface BoundChannelTool { readonly instanceId: string; readonly channel: Channel; readonly name: string; readonly tool: ChannelSendTool }
 interface BoundModuleTool {
   readonly loaded: LoadedAgentModule;
@@ -75,36 +95,9 @@ interface AmbiguousToolAlias {
   readonly alias: string;
   readonly canonicalNames: readonly string[];
 }
-interface ChannelDeliveryOutcome { readonly result: ChannelDeliveryResult; readonly destinationConversationId?: string }
-interface ActiveTurn {
-  readonly id: string;
-  readonly requestId: string;
-  readonly startedAt: string;
-  readonly controller: AbortController;
-  readonly transcriptEntries: AgentTranscriptEntry[];
-  readonly pendingChannelHistory: Set<string>;
-  currentRunFiles: CurrentRunFiles | undefined;
-  runtime?: Runtime;
-  route?: RuntimeRoute;
-  sessionsSupported?: boolean;
-  liveInput: RuntimeLiveInputHandler | undefined;
-  pendingAsk: {
-    readonly interactionId: string;
-    readonly request: AskUserRequest;
-    readonly resolve: (answer: AskUserAnswer) => void;
-    readonly reject: (error: Error) => void;
-  } | undefined;
-  pendingApproval: {
-    readonly interactionId: string;
-    readonly request: ApprovalRequest;
-    readonly resolve: (decision: ApprovalDecision) => void;
-    readonly reject: (error: Error) => void;
-  } | undefined;
-}
 interface TranscriptArtifactDraft { readonly kind: "pending-artifact"; readonly slot: string; readonly name?: string }
 type TranscriptContentDraft = AgentTranscriptContentPart | TranscriptArtifactDraft;
 interface LoadedInstructions { readonly text: string; readonly tools: readonly CoreRuntimeTool[] }
-type HostState = "new" | "starting" | "running" | "draining" | "stopped" | "failed";
 export async function createAgentHost(
   config: string | LoadedAgentConfig,
   options: AgentHostOptions = {},
@@ -159,19 +152,17 @@ class AgentHostImplementation implements AgentHost {
   readonly #conversationMetadata = new Map<string, JsonObject>();
   readonly #activeTurns = new Map<string, ActiveTurn>();
   readonly #triggerClaims = new Map<string, "pending" | "delivery_unknown" | "execution_unknown">();
-  readonly #backgroundFailures: string[] = [];
-  readonly #conversationTails = new Map<string, Promise<void>>();
+  readonly #health: HostHealthMonitor;
+  readonly #conversationTails = new ConversationTails();
   readonly #inflightRequests = new Map<string, {
     readonly fingerprint: DurableFingerprint;
     readonly promise: Promise<AgentResponse>;
   }>();
-  readonly #inflightDeliveries = new Map<string, {
-    readonly fingerprint: DurableFingerprint;
-    readonly promise: Promise<ChannelDeliveryOutcome>;
-  }>();
   readonly #transcripts = new Map<string, CanonicalTranscript>();
   readonly #idleWaiters = new Set<() => void>();
-  readonly #semaphore: Semaphore;
+  readonly #semaphore: TurnSemaphore;
+  readonly #lifecycle: HostLifecycleCalls;
+  readonly #delivery: HostDelivery;
   readonly #redactionValues: readonly string[];
   #mcp: ConnectedMcpTools = { tools: [], async close() {} };
   #memory: Memory | undefined;
@@ -181,7 +172,7 @@ class AgentHostImplementation implements AgentHost {
   #sandbox: Sandbox | undefined;
   #instructions = "";
   #instructionTools: readonly CoreRuntimeTool[] = [];
-  #state: HostState = "new";
+  #state: HostLifecycleState = "new";
   #pending = 0;
   #active = 0;
   #startPromise?: Promise<void>;
@@ -199,11 +190,30 @@ class AgentHostImplementation implements AgentHost {
     if (this.#options.maxPendingTurns < this.#options.maxConcurrentTurns) {
       throw new RangeError("maxPendingTurns must be greater than or equal to maxConcurrentTurns");
     }
-    this.#semaphore = new Semaphore(this.#options.maxConcurrentTurns);
+    this.#semaphore = new TurnSemaphore(this.#options.maxConcurrentTurns);
+    this.#lifecycle = new HostLifecycleCalls(this.#options.lifecycleTimeoutMs, this.#hostAbort.signal);
+    this.#delivery = new HostDelivery({
+      hostSignal: this.#hostAbort.signal,
+      lifecycleTimeoutMs: this.#options.lifecycleTimeoutMs,
+      channels: this.#channelInstances,
+      transcripts: this.#transcripts,
+      conversationTails: this.#conversationTails,
+      normalizeMessage: normalizeOutboundMessage,
+      execution: () => this.#execution,
+      loadConversation: (conversationId, signal) => {
+        this.#loadedConversations.delete(conversationId);
+        return this.#loadConversation(conversationId, signal);
+      },
+      appendLocalVerbatim: (conversationId, entries, updatedAt) => {
+        this.#appendLocalVerbatim(conversationId, entries, updatedAt);
+      },
+      redact: (message) => this.#redact(message),
+    });
     this.#redactionValues = referencedEnvironmentValues(
       [config.raw, config.mcp],
       environmentFor(config),
     );
+    this.#health = new HostHealthMonitor(this.#lifecycle, (message) => this.#redact(message));
     this.#startInfo = {
       agentId: config.raw.agent.id,
       configPath: config.configPath,
@@ -245,6 +255,30 @@ class AgentHostImplementation implements AgentHost {
     if (active?.liveInput === undefined) return "unavailable";
     const handler = active.liveInput;
     const normalizedInput = normalizeLiveInput(input);
+    const turnInput: AgentSubmitInput = {
+      requestId: active.requestId, conversationId, text: "",
+    };
+    const requeue = async (
+      failureCode: string,
+      message: string,
+      cause: unknown,
+    ): Promise<"requeue"> => {
+      const settledAt = new Date().toISOString();
+      await this.#appendInteractionEvidence(
+        turnInput,
+        active,
+        {
+          kind: "live-input", interactionId: normalizedInput.id, phase: "requeued",
+          receivedAt: normalizedInput.receivedAt, settledAt,
+        },
+        normalizedInput.text,
+        AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
+      ).catch(() => undefined);
+      active.controller.abort(turnExecutionError(
+        "uncertain", failureCode, message, turnInput, active, cause,
+      ));
+      return "requeue";
+    };
     const signal = AbortSignal.any([
       this.#hostAbort.signal,
       active.controller.signal,
@@ -266,55 +300,15 @@ class AgentHostImplementation implements AgentHost {
       if (this.#hostAbort.signal.aborted || suppliedSignal?.aborted === true) {
         throw abortError("Runtime live-input acknowledgement was aborted");
       }
-      const settledAt = new Date().toISOString();
-      await this.#appendInteractionEvidence(
-        { requestId: active.requestId, conversationId, text: "" },
-        active,
-        {
-          kind: "live-input",
-          interactionId: normalizedInput.id,
-          phase: "requeued",
-          receivedAt: normalizedInput.receivedAt,
-          settledAt,
-        },
-        normalizedInput.text,
-        AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-      ).catch(() => undefined);
-      active.controller.abort(
-        new RunExecutionError(
-          "uncertain",
-          "live-input-acknowledgement-unknown",
-          "Runtime live-input acknowledgement failed after dispatch",
-          { cause: error, requestId: active.requestId, runId: active.id },
-        ),
+      return requeue(
+        "live-input-acknowledgement-unknown",
+        "Runtime live-input acknowledgement failed after dispatch",
+        error,
       );
-      return "requeue";
     }
-    if (!isRuntimeLiveInputDisposition(result)) {
+    if (result !== "applied" && result !== "requeue" && result !== "discarded") {
       const invalid = new TypeError("Runtime live-input handler returned an invalid disposition");
-      const settledAt = new Date().toISOString();
-      await this.#appendInteractionEvidence(
-        { requestId: active.requestId, conversationId, text: "" },
-        active,
-        {
-          kind: "live-input",
-          interactionId: normalizedInput.id,
-          phase: "requeued",
-          receivedAt: normalizedInput.receivedAt,
-          settledAt,
-        },
-        normalizedInput.text,
-        AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-      ).catch(() => undefined);
-      active.controller.abort(
-        new RunExecutionError(
-          "uncertain",
-          "live-input-disposition-invalid",
-          invalid.message,
-          { cause: invalid, requestId: active.requestId, runId: active.id },
-        ),
-      );
-      return "requeue";
+      return requeue("live-input-disposition-invalid", invalid.message, invalid);
     }
     const settledAt = new Date().toISOString();
     const evidence: AgentInteractionEvidence = {
@@ -330,11 +324,7 @@ class AgentHostImplementation implements AgentHost {
     };
     try {
       await this.#appendInteractionEvidence(
-        {
-          requestId: active.requestId,
-          conversationId,
-          text: "",
-        },
+        turnInput,
         active,
         evidence,
         normalizedInput.text,
@@ -352,39 +342,14 @@ class AgentHostImplementation implements AgentHost {
   }
   async answerAsk(conversationId: string, answer: AgentAskAnswer): Promise<AgentAskAnswerStatus> {
     const active = this.#activeTurns.get(conversationId);
-    if (active === undefined || active.pendingAsk === undefined) return "expired";
-    const pending = active.pendingAsk;
-    if (pending.interactionId !== answer.interactionId) return "mismatch";
-    let parsed: AskUserAnswer;
-    try {
-      parsed = parseAskUserAnswer(
-        { ...answer, answeredAt: new Date().toISOString() },
-        pending.request,
-      );
-    } catch {
-      return "mismatch";
-    }
-    active.pendingAsk = undefined;
-    pending.resolve(parsed);
-    return "accepted";
+    return active === undefined ? "expired" : active.answerAsk(answer);
   }
   async answerApproval(
     conversationId: string,
     decision: AgentApprovalAnswer,
   ): Promise<AgentApprovalAnswerStatus> {
     const active = this.#activeTurns.get(conversationId);
-    if (active === undefined || active.pendingApproval === undefined) return "expired";
-    const pending = active.pendingApproval;
-    if (pending.interactionId !== decision.interactionId) return "mismatch";
-    let parsed: ApprovalDecision;
-    try {
-      parsed = parseApprovalDecision(decision, pending.request);
-    } catch {
-      return "mismatch";
-    }
-    active.pendingApproval = undefined;
-    pending.resolve(parsed);
-    return "accepted";
+    return active === undefined ? "expired" : active.answerApproval(decision);
   }
   async conversations(): Promise<readonly AgentConversationSummary[]> {
     if (this.#execution !== undefined) {
@@ -455,183 +420,9 @@ class AgentHostImplementation implements AgentHost {
     };
   }
   async deliver(channelInstanceId: string, message: ChannelOutboundMessage): Promise<ChannelDeliveryResult> {
-    return (await this.#deliver(channelInstanceId, message, this.#hostAbort.signal)).result;
-  }
-  async #deliver(
-    channelInstanceId: string, message: ChannelOutboundMessage, signal: AbortSignal,
-  ): Promise<ChannelDeliveryOutcome> {
-    const channel = this.#channelInstances.get(channelInstanceId);
-    const normalized = normalizeOutboundMessage(message,
-      channel?.resolveDefaultDeliveryConversationId?.bind(channel));
-    assertBoundedText(deliveryHistoryText(normalized), "channel delivery history text", DEFAULT_MESSAGE_BYTES);
-    if (channel?.deliver === undefined || channel.resolveDeliveryHistory === undefined) {
-      return { result: deliveryFailure(normalized.idempotencyKey, "channel_delivery_unsupported",
-        `Channel ${channelInstanceId} does not support proactive delivery`) };
-    }
-    const fingerprint = deliveryFingerprint(channelInstanceId, normalized);
-    const existing = this.#inflightDeliveries.get(normalized.idempotencyKey);
-    if (existing !== undefined) {
-      if (existing.fingerprint === fingerprint) return existing.promise;
-      return { result: deliveryFailure(normalized.idempotencyKey,
-        "channel_delivery_idempotency_conflict",
-        "The idempotency key is already active for a different delivery") };
-    }
-    const delivery = this.#deliverOnce(channelInstanceId, channel, normalized, fingerprint,
-      AbortSignal.any([this.#hostAbort.signal, signal]));
-    const tracked = delivery.finally(() => {
-      const current = this.#inflightDeliveries.get(normalized.idempotencyKey);
-      if (current?.promise === tracked) this.#inflightDeliveries.delete(normalized.idempotencyKey);
-    });
-    this.#inflightDeliveries.set(normalized.idempotencyKey, { fingerprint, promise: tracked });
-    return tracked;
-  }
-  async #deliverOnce(
-    channelInstanceId: string, channel: Channel, message: ChannelOutboundMessage,
-    fingerprint: DurableFingerprint, signal: AbortSignal,
-  ): Promise<ChannelDeliveryOutcome> {
-    const intent = this.#execution === undefined
-      ? undefined
-      : await this.#execution.prepareDelivery({
-          idempotencyKey: message.idempotencyKey, fingerprint, channelInstanceId, signal,
-        });
-    if (intent?.status === "duplicate") {
-      const result: ChannelDeliveryResult = {
-        status: "duplicate", idempotencyKey: message.idempotencyKey,
-        ...(intent.messageId === undefined ? {} : { messageId: intent.messageId }),
-      };
-      return this.#confirmDeliveryHistory(channelInstanceId, channel, message, fingerprint, result, intent);
-    }
-    if (intent?.status === "conflict") {
-      return { result: deliveryFailure(message.idempotencyKey,
-        "channel_delivery_idempotency_conflict",
-        "The idempotency key was already used for a different delivery") };
-    }
-    if (intent?.status === "join" || intent?.status === "unknown") {
-      return { result: deliveryUnknown(
-        message.idempotencyKey,
-        intent.status === "join"
-          ? "channel_delivery_in_progress"
-          : intent.code ?? "channel_delivery_unknown",
-        intent.status === "join"
-          ? "A matching delivery is already in progress"
-          : "The prior delivery outcome is unknown and will not be replayed",
-      ) };
-    }
-    if (signal.aborted) {
-      await this.#settlePreparedDelivery(intent, fingerprint, message, {
-        status: "failed", code: "channel-delivery-cancelled-before-send",
-      }, true);
-      return { result: deliveryFailure(message.idempotencyKey, "channel_delivery_cancelled",
-        "The channel delivery was cancelled before sending") };
-    }
-    let rawResult: unknown;
-    try {
-      rawResult = await channel.deliver!(message, signal);
-    } catch (error) {
-      await this.#settlePreparedDelivery(intent, fingerprint, message, {
-        status: "unknown", code: "channel-delivery-threw",
-      }, true);
-      return { result: deliveryUnknown(message.idempotencyKey, "channel_delivery_unknown",
-        `The channel delivery outcome is unknown: ${this.#redact(errorMessage(error))}`) };
-    }
-    let result: ChannelDeliveryResult;
-    try {
-      result = normalizeChannelDeliveryResult(rawResult, message.idempotencyKey);
-    } catch (error) {
-      const mismatch = error instanceof TypeError
-        && error.message === "channel delivery result idempotency key is invalid";
-      await this.#settlePreparedDelivery(intent, fingerprint, message, {
-        status: "unknown",
-        code: mismatch ? "channel-delivery-idempotency-mismatch" : "channel-delivery-malformed-result",
-      }, true);
-      return { result: deliveryUnknown(message.idempotencyKey,
-        mismatch ? "channel_delivery_idempotency_mismatch" : "channel_delivery_unknown",
-        `The channel delivery outcome is unknown: ${this.#redact(errorMessage(error))}`) };
-    }
-    if (result.status === "delivered" || result.status === "duplicate") {
-      return this.#confirmDeliveryHistory(channelInstanceId, channel, message, fingerprint, result, intent);
-    }
-    if (intent?.status !== "send") return { result: immutableClone(result) };
-    try {
-      const settled = await this.#settlePreparedDelivery(intent, fingerprint, message,
-        { status: result.status, code: result.diagnostic?.code ?? `channel-delivery-${result.status}` });
-      const confirmed = result.status === "failed"
-        ? settled?.status === "join"
-        : settled?.status === "unknown";
-      if (!confirmed) throw new Error(`delivery settlement returned ${settled?.status ?? "nothing"}`);
-    } catch (error) {
-      return { result: deliveryUnknown(message.idempotencyKey, "channel_delivery_settlement_unknown",
-        `The channel response could not be durably settled: ${this.#redact(errorMessage(error))}`) };
-    }
-    return { result: immutableClone(result) };
-  }
-  async #confirmDeliveryHistory(
-    channelInstanceId: string, channel: Channel, message: ChannelOutboundMessage,
-    fingerprint: DurableFingerprint, result: ChannelDeliveryResult, intent: DeliveryIntent,
-  ): Promise<ChannelDeliveryOutcome> {
-    const settlementSignal = AbortSignal.timeout(this.#options.lifecycleTimeoutMs);
-    try {
-      const resolution = normalizeDeliveryHistoryResolution(channel.resolveDeliveryHistory!(message, result),
-        `${channelInstanceId} delivery history resolution`);
-      const destination = resolution.conversationId;
-      const text = deliveryHistoryText(message);
-      const entry = Object.freeze({
-        kind: "verbatim",
-        entryId: `delivery:${createHash("sha256").update(`${channelInstanceId}\0${message.idempotencyKey}`).digest("hex")}`,
-        runId: message.idempotencyKey, requestId: message.idempotencyKey,
-        conversationId: destination, role: "assistant", text,
-      } as const);
-      const entryFingerprint = durableFingerprint({
-        schemaVersion: 1, kind: "mono-agent.delivery-history-fingerprint",
-        channelInstanceId, deliveryFingerprint: fingerprint, messageId: result.messageId ?? null,
-        destination, entry,
-      });
-      if (this.#execution !== undefined) {
-        if (intent?.status === "send") {
-          const settled = await this.#execution.retryDeliveryWithHistory({
-            idempotencyKey: message.idempotencyKey, fingerprint,
-            attempt: intent.attempt, token: intent.token,
-            ...(result.messageId === undefined ? {} : { messageId: result.messageId }),
-            conversationId: destination, entry, entryFingerprint, signal: settlementSignal,
-          });
-          if (settled.status === "conflict" || settled.conversationId !== destination
-            || settled.entryId !== entry.entryId)
-            throw new Error("channel delivery history identity conflict");
-        }
-        this.#loadedConversations.delete(destination);
-        const transcript = await this.#loadConversation(destination, settlementSignal);
-        const stored = transcript?.entries.find(
-          (candidate) => candidate.entryId === entry.entryId);
-        if (stored === undefined || JSON.stringify({ ...stored, recordedAt: undefined })
-          !== JSON.stringify(entry)) throw new Error("channel delivery history identity conflict");
-      } else {
-        const localEntry: AgentTranscriptEntry = { ...entry, recordedAt: new Date().toISOString() };
-        const current = this.#transcripts.get(destination);
-        const prior = current?.entries.find((candidate) => candidate.entryId === entry.entryId);
-        if (prior !== undefined && JSON.stringify({ ...prior, recordedAt: undefined })
-          !== JSON.stringify(entry)) throw new Error("channel delivery history identity conflict");
-        if (prior === undefined) this.#appendLocalVerbatim(destination, [localEntry], localEntry.recordedAt);
-      }
-      return { result: immutableClone(result), destinationConversationId: destination };
-    } catch (error) {
-      await this.#settlePreparedDelivery(intent, fingerprint, message,
-        { status: "unknown", code: "channel-delivery-history-unknown" }, true);
-      return { result: deliveryUnknown(message.idempotencyKey, "channel_delivery_history_unknown",
-        `The delivery destination history could not be confirmed: ${this.#redact(errorMessage(error))}`) };
-    }
-  }
-  async #settlePreparedDelivery(
-    intent: DeliveryIntent, fingerprint: DurableFingerprint, message: ChannelOutboundMessage,
-    settlement: Readonly<{ status: "delivered" | "failed" | "unknown";
-      messageId?: string; code?: string }>, bestEffort = false,
-  ): Promise<Awaited<ReturnType<StateExecutionClient["settleDelivery"]>> | undefined> {
-    if (intent?.status !== "send") return undefined;
-    const pending = this.#execution!.settleDelivery({
-      idempotencyKey: message.idempotencyKey, fingerprint,
-      attempt: intent.attempt, token: intent.token, ...settlement,
-      signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-    });
-    return bestEffort ? pending.catch(() => undefined) : pending;
+    return (await this.#delivery.deliver(
+      channelInstanceId, message, this.#hostAbort.signal,
+    )).result;
   }
   async runModuleCommand(moduleInstanceId: string, commandName: string, input?: unknown): Promise<AgentModuleCommandResult> {
     const running = this.#running.find((candidate) => candidate.loaded.instanceId === moduleInstanceId);
@@ -643,9 +434,9 @@ class AgentHostImplementation implements AgentHost {
     if (loaded === undefined) throw new Error(`Module ${moduleInstanceId} is not selected`);
     let instance: ModuleInstance | undefined;
     try {
-      instance = await withTimeoutSignal(
+      instance = await this.#lifecycle.run(
+        `${loaded.instanceId} command create`,
         (signal) => this.#createInstance(loaded, signal),
-        this.#options.lifecycleTimeoutMs, this.#hostAbort.signal, `${loaded.instanceId} command create`,
       );
       if (instance === undefined) throw new Error(`${loaded.instanceId} command create returned undefined`);
     } catch (error) { throw this.#moduleCommandError(error, loaded, commandName, "create"); }
@@ -656,9 +447,9 @@ class AgentHostImplementation implements AgentHost {
     let stopFailure: unknown; let stopFailed = false;
     if (instance.stop !== undefined) {
       try {
-        await withTimeoutSignal(
+        await this.#lifecycle.cleanup(
+          `${loaded.instanceId} command stop`,
           (signal) => instance.stop?.({ signal, reason: "shutdown" }),
-          this.#options.lifecycleTimeoutMs, undefined, `${loaded.instanceId} command stop`,
         );
       } catch (error) { stopFailure = error; stopFailed = true; }
     }
@@ -680,9 +471,9 @@ class AgentHostImplementation implements AgentHost {
   ): Promise<AgentModuleCommandResult> {
     const command = instance.commands?.find((candidate) => candidate.name === commandName);
     if (command === undefined) throw new Error(`Module ${loaded.instanceId} does not expose command ${commandName}`);
-    const value = await withTimeoutSignal(
+    const value = await this.#lifecycle.run(
+      `${loaded.instanceId} command ${commandName}`,
       (signal) => command.run(input, { signal, logger: NULL_LOGGER }),
-      this.#options.lifecycleTimeoutMs, this.#hostAbort.signal, `${loaded.instanceId} command ${commandName}`,
     );
     return {
       module: loaded.instanceId,
@@ -703,11 +494,9 @@ class AgentHostImplementation implements AgentHost {
       .sort((left, right) => left.instanceId.localeCompare(right.instanceId))) {
       let instance: ModuleInstance;
       try {
-        const created = await withTimeoutSignal(
-          (signal) => this.#createInstance(loaded, signal),
-          this.#options.lifecycleTimeoutMs,
-          this.#hostAbort.signal,
+        const created = await this.#lifecycle.run(
           `${loaded.instanceId} diagnostics create`,
+          (signal) => this.#createInstance(loaded, signal),
         );
         if (created === undefined) throw new Error(`${loaded.instanceId} diagnostics create returned undefined`);
         instance = created;
@@ -718,11 +507,9 @@ class AgentHostImplementation implements AgentHost {
       let result = await this.#diagnoseModule(loaded, instance, verbose);
       if (instance.stop !== undefined) {
         try {
-          await withTimeoutSignal(
-            (signal) => instance.stop?.({ signal, reason: "shutdown" }),
-            this.#options.lifecycleTimeoutMs,
-            undefined,
+          await this.#lifecycle.cleanup(
             `${loaded.instanceId} diagnostics stop`,
+            (signal) => instance.stop?.({ signal, reason: "shutdown" }),
           );
         } catch (error) {
           result = {
@@ -743,11 +530,9 @@ class AgentHostImplementation implements AgentHost {
       try {
         const execution = (instance as StateStore).execution;
         if (execution === undefined) throw new Error(`${loaded.instanceId} does not expose the required state execution capability`);
-        await withTimeoutSignal(
-          (signal) => new StateExecutionClient(execution).assertCompatible(signal),
-          this.#options.lifecycleTimeoutMs,
-          this.#hostAbort.signal,
+        await this.#lifecycle.run(
           `${loaded.instanceId} state execution protocol`,
+          (signal) => new StateExecutionClient(execution).assertCompatible(signal),
         );
       } catch (error) {
         return this.#diagnosticFailure(loaded, "state_execution_protocol_incompatible", error);
@@ -756,11 +541,9 @@ class AgentHostImplementation implements AgentHost {
     if (instance.diagnostics === undefined) {
       if (instance.health !== undefined && ["memory", "state", "sandbox", "exporter"].includes(loaded.slot)) {
         try {
-          const raw = await withTimeoutSignal(
-            (signal) => instance.health?.({ signal }),
-            this.#options.lifecycleTimeoutMs,
-            this.#hostAbort.signal,
+          const raw = await this.#lifecycle.run(
             `${loaded.instanceId} diagnostic health`,
+            (signal) => instance.health?.({ signal }),
           );
           const health = normalizeModuleHealth(
             raw,
@@ -781,11 +564,9 @@ class AgentHostImplementation implements AgentHost {
       return this.#diagnosticResult(loaded, []);
     }
     try {
-      const raw = await withTimeoutSignal(
-        (signal) => instance.diagnostics?.({ signal, verbose }),
-        this.#options.lifecycleTimeoutMs,
-        this.#hostAbort.signal,
+      const raw = await this.#lifecycle.run(
         `${loaded.instanceId} diagnostics`,
+        (signal) => instance.diagnostics?.({ signal, verbose }),
       );
       const values = boundedOwnDataArray(
         raw,
@@ -850,61 +631,18 @@ class AgentHostImplementation implements AgentHost {
     this.#pending += 1;
   }
   async health(): Promise<AgentHealth> {
-    if (this.#state === "stopped" || this.#state === "failed") {
-      return { status: "stopped", accepting: false, pending: this.#pending, active: this.#active, modules: [] };
-    }
-    const modules = [];
-    let degraded = this.#backgroundFailures.length > 0;
-    for (const running of this.#running) {
-      if (running.instance.health === undefined) {
-        modules.push({ kind: running.loaded.slot, instanceId: running.loaded.instanceId, status: "unknown" });
-        continue;
-      }
-      try {
-        const rawHealth = await withTimeoutSignal(
-          (signal) => running.instance.health?.({ signal }),
-          this.#options.lifecycleTimeoutMs,
-          this.#hostAbort.signal,
-          `${running.loaded.instanceId} health`,
-        );
-        const health = normalizeModuleHealth(
-          rawHealth,
-          `${running.loaded.instanceId} health`,
-          (text) => this.#redact(text),
-        );
-        const status = health.status;
-        if (status !== "healthy") degraded = true;
-        modules.push({
-          kind: running.loaded.slot,
-          instanceId: running.loaded.instanceId,
-          status,
-          detail: health as unknown as JsonObject,
-        });
-      } catch (error) {
-        degraded = true;
-        modules.push({
-          kind: running.loaded.slot,
-          instanceId: running.loaded.instanceId,
-          status: "unhealthy",
-          detail: { message: this.#redact(errorMessage(error)) },
-        });
-      }
-    }
-    return {
-      status: this.#state === "draining" ? "stopping" : degraded ? "degraded" : "healthy",
-      accepting: this.#state === "running",
+    return this.#health.inspect({
+      state: this.#state,
       pending: this.#pending,
       active: this.#active,
-      modules,
-    };
+      running: this.#running,
+    });
   }
   drain(): Promise<void> {
-    this.#drainPromise ??= this.#drainInternal();
-    return this.#drainPromise;
+    return this.#drainPromise ??= this.#drainInternal();
   }
   stop(): Promise<void> {
-    this.#stopPromise ??= this.#stopInternal();
-    return this.#stopPromise;
+    return this.#stopPromise ??= this.#stopInternal();
   }
   async #startInternal(): Promise<void> {
     this.#state = "starting";
@@ -934,7 +672,8 @@ class AgentHostImplementation implements AgentHost {
         channels: [...this.#channelInstances.entries()].map(([instanceId, channel]) => ({
           instanceId,
           kind: "channel" as const,
-          ...readEndpoint(channel),
+          ...(isRecord(channel) && typeof channel.endpoint === "string"
+            ? { endpoint: channel.endpoint } : {}),
         })),
       };
       await this.#startKind("trigger");
@@ -966,11 +705,9 @@ class AgentHostImplementation implements AgentHost {
       this.#hostAbort.abort(redactedError);
       await this.#stopRunning("startup-failed");
       try {
-        await withTimeoutSignal(
-          () => this.#mcp.close(),
-          this.#options.lifecycleTimeoutMs,
-          undefined,
+        await this.#lifecycle.cleanup(
           "MCP close after startup failure",
+          () => this.#mcp.close(),
         );
       } catch {
         // Preserve the original startup failure after bounded best-effort cleanup.
@@ -983,11 +720,9 @@ class AgentHostImplementation implements AgentHost {
       .filter((module) => module.slot === kind)
       .sort((left, right) => left.instanceId.localeCompare(right.instanceId));
     for (const module of selected) {
-      const instance = await withTimeoutSignal(
-        (signal) => this.#createInstance(module, signal),
-        this.#options.lifecycleTimeoutMs,
-        this.#hostAbort.signal,
+      const instance = await this.#lifecycle.run(
         `${module.instanceId} create`,
+        (signal) => this.#createInstance(module, signal),
       );
       if (instance === undefined) throw new Error(`${module.packageName} create() returned undefined`);
       this.#running.push({ loaded: module, instance });
@@ -1021,20 +756,16 @@ class AgentHostImplementation implements AgentHost {
           throw new Error(`${module.instanceId} does not expose the required state execution capability`);
         }
         const execution = new StateExecutionClient(this.#stateStore.execution);
-        await withTimeoutSignal(
-          (signal) => execution.assertCompatible(signal),
-          this.#options.lifecycleTimeoutMs,
-          this.#hostAbort.signal,
+        await this.#lifecycle.run(
           `${module.instanceId} state execution protocol`,
+          (signal) => execution.assertCompatible(signal),
         );
         this.#execution = execution;
       }
       if (instance.start !== undefined) {
-        await withTimeoutSignal(
-          (signal) => instance.start?.({ signal }),
-          this.#options.lifecycleTimeoutMs,
-          this.#hostAbort.signal,
+        await this.#lifecycle.run(
           `${module.instanceId} start`,
+          (signal) => instance.start?.({ signal }),
         );
       }
       const contributions = this.#createdModuleTools.get(instance as object) ?? [];
@@ -1075,11 +806,9 @@ class AgentHostImplementation implements AgentHost {
       }
     }
     if (Object.keys(details).length === 0) return;
-    await withTimeoutSignal(
-      (signal) => publish.call(this.#stateStore, { status: "ready", details: details as JsonObject, signal }),
-      this.#options.lifecycleTimeoutMs,
-      this.#hostAbort.signal,
+    await this.#lifecycle.run(
       "channel discovery publication",
+      (signal) => publish.call(this.#stateStore, { status: "ready", details: details as JsonObject, signal }),
     );
   }
   async #createInstance(module: LoadedAgentModule, signal: AbortSignal): Promise<ModuleInstance> {
@@ -1108,40 +837,24 @@ class AgentHostImplementation implements AgentHost {
     }
     try {
       if (module.slot === "runtime") {
-        const runtime = requireInstanceRecord(instance, "runtime instance");
-        const descriptor = Object.getOwnPropertyDescriptor(runtime, "capabilities");
-        if (descriptor === undefined || !("value" in descriptor)) {
-          throw new TypeError("runtime instance capabilities must be an own data property");
-        }
         this.#createdRuntimeCapabilities.set(
-          runtime,
-          Object.freeze(normalizeRuntimeCapabilities(
-            descriptor.value,
-            `${module.instanceId} runtime capabilities`,
-          )),
+          instance as Runtime,
+          snapshotInstanceCapabilities(
+            instance, "runtime", module.instanceId, normalizeRuntimeCapabilities,
+          ),
         );
       }
       if (module.slot === "channel") {
-        const channel = requireInstanceRecord(instance, "channel instance");
-        const descriptor = Object.getOwnPropertyDescriptor(channel, "capabilities");
-        if (descriptor === undefined) {
-          throw new TypeError("channel instance capabilities must be an own data property");
-        }
-        if (!("value" in descriptor)) {
-          throw new TypeError("channel instance capabilities must be an own data property");
-        }
         this.#createdChannelCapabilities.set(
-          channel,
-          Object.freeze(normalizeChannelCapabilities(
-            descriptor.value,
-            `${module.instanceId} channel capabilities`,
-          )),
+          instance as Channel,
+          snapshotInstanceCapabilities(
+            instance, "channel", module.instanceId, normalizeChannelCapabilities,
+          ),
         );
       }
-      assertCreatedInstanceCompliance(module.slot, instance);
       this.#createdModuleTools.set(
         instance as object,
-        snapshotModuleToolContributions(instance, module.instanceId),
+        createdModuleToolSnapshot(module.slot, instance, module.instanceId),
       );
       if (module.slot === "channel") this.#createdChannelTools.set(
         instance as object, snapshotChannelSendTools(instance, module.instanceId));
@@ -1151,7 +864,7 @@ class AgentHostImplementation implements AgentHost {
         { packageName: module.packageName, configPath: module.configPath, cause: error },
       );
     }
-    return instance;
+    return instance as ModuleInstance;
   }
   #moduleHost(module: LoadedAgentModule): ModuleHost | ChannelHost | MemoryHost | TriggerHost {
     const capabilityValues = new Map<string, unknown>();
@@ -1408,7 +1121,7 @@ class AgentHostImplementation implements AgentHost {
       );
       if (response.status === "completed" && response.text.length > 0
         && completionDelivery !== undefined) {
-        const outcome = await this.#deliver(completionDelivery.channel, {
+        const outcome = await this.#delivery.deliver(completionDelivery.channel, {
           conversationId: completionDelivery.destination ?? "",
           text: response.text,
           idempotencyKey: `channel-completion:${createHash("sha256")
@@ -1463,10 +1176,12 @@ class AgentHostImplementation implements AgentHost {
         assertOwnKeys(prepared, ["conversationId", "text", "attachments", "replyToMessageId", "metadata"],
           `${binding.name} prepared delivery`);
         active.pendingChannelHistory.add(idempotencyKey);
-        let outcome: ChannelDeliveryOutcome;
+        let outcome;
         try {
-          outcome = await this.#deliver(binding.instanceId,
-            { ...prepared, idempotencyKey } as unknown as ChannelOutboundMessage, callSignal);
+          outcome = await this.#delivery.deliver(binding.instanceId,
+            { ...prepared, idempotencyKey } as unknown as ChannelOutboundMessage,
+            callSignal,
+            input.conversationId);
         } catch (error) {
           active.pendingChannelHistory.delete(idempotencyKey);
           throw error;
@@ -1504,198 +1219,135 @@ class AgentHostImplementation implements AgentHost {
     } catch (error) {
       return Promise.reject(error);
     }
-    const running = this.#submitWithEvents(
-      input,
-      fingerprint,
-      emit,
-      emitAsk,
-      emitApproval,
-      observeAdmission,
-    );
+    const running = (async (): Promise<AgentResponse> => {
+      try {
+        const admissionSignal = AbortSignal.any([
+          this.#hostAbort.signal,
+          ...(input.signal === undefined ? [] : [input.signal]),
+        ]);
+        return await this.#conversationTails.run(
+          input.conversationId,
+          admissionSignal,
+          async () => {
+            const releaseSlot = await this.#semaphore.acquire(admissionSignal);
+            try {
+              const admission = await this.#admitRun(input, fingerprint, admissionSignal);
+              observeAdmission?.(admission.replayed);
+              if (admission.response !== undefined) return admission.response;
+              const controller = new AbortController();
+              const active = new ActiveTurn(
+                admission.runId, input.requestId!, new Date().toISOString(), controller,
+              );
+              const signal = AbortSignal.any([admissionSignal, controller.signal]);
+              this.#activeTurns.set(input.conversationId, active);
+              this.#active += 1;
+              try {
+                try {
+                  if ((this.config.raw.context?.mcp?.requestContextServers?.length ?? 0) > 0) {
+                    active.currentRunFiles = await createCurrentRunFiles({
+                      projectRoot: this.config.projectRoot, runId: active.id,
+                      conversationId: input.conversationId, attachments: input.attachments ?? [], signal,
+                    });
+                  }
+                  return await this.#runTurn(input, active, signal, emit, emitAsk, emitApproval);
+                } catch (error) {
+                  if (this.#hostAbort.signal.aborted) {
+                    throw abortError("Agent host stopped before the run could settle");
+                  }
+                  const settlementSignal = AbortSignal.timeout(this.#options.lifecycleTimeoutMs);
+                  const activeAbortReason = active.controller.signal.reason;
+                  const classified = activeAbortReason instanceof RunExecutionError
+                    ? activeAbortReason
+                    : error instanceof RunExecutionError
+                      ? error
+                      : undefined;
+                  if (classified !== undefined) {
+                    await this.#persistRunSettlement({
+                      input,
+                      runId: active.id,
+                      status: classified.status,
+                      failureCode: classified.failureCode,
+                      signal: settlementSignal,
+                    }).catch(() => undefined);
+                    throw classified;
+                  }
+                  if (signal.aborted || isAbort(error)) {
+                    const route = active.route ?? routeCandidates(this.config, input)[0]!;
+                    try {
+                      await this.#settle(
+                        input, route, { status: "cancelled" },
+                        active.sessionsSupported ?? true, active, settlementSignal,
+                      );
+                    } catch (settlementError) {
+                      const uncertain = turnExecutionError(
+                        "uncertain",
+                        "cancellation-settlement-failed",
+                        "Cancellation occurred but durable settlement could not be proven",
+                        input, active, this.#safePublicCause(settlementError),
+                      );
+                      await this.#persistRunSettlement({
+                        input,
+                        runId: active.id,
+                        status: "uncertain",
+                        failureCode: uncertain.failureCode,
+                        signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
+                      }).catch(() => undefined);
+                      throw uncertain;
+                    }
+                    throw abortError();
+                  }
+                  const safeCause = this.#safePublicCause(error);
+                  const failure = turnExecutionError(
+                    "failed", "core-execution-failed", safeCause.message, input, active, safeCause,
+                  );
+                  try {
+                    await this.#persistRunSettlement({
+                      input,
+                      runId: active.id,
+                      status: failure.status,
+                      failureCode: failure.failureCode,
+                      signal: settlementSignal,
+                    });
+                  } catch (settlementError) {
+                    throw turnExecutionError(
+                      "uncertain",
+                      "failure-settlement-failed",
+                      "Run failure occurred but durable classification could not be proven",
+                      input, active, this.#safePublicCause(settlementError),
+                    );
+                  }
+                  throw failure;
+                }
+              } finally {
+                try {
+                  await active.currentRunFiles?.cleanup();
+                } catch (error) {
+                  this.#health.record(`current-run cleanup: ${errorMessage(error)}`);
+                }
+                if (this.#activeTurns.get(input.conversationId) === active) {
+                  this.#activeTurns.delete(input.conversationId);
+                }
+                this.#active -= 1;
+              }
+            } finally {
+              releaseSlot();
+            }
+          },
+        );
+      } finally {
+        this.#pending -= 1;
+        if (this.#pending === 0) {
+          for (const resolveIdle of this.#idleWaiters) resolveIdle();
+          this.#idleWaiters.clear();
+        }
+      }
+    })();
     const tracked = running.finally(() => {
       const current = this.#inflightRequests.get(input.requestId!);
       if (current?.promise === tracked) this.#inflightRequests.delete(input.requestId!);
     });
     this.#inflightRequests.set(input.requestId!, { fingerprint, promise: tracked });
     return tracked;
-  }
-  async #submitWithEvents(
-    input: AgentSubmitInput,
-    fingerprint: DurableFingerprint,
-    emit: (event: RuntimeTurnEvent) => Promise<void>,
-    emitAsk?: (request: AskUserRequest) => Promise<void>,
-    emitApproval?: (request: ApprovalRequest) => Promise<void>,
-    observeAdmission?: (replayed: boolean) => void,
-  ): Promise<AgentResponse> {
-    let releaseConversation: (() => void) | undefined;
-    let current: Promise<void> | undefined;
-    try {
-      const admissionSignal = AbortSignal.any([
-        this.#hostAbort.signal,
-        ...(input.signal === undefined ? [] : [input.signal]),
-      ]);
-      const previous = this.#conversationTails.get(input.conversationId) ?? Promise.resolve();
-      const gate = new Promise<void>((resolveGate) => {
-        releaseConversation = resolveGate;
-      });
-      current = previous.catch(() => {}).then(() => gate);
-      this.#conversationTails.set(input.conversationId, current);
-      await waitWithAbort(previous.catch(() => {}), admissionSignal);
-      const releaseSlot = await this.#semaphore.acquire(admissionSignal);
-      try {
-        const admission = await this.#admitRun(input, fingerprint, admissionSignal);
-        observeAdmission?.(admission.replayed);
-        if (admission.response !== undefined) return admission.response;
-        const controller = new AbortController();
-        const active: ActiveTurn = {
-          id: admission.runId,
-          requestId: input.requestId!,
-          startedAt: new Date().toISOString(),
-          controller,
-          transcriptEntries: [],
-          pendingChannelHistory: new Set(),
-          currentRunFiles: undefined,
-          liveInput: undefined,
-          pendingAsk: undefined,
-          pendingApproval: undefined,
-        };
-        const signal = AbortSignal.any([admissionSignal, controller.signal]);
-        this.#activeTurns.set(input.conversationId, active);
-        this.#active += 1;
-        try {
-          try {
-            if ((this.config.raw.context?.mcp?.requestContextServers?.length ?? 0) > 0) {
-              active.currentRunFiles = await createCurrentRunFiles({
-                projectRoot: this.config.projectRoot, runId: active.id,
-                conversationId: input.conversationId, attachments: input.attachments ?? [], signal,
-              });
-            }
-            return await this.#runTurn(input, active, signal, emit, emitAsk, emitApproval);
-          } catch (error) {
-            if (this.#hostAbort.signal.aborted) {
-              throw abortError("Agent host stopped before the run could settle");
-            }
-            const settlementSignal = AbortSignal.timeout(this.#options.lifecycleTimeoutMs);
-            const activeAbortReason = active.controller.signal.reason;
-            const classified = activeAbortReason instanceof RunExecutionError
-              ? activeAbortReason
-              : error instanceof RunExecutionError
-                ? error
-                : undefined;
-            if (classified !== undefined) {
-              await this.#persistRunSettlement({
-                input,
-                runId: active.id,
-                status: classified.status,
-                failureCode: classified.failureCode,
-                signal: settlementSignal,
-              }).catch(() => undefined);
-              throw classified;
-            }
-            if (signal.aborted || isAbort(error)) {
-              const route = active.route ?? routeCandidates(this.config, input)[0]!;
-              try {
-                await this.#settleCancelled(input, route, active, settlementSignal);
-              } catch (settlementError) {
-                const uncertain = new RunExecutionError(
-                  "uncertain",
-                  "cancellation-settlement-failed",
-                  "Cancellation occurred but durable settlement could not be proven",
-                  {
-                    cause: this.#safePublicCause(settlementError),
-                    requestId: input.requestId!,
-                    runId: active.id,
-                  },
-                );
-                await this.#persistRunSettlement({
-                  input,
-                  runId: active.id,
-                  status: "uncertain",
-                  failureCode: uncertain.failureCode,
-                  signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-                }).catch(() => undefined);
-                throw uncertain;
-              }
-              throw abortError();
-            }
-            const safeCause = this.#safePublicCause(error);
-            const failure = new RunExecutionError(
-                "failed",
-                "core-execution-failed",
-                safeCause.message,
-                {
-                  cause: safeCause,
-                  requestId: input.requestId!,
-                  runId: active.id,
-                },
-              );
-            try {
-              await this.#persistRunSettlement({
-                input,
-                runId: active.id,
-                status: failure.status,
-                failureCode: failure.failureCode,
-                signal: settlementSignal,
-              });
-            } catch (settlementError) {
-              throw new RunExecutionError(
-                "uncertain",
-                "failure-settlement-failed",
-                "Run failure occurred but durable classification could not be proven",
-                {
-                  cause: this.#safePublicCause(settlementError),
-                  requestId: input.requestId!,
-                  runId: active.id,
-                },
-              );
-            }
-            throw failure;
-          }
-        } finally {
-          try {
-            await active.currentRunFiles?.cleanup();
-          } catch (error) {
-            this.#recordBackgroundFailure(`current-run cleanup: ${errorMessage(error)}`);
-          }
-          if (this.#activeTurns.get(input.conversationId) === active) {
-            this.#activeTurns.delete(input.conversationId);
-          }
-          this.#active -= 1;
-        }
-      } finally {
-        releaseSlot();
-      }
-    } finally {
-      releaseConversation?.();
-      if (
-        current !== undefined
-        && this.#conversationTails.get(input.conversationId) === current
-      ) {
-        this.#conversationTails.delete(input.conversationId);
-      }
-      this.#pending -= 1;
-      if (this.#pending === 0) {
-        for (const resolveIdle of this.#idleWaiters) resolveIdle();
-        this.#idleWaiters.clear();
-      }
-    }
-  }
-  async #nextTranscript(
-    conversationId: string,
-    entries: readonly AgentTranscriptEntry[],
-    signal: AbortSignal,
-  ): Promise<CanonicalTranscript> {
-    const current = this.#transcripts.get(conversationId);
-    if (this.#execution !== undefined) {
-      return this.#execution.appendTranscript(current, conversationId, entries, signal);
-    }
-    return Object.freeze({
-      schemaVersion: 1,
-      kind: "mono-agent.canonical-transcript",
-      conversationId,
-      revision: (current?.revision ?? 0) + 1,
-      entries: Object.freeze([...(current?.entries ?? []), ...entries]),
-    });
   }
   async #persistRunSettlement(options: {
     readonly input: AgentSubmitInput;
@@ -1747,20 +1399,8 @@ class AgentHostImplementation implements AgentHost {
     evidence: AgentRunAttemptEvidence,
     signal: AbortSignal,
   ): Promise<void> {
-    if (this.#execution !== undefined) {
+    if (this.#execution !== undefined)
       await this.#execution.recordAttempt(runId, evidence, signal);
-      return;
-    }
-  }
-  async #recordRunInteraction(
-    runId: string,
-    evidence: AgentInteractionEvidence,
-    signal: AbortSignal,
-  ): Promise<void> {
-    if (this.#execution !== undefined) {
-      await this.#execution.recordInteraction(runId, evidence, signal);
-      return;
-    }
   }
   async #appendInteractionEvidence(
     input: AgentSubmitInput,
@@ -1769,7 +1409,8 @@ class AgentHostImplementation implements AgentHost {
     text: string,
     signal: AbortSignal,
   ): Promise<void> {
-    await this.#recordRunInteraction(active.id, evidence, signal);
+    if (this.#execution !== undefined)
+      await this.#execution.recordInteraction(active.id, evidence, signal);
     const recordedAt = evidence.kind === "live-input"
       ? evidence.settledAt
       : evidence.settledAt ?? evidence.requestedAt;
@@ -1919,7 +1560,6 @@ class AgentHostImplementation implements AgentHost {
         await rejectRoute("runtime-not-started", `Runtime ${route.runtime} is not started`);
         continue;
       }
-      active.runtime = runtime;
       active.route = route;
       let routeCapabilities = runtimeCapabilities;
       let routeNativeTools: readonly RuntimeNativeToolDescriptor[] = [];
@@ -1977,16 +1617,7 @@ class AgentHostImplementation implements AgentHost {
       const closeAttempt = (): void => {
         attemptOpen = false;
         active.liveInput = undefined;
-        const pendingAsk = active.pendingAsk;
-        if (pendingAsk !== undefined) {
-          active.pendingAsk = undefined;
-          pendingAsk.reject(new Error("Runtime attempt settled before AskUser completed"));
-        }
-        const pendingApproval = active.pendingApproval;
-        if (pendingApproval !== undefined) {
-          active.pendingApproval = undefined;
-          pendingApproval.reject(new Error("Runtime attempt settled before approval completed"));
-        }
+        active.rejectPendingInteractions();
       };
       try {
         await this.#recordRunAttempt(active.id, {
@@ -2121,10 +1752,10 @@ class AgentHostImplementation implements AgentHost {
           throw abortError("Agent host stopped before the runtime result could settle");
         }
         if (active.pendingChannelHistory.size > 0) {
-          throw new RunExecutionError(
+          throw turnExecutionError(
             "uncertain", "channel-history-unconfirmed",
             "A channel tool may have delivered without confirmed destination history",
-            { requestId: input.requestId!, runId: active.id },
+            input, active,
           );
         }
         const settlementSignal = AbortSignal.timeout(this.#options.lifecycleTimeoutMs);
@@ -2134,11 +1765,13 @@ class AgentHostImplementation implements AgentHost {
           conversationId: input.conversationId,
           route: attemptRoute,
         });
-        assertRuntimeSessionCapability(
-          normalizedResult,
-          routeCapabilities.sessions,
-          route,
-        );
+        if (!routeCapabilities.sessions
+          && (normalizedResult.session !== undefined
+            || normalizedResult.usage?.sessionEvicted === true)) {
+          throw new Error(
+            `${route.runtime}:${route.model} returned session state while advertising sessions: false`,
+          );
+        }
         await this.#recordRunAttempt(active.id, {
           attempt: attemptNumber,
           route: attemptRoute,
@@ -2164,28 +1797,20 @@ class AgentHostImplementation implements AgentHost {
         const typed = snapshotRuntimeTurnError(error);
         const safeRuntimeCause = this.#safePublicCause(error, typed);
         if (runtimeReturned) {
-          throw new RunExecutionError(
+          throw turnExecutionError(
             "uncertain",
             "runtime-result-unsettled",
             "The runtime returned but its result could not be durably settled",
-            {
-              cause: safeRuntimeCause,
-              requestId: input.requestId!,
-              runId: active.id,
-            },
+            input, active, safeRuntimeCause,
           );
         }
         if (signal.aborted || isAbort(error)) {
           if (!runtimeDispatched || typed?.sideEffects === "none") throw abortError();
-          throw new RunExecutionError(
+          throw turnExecutionError(
             "uncertain",
             "runtime-cancellation-outcome-unknown",
             "Cancellation raced a dispatched runtime whose outcome could not be proven",
-            {
-              cause: safeRuntimeCause,
-              requestId: input.requestId!,
-              runId: active.id,
-            },
+            input, active, safeRuntimeCause,
           );
         }
         errors.push(safeRuntimeCause);
@@ -2205,15 +1830,11 @@ class AgentHostImplementation implements AgentHost {
           }, signal);
         } catch (evidenceError) {
           if (hasUncertainEffects) {
-            throw new RunExecutionError(
+            throw turnExecutionError(
               "uncertain",
               "attempt-evidence-unsettled",
               "The runtime attempt may have effects but its terminal evidence could not be persisted",
-              {
-                cause: evidenceError,
-                requestId: input.requestId!,
-                runId: active.id,
-              },
+              input, active, evidenceError,
             );
           }
           throw evidenceError;
@@ -2221,7 +1842,8 @@ class AgentHostImplementation implements AgentHost {
         if (
           runtimeSessionUsed
           && !observedEffect
-          && isRuntimeSessionUnavailable(typed)
+          && typed?.code === RUNTIME_SESSION_UNAVAILABLE_CODE
+          && typed.sideEffects === "none"
           && !sessionRecoveryRoutes.has(runtimeSessionRouteKey(route))
         ) {
           await this.#evictRetainedSession(
@@ -2243,15 +1865,11 @@ class AgentHostImplementation implements AgentHost {
       errors,
       `Every eligible runtime route failed for conversation ${input.conversationId}`,
     );
-    throw new RunExecutionError(
+    throw turnExecutionError(
       hasUncertainEffects ? "uncertain" : "failed",
       hasUncertainEffects ? "runtime-effects-uncertain" : "runtime-routes-failed",
       aggregate.message,
-      {
-        cause: aggregate,
-        ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
-        runId: active.id,
-      },
+      input, active, aggregate,
     );
     } finally {
       moduleBindings.revoke();
@@ -2293,7 +1911,7 @@ class AgentHostImplementation implements AgentHost {
           ? (() => {
               throw new Error("AskUser interaction handler is unavailable");
             })()
-          : await this.#awaitChannelAskUser(active, parsedRequest, signal, emitAsk);
+          : await active.waitForAsk(parsedRequest, signal, emitAsk);
     } catch (error) {
       const settledAt = new Date().toISOString();
       const settlementSignal = AbortSignal.timeout(this.#options.lifecycleTimeoutMs);
@@ -2319,31 +1937,6 @@ class AgentHostImplementation implements AgentHost {
       answeredQuestionCount: Object.keys(parsedAnswer.answers).length,
     }, renderAskUserAnswer(parsedRequest, parsedAnswer), signal);
     return parsedAnswer;
-  }
-  async #awaitChannelAskUser(
-    active: ActiveTurn,
-    request: AskUserRequest,
-    signal: AbortSignal,
-    emitAsk: (request: AskUserRequest) => Promise<void>,
-  ): Promise<AskUserAnswer> {
-    if (active.pendingAsk !== undefined) throw new Error("Only one AskUser interaction may be pending per turn");
-    let rejectPending!: (error: Error) => void;
-    const answer = new Promise<AskUserAnswer>((resolve, reject) => {
-      rejectPending = reject;
-      active.pendingAsk = { interactionId: request.interactionId, request, resolve, reject };
-    });
-    const abort = (): void => {
-      active.pendingAsk = undefined;
-      rejectPending(abortError("AskUser interaction was aborted"));
-    };
-    signal.addEventListener("abort", abort, { once: true });
-    try {
-      const [, resolved] = await Promise.all([emitAsk(request), answer]);
-      return resolved;
-    } finally {
-      signal.removeEventListener("abort", abort);
-      active.pendingAsk = undefined;
-    }
   }
   async #requestRuntimeApproval(
     input: AgentSubmitInput,
@@ -2442,12 +2035,7 @@ class AgentHostImplementation implements AgentHost {
               if (emitApproval === undefined) {
                 throw new Error("Approval interaction handler is unavailable");
               }
-              return this.#awaitChannelApproval(
-                active,
-                parsedRequest,
-                boundedSignal,
-                emitApproval,
-              );
+              return active.waitForApproval(parsedRequest, boundedSignal, emitApproval);
             },
             timeoutMs,
             signal,
@@ -2498,39 +2086,6 @@ class AgentHostImplementation implements AgentHost {
     }`, signal);
     return parsedDecision;
   }
-  async #awaitChannelApproval(
-    active: ActiveTurn,
-    request: ApprovalRequest,
-    signal: AbortSignal,
-    emitApproval: (request: ApprovalRequest) => Promise<void>,
-  ): Promise<ApprovalDecision> {
-    throwIfAborted(signal);
-    if (active.pendingApproval !== undefined) {
-      throw new Error("Only one approval interaction may be pending per turn");
-    }
-    let rejectPending!: (error: Error) => void;
-    const decision = new Promise<ApprovalDecision>((resolve, reject) => {
-      rejectPending = reject;
-      active.pendingApproval = {
-        interactionId: request.interactionId,
-        request,
-        resolve,
-        reject,
-      };
-    });
-    const abort = (): void => {
-      active.pendingApproval = undefined;
-      rejectPending(abortError("Approval interaction was aborted"));
-    };
-    signal.addEventListener("abort", abort, { once: true });
-    try {
-      const [, resolved] = await Promise.all([emitApproval(request), decision]);
-      return resolved;
-    } finally {
-      signal.removeEventListener("abort", abort);
-      active.pendingApproval = undefined;
-    }
-  }
   async #runtimeRequest(
     input: AgentSubmitInput,
     route: RuntimeRoute,
@@ -2575,7 +2130,10 @@ class AgentHostImplementation implements AgentHost {
           role: "user" as const,
           content: [
             { type: "text" as const, text: input.text },
-            ...attachmentParts(input.attachments ?? []),
+            ...(input.attachments ?? []).map((attachment) => ({
+              type: "attachment" as const,
+              attachment,
+            })),
           ],
         },
       ]),
@@ -2603,21 +2161,7 @@ class AgentHostImplementation implements AgentHost {
     active: ActiveTurn,
     signal: AbortSignal,
   ): Promise<AgentResponse> {
-    let settledResult: RuntimeTurnResult;
-    try {
-      settledResult = normalizeRuntimeTurnResult(result, {
-        conversationId: input.conversationId,
-        route: {
-          runtimeInstanceId: route.runtime,
-          model: route.model,
-        },
-      });
-    } catch (error) {
-      throw new Error(`${route.runtime} returned an invalid turn result: ${errorMessage(error)}`, {
-        cause: error,
-      });
-    }
-    assertRuntimeSessionCapability(settledResult, sessionsSupported, route);
+    const settledResult = result;
     const sessionDisposition = this.#sessionDisposition(input, sessionsSupported);
     if (settledResult.message !== undefined && settledResult.message.role !== "assistant") {
       throw new Error(`${route.runtime} returned a non-assistant turn message`);
@@ -2632,7 +2176,16 @@ class AgentHostImplementation implements AgentHost {
       updatedAt,
       signal,
     );
-    const transcript = await this.#nextTranscript(input.conversationId, entries, signal);
+    const current = this.#transcripts.get(input.conversationId);
+    const transcript = this.#execution === undefined
+      ? Object.freeze({
+          schemaVersion: 1 as const,
+          kind: "mono-agent.canonical-transcript" as const,
+          conversationId: input.conversationId,
+          revision: (current?.revision ?? 0) + 1,
+          entries: Object.freeze([...(current?.entries ?? []), ...entries]),
+        })
+      : await this.#execution.appendTranscript(current, input.conversationId, entries, signal);
     const message = settledResult.message === undefined
       ? undefined
       : cacheableAssistantMessage(settledResult.message);
@@ -2677,11 +2230,11 @@ class AgentHostImplementation implements AgentHost {
         signal,
       });
     } catch (error) {
-      throw new RunExecutionError(
+      throw turnExecutionError(
         "uncertain",
         "settlement-failed",
         "The runtime completed but durable settlement could not be proven",
-        { cause: error, requestId: input.requestId!, runId: active.id },
+        input, active, error,
       );
     }
     await this.#commitSettledTurnInMemory(
@@ -2706,56 +2259,6 @@ class AgentHostImplementation implements AgentHost {
         },
       }, this.#hostAbort.signal);
     }
-    return response;
-  }
-  async #settleCancelled(
-    input: AgentSubmitInput,
-    route: RuntimeRoute,
-    active: ActiveTurn,
-    signal: AbortSignal,
-  ): Promise<AgentResponse> {
-    const updatedAt = new Date().toISOString();
-    const sessionDisposition = this.#sessionDisposition(
-      input,
-      active.sessionsSupported ?? true,
-    );
-    const entries = await this.#canonicalTurnEntries(
-      input,
-      route,
-      undefined,
-      active,
-      updatedAt,
-      signal,
-    );
-    const transcript = await this.#nextTranscript(input.conversationId, entries, signal);
-    const response = immutableClone({
-      requestId: input.requestId!,
-      runId: active.id,
-      conversationId: input.conversationId,
-      runtime: route.runtime,
-      model: route.model,
-      status: "cancelled",
-      text: "",
-      output: { status: "cancelled" },
-    } satisfies AgentResponse);
-    await this.#persistRunSettlement({
-      input,
-      runId: active.id,
-      status: "cancelled",
-      response,
-      transcript,
-      signal,
-    });
-    await this.#commitSettledTurnInMemory(
-      input,
-      { status: "cancelled" },
-      transcript,
-      entries,
-      route,
-      sessionDisposition,
-      updatedAt,
-      signal,
-    );
     return response;
   }
   async #canonicalTurnEntries(
@@ -2792,33 +2295,22 @@ class AgentHostImplementation implements AgentHost {
         assistantContent.push({ type: "text", text: part.text });
         continue;
       }
-      if (part.type === "image" || part.type === "file") {
+      if (part.type === "image" || part.type === "file" || part.type === "attachment") {
         const slot = `transcript/assistant/${String(index).padStart(3, "0")}`;
+        const source = part.type === "attachment" ? part.attachment : part;
+        const name = source.name;
         artifacts.push({
           slot,
-          data: turnBinaryData(part.data, `${part.type} response part`),
-          mediaType: part.mediaType,
-          ...(part.name === undefined ? {} : { fileName: part.name }),
+          data: part.type === "attachment"
+            ? new Uint8Array(part.attachment.data)
+            : turnBinaryData(part.data, `${part.type} response part`),
+          mediaType: source.mediaType,
+          ...(name === undefined ? {} : { fileName: name }),
         });
         assistantContent.push({
           kind: "pending-artifact",
           slot,
-          ...(part.name === undefined ? {} : { name: part.name }),
-        });
-        continue;
-      }
-      if (part.type === "attachment") {
-        const slot = `transcript/assistant/${String(index).padStart(3, "0")}`;
-        artifacts.push({
-          slot,
-          data: new Uint8Array(part.attachment.data),
-          mediaType: part.attachment.mediaType,
-          fileName: part.attachment.name,
-        });
-        assistantContent.push({
-          kind: "pending-artifact",
-          slot,
-          name: part.attachment.name,
+          ...(name === undefined ? {} : { name }),
         });
       }
     }
@@ -3077,7 +2569,9 @@ class AgentHostImplementation implements AgentHost {
     }
     if (
       this.config.raw.session?.isolateProactiveRuns === true
-      && isProactiveInput(input)
+      && (input.conversationId.startsWith("trigger:")
+        || input.conversationId.startsWith("proactive:")
+        || (isRecord(input.metadata) && typeof input.metadata.triggerId === "string"))
     ) {
       return "isolate";
     }
@@ -3114,9 +2608,12 @@ class AgentHostImplementation implements AgentHost {
         conversationId: input.conversationId,
         signal,
       });
+      if (!Array.isArray(result.records)) {
+        throw new TypeError("automatic memory recall returned invalid records");
+      }
       return result.records.slice(0, 8);
     } catch (error) {
-      this.#recordBackgroundFailure(`memory recall: ${errorMessage(error)}`);
+      this.#health.record(`memory recall: ${errorMessage(error)}`);
       return [];
     }
   }
@@ -3125,7 +2622,7 @@ class AgentHostImplementation implements AgentHost {
     try {
       await this.#memory.capture({ record, signal });
     } catch (error) {
-      this.#recordBackgroundFailure(`memory capture: ${errorMessage(error)}`);
+      this.#health.record(`memory capture: ${errorMessage(error)}`);
     }
   }
   async #exportTurn(
@@ -3148,10 +2645,16 @@ class AgentHostImplementation implements AgentHost {
     } as const;
     for (const [instanceId, exporter] of this.#exporterInstances) {
       try {
-        const result = await exporter.export({ records: [record], signal: this.#hostAbort.signal });
-        if (result.rejected > 0) this.#recordBackgroundFailure(`exporter ${instanceId} rejected a turn record`);
+        const result = await this.#lifecycle.run(
+          `exporter ${instanceId} export`,
+          (signal) => exporter.export({ records: [record], signal }),
+        );
+        if (result === undefined) {
+          throw new Error(`exporter ${instanceId} returned no result`);
+        }
+        if (result.rejected > 0) this.#health.record(`exporter ${instanceId} rejected a turn record`);
       } catch (error) {
-        this.#recordBackgroundFailure(`exporter ${instanceId}: ${errorMessage(error)}`);
+        this.#health.record(`exporter ${instanceId}: ${errorMessage(error)}`);
       }
     }
   }
@@ -3319,41 +2822,29 @@ class AgentHostImplementation implements AgentHost {
       ...(result.usage === undefined ? {} : { usage: result.usage }),
     };
   }
-  #recordBackgroundFailure(message: string): void {
-    this.#backgroundFailures.push(this.#redact(message).slice(0, 2_048));
-    if (this.#backgroundFailures.length > 50) this.#backgroundFailures.shift();
-  }
   async #drainInternal(): Promise<void> {
     if (this.#state === "new") return;
     if (this.#state === "stopped" || this.#state === "failed") return;
     this.#state = "draining";
     const deadline = new Date(Date.now() + this.#options.drainTimeoutMs).toISOString();
     const idle = this.#watchForIdle();
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    const timer = new Promise<"timeout">((resolveTimer) => {
-      timeout = setTimeout(() => resolveTimer("timeout"), this.#options.drainTimeoutMs);
-    });
-    let outcome: "idle" | "timeout";
-    try {
-      outcome = await Promise.race([idle.promise.then(() => "idle" as const), timer]);
-    } finally {
-      if (timeout !== undefined) clearTimeout(timeout);
-      idle.cancel();
-    }
     const failures: unknown[] = [];
-    if (outcome === "timeout") {
-      const error = new Error(`Agent drain timed out after ${this.#options.drainTimeoutMs}ms`);
+    try {
+      await withTimeoutSignal(
+        () => idle.promise, this.#options.drainTimeoutMs, undefined, "Agent drain",
+      );
+    } catch (error) {
       this.#hostAbort.abort(error);
       failures.push(error);
+    } finally {
+      idle.cancel();
     }
     for (const running of [...this.#running].reverse()) {
       if (running.instance.drain === undefined) continue;
       try {
-        await withTimeoutSignal(
-          (signal) => running.instance.drain?.({ signal, deadline }),
-          this.#options.lifecycleTimeoutMs,
-          this.#hostAbort.signal,
+        await this.#lifecycle.run(
           `${running.loaded.instanceId} drain`,
+          (signal) => running.instance.drain?.({ signal, deadline }),
         );
       } catch (error) {
         failures.push(error);
@@ -3373,12 +2864,7 @@ class AgentHostImplementation implements AgentHost {
     this.#hostAbort.abort("shutdown");
     const failures = await this.#stopRunning("shutdown");
     try {
-      await withTimeoutSignal(
-        () => this.#mcp.close(),
-        this.#options.lifecycleTimeoutMs,
-        undefined,
-        "MCP close",
-      );
+      await this.#lifecycle.cleanup("MCP close", () => this.#mcp.close());
     } catch (error) {
       failures.push(error);
     }
@@ -3390,11 +2876,9 @@ class AgentHostImplementation implements AgentHost {
     for (const running of [...this.#running].reverse()) {
       if (running.instance.stop === undefined) continue;
       try {
-        await withTimeoutSignal(
-          (signal) => running.instance.stop?.({ signal, reason }),
-          this.#options.lifecycleTimeoutMs,
-          undefined,
+        await this.#lifecycle.cleanup(
           `${running.loaded.instanceId} stop`,
+          (signal) => running.instance.stop?.({ signal, reason }),
         );
       } catch (error) {
         failures.push(error);
@@ -3504,31 +2988,6 @@ function ownDataProperty(value: unknown, key: string): unknown {
     return descriptor !== undefined && "value" in descriptor ? descriptor.value : undefined;
   } catch { return undefined; }
 }
-function normalizeModuleJson(
-  value: unknown,
-  path: string,
-  redact: (value: string) => string,
-): JsonValue {
-  const options = {
-    path,
-    maxBytes: MODULE_OUTPUT_MAX_BYTES,
-    maxItems: MODULE_OUTPUT_MAX_ITEMS,
-    maxDepth: MODULE_OUTPUT_MAX_DEPTH,
-    label: "JSON",
-    requireEnumerable: true,
-    requireOrdinaryArrays: true,
-  } as const;
-  const snapshot = snapshotBoundedValue<JsonValue>(value, options).value;
-  return snapshotBoundedValue<JsonValue>(redactJson(snapshot, redact), options).value;
-}
-function redactJson(value: JsonValue, redact: (value: string) => string): JsonValue {
-  if (typeof value === "string") return redact(value);
-  if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((entry) => redactJson(entry, redact));
-  const output: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;
-  for (const [key, entry] of Object.entries(value)) output[redact(key)] = redactJson(entry, redact);
-  return output;
-}
 function redactChannelToolEvent(
   event: Extract<RuntimeTurnEvent, { readonly type: "tool-call" | "tool-result" }>,
   redact: (value: string) => string,
@@ -3550,36 +3009,6 @@ function redactChannelToolEvent(
               ? `[file result omitted: ${redact(part.name ?? part.mediaType)}]`
               : `[artifact result omitted${part.preview === undefined ? "" : `: ${redact(part.preview)}`}]` }),
     },
-  };
-}
-function normalizeModuleHealth(
-  value: unknown,
-  path: string,
-  redact: (value: string) => string,
-): ModuleHealth {
-  const input = ownDataRecord(
-    normalizeModuleJson(value, path, redact),
-    path,
-    ["status", "checkedAt", "summary", "details"],
-  );
-  if (!["healthy", "degraded", "unhealthy", "unknown"].includes(String(input.status))) {
-    throw new TypeError(`${path}.status is invalid`);
-  }
-  if (typeof input.checkedAt !== "string" || input.checkedAt.length === 0) {
-    throw new TypeError(`${path}.checkedAt must be non-empty`);
-  }
-  if (input.summary !== undefined && typeof input.summary !== "string") {
-    throw new TypeError(`${path}.summary must be text`);
-  }
-  if (input.details !== undefined
-    && (typeof input.details !== "object" || input.details === null || Array.isArray(input.details))) {
-    throw new TypeError(`${path}.details must be a JSON object`);
-  }
-  return {
-    status: input.status as ModuleHealth["status"],
-    checkedAt: input.checkedAt,
-    ...(input.summary === undefined ? {} : { summary: input.summary }),
-    ...(input.details === undefined ? {} : { details: input.details as JsonObject }),
   };
 }
 function routeCandidates(config: LoadedAgentConfig, input: AgentSubmitInput): readonly RuntimeRoute[] {
@@ -3708,7 +3137,9 @@ async function executeTool(
       ...(requestContext === undefined ? {} : { requestContext }),
       ...(emitActivity === undefined ? {} : {
         onActivity: (text: string) => {
-          const safe = boundedActivity(publicText(text));
+          const compact = publicText(text)
+            .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/gu, " ").replace(/\s+/gu, " ").trim();
+          const safe = boundedUtf8(compact.length === 0 ? "MCP progress" : compact, 16_384);
           activity = activity.then(() => emitActivity(safe)).catch((error: unknown) => {
             activityFailure ??= { error };
           });
@@ -3740,10 +3171,9 @@ async function executeTool(
   }
 }
 function stateArtifactSink(state: StateStore | undefined): ToolResultArtifactSink | undefined {
-  if (state?.putArtifact === undefined) return undefined;
-  return {
-    putArtifact: (request) => state.putArtifact!(request),
-  };
+  return state?.putArtifact === undefined
+    ? undefined
+    : { putArtifact: (request) => state.putArtifact!(request) };
 }
 function boundedUtf8(value: string, maxBytes: number): string {
   if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
@@ -3753,10 +3183,6 @@ function boundedUtf8(value: string, maxBytes: number): string {
   let end = Math.max(0, payloadBytes);
   while (end > 0 && (bytes[end] ?? 0) >> 6 === 0b10) end -= 1;
   return `${bytes.subarray(0, end).toString("utf8")}${suffix}`;
-}
-function boundedActivity(value: string): string {
-  const safe = value.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/gu, " ").replace(/\s+/gu, " ").trim();
-  return boundedUtf8(safe.length === 0 ? "MCP progress" : safe, 16_384);
 }
 function requestContextTransformer(
   context: CurrentRunFiles["requestContext"],
@@ -3807,10 +3233,14 @@ function textFromMessage(message: TurnMessage): string {
     .join("");
 }
 function moduleProvenance(module: LoadedAgentModule, config: LoadedAgentConfig): ConfigProvenanceMap {
-  const selected = lookupPath(config.raw, module.configPath);
+  let selected: unknown = config.raw;
+  for (const segment of module.configPath.split(".")) {
+    selected = isRecord(selected) ? selected[segment] : undefined;
+    if (selected === undefined) break;
+  }
   const map: Record<string, { source: "file" | "environment"; filePath?: string; environmentName?: string }> = {};
   const visit = (value: unknown, path: readonly (string | number)[]): void => {
-    if (isEnvReference(value)) {
+    if (isRecord(value) && Object.keys(value).length === 1 && typeof value.$env === "string") {
       map[toPointer(path)] = { source: "environment", environmentName: value.$env };
       return;
     }
@@ -4121,10 +3551,6 @@ function boundedSkillMetadata(value: string): string {
 function isNotFoundError(error: unknown): boolean {
   return isRecord(error) && error.code === "ENOENT";
 }
-function readEndpoint(instance: Channel): { readonly endpoint?: string } {
-  if (isRecord(instance) && typeof instance.endpoint === "string") return { endpoint: instance.endpoint };
-  return {};
-}
 function snapshotChannelSendTools(value: unknown, instanceId: string): readonly ChannelSendTool[] {
   const instance = requireInstanceRecord(value, `${instanceId} channel instance`);
   const descriptor = Object.getOwnPropertyDescriptor(instance, "sendTools");
@@ -4140,59 +3566,6 @@ function snapshotChannelSendTools(value: unknown, instanceId: string): readonly 
     }).value;
     return Object.freeze({ name: tool.name as string, description, inputSchema,
       prepare: tool.prepare as ChannelSendTool["prepare"] });
-  }));
-}
-function snapshotModuleToolContributions(
-  value: unknown,
-  instanceId: string,
-): readonly ModuleToolContribution[] {
-  const instance = requireInstanceRecord(value, `${instanceId} module instance`);
-  const descriptor = Object.getOwnPropertyDescriptor(instance, "toolContributions");
-  if (descriptor === undefined || ("value" in descriptor && descriptor.value === undefined)) return [];
-  if (!("value" in descriptor)) {
-    throw new TypeError(`${instanceId} module toolContributions must be an own data property`);
-  }
-  assertModuleToolContributionsCompliance(
-    descriptor.value,
-    `${instanceId} module toolContributions`,
-  );
-  return Object.freeze(boundedOwnDataArray(
-    descriptor.value,
-    `${instanceId} module toolContributions`,
-    MODULE_TOOL_LIMITS.perInstance,
-    true,
-    true,
-  ).map((raw, index) => {
-    const label = `${instanceId} module toolContributions[${String(index)}]`;
-    const tool = boundedOwnDataRecord(raw, label, true);
-    assertOwnKeys(tool, ["name", "description", "inputSchema", "effects", "bind"], label);
-    const inputSchema = snapshotBoundedValue<Readonly<Record<string, unknown>>>(
-      tool.inputSchema,
-      {
-        path: `${label}.inputSchema`,
-        maxBytes: MODULE_TOOL_LIMITS.inputSchemaBytes,
-        maxItems: MODULE_TOOL_LIMITS.inputSchemaItems,
-        maxDepth: MODULE_TOOL_LIMITS.inputSchemaDepth,
-        label: "JSON",
-        freeze: true,
-        requireEnumerable: true,
-        requireOrdinaryArrays: true,
-      },
-    ).value;
-    const effects = Object.freeze(boundedOwnDataArray(
-      tool.effects,
-      `${label}.effects`,
-      4,
-      true,
-      true,
-    ) as RuntimeNativeToolEffect[]);
-    return Object.freeze({
-      name: tool.name as string,
-      description: tool.description as string,
-      inputSchema,
-      effects,
-      bind: tool.bind as ModuleToolContribution["bind"],
-    });
   }));
 }
 function collectChannelTools(
@@ -4354,30 +3727,15 @@ function bindModuleTools(
   const rows = new Map(moduleTools.map((row) => [row.name, row]));
   const controller = new AbortController();
   const signal = AbortSignal.any([context.signal, controller.signal]);
-  const cells: Array<{ execute: ModuleToolBinding["execute"] | undefined }> = [];
-  let revoked = false;
-  const revoke = (): void => {
-    if (revoked) return;
-    revoked = true;
-    for (const cell of cells) cell.execute = undefined;
-    controller.abort(new Error("Module tool turn binding is closed"));
-  };
+  const revoke = (): void => controller.abort(new Error("Module tool turn binding is closed"));
   try {
     const bound = tools.map((tool): CoreRuntimeTool => {
       if (tool.source.kind !== "module") return tool;
       const row = rows.get(tool.name);
       if (row === undefined) throw new Error(`Module tool ${tool.name} has no selected source`);
-      const rawBinding = row.tool.bind(Object.freeze({
-        conversationId: context.conversationId,
-        runId: context.runId,
-        ...(context.requestId === undefined ? {} : { requestId: context.requestId }),
-        signal,
-      }));
+      const rawBinding = row.tool.bind(Object.freeze({ ...context, signal }));
       assertModuleToolBindingCompliance(rawBinding, `${tool.name} module tool binding`);
-      const cell: { execute: ModuleToolBinding["execute"] | undefined } = {
-        execute: rawBinding.execute.bind(rawBinding),
-      };
-      cells.push(cell);
+      const execute = rawBinding.execute.bind(rawBinding);
       return Object.freeze({
         ...tool,
         async execute(
@@ -4386,21 +3744,11 @@ function bindModuleTools(
         ) {
           const callId = options.callId;
           if (callId === undefined) throw new Error("Module tool call identity is unavailable");
-          const execute = cell.execute;
-          if (execute === undefined || revoked) {
-            throw new Error(`Module tool ${tool.name} binding is closed`);
-          }
+          if (signal.aborted) throw new Error(`Module tool ${tool.name} binding is closed`);
           const parent = options.signal === undefined
-            ? signal
-            : AbortSignal.any([signal, options.signal]);
+            ? signal : AbortSignal.any([signal, options.signal]);
           return withTimeoutSignal(
-            (callSignal) => {
-              const current = cell.execute;
-              if (current === undefined || revoked) {
-                throw new Error(`Module tool ${tool.name} binding is closed`);
-              }
-              return current(input as JsonValue, Object.freeze({ callId, signal: callSignal }));
-            },
+            (callSignal) => execute(input as JsonValue, Object.freeze({ callId, signal: callSignal })),
             MODULE_TOOL_CALL_TIMEOUT_MS,
             parent,
             `Module tool ${tool.name}`,
@@ -4414,63 +3762,57 @@ function bindModuleTools(
     throw error;
   }
 }
-function assertCreatedInstanceCompliance(kind: ModuleKind, value: unknown): asserts value is ModuleInstance {
-  if (kind === "runtime") {
-    assertRuntimeInstanceCompliance(value);
-    return;
+function createdModuleToolSnapshot(
+  kind: ModuleKind,
+  value: unknown,
+  instanceId: string,
+): readonly ModuleToolContribution[] {
+  if (kind === "runtime") assertRuntimeInstanceCompliance(value);
+  else if (kind === "channel") assertChannelInstanceCompliance(value);
+  else if (kind === "memory") assertMemoryInstanceCompliance(value);
+  else {
+    const reserved = requireInstanceRecord(value, `${kind} instance`);
+    assertInstanceLifecycle(reserved, `${kind} instance`);
+    const required = kind === "state"
+      ? ["read", "write", "delete", "list", "compareAndSwap", "transaction", "scan",
+          "upsertPresence", "removePresence", "listPresence"] as const
+      : kind === "exporter" ? ["export", "flush"] as const
+        : kind === "sandbox" ? ["execute"] as const : [];
+    assertRequiredInstanceFunctions(reserved, required, `${kind} instance`);
+    if (kind === "state") assertStateArtifactCompliance(reserved);
   }
-  if (kind === "channel") {
-    assertChannelInstanceCompliance(value);
-    return;
-  }
-  if (kind === "memory") {
-    assertMemoryInstanceCompliance(value);
-    return;
-  }
-  const instance = requireInstanceRecord(value, `${kind} instance`);
-  assertInstanceLifecycle(instance, `${kind} instance`);
-  if (kind === "state") {
-    assertRequiredInstanceFunctions(instance, [
-      "read",
-      "write",
-      "delete",
-      "list",
-      "compareAndSwap",
-      "transaction",
-      "scan",
-      "upsertPresence",
-      "removePresence",
-      "listPresence",
-    ], "state instance");
-    assertOptionalInstanceFunction(instance, "publishHostPresence", "state instance");
-    const artifactMethods = [
-      "putArtifact",
-      "readArtifact",
-      "deleteArtifact",
-      "listArtifacts",
-    ] as const;
-    const presentArtifactMethods = artifactMethods.filter((method) =>
-      instance[method] !== undefined);
-    if (presentArtifactMethods.length > 0
-      && presentArtifactMethods.length !== artifactMethods.length) {
-      throw new TypeError("state instance must implement the complete artifact method group");
-    }
-    for (const method of artifactMethods) {
-      assertOptionalInstanceFunction(instance, method, "state instance");
-    }
-    return;
-  }
-  if (kind === "exporter") {
-    assertRequiredInstanceFunctions(instance, ["export", "flush"], "exporter instance");
-    return;
-  }
-  if (kind === "sandbox") {
-    assertRequiredInstanceFunctions(instance, ["execute"], "sandbox instance");
-  }
+  const instance = requireInstanceRecord(value, `${instanceId} module instance`);
+  const descriptor = Object.getOwnPropertyDescriptor(instance, "toolContributions");
+  if (descriptor !== undefined && !("value" in descriptor))
+    throw new TypeError(`${instanceId} module toolContributions must be an own data property`);
+  return assertModuleToolContributionsCompliance(
+    descriptor?.value, `${instanceId} module toolContributions`,
+  );
+}
+function assertStateArtifactCompliance(instance: Record<string, unknown>): void {
+  assertOptionalInstanceFunction(instance, "publishHostPresence", "state instance");
+  const methods = ["putArtifact", "readArtifact", "deleteArtifact", "listArtifacts"] as const;
+  const present = methods.filter((method) => instance[method] !== undefined).length;
+  if (present > 0 && present !== methods.length)
+    throw new TypeError("state instance must implement the complete artifact method group");
+  for (const method of methods)
+    assertOptionalInstanceFunction(instance, method, "state instance");
 }
 function requireInstanceRecord(value: unknown, label: string): Record<string, unknown> {
   if (!isRecord(value) || Array.isArray(value)) throw new TypeError(`${label} must be an object`);
   return value;
+}
+function snapshotInstanceCapabilities<T extends object>(
+  value: unknown,
+  kind: "runtime" | "channel",
+  instanceId: string,
+  normalize: (value: unknown, label: string) => T,
+): Readonly<T> {
+  const instance = requireInstanceRecord(value, `${kind} instance`);
+  const descriptor = Object.getOwnPropertyDescriptor(instance, "capabilities");
+  if (descriptor === undefined || !("value" in descriptor))
+    throw new TypeError(`${kind} instance capabilities must be an own data property`);
+  return Object.freeze(normalize(descriptor.value, `${instanceId} ${kind} capabilities`));
 }
 function assertInstanceLifecycle(instance: Record<string, unknown>, label: string): void {
   for (const method of ["start", "drain", "stop", "health", "diagnostics"] as const) {
@@ -4479,19 +3821,14 @@ function assertInstanceLifecycle(instance: Record<string, unknown>, label: strin
   if (instance.commands === undefined) return;
   if (!Array.isArray(instance.commands)) throw new TypeError(`${label} commands must be an array`);
   for (const [index, rawCommand] of instance.commands.entries()) {
-    const command = requireInstanceRecord(rawCommand, `${label} commands[${index}]`);
-    if (typeof command.name !== "string" || command.name.trim().length === 0) {
-      throw new TypeError(`${label} commands[${index}].name must be a non-empty string`);
-    }
-    if (typeof command.description !== "string" || command.description.trim().length === 0) {
-      throw new TypeError(`${label} commands[${index}].description must be a non-empty string`);
-    }
-    if (command.kind !== "authentication" && command.kind !== "maintenance") {
-      throw new TypeError(`${label} commands[${index}].kind is invalid`);
-    }
-    if (typeof command.run !== "function") {
-      throw new TypeError(`${label} commands[${index}].run must be a function`);
-    }
+    const commandLabel = `${label} commands[${index}]`;
+    const command = requireInstanceRecord(rawCommand, commandLabel);
+    for (const field of ["name", "description"] as const)
+      if (typeof command[field] !== "string" || command[field].trim().length === 0)
+        throw new TypeError(`${commandLabel}.${field} must be a non-empty string`);
+    if (command.kind !== "authentication" && command.kind !== "maintenance")
+      throw new TypeError(`${commandLabel}.kind is invalid`);
+    assertRequiredInstanceFunctions(command, ["run"], commandLabel);
   }
 }
 function assertRequiredInstanceFunctions(
@@ -4511,17 +3848,6 @@ function assertOptionalInstanceFunction(
   if (instance[method] !== undefined && typeof instance[method] !== "function") {
     throw new TypeError(`${label} ${method} must be a function when present`);
   }
-}
-function isEnvReference(value: unknown): value is { readonly $env: string } {
-  return isRecord(value) && Object.keys(value).length === 1 && typeof value.$env === "string";
-}
-function lookupPath(value: unknown, path: string): unknown {
-  let current = value;
-  for (const segment of path.split(".")) {
-    if (!isRecord(current)) return undefined;
-    current = current[segment];
-  }
-  return current;
 }
 function toPointer(path: readonly (string | number)[]): string {
   if (path.length === 0) return "";
@@ -4546,11 +3872,6 @@ function toJsonValue(value: unknown, seen = new Set<object>(), depth = 0): JsonV
     return output;
   }
   return String(value);
-}
-function attachmentParts(
-  attachments: readonly ChannelAttachment[],
-): TurnMessage["content"][number][] {
-  return attachments.map((attachment) => ({ type: "attachment", attachment }));
 }
 function turnBinaryData(value: Uint8Array | string, label: string): Uint8Array {
   if (value instanceof Uint8Array) return new Uint8Array(value);
@@ -4599,43 +3920,24 @@ function normalizeOutboundMessage(
     message,
     "outbound message",
     [
-      "conversationId",
-      "text",
-      "attachments",
-      "replyToMessageId",
-      "idempotencyKey",
-      "metadata",
+      "conversationId", "text", "attachments", "replyToMessageId",
+      "idempotencyKey", "metadata",
     ],
   );
-  if (typeof input.idempotencyKey !== "string" || input.idempotencyKey.trim().length === 0) {
-    throw new TypeError("idempotencyKey must be non-empty");
-  }
-  assertBoundedText(input.idempotencyKey, "idempotencyKey", 512);
-  if (input.idempotencyKey.includes("\0")) {
-    throw new TypeError("idempotencyKey must not contain NUL");
-  }
+  const idempotencyKey = routeText(input.idempotencyKey, "idempotencyKey", 512);
   const conversationId = input.conversationId === "" ? resolveDefault?.() : input.conversationId;
   if (input.conversationId === "" && conversationId === undefined)
     throw new TypeError("conversationId requires an adapter-owned default");
   const normalized = normalizeSubmitInput({
-    requestId: input.idempotencyKey,
+    requestId: idempotencyKey,
     conversationId: conversationId as string,
     text: input.text as string,
     ...(input.attachments === undefined
       ? {}
       : { attachments: input.attachments as readonly ChannelAttachment[] }),
   });
-  if (
-    input.replyToMessageId !== undefined
-    && (typeof input.replyToMessageId !== "string"
-      || input.replyToMessageId.trim().length === 0
-      || input.replyToMessageId.includes("\0"))
-  ) {
-    throw new TypeError("replyToMessageId must be a bounded non-empty string");
-  }
-  if (typeof input.replyToMessageId === "string") {
-    assertBoundedText(input.replyToMessageId, "replyToMessageId", 4_096);
-  }
+  const replyToMessageId = input.replyToMessageId === undefined ? undefined
+    : routeText(input.replyToMessageId, "replyToMessageId", 4_096);
   const metadata = input.metadata === undefined
     ? undefined
     : snapshotBoundedValue(input.metadata, {
@@ -4647,49 +3949,17 @@ function normalizeOutboundMessage(
         freeze: true,
         requireOrdinaryArrays: true,
       }).value;
-  if (metadata !== undefined) {
-    if (!isJsonObject(metadata)) {
-      throw new TypeError("outbound message metadata must be a JSON object");
-    }
-  }
+  if (metadata !== undefined && !isJsonObject(metadata))
+    throw new TypeError("outbound message metadata must be a JSON object");
   return immutableClone({
     conversationId: normalized.conversationId,
     text: normalized.text,
     ...(normalized.attachments === undefined ? {} : { attachments: normalized.attachments }),
-    ...(input.replyToMessageId === undefined
-      ? {}
-      : { replyToMessageId: input.replyToMessageId as string }),
-    idempotencyKey: input.idempotencyKey,
+    ...(replyToMessageId === undefined ? {} : { replyToMessageId }),
+    idempotencyKey,
     ...(metadata === undefined ? {} : { metadata }),
   });
 }
-function deliveryFingerprint(
-  channelInstanceId: string,
-  message: ChannelOutboundMessage,
-): DurableFingerprint {
-  return durableFingerprint({
-    schemaVersion: 1,
-    kind: "mono-agent.delivery-fingerprint",
-    channelInstanceId,
-    conversationId: message.conversationId,
-    text: message.text,
-    attachments: (message.attachments ?? []).map((attachment) => ({
-      id: attachment.id,
-      kind: attachment.kind,
-      name: attachment.name,
-      mediaType: attachment.mediaType,
-      sizeBytes: attachment.sizeBytes,
-      sha256: `sha256:${createHash("sha256").update(attachment.data).digest("hex")}`,
-    })),
-    replyToMessageId: message.replyToMessageId ?? null,
-    metadata: message.metadata ?? null,
-  });
-}
-function deliveryHistoryText(message: ChannelOutboundMessage): string {
-  return [message.text, ...(message.attachments ?? []).map((item) =>
-    `[sent attachment: ${item.name}]`)].filter((part) => part.length > 0).join("\n");
-}
-
 function deliveryTriggerKind(metadata: JsonObject | undefined): JsonObject {
   const triggerKind = metadata?.triggerKind;
   return triggerKind === "cron" || triggerKind === "webhook"
@@ -4704,57 +3974,6 @@ function normalizeCompletionDelivery(value: unknown): ChannelCompletionDelivery 
     : routeText(input.destination, "channel completion delivery destination", 4_096);
   return Object.freeze({
     channel, ...(destination === undefined ? {} : { destination }),
-  });
-}
-function normalizeDeliveryHistoryResolution(
-  value: unknown,
-  label: string,
-): { readonly conversationId: string } {
-  const input = ownDataRecord(value, label, ["conversationId"]);
-  const conversationId = routeText(input.conversationId, `${label} conversationId`, 4_096);
-  return { conversationId };
-}
-function durableFingerprint(value: unknown): DurableFingerprint {
-  const encoded = JSON.stringify(value, (_key, entry: unknown) => (
-    isRecord(entry)
-      ? Object.fromEntries(Object.entries(entry).sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0))
-      : entry
-  ));
-  return `sha256:${createHash("sha256").update(encoded).digest("hex")}`;
-}
-function normalizeChannelDeliveryResult(value: unknown, idempotencyKey: string): ChannelDeliveryResult {
-  const input = ownDataRecord(value, "channel delivery result",
-    ["status", "idempotencyKey", "messageId", "diagnostic"]);
-  if (!["delivered", "duplicate", "unknown", "failed"].includes(String(input.status)))
-    throw new TypeError("channel delivery result status is invalid");
-  if (input.idempotencyKey !== idempotencyKey)
-    throw new TypeError("channel delivery result idempotency key is invalid");
-  if (input.messageId !== undefined) {
-    if ((input.status !== "delivered" && input.status !== "duplicate")
-      || typeof input.messageId !== "string" || input.messageId.trim().length === 0
-      || input.messageId.includes("\0")) throw new TypeError("channel delivery result messageId is invalid");
-    assertBoundedText(input.messageId, "channel delivery result messageId", 512);
-  }
-  return Object.freeze({
-    status: input.status, idempotencyKey,
-    ...(input.messageId === undefined ? {} : { messageId: input.messageId }),
-    ...(input.diagnostic === undefined ? {} : {
-      diagnostic: normalizeModuleDiagnostic(input.diagnostic, "channel delivery result diagnostic"),
-    }),
-  }) as ChannelDeliveryResult;
-}
-function deliveryFailure(idempotencyKey: string, code: string, message: string): ChannelDeliveryResult {
-  return deliveryDiagnostic("failed", idempotencyKey, code, message);
-}
-function deliveryUnknown(idempotencyKey: string, code: string, message: string): ChannelDeliveryResult {
-  return deliveryDiagnostic("unknown", idempotencyKey, code, message);
-}
-function deliveryDiagnostic(
-  status: "failed" | "unknown", idempotencyKey: string, code: string, message: string,
-): ChannelDeliveryResult {
-  return Object.freeze({
-    status, idempotencyKey,
-    diagnostic: Object.freeze({ code, severity: "error", message }),
   });
 }
 function encodeCachedAgentResponse(response: AgentResponse): Uint8Array {
@@ -4979,7 +4198,8 @@ async function turnMessagesFromTranscript(
     }
     messages.push(Object.freeze({
       id: entry.entryId,
-      role: transcriptInteractionRole(entry.evidence),
+      role: entry.evidence.kind === "live-input" || entry.evidence.phase !== "requested"
+        ? "user" : "assistant",
       content: Object.freeze(content),
       name: `interaction:${entry.evidence.kind}`,
       createdAt: entry.recordedAt,
@@ -5019,12 +4239,6 @@ async function turnContentFromTranscriptPart(
     name: part.name ?? ref.fileName ?? ref.id,
   });
 }
-function transcriptInteractionRole(
-  evidence: AgentInteractionEvidence,
-): "user" | "assistant" {
-  if (evidence.kind === "live-input") return "user";
-  return evidence.phase === "requested" ? "assistant" : "user";
-}
 function renderAskUserRequest(request: AskUserRequest): string {
   return request.questions.map((question) => {
     const choices = question.choices?.map((choice) => choice.label).join(", ");
@@ -5050,13 +4264,8 @@ function normalizeSubmitInput(input: AgentSubmitInput): AgentSubmitInput {
       "effort", "maxTurns", "maxOutputTokens", "responseSchema", "interactionHandler",
       "signal", "metadata", "requiredCapabilities", "toolPolicy"],
   ) as unknown as AgentSubmitInput;
-  const requestId = input.requestId ?? randomUUID();
-  if (typeof requestId !== "string" || requestId.trim().length === 0) throw new TypeError("requestId must be non-empty");
-  assertBoundedText(requestId, "requestId", 512);
-  if (requestId.includes("\0")) throw new TypeError("requestId must not contain NUL");
-  if (typeof input.conversationId !== "string" || input.conversationId.trim().length === 0) throw new TypeError("conversationId must be non-empty");
-  assertBoundedText(input.conversationId, "conversationId", 4_096);
-  if (input.conversationId.includes("\0")) throw new TypeError("conversationId must not contain NUL");
+  const requestId = routeText(input.requestId ?? randomUUID(), "requestId", 512);
+  const conversationId = routeText(input.conversationId, "conversationId", 4_096);
   if (typeof input.text !== "string") throw new TypeError("text must be a string");
   assertBoundedText(input.text, "text", DEFAULT_MESSAGE_BYTES);
   if (input.text.includes("\0")) throw new TypeError("text must not contain NUL");
@@ -5151,7 +4360,7 @@ function normalizeSubmitInput(input: AgentSubmitInput): AgentSubmitInput {
   });
   return Object.freeze({
     requestId,
-    conversationId: input.conversationId,
+    conversationId,
     text: input.text,
     ...(normalized.length === 0 ? {} : { attachments: Object.freeze(normalized) }),
     ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
@@ -5234,11 +4443,9 @@ function renderRecalledMemory(records: readonly MemoryRecord[]): string {
 function runtimeSessionRouteKey(route: RuntimeRoute): string {
   return Buffer.from(JSON.stringify([route.runtime, route.model]), "utf8").toString("base64url");
 }
-function runtimeSessionConversationSuffix(conversationId: string): string {
-  return `:${Buffer.from(conversationId, "utf8").toString("base64url")}`;
-}
 function runtimeSessionMapKey(route: RuntimeRoute, conversationId: string): string {
-  return `${runtimeSessionRouteKey(route)}${runtimeSessionConversationSuffix(conversationId)}`;
+  const suffix = Buffer.from(conversationId, "utf8").toString("base64url");
+  return `${runtimeSessionRouteKey(route)}:${suffix}`;
 }
 function encodePersistedValue(value: unknown): Uint8Array {
   const source = JSON.stringify(value, (_key, entry: unknown) => entry instanceof Uint8Array
@@ -5268,11 +4475,6 @@ function deepFreeze<T>(value: T, seen = new Set<object>()): T {
   for (const child of Object.values(value)) deepFreeze(child, seen);
   return Object.freeze(value);
 }
-function isProactiveInput(input: AgentSubmitInput): boolean {
-  return input.conversationId.startsWith("trigger:")
-    || input.conversationId.startsWith("proactive:")
-    || (isRecord(input.metadata) && typeof input.metadata.triggerId === "string");
-}
 function calendarDateKey(timestamp: string, timeZone: string): string {
   const date = new Date(timestamp);
   if (!Number.isFinite(date.valueOf())) return "invalid";
@@ -5285,22 +4487,19 @@ function calendarDateKey(timestamp: string, timeZone: string): string {
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${values.year ?? ""}-${values.month ?? ""}-${values.day ?? ""}`;
 }
-function isRuntimeLiveInputDisposition(
-  value: unknown,
-): value is Exclude<AgentLiveInputStatus, "unavailable"> {
-  return value === "applied" || value === "requeue" || value === "discarded";
-}
-function assertRuntimeSessionCapability(
-  result: RuntimeTurnResult,
-  sessionsSupported: boolean,
-  route: RuntimeRoute,
-): void {
-  if (sessionsSupported) return;
-  if (result.session !== undefined || result.usage?.sessionEvicted === true) {
-    throw new Error(
-      `${route.runtime}:${route.model} returned session state while advertising sessions: false`,
-    );
-  }
+function turnExecutionError(
+  status: "failed" | "uncertain",
+  code: string,
+  message: string,
+  input: AgentSubmitInput,
+  active: ActiveTurn,
+  cause?: unknown,
+): RunExecutionError {
+  return new RunExecutionError(status, code, message, {
+    ...(cause === undefined ? {} : { cause }),
+    ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
+    runId: active.id,
+  });
 }
 function boundedRuntimeFailureMessage(
   error: unknown,
@@ -5321,12 +4520,6 @@ function boundedRuntimeFailureMessage(
   } catch {
     return "Runtime attempt failed";
   }
-}
-function isRuntimeSessionUnavailable(
-  failure: RuntimeTurnErrorSnapshot | undefined,
-): boolean {
-  return failure?.code === RUNTIME_SESSION_UNAVAILABLE_CODE
-    && failure.sideEffects === "none";
 }
 function isSafeRuntimeFallback(
   failure: RuntimeTurnErrorSnapshot | undefined,
@@ -5392,17 +4585,6 @@ function isJsonValue(value: unknown, seen = new Set<object>(), depth = 0): value
   seen.delete(value);
   return valid;
 }
-function throwIfAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw abortError();
-}
-function isAbort(error: unknown): boolean {
-  return error instanceof Error && error.name === "AbortError";
-}
-function abortError(message = "operation aborted"): Error {
-  const error = new Error(message);
-  error.name = "AbortError";
-  return error;
-}
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -5442,108 +4624,6 @@ function referencedEnvironmentValues(
       .filter((value): value is string => typeof value === "string" && value.length > 0)
       .sort((left, right) => right.length - left.length || left.localeCompare(right)),
   );
-}
-async function waitWithAbort(promise: Promise<unknown>, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) throw abortError();
-  let listener: (() => void) | undefined;
-  const aborted = new Promise<never>((_, reject) => {
-    listener = () => reject(abortError());
-    signal.addEventListener("abort", listener, { once: true });
-  });
-  try {
-    await Promise.race([promise, aborted]);
-  } finally {
-    if (listener !== undefined) signal.removeEventListener("abort", listener);
-  }
-}
-async function waitForValueWithAbort<T>(
-  promise: Promise<T>,
-  signal: AbortSignal,
-): Promise<T> {
-  if (signal.aborted) {
-    void promise.catch(() => undefined);
-    throw signal.reason instanceof Error ? signal.reason : abortError();
-  }
-  let listener: (() => void) | undefined;
-  const aborted = new Promise<never>((_, reject) => {
-    listener = () => {
-      reject(signal.reason instanceof Error ? signal.reason : abortError());
-    };
-    signal.addEventListener("abort", listener, { once: true });
-  });
-  try {
-    return await Promise.race([promise, aborted]);
-  } finally {
-    if (listener !== undefined) signal.removeEventListener("abort", listener);
-  }
-}
-async function withTimeoutSignal<T>(
-  operation: (signal: AbortSignal) => T | PromiseLike<T> | undefined,
-  timeoutMs: number,
-  parent: AbortSignal | undefined,
-  label: string,
-): Promise<T | undefined> {
-  const timeoutController = new AbortController();
-  const signal = parent === undefined
-    ? timeoutController.signal
-    : AbortSignal.any([parent, timeoutController.signal]);
-  const timeoutError = new Error(`${label} timed out after ${timeoutMs}ms`);
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const timedOut = new Promise<never>((_, reject) => {
-    timeout = setTimeout(() => {
-      timeoutController.abort(timeoutError);
-      reject(timeoutError);
-    }, timeoutMs);
-  });
-  const running = Promise.resolve().then(() => operation(signal));
-  try {
-    return await Promise.race([
-      waitForValueWithAbort(running, signal),
-      timedOut,
-    ]);
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-  }
-}
-class Semaphore {
-  readonly #limit: number;
-  #active = 0;
-  readonly #waiters: { readonly resolve: (release: () => void) => void; readonly reject: (error: Error) => void; readonly signal: AbortSignal }[] = [];
-  constructor(limit: number) {
-    this.#limit = limit;
-  }
-  acquire(signal: AbortSignal): Promise<() => void> {
-    if (signal.aborted) return Promise.reject(abortError());
-    if (this.#active < this.#limit) {
-      this.#active += 1;
-      return Promise.resolve(() => this.#release());
-    }
-    return new Promise((resolveAcquire, rejectAcquire) => {
-      const waiter = { resolve: resolveAcquire, reject: rejectAcquire, signal };
-      this.#waiters.push(waiter);
-      signal.addEventListener(
-        "abort",
-        () => {
-          const index = this.#waiters.indexOf(waiter);
-          if (index >= 0) this.#waiters.splice(index, 1);
-          rejectAcquire(abortError());
-        },
-        { once: true },
-      );
-    });
-  }
-  #release(): void {
-    const next = this.#waiters.shift();
-    if (next === undefined) {
-      this.#active -= 1;
-      return;
-    }
-    if (next.signal.aborted) {
-      this.#release();
-      return;
-    }
-    next.resolve(() => this.#release());
-  }
 }
 const NULL_LOGGER: ModuleLogger = Object.freeze({
   debug() {},

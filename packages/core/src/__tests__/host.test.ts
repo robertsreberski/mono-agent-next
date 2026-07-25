@@ -1285,6 +1285,112 @@ describe("agent host lifecycle", () => {
     }
   });
 
+  it("blocking exporter does not stall turn completion", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-${suffix}`;
+    const exporter = `@fixture/exporter-${suffix}`;
+    let exports = 0;
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create: () => runtimeInstance(async (request) => completed(requestText(request))),
+        },
+      },
+      {
+        name: exporter,
+        kind: "exporter",
+        controller: {
+          create: () => ({
+            export() {
+              exports += 1;
+              return new Promise<never>(() => {});
+            },
+            async flush() {},
+          }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      observability: { exporters: { blocked: { $use: exporter } } },
+    }));
+    const host = await createAgentHost(project.configPath, {
+      drainTimeoutMs: 20,
+      lifecycleTimeoutMs: 20,
+      maxConcurrentTurns: 1,
+    });
+
+    try {
+      await expect(settleWithin(host.submit({
+        requestId: "blocked-export-1",
+        conversationId: "blocked-export-1",
+        text: "first",
+      }), 500)).resolves.toMatchObject({ status: "completed", text: "first" });
+      await expect(host.health()).resolves.toMatchObject({
+        status: "degraded",
+        pending: 0,
+        active: 0,
+      });
+      await expect(settleWithin(host.submit({
+        requestId: "blocked-export-2",
+        conversationId: "blocked-export-2",
+        text: "second",
+      }), 500)).resolves.toMatchObject({ status: "completed", text: "second" });
+      expect(exports).toBe(2);
+    } finally {
+      await host.stop();
+    }
+  });
+
+  it("automatic pre-turn recall rejects non-array records", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-${suffix}`;
+    const memory = `@fixture/memory-${suffix}`;
+    let renderedRequest = "";
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create: () => runtimeInstance(async (request) => {
+            renderedRequest = JSON.stringify(request);
+            return completed("continued");
+          }),
+        },
+      },
+      {
+        name: memory,
+        kind: "memory",
+        controller: {
+          create: () => ({
+            capabilities: { capture: false, forget: false },
+            async recall() {
+              return { records: "not-an-array" };
+            },
+          }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      memory: { $use: memory },
+    }));
+    const host = await createAgentHost(project.configPath);
+
+    try {
+      await expect(host.submit({
+        requestId: "invalid-auto-recall",
+        conversationId: "invalid-auto-recall",
+        text: "continue safely",
+      })).resolves.toMatchObject({ status: "completed", text: "continued" });
+      expect(renderedRequest).not.toContain("- undefined");
+      expect(renderedRequest).not.toContain("Relevant memory");
+      await expect(host.health()).resolves.toMatchObject({ status: "degraded" });
+    } finally {
+      await host.stop();
+    }
+  });
+
   it("aborts an unfinished post-settlement memory capture when host stop reaches its drain bound", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtime = `@fixture/runtime-${suffix}`;

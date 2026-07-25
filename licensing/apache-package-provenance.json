@@ -219,7 +219,7 @@
     },
     {
       "path": "packages/module-sdk/src/testing.ts",
-      "sha256": "bbbc2132cca0117b3c25c2b0cca43576bf949d911c4fa5d6f0b4b1cfbb0dc0e5",
+      "sha256": "2fd373f0cd8e8a4b47eee9ba05795f2b90b93b5d8a009049626e6f6e6a0618df",
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",

@@ -62,6 +62,7 @@ jobs:
           pnpm run check:oss-hygiene
           node scripts/check-license-consistency.mjs
           pnpm run check:apache-provenance
+          pnpm run check:source-line-length
           pnpm run check:architecture
 
       - name: Check generated documentation contracts

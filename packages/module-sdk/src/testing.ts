@@ -8,7 +8,7 @@ import {
   readCrossSlotReference,
   type Awaitable, type Channel, type ChannelOutboundMessage, type ChannelModuleDefinition,
   type Memory, type MemoryModuleDefinition, type ModuleKind, type ModuleSchema,
-  type ModuleToolBinding,
+  type ModuleToolBinding, type ModuleToolContribution,
   type OpenModuleDefinition, type Runtime, type RuntimeModuleDefinition,
 } from "./index.js";
 const RESERVED_DIRECTIVES = new Set(["$schema", "$use", "$env"]);
@@ -166,10 +166,11 @@ export function assertSchemaCompliance(value: unknown): asserts value is ModuleS
 export function assertModuleToolContributionsCompliance(
   value: unknown,
   label = "module instance toolContributions",
-): void {
-  if (value === undefined) return;
+): readonly ModuleToolContribution[] {
+  if (value === undefined) return [];
   const contributions = requireOwnDataArray(value, label, MODULE_TOOL_LIMITS.perInstance);
   const names = new Set<string>();
+  const snapshot: ModuleToolContribution[] = [];
   for (const [index, raw] of contributions.entries()) {
     const toolLabel = `${label}[${String(index)}]`;
     const tool = requirePlainRecord(raw, toolLabel);
@@ -213,7 +214,15 @@ export function assertModuleToolContributionsCompliance(
     if (typeof readOwnDataProperty(tool, "bind", toolLabel, true) !== "function") {
       fail(`${toolLabel}.bind must be a function`);
     }
+    snapshot.push(Object.freeze({
+      name,
+      description,
+      inputSchema: deepFreeze(structuredClone(inputSchema)),
+      effects: Object.freeze([...effects]) as ModuleToolContribution["effects"],
+      bind: tool.bind as ModuleToolContribution["bind"],
+    }));
   }
+  return Object.freeze(snapshot);
 }
 export function assertModuleToolBindingCompliance(
   value: unknown,
@@ -308,19 +317,13 @@ function assertInstanceCapabilities(
   return detached;
 }
 function assertSchemaGraph(jsonSchema: Record<string, unknown>): void {
-  const visited = new Set<object>();
-  const pending: unknown[] = [jsonSchema];
   const snapshots = new WeakMap<object, Record<string, unknown>>();
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (current === null || typeof current !== "object" || visited.has(current)) continue;
+  const visited = new Set<object>();
+  const visit = (current: unknown): void => {
+    if (current === null || typeof current !== "object" || visited.has(current)) return;
     visited.add(current);
     const record = snapshotSchemaNode(current, snapshots);
-    if (Array.isArray(current)) {
-      pending.push(...Object.values(record));
-      continue;
-    }
-    if (record.properties !== undefined) {
+    if (!Array.isArray(current) && record.properties !== undefined) {
       const properties = snapshotSchemaNode(
         requireRecord(record.properties, "JSON Schema properties"),
         snapshots,
@@ -330,16 +333,17 @@ function assertSchemaGraph(jsonSchema: Record<string, unknown>): void {
           fail(`module schema may not define reserved directive property ${name}`);
       }
     }
-    pending.push(...Object.values(record));
-  }
-  for (const current of visited) {
-    if (Array.isArray(current)) continue;
-    const schema = snapshots.get(current)!;
-    if (MODULE_SCHEMA_SLOT_REFERENCE in schema
-      && (schema.type !== "string" || !hasValidSlotReference(schema, snapshots))) {
+    for (const child of Object.values(record)) visit(child);
+    if (Array.isArray(current) || !(MODULE_SCHEMA_SLOT_REFERENCE in record)) return;
+    const reference = record[MODULE_SCHEMA_SLOT_REFERENCE];
+    if (record.type !== "string" || reference === null || typeof reference !== "object"
+      || Array.isArray(reference) || readCrossSlotReference({
+        [MODULE_SCHEMA_SLOT_REFERENCE]: snapshotSchemaNode(reference, snapshots),
+      }) === undefined) {
       fail("module schema has an invalid cross-slot reference annotation");
     }
-  }
+  };
+  visit(jsonSchema);
 }
 function snapshotSchemaNode(value: object, snapshots: WeakMap<object, Record<string, unknown>>):
 Record<string, unknown> {
@@ -360,14 +364,6 @@ Record<string, unknown> {
       { value: descriptor.value, enumerable: descriptor.enumerable === true });
   }
   return snapshot;
-}
-function hasValidSlotReference(schema: Record<string, unknown>,
-  snapshots: WeakMap<object, Record<string, unknown>>): boolean {
-  const reference = schema[MODULE_SCHEMA_SLOT_REFERENCE];
-  if (reference === null || typeof reference !== "object" || Array.isArray(reference)) return false;
-  return readCrossSlotReference({
-    [MODULE_SCHEMA_SLOT_REFERENCE]: snapshotSchemaNode(reference, snapshots),
-  }) !== undefined;
 }
 function assertOptionalFunction(value: unknown, label: string): void {
   if (value !== undefined && typeof value !== "function") fail(`${label} must be a function when present`);
@@ -443,87 +439,64 @@ function utf8Bytes(value: string): number {
 function assertBoundedModuleToolSchema(value: Record<string, unknown>, label: string): void {
   let bytes = 0;
   let items = 0;
-  let serializedBytes = 0;
   const active = new Set<object>();
   const charge = (amount: number): void => {
     bytes += amount;
-    if (bytes > MODULE_TOOL_LIMITS.inputSchemaBytes) {
+    if (bytes > MODULE_TOOL_LIMITS.inputSchemaBytes)
       fail(`${label} exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaBytes)} UTF-8 bytes`);
-    }
-  };
-  const chargeSerialized = (amount: number): void => {
-    serializedBytes += amount;
-    if (serializedBytes > MODULE_TOOL_LIMITS.inputSchemaBytes) {
-      fail(`${label} exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaBytes)} UTF-8 bytes`);
-    }
   };
   const addItems = (amount: number): void => {
     items += amount;
-    if (items > MODULE_TOOL_LIMITS.inputSchemaItems) {
+    if (items > MODULE_TOOL_LIMITS.inputSchemaItems)
       fail(`${label} exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaItems)} JSON items`);
-    }
   };
   const visit = (current: unknown, path: string, depth: number): void => {
     if (depth === 0) addItems(1);
-    if (current === null) {
-      charge(8);
-      chargeSerialized(4);
-      return;
-    }
-    if (typeof current === "boolean") {
-      charge(8);
-      chargeSerialized(current ? 4 : 5);
-      return;
-    }
+    if (current === null) { charge(8); return; }
+    if (typeof current === "boolean") { charge(8); return; }
     if (typeof current === "number") {
       if (!Number.isFinite(current)) fail(`${path} must contain only finite numbers`);
-      charge(16);
-      chargeSerialized(jsonScalarBytes(current));
-      return;
+      charge(16); return;
     }
-    if (typeof current === "string") {
-      charge(utf8Bytes(current));
-      chargeSerialized(jsonScalarBytes(current));
-      return;
-    }
+    if (typeof current === "string") { charge(utf8Bytes(current)); return; }
     if (current === null || typeof current !== "object") {
       fail(`${path} must contain only JSON values`);
     }
     if (isProxy(current)) fail(`${path} must not contain a Proxy`);
-    if (depth >= MODULE_TOOL_LIMITS.inputSchemaDepth) {
+    if (depth >= MODULE_TOOL_LIMITS.inputSchemaDepth)
       fail(`${path} exceeds JSON depth ${String(MODULE_TOOL_LIMITS.inputSchemaDepth)}`);
-    }
     if (active.has(current)) fail(`${path} must not contain cycles`);
-    const source = Array.isArray(current)
+    const array = Array.isArray(current);
+    const source = array
       ? requireOwnDataArray(current, path, MODULE_TOOL_LIMITS.inputSchemaItems)
       : requirePlainRecord(current, path);
-    const entries = Reflect.ownKeys(source)
-      .filter((key) => !Array.isArray(current) || key !== "length");
+    const entries = Reflect.ownKeys(source).filter((key) => !array || key !== "length");
     addItems(entries.length);
-    chargeSerialized(2 + Math.max(0, entries.length - 1));
     active.add(current);
     try {
       for (const key of entries) {
         if (typeof key !== "string") fail(`${path} contains an unknown symbol key`);
         if (UNSAFE_KEYS.has(key)) fail(`${path} contains unsafe key ${JSON.stringify(key)}`);
         const descriptor = Object.getOwnPropertyDescriptor(source, key);
-        if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+        if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true)
           fail(`${path}.${key} must be an enumerable data property`);
-        }
-        if (!Array.isArray(current)) {
-          charge(utf8Bytes(key));
-          chargeSerialized(jsonScalarBytes(key) + 1);
-        }
-        visit(descriptor.value, Array.isArray(current) ? `${path}[${key}]` : `${path}.${key}`, depth + 1);
+        if (!array) charge(utf8Bytes(key));
+        visit(descriptor.value, array ? `${path}[${key}]` : `${path}.${key}`, depth + 1);
       }
     } finally {
       active.delete(current);
     }
   }
   visit(value, label, 0);
+  if (utf8Bytes(JSON.stringify(value)) > MODULE_TOOL_LIMITS.inputSchemaBytes)
+    fail(`${label} exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaBytes)} UTF-8 bytes`);
 }
-function jsonScalarBytes(value: string | number): number {
-  return utf8Bytes(JSON.stringify(value));
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
 }
 function fail(message: string): never {
   throw new ModuleComplianceError(message);

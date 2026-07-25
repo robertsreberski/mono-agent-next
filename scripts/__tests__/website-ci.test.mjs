@@ -46,6 +46,7 @@ describe("website CI contract", () => {
       .map((step) => step.run)
       .filter((run) => typeof run === "string");
     expect(verifyRuns.some((run) => run.includes("pnpm run check:apache-provenance"))).toBe(true);
+    expect(verifyRuns.some((run) => run.includes("pnpm run check:source-line-length"))).toBe(true);
     expect(verifyRuns.some((run) => run.includes("pnpm run check:source-beta-budgets"))).toBe(true);
     expect(verifyRuns.some((run) => run.includes("pnpm run scripts:test"))).toBe(true);
 
