@@ -46,7 +46,10 @@ import {
   runtimeSessionRouteKey,
 } from "./host-routing.js";
 import { HostDiagnostics } from "./host-diagnostics.js";
+import { HostExport } from "./host-export.js";
 import { HostInteractions } from "./host-interactions.js";
+import { HostMemory } from "./host-memory.js";
+import { HostTriggers } from "./host-triggers.js";
 import { HostSessions } from "./host-sessions.js";
 import { normalizeLiveInput, normalizeSubmitInput } from "./host-submit-input.js";
 import {
@@ -112,8 +115,6 @@ import type { AgentHealth, AgentHost, AgentHostOptions, AgentHostStartInfo, Agen
 const DEFAULT_MAX_CONCURRENT_TURNS = 4, DEFAULT_MAX_PENDING_TURNS = 64;
 const DEFAULT_DRAIN_TIMEOUT_MS = 30_000, DEFAULT_LIFECYCLE_TIMEOUT_MS = 10_000, DEFAULT_LIVE_INPUT_ACK_TIMEOUT_MS = 5_000;
 const MODULE_DIAGNOSTIC_MAX_ITEMS = 100;
-const MAX_TRIGGER_CLAIMS = 10_000;
-const PROACTIVE_SUPPRESSION_SENTINEL = "NOTHING_TO_REPORT";
 export async function createAgentHost(
   config: string | LoadedAgentConfig,
   options: AgentHostOptions = {},
@@ -163,18 +164,14 @@ class AgentHostImplementation implements AgentHost {
   readonly #sessionStore: HostSessions;
   readonly #diagnostics: HostDiagnostics;
   readonly #interactions: HostInteractions;
+  readonly #memoryFacet: HostMemory;
+  readonly #export: HostExport;
+  readonly #triggers: HostTriggers;
   readonly #loadedConversations = new Set<string>();
   readonly #conversationUpdatedAt = new Map<string, string>();
   readonly #conversationTitles = new Map<string, string>();
   readonly #conversationMetadata = new Map<string, JsonObject>();
   readonly #activeTurns = new Map<string, ActiveTurn>();
-  readonly #triggerClaims = new Map<string, "pending" | "delivery_unknown" | "execution_unknown">();
-  /**
-   * Unknown trigger outcomes are retained so a replayed event cannot execute
-   * twice. Retention is bounded: the oldest claim is dropped past the cap, and
-   * a dropped claim degrades to at-least-once for that one event rather than
-   * growing the ledger without limit.
-   */
   readonly #health: HostHealthMonitor;
   readonly #conversationTails = new ConversationTails();
   readonly #localHistoryTails = new ConversationTails();
@@ -247,6 +244,27 @@ class AgentHostImplementation implements AgentHost {
       activeTurn: (conversationId) => this.#activeTurns.get(conversationId),
       appendEvidence: (input, active, evidence, text, signal) =>
         this.#appendInteractionEvidence(input, active, evidence, text, signal),
+    });
+    this.#memoryFacet = new HostMemory({
+      hostSignal: this.#hostAbort.signal,
+      memory: () => this.#memory,
+      runtimes: () => this.#runtimeInstances,
+      runtimeCapabilities: () => this.#runtimeCapabilities,
+      recordFailure: (message) => { this.#health.record(message); },
+    });
+    this.#export = new HostExport({
+      agentId: config.raw.agent.id,
+      lifecycle: this.#lifecycle,
+      exporters: () => this.#exporterInstances,
+      recordFailure: (message) => { this.#health.record(message); },
+    });
+    this.#triggers = new HostTriggers({
+      hostSignal: this.#hostAbort.signal,
+      submitRequest: (input, emit, emitAsk, emitApproval, observeAdmission) =>
+        this.#submitRequest(input, emit, emitAsk, emitApproval, observeAdmission),
+      deliver: (channelInstanceId, message) => this.deliver(channelInstanceId, message),
+      redact: (message) => this.#redact(message),
+      recordFailure: (message) => { this.#health.record(message); },
     });
     this.#redactionValues = referencedEnvironmentValues(
       [config.raw, config.mcp],
@@ -658,7 +676,7 @@ class AgentHostImplementation implements AgentHost {
     }
     if (module.slot === "memory" && declaresHostCapability(module, HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE)) {
       capabilityValues.set(HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE, {
-        complete: (request: MemoryRuntimeCaptureRequest) => this.#completeMemoryCapture(request),
+        complete: (request: MemoryRuntimeCaptureRequest) => this.#memoryFacet.completeCapture(request),
       });
     }
     if (module.slot === "trigger" && this.#stateStore !== undefined
@@ -719,7 +737,7 @@ class AgentHostImplementation implements AgentHost {
       },
     };
     if (module.slot === "trigger") {
-      return { ...base, emit: (event: TriggerEvent, signal: AbortSignal) => this.#emitTrigger(event, signal) };
+      return { ...base, emit: (event: TriggerEvent, signal: AbortSignal) => this.#triggers.emit(event, signal) };
     }
     if (module.slot === "memory") {
       const grant = capabilityValues.get(HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE);
@@ -1336,7 +1354,7 @@ class AgentHostImplementation implements AgentHost {
     emitApproval?: (request: ApprovalRequest) => Promise<void>,
   ): Promise<AgentResponse> {
     await this.#loadConversation(input.conversationId, signal);
-    const recalled = await this.#recallMemory(input, signal);
+    const recalled = await this.#memoryFacet.recall(input, signal);
     const routes = routeCandidates(this.config, input);
     const memoryRecallTool = this.#memoryRecallEnabled && this.#memory !== undefined
       ? [createMemoryRecallTool(this.#memory, input.conversationId, signal)] : [];
@@ -1623,7 +1641,7 @@ class AgentHostImplementation implements AgentHost {
           active,
           settlement,
         );
-        await this.#exportTurn("mono_agent.turn.settled", input, route, response);
+        await this.#export.emit("mono_agent.turn.settled", input, route, response);
         return response;
       } catch (error) {
         if (this.#hostAbort.signal.aborted) {
@@ -1870,7 +1888,7 @@ class AgentHostImplementation implements AgentHost {
       await this.#localHistoryTails.run(input.conversationId, signal, commit);
     else await commit();
     if (settledResult.status === "completed") {
-      await this.#captureMemory({
+      await this.#memoryFacet.capture({
         id: active.id,
         text: `User: ${input.text}\nAssistant: ${text}`,
         createdAt: updatedAt,
@@ -2112,226 +2130,6 @@ class AgentHostImplementation implements AgentHost {
     if (conversation.metadata === undefined) this.#conversationMetadata.delete(conversation.conversationId);
     else this.#conversationMetadata.set(conversation.conversationId, immutableClone(conversation.metadata));
   }
-  async #recallMemory(input: AgentSubmitInput, signal: AbortSignal): Promise<readonly MemoryRecord[]> {
-    if (this.#memory === undefined) return [];
-    try {
-      const result = await this.#memory.recall({
-        query: input.text,
-        limit: 8,
-        conversationId: input.conversationId,
-        signal,
-      });
-      return snapshotMemoryRecallRecords(result, 8, "automatic memory recall");
-    } catch (error) {
-      this.#health.record(`memory recall: ${errorMessage(error)}`);
-      return [];
-    }
-  }
-  async #captureMemory(record: MemoryRecord, signal: AbortSignal): Promise<void> {
-    if (this.#memory?.capture === undefined) return;
-    try {
-      await this.#memory.capture({ record, signal });
-    } catch (error) {
-      this.#health.record(`memory capture: ${errorMessage(error)}`);
-    }
-  }
-  async #exportTurn(
-    name: string,
-    input: AgentSubmitInput,
-    route: RuntimeRoute,
-    response: AgentResponse,
-  ): Promise<void> {
-    if (this.#exporterInstances.size === 0) return;
-    const record = {
-      name,
-      timestamp: new Date().toISOString(),
-      attributes: {
-        agentId: this.config.raw.agent.id,
-        conversationId: input.conversationId,
-        runtime: route.runtime,
-        model: route.model,
-        status: response.status,
-      },
-    } as const;
-    for (const [instanceId, exporter] of this.#exporterInstances) {
-      try {
-        const result = await this.#lifecycle.run(
-          `exporter ${instanceId} export`,
-          (signal) => exporter.export({ records: [record], signal }),
-        );
-        if (result === undefined) {
-          throw new Error(`exporter ${instanceId} returned no result`);
-        }
-        if (result.rejected > 0) this.#health.record(`exporter ${instanceId} rejected a turn record`);
-      } catch (error) {
-        this.#health.record(`exporter ${instanceId}: ${errorMessage(error)}`);
-      }
-    }
-  }
-  async #emitTrigger(event: TriggerEvent, signal: AbortSignal): Promise<TriggerReceipt> {
-    const combined = AbortSignal.any([this.#hostAbort.signal, signal]);
-    const claimed = this.#triggerClaims.get(event.id);
-    if (claimed !== undefined) return {
-      status: "unknown", code: claimed === "pending" ? "execution_unknown" : claimed,
-      reason: this.#redact("The prior trigger outcome is unknown"),
-    };
-    this.#claimTrigger(event.id, "pending");
-    const conversationId = `trigger:${event.triggerInstanceId}:${event.id}`;
-    let delivery: ChannelDeliveryResult | undefined;
-    let replayed = false;
-    try {
-      const response = await this.#submitRequest(normalizeSubmitInput({
-        requestId: event.id,
-        conversationId,
-        text: event.prompt,
-        ...(event.runtime === undefined ? {} : { runtime: event.runtime }),
-        ...(event.model === undefined ? {} : { model: event.model }),
-        ...(typeof event.metadata?.effort === "string" ? { effort: event.metadata.effort } : {}),
-        signal: combined,
-        metadata: {
-          triggerId: event.id,
-          triggerInstanceId: event.triggerInstanceId,
-          ...(event.metadata ?? {}),
-        },
-      }), async () => {}, undefined, undefined, (value) => { replayed = value; });
-      if (response.status !== "completed") {
-        throw new Error(`Trigger turn ended with ${response.status}`);
-      }
-      if (replayed && event.deliveryChannel === undefined) {
-        this.#triggerClaims.delete(event.id);
-        return { status: "rejected", code: "duplicate", reason: "duplicate trigger event" };
-      }
-      if (response.text === PROACTIVE_SUPPRESSION_SENTINEL) {
-        this.#triggerClaims.delete(event.id);
-        return replayed
-          ? { status: "rejected", code: "duplicate", reason: "duplicate trigger event" }
-          : { status: "accepted", runId: response.runId };
-      }
-      if (event.deliveryChannel !== undefined) {
-        const destination = typeof event.metadata?.destination === "string"
-          ? event.metadata.destination
-          : conversationId;
-        delivery = await this.deliver(event.deliveryChannel, {
-          conversationId: destination,
-          text: response.text,
-          idempotencyKey: event.id,
-          metadata: {
-            triggerId: event.id,
-            sourceConversationId: conversationId,
-            ...deliveryTriggerKind(event.metadata),
-          },
-        });
-        if (delivery.status !== "delivered" && delivery.status !== "duplicate") {
-          throw new Error(`Trigger delivery ended with ${delivery.status}`);
-        }
-        if (replayed && delivery.status === "duplicate") {
-          this.#triggerClaims.delete(event.id);
-          return { status: "rejected", code: "duplicate", reason: "duplicate trigger event" };
-        }
-      }
-      this.#triggerClaims.delete(event.id);
-      return { status: "accepted", runId: response.runId };
-    } catch (error) {
-      if (error instanceof AgentAdmissionError && error.code === "request_in_progress") {
-        this.#claimTrigger(event.id, "execution_unknown");
-        return { status: "unknown", code: "execution_unknown", reason: this.#redact(errorMessage(error)) };
-      }
-      if (error instanceof AgentAdmissionError && error.code === "request_conflict") {
-        this.#triggerClaims.delete(event.id);
-        return { status: "rejected", code: "execution_failed", reason: this.#redact(errorMessage(error)) };
-      }
-      const deliveryUnknown = delivery?.status === "unknown";
-      const executionUnknown = error instanceof RunExecutionError && error.status === "uncertain"
-        || error instanceof AgentAdmissionError
-          && (error.code === "uncertain_admission" || error.code === "stale_admission");
-      if (deliveryUnknown) {
-        this.#claimTrigger(event.id, "delivery_unknown");
-        return { status: "unknown", code: "delivery_unknown", reason: this.#redact(errorMessage(error)) };
-      }
-      if (executionUnknown) {
-        this.#claimTrigger(event.id, "execution_unknown");
-        return { status: "unknown", code: "execution_unknown", reason: this.#redact(errorMessage(error)) };
-      }
-      this.#triggerClaims.delete(event.id);
-      return { status: "rejected", code: "execution_failed", reason: this.#redact(errorMessage(error)) };
-    }
-  }
-  async #completeMemoryCapture(request: MemoryRuntimeCaptureRequest): Promise<MemoryRuntimeCaptureResult> {
-    assertBoundedText(request.instructions, "memory capture instructions", DEFAULT_INSTRUCTION_BYTES);
-    assertBoundedText(request.input, "memory capture input", DEFAULT_MESSAGE_BYTES);
-    assertRouteText(request.runtime, "memory capture runtime", 256);
-    assertRouteText(request.model, "memory capture model", 512);
-    if (!Number.isSafeInteger(request.maxOutputTokens) || request.maxOutputTokens <= 0 || request.maxOutputTokens > 16_384) {
-      throw new RangeError("memory capture maxOutputTokens must be between 1 and 16384");
-    }
-    if (!Number.isSafeInteger(request.timeoutMs) || request.timeoutMs < 1 || request.timeoutMs > 3_600_000) {
-      throw new RangeError("memory capture timeoutMs must be between 1 and 3600000");
-    }
-    const runtime = this.#runtimeInstances.get(request.runtime);
-    const configuredCapabilities = this.#runtimeCapabilities.get(request.runtime);
-    if (runtime === undefined || configuredCapabilities === undefined) {
-      throw new Error(`memory capture runtime ${request.runtime} is unavailable`);
-    }
-    const timeout = AbortSignal.timeout(request.timeoutMs);
-    const signal = AbortSignal.any([this.#hostAbort.signal, request.signal, timeout]);
-    let routeCapabilities = configuredCapabilities;
-    if (runtime.preflightModel !== undefined || runtime.validateModel !== undefined) {
-      const rawValidation = runtime.preflightModel !== undefined
-        ? await runtime.preflightModel({ model: request.model, signal })
-        : await runtime.validateModel!(request.model, signal);
-      const validation = normalizeRuntimeModelValidation(
-        rawValidation,
-        `${request.runtime}:${request.model} memory capture model validation result`,
-      );
-      if (!validation.supported) {
-        throw new Error(`memory capture runtime ${request.runtime} does not support the selected model`);
-      }
-      routeCapabilities = validation.capabilities ?? routeCapabilities;
-    }
-    if (!routeCapabilities.structuredOutput) {
-      throw new Error("memory capture route does not support structured output");
-    }
-    const eventBoundary = createRuntimeTurnEventBoundary();
-    const captureConversationId = `memory-capture:${randomUUID()}`;
-    const captureAuthority = {
-      conversationId: captureConversationId,
-      route: {
-        runtimeInstanceId: request.runtime,
-        model: request.model,
-      },
-    } as const;
-    const rawResult = await runtime.runTurn({
-      turnId: randomUUID(),
-      conversationId: captureConversationId,
-      model: request.model,
-      messages: [
-        { role: "system", content: [{ type: "text", text: request.instructions }] },
-        { role: "user", content: [{ type: "text", text: request.input }] },
-      ],
-      tools: [],
-      signal,
-      options: {
-        maxOutputTokens: request.maxOutputTokens,
-        ...(request.responseSchema === undefined ? {} : { responseSchema: request.responseSchema }),
-      },
-    }, {
-      emit: async (event) => {
-        normalizeRuntimeTurnEvent(event, eventBoundary, captureAuthority);
-      },
-      executeTool: async (call) => {
-        normalizeRuntimeToolCall(call);
-        throw new Error("tools are disabled for memory capture");
-      },
-    });
-    assertRuntimeTurnEventBoundaryHealthy(eventBoundary);
-    const result = normalizeRuntimeTurnResult(rawResult, captureAuthority);
-    if (result.status !== "completed") throw new Error(`memory capture runtime ended with ${result.status}`);
-    return {
-      text: textFromMessage(result.message),
-      ...(result.structuredOutput === undefined ? {} : { structuredOutput: result.structuredOutput }),
-      ...(result.usage === undefined ? {} : { usage: result.usage }),
-    };
-  }
   async #drainInternal(): Promise<void> {
     if (this.#state === "new") return;
     if (this.#state === "stopped" || this.#state === "failed") return;
@@ -2418,7 +2216,7 @@ class AgentHostImplementation implements AgentHost {
     this.#conversationUpdatedAt.clear();
     this.#conversationTitles.clear();
     this.#conversationMetadata.clear();
-    this.#triggerClaims.clear();
+    this.#triggers.clear();
     return failures;
   }
   #watchForIdle(): { readonly promise: Promise<void>; cancel(): void } {
@@ -2432,16 +2230,6 @@ class AgentHostImplementation implements AgentHost {
       promise,
       cancel: () => this.#idleWaiters.delete(resolveIdle),
     };
-  }
-  #claimTrigger(id: string, state: "pending" | "delivery_unknown" | "execution_unknown"): void {
-    this.#triggerClaims.delete(id);
-    this.#triggerClaims.set(id, state);
-    while (this.#triggerClaims.size > MAX_TRIGGER_CLAIMS) {
-      const oldest = this.#triggerClaims.keys().next();
-      if (oldest.done === true) break;
-      this.#triggerClaims.delete(oldest.value);
-      this.#health.record("trigger claim ledger is full; the oldest claim was dropped");
-    }
   }
   /** A settlement window bounded by both the lifecycle timeout and host shutdown. */
   #settlementSignal(): AbortSignal {
