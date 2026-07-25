@@ -333,6 +333,16 @@ export type AgentInteractionEvidence =
  * Provider-neutral evidence for one route attempt. Failure evidence is a
  * bounded code and safety classification, never a raw provider error or stack.
  */
+/**
+ * Records that a message keyword raised this turn's effort, and from what, so an
+ * operator can see why an otherwise identical question cost more.
+ */
+export interface AgentEffortEscalationEvidence {
+  readonly keyword: "ultraThink" | "extraThink" | "think";
+  readonly from?: string;
+  readonly to: string;
+}
+
 export interface AgentRunAttemptEvidence {
   readonly attempt: number;
   readonly route: RouteIdentity;
@@ -342,6 +352,7 @@ export interface AgentRunAttemptEvidence {
   readonly code?: string;
   readonly retryability?: RuntimeRetryability;
   readonly sideEffects?: RuntimeSideEffectStatus;
+  readonly effortEscalation?: AgentEffortEscalationEvidence;
 }
 
 /**

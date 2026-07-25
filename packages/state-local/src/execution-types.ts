@@ -52,6 +52,12 @@ export type AgentInteractionEvidence =
       readonly settledAt: string;
     };
 
+export interface AgentEffortEscalationEvidence {
+  readonly keyword: "ultraThink" | "extraThink" | "think";
+  readonly from?: string;
+  readonly to: string;
+}
+
 export interface AgentRunAttemptEvidence {
   readonly attempt: number;
   readonly route: RouteIdentity;
@@ -61,6 +67,7 @@ export interface AgentRunAttemptEvidence {
   readonly code?: string;
   readonly retryability?: RuntimeRetryability;
   readonly sideEffects?: RuntimeSideEffectStatus;
+  readonly effortEscalation?: AgentEffortEscalationEvidence;
 }
 
 export type AgentTranscriptEntry =

@@ -51,6 +51,7 @@ import {
 } from "./execution-transcript.js";
 
 import type {
+  AgentEffortEscalationEvidence,
   AgentRunAttemptEvidence,
   AgentRunEvent,
   AgentRunStatus,
@@ -1183,6 +1184,7 @@ export function parseRunAttemptEvidence(
       "code",
       "retryability",
       "sideEffects",
+      "effortEscalation",
     ],
   );
   const status = stringEnum(
@@ -1223,6 +1225,9 @@ export function parseRunAttemptEvidence(
   if (status === "failed" && (retryability === undefined || sideEffects === undefined)) {
     throw new TypeError(`${path} failed attempts require explicit retry and side-effect evidence`);
   }
+  const effortEscalation = input.effortEscalation === undefined
+    ? undefined
+    : parseEffortEscalationEvidence(input.effortEscalation, `${path}.effortEscalation`);
   return Object.freeze({
     attempt: boundedInteger(input.attempt, `${path}.attempt`, 1, RUN_MAX_ATTEMPTS),
     route: parseRouteIdentity(input.route),
@@ -1232,6 +1237,23 @@ export function parseRunAttemptEvidence(
     ...(code === undefined ? {} : { code }),
     ...(retryability === undefined ? {} : { retryability }),
     ...(sideEffects === undefined ? {} : { sideEffects }),
+    ...(effortEscalation === undefined ? {} : { effortEscalation }),
+  });
+}
+
+function parseEffortEscalationEvidence(
+  value: unknown,
+  path: string,
+): AgentEffortEscalationEvidence {
+  const input = ownDataRecord(value, path, ["keyword", "from", "to"]);
+  return Object.freeze({
+    keyword: stringEnum(
+      input.keyword,
+      ["ultraThink", "extraThink", "think"] as const,
+      `${path}.keyword`,
+    ),
+    ...(input.from === undefined ? {} : { from: boundedCode(input.from, `${path}.from`) }),
+    to: boundedCode(input.to, `${path}.to`),
   });
 }
 
