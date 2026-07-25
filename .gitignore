@@ -5,6 +5,9 @@
 node_modules/
 dist/
 coverage/
+.stryker-tmp/
+packages/*/reports/
+extras/*/reports/
 .workflow/
 .ultrawork/
 .env*

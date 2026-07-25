@@ -55,13 +55,23 @@ function EmptyPart({ status }: EmptyMessagePartProps) {
   return <span className="thinking-indicator" role="status" aria-label="Agent is thinking"><i /><i /><i /></span>;
 }
 
-const parts = {
+/**
+ * Exported so a render test can drive the real map through assistant-ui.
+ *
+ * `tools` and `data` are lowercase because those are the keys the primitive
+ * reads (`MessagePrimitiveParts.StandardComponents`). Capitalised `ToolCall` and
+ * `Data` are accepted by the object literal but silently ignored at render, so
+ * every tool call and data part resolved to nothing.
+ */
+export const parts = {
   Text: MarkdownText,
   Quote: QuoteBlock,
   Empty: EmptyPart,
   Reasoning,
-  ToolCall,
-  Data: { "operator-compaction": CompactionRow, "operator-orphan-result": OrphanResult },
+  tools: { Fallback: ToolCall },
+  data: {
+    by_name: { "operator-compaction": CompactionRow, "operator-orphan-result": OrphanResult },
+  },
 } as const;
 
 function Attachments() {

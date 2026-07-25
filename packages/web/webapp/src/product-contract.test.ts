@@ -18,7 +18,11 @@ describe("packed assistant-ui PWA contract", () => {
     // back out of message metadata by a bespoke feed.
     expect(runtime).toContain("type: \"reasoning\"");
     expect(runtime).toContain("type: \"tool-call\"");
-    expect(chat).toMatch(/Reasoning,\s*\n\s*ToolCall,/u);
+    // Whether those parts actually reach the DOM is asserted by rendering them
+    // in message-parts.test.tsx. A source-text assertion cannot see it: the
+    // previous one here pinned the capitalised `ToolCall` key, which
+    // assistant-ui never reads, so it passed while every tool call rendered
+    // nothing — and would have failed when the key was corrected.
     expect(chat).not.toContain("metadata.custom?.activities");
     // The rail expands by discrete toggle only; a drag handle would make the
     // layout width a continuously persisted preference.
