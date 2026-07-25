@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+import type { ModuleLogger } from "@mono-agent/module-sdk";
 import { isRecord } from "./host-values.js";
 export function assertStateArtifactCompliance(instance: Record<string, unknown>): void {
   assertOptionalInstanceFunction(instance, "publishHostPresence", "state instance");
@@ -60,3 +61,9 @@ export function assertOptionalInstanceFunction(
     throw new TypeError(`${label} ${method} must be a function when present`);
   }
 }
+export const NULL_LOGGER: ModuleLogger = Object.freeze({
+  debug() {},
+  info() {},
+  warn() {},
+  error() {},
+});

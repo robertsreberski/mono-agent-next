@@ -36,7 +36,7 @@ import { AgentAdmissionError, AgentConfigError, AgentModuleError, RunExecutionEr
 import { escalateMessageEffort } from "./effort.js";
 import { ConversationTails, durableFingerprint, submissionFingerprint } from "./host-admission.js";
 import { createAskUserTool, createMemoryRecallTool, moduleProvenance, readInstructions } from "./host-instructions.js";
-import { snapshotInstanceCapabilities } from "./host-module-instances.js";
+import { NULL_LOGGER, snapshotInstanceCapabilities } from "./host-module-instances.js";
 import { deliveryTriggerKind, normalizeCompletionDelivery, normalizeOutboundMessage } from "./host-outbound.js";
 import {
   boundedUtf8, inspectModuleFailure, redactBounded, redactChannelToolEvent, sanitizeModuleCommandError,
@@ -44,6 +44,9 @@ import {
 import {
   routeCandidates, runtimeEligibility, runtimeSessionMapKey, runtimeSessionRouteKey,
 } from "./host-routing.js";
+import { HostDiagnostics } from "./host-diagnostics.js";
+import { HostInteractions } from "./host-interactions.js";
+import { HostSessions } from "./host-sessions.js";
 import { normalizeLiveInput, normalizeSubmitInput } from "./host-submit-input.js";
 import {
   assertUnambiguousToolPolicy, bindModuleTools, collectChannelTools, createdModuleToolSnapshot,
@@ -83,7 +86,9 @@ import {
   waitForValueWithAbort,
   withTimeoutSignal,
 } from "./host-lifecycle.js";
-import { ActiveTurn } from "./host-turn.js";
+import {
+  ActiveTurn, boundedRuntimeFailureMessage, isSafeRuntimeFallback, turnExecutionError,
+} from "./host-turn.js";
 import { connectProjectMcpTools, type ConnectedMcpTools, type CoreRuntimeTool } from "./mcp.js";
 import { decodeAuthorityText, readAuthorityFile } from "./authority-read.js";
 import { createCurrentRunFiles, type CurrentRunFiles } from "./current-run-output.js";
@@ -150,8 +155,9 @@ class AgentHostImplementation implements AgentHost {
   readonly #exporterInstances = new Map<string, Exporter>();
   readonly #running: RunningModule[] = [];
   readonly #history = new Map<string, readonly TurnMessage[]>();
-  readonly #sessions = new Map<string, RuntimeSession>();
-  readonly #sessionUpdatedAt = new Map<string, string>();
+  readonly #sessionStore: HostSessions;
+  readonly #diagnostics: HostDiagnostics;
+  readonly #interactions: HostInteractions;
   readonly #loadedConversations = new Set<string>();
   readonly #conversationUpdatedAt = new Map<string, string>();
   readonly #conversationTitles = new Map<string, string>();
@@ -198,7 +204,15 @@ class AgentHostImplementation implements AgentHost {
       throw new RangeError("maxPendingTurns must be greater than or equal to maxConcurrentTurns");
     }
     this.#semaphore = new TurnSemaphore(this.#options.maxConcurrentTurns);
+    this.#sessionStore = new HostSessions({ config, execution: () => this.#execution });
     this.#lifecycle = new HostLifecycleCalls(this.#options.lifecycleTimeoutMs, this.#hostAbort.signal);
+    this.#diagnostics = new HostDiagnostics({
+      config,
+      lifecycle: this.#lifecycle,
+      running: () => this.#running,
+      createInstance: (module, signal) => this.#createInstance(module, signal),
+      redact: (message) => this.#redact(message),
+    });
     this.#delivery = new HostDelivery({
       hostSignal: this.#hostAbort.signal,
       lifecycleTimeoutMs: this.#options.lifecycleTimeoutMs,
@@ -214,6 +228,14 @@ class AgentHostImplementation implements AgentHost {
         this.#appendLocalVerbatim(conversationId, entries, updatedAt);
       },
       redact: (message) => this.#redact(message),
+    });
+    this.#interactions = new HostInteractions({
+      config,
+      lifecycleTimeoutMs: this.#options.lifecycleTimeoutMs,
+      hostSignal: this.#hostAbort.signal,
+      activeTurn: (conversationId) => this.#activeTurns.get(conversationId),
+      appendEvidence: (input, active, evidence, text, signal) =>
+        this.#appendInteractionEvidence(input, active, evidence, text, signal),
     });
     this.#redactionValues = referencedEnvironmentValues(
       [config.raw, config.mcp],
@@ -253,109 +275,17 @@ class AgentHostImplementation implements AgentHost {
     return true;
   }
   async offerLiveInput(
-    conversationId: string,
-    input: AgentLiveInput,
-    suppliedSignal?: AbortSignal,
+    conversationId: string, input: AgentLiveInput, suppliedSignal?: AbortSignal,
   ): Promise<AgentLiveInputStatus> {
-    const active = this.#activeTurns.get(conversationId);
-    if (active?.liveInput === undefined) return "unavailable";
-    const handler = active.liveInput;
-    const normalizedInput = normalizeLiveInput(input);
-    const turnInput: AgentSubmitInput = {
-      requestId: active.requestId, conversationId, text: "",
-    };
-    const requeue = async (
-      failureCode: string,
-      message: string,
-      cause: unknown,
-    ): Promise<"requeue"> => {
-      const settledAt = new Date().toISOString();
-      await this.#appendInteractionEvidence(
-        turnInput,
-        active,
-        {
-          kind: "live-input", interactionId: normalizedInput.id, phase: "requeued",
-          receivedAt: normalizedInput.receivedAt, settledAt,
-        },
-        normalizedInput.text,
-        AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-      ).catch(() => undefined);
-      active.controller.abort(turnExecutionError(
-        "uncertain", failureCode, message, turnInput, active, cause,
-      ));
-      return "requeue";
-    };
-    const signal = AbortSignal.any([
-      this.#hostAbort.signal,
-      active.controller.signal,
-      ...(suppliedSignal === undefined ? [] : [suppliedSignal]),
-    ]);
-    throwIfAborted(signal);
-    let result: unknown;
-    try {
-      result = await withTimeoutSignal(
-        (boundedSignal) => waitForValueWithAbort(
-          Promise.resolve().then(() => handler(normalizedInput, boundedSignal)),
-          boundedSignal,
-        ),
-        Math.min(this.#options.lifecycleTimeoutMs, DEFAULT_LIVE_INPUT_ACK_TIMEOUT_MS),
-        signal,
-        "Runtime live-input acknowledgement",
-      );
-    } catch (error) {
-      if (this.#hostAbort.signal.aborted || suppliedSignal?.aborted === true) {
-        throw abortError("Runtime live-input acknowledgement was aborted");
-      }
-      return requeue(
-        "live-input-acknowledgement-unknown",
-        "Runtime live-input acknowledgement failed after dispatch",
-        error,
-      );
-    }
-    if (result !== "applied" && result !== "requeue" && result !== "discarded") {
-      const invalid = new TypeError("Runtime live-input handler returned an invalid disposition");
-      return requeue("live-input-disposition-invalid", invalid.message, invalid);
-    }
-    const settledAt = new Date().toISOString();
-    const evidence: AgentInteractionEvidence = {
-      kind: "live-input",
-      interactionId: normalizedInput.id,
-      phase: result === "requeue"
-        ? "requeued"
-        : result === "discarded"
-          ? "discarded"
-          : "applied",
-      receivedAt: normalizedInput.receivedAt,
-      settledAt,
-    };
-    try {
-      await this.#appendInteractionEvidence(
-        turnInput,
-        active,
-        evidence,
-        normalizedInput.text,
-        signal,
-      );
-    } catch (error) {
-      active.controller.abort(
-        error instanceof Error
-          ? error
-          : new Error("Live-input evidence could not be recorded"),
-      );
-      throw error;
-    }
-    return result;
+    return this.#interactions.offerLiveInput(conversationId, input, suppliedSignal);
   }
   async answerAsk(conversationId: string, answer: AgentAskAnswer): Promise<AgentAskAnswerStatus> {
-    const active = this.#activeTurns.get(conversationId);
-    return active === undefined ? "expired" : active.answerAsk(answer);
+    return this.#interactions.answerAsk(conversationId, answer);
   }
   async answerApproval(
-    conversationId: string,
-    decision: AgentApprovalAnswer,
+    conversationId: string, decision: AgentApprovalAnswer,
   ): Promise<AgentApprovalAnswerStatus> {
-    const active = this.#activeTurns.get(conversationId);
-    return active === undefined ? "expired" : active.answerApproval(decision);
+    return this.#interactions.answerApproval(conversationId, decision);
   }
   async conversations(): Promise<readonly AgentConversationSummary[]> {
     if (this.#execution !== undefined) {
@@ -425,193 +355,18 @@ class AgentHostImplementation implements AgentHost {
       redacted: true,
     };
   }
+  async runModuleCommand(
+    moduleInstanceId: string, commandName: string, input?: unknown,
+  ): Promise<AgentModuleCommandResult> {
+    return this.#diagnostics.runCommand(moduleInstanceId, commandName, input);
+  }
+  async diagnostics(verbose = false): Promise<readonly AgentModuleDiagnostics[]> {
+    return this.#diagnostics.inspect(verbose);
+  }
   async deliver(channelInstanceId: string, message: ChannelOutboundMessage): Promise<ChannelDeliveryResult> {
     return (await this.#delivery.deliver(
       channelInstanceId, message, this.#hostAbort.signal,
     )).result;
-  }
-  async runModuleCommand(moduleInstanceId: string, commandName: string, input?: unknown): Promise<AgentModuleCommandResult> {
-    const running = this.#running.find((candidate) => candidate.loaded.instanceId === moduleInstanceId);
-    if (running !== undefined) {
-      try { return await this.#invokeModuleCommand(running.loaded, running.instance, commandName, input); }
-      catch (error) { throw this.#moduleCommandError(error, running.loaded, commandName, "run"); }
-    }
-    const loaded = this.config.modules.find((candidate) => candidate.instanceId === moduleInstanceId);
-    if (loaded === undefined) throw new Error(`Module ${moduleInstanceId} is not selected`);
-    let instance: ModuleInstance | undefined;
-    try {
-      instance = await this.#lifecycle.run(
-        `${loaded.instanceId} command create`,
-        (signal) => this.#createInstance(loaded, signal),
-      );
-      if (instance === undefined) throw new Error(`${loaded.instanceId} command create returned undefined`);
-    } catch (error) { throw this.#moduleCommandError(error, loaded, commandName, "create"); }
-    let result: AgentModuleCommandResult | undefined;
-    let runFailure: unknown; let runFailed = false;
-    try { result = await this.#invokeModuleCommand(loaded, instance, commandName, input); }
-    catch (error) { runFailure = error; runFailed = true; }
-    let stopFailure: unknown; let stopFailed = false;
-    if (instance.stop !== undefined) {
-      try {
-        await this.#lifecycle.cleanup(
-          `${loaded.instanceId} command stop`,
-          (signal) => instance.stop?.({ signal, reason: "shutdown" }),
-        );
-      } catch (error) { stopFailure = error; stopFailed = true; }
-    }
-    if (runFailed && stopFailed) {
-      throw this.#moduleCommandError(
-        new AggregateError(
-          [runFailure, stopFailure],
-          `Command failed: ${inspectModuleFailure(runFailure)}; cleanup failed: ${inspectModuleFailure(stopFailure)}`,
-        ),
-        loaded, commandName, "run_and_stop",
-      );
-    }
-    if (runFailed) throw this.#moduleCommandError(runFailure, loaded, commandName, "run");
-    if (stopFailed) throw this.#moduleCommandError(stopFailure, loaded, commandName, "stop");
-    return result!;
-  }
-  async #invokeModuleCommand(
-    loaded: LoadedAgentModule, instance: ModuleInstance, commandName: string, input?: unknown,
-  ): Promise<AgentModuleCommandResult> {
-    const command = instance.commands?.find((candidate) => candidate.name === commandName);
-    if (command === undefined) throw new Error(`Module ${loaded.instanceId} does not expose command ${commandName}`);
-    const value = await this.#lifecycle.run(
-      `${loaded.instanceId} command ${commandName}`,
-      (signal) => command.run(input, { signal, logger: NULL_LOGGER }),
-    );
-    return {
-      module: loaded.instanceId,
-      command: commandName,
-      ...(value === undefined
-        ? {}
-        : { value: normalizeModuleJson(value, "module command result", (text) => this.#redact(text)) }),
-    };
-  }
-  async diagnostics(verbose = false): Promise<readonly AgentModuleDiagnostics[]> {
-    if (typeof verbose !== "boolean") throw new TypeError("diagnostics verbose must be boolean");
-    if (this.#running.length > 0) {
-      return Promise.all(this.#running.map(({ loaded, instance }) =>
-        this.#diagnoseModule(loaded, instance, verbose)));
-    }
-    const results: AgentModuleDiagnostics[] = [];
-    for (const loaded of [...this.config.modules]
-      .sort((left, right) => left.instanceId.localeCompare(right.instanceId))) {
-      let instance: ModuleInstance;
-      try {
-        const created = await this.#lifecycle.run(
-          `${loaded.instanceId} diagnostics create`,
-          (signal) => this.#createInstance(loaded, signal),
-        );
-        if (created === undefined) throw new Error(`${loaded.instanceId} diagnostics create returned undefined`);
-        instance = created;
-      } catch (error) {
-        results.push(this.#diagnosticFailure(loaded, "module_diagnostics_create_failed", error));
-        continue;
-      }
-      let result = await this.#diagnoseModule(loaded, instance, verbose);
-      if (instance.stop !== undefined) {
-        try {
-          await this.#lifecycle.cleanup(
-            `${loaded.instanceId} diagnostics stop`,
-            (signal) => instance.stop?.({ signal, reason: "shutdown" }),
-          );
-        } catch (error) {
-          result = {
-            ...result,
-            diagnostics: [...result.diagnostics, this.#diagnostic(
-              "module_diagnostics_stop_failed",
-              error,
-            )],
-          };
-        }
-      }
-      results.push(result);
-    }
-    return Object.freeze(results);
-  }
-  async #diagnoseModule(loaded: LoadedAgentModule, instance: ModuleInstance, verbose: boolean): Promise<AgentModuleDiagnostics> {
-    if (loaded.slot === "state") {
-      try {
-        const execution = (instance as StateStore).execution;
-        if (execution === undefined) throw new Error(`${loaded.instanceId} does not expose the required state execution capability`);
-        await this.#lifecycle.run(
-          `${loaded.instanceId} state execution protocol`,
-          (signal) => new StateExecutionClient(execution).assertCompatible(signal),
-        );
-      } catch (error) {
-        return this.#diagnosticFailure(loaded, "state_execution_protocol_incompatible", error);
-      }
-    }
-    if (instance.diagnostics === undefined) {
-      if (instance.health !== undefined && ["memory", "state", "sandbox", "exporter"].includes(loaded.slot)) {
-        try {
-          const raw = await this.#lifecycle.run(
-            `${loaded.instanceId} diagnostic health`,
-            (signal) => instance.health?.({ signal }),
-          );
-          const health = normalizeModuleHealth(
-            raw,
-            `${loaded.instanceId} diagnostic health`,
-            (text) => this.#redact(text),
-          );
-          if (health.status !== "healthy") {
-            return this.#diagnosticResult(loaded, [Object.freeze({
-                code: `module_health_${health.status}`,
-                severity: health.status === "unhealthy" ? "error" : "warning",
-                message: health.summary ?? `Module health is ${health.status}`,
-            })]);
-          }
-        } catch (error) {
-          return this.#diagnosticFailure(loaded, "module_diagnostic_health_failed", error);
-        }
-      }
-      return this.#diagnosticResult(loaded, []);
-    }
-    try {
-      const raw = await this.#lifecycle.run(
-        `${loaded.instanceId} diagnostics`,
-        (signal) => instance.diagnostics?.({ signal, verbose }),
-      );
-      const values = boundedOwnDataArray(
-        raw,
-        `${loaded.instanceId} diagnostics`,
-        MODULE_DIAGNOSTIC_MAX_ITEMS,
-        true,
-        true,
-      );
-      const diagnostics = values.map((value, index) => {
-        const diagnostic = normalizeModuleDiagnostic(
-          value,
-          `${loaded.instanceId} diagnostics[${String(index)}]`,
-        );
-        return Object.freeze({
-          ...diagnostic,
-          message: this.#redact(diagnostic.message),
-          ...(diagnostic.hint === undefined ? {} : { hint: this.#redact(diagnostic.hint) }),
-        });
-      });
-      return this.#diagnosticResult(loaded, diagnostics);
-    } catch (error) {
-      return this.#diagnosticFailure(loaded, "module_diagnostics_failed", error);
-    }
-  }
-  #diagnosticFailure(loaded: LoadedAgentModule, code: string, error: unknown): AgentModuleDiagnostics {
-    return this.#diagnosticResult(loaded, [this.#diagnostic(code, error)]);
-  }
-  #diagnosticResult(loaded: LoadedAgentModule, diagnostics: readonly ModuleDiagnostic[]): AgentModuleDiagnostics {
-    return Object.freeze({
-      kind: loaded.slot, instanceId: loaded.instanceId,
-      diagnostics: Object.freeze(diagnostics),
-    });
-  }
-  #diagnostic(code: string, error: unknown): ModuleDiagnostic {
-    return Object.freeze({
-      code,
-      severity: "error",
-      message: boundedUtf8(this.#redact(errorMessage(error)), 4_096),
-    });
   }
   #admit(input: AgentSubmitInput): void {
     if (this.#state !== "running") {
@@ -1530,7 +1285,7 @@ class AgentHostImplementation implements AgentHost {
     const askUserTool = input.interactionHandler === undefined && emitAsk === undefined ? [] : [createAskUserTool(
       (request, askSignal) => {
         if (active.route === undefined) throw new Error("AskUser route is unavailable");
-        return this.#requestAskUser(input, active, active.route, request, askSignal, emitAsk);
+        return this.#interactions.askUser(input, active, active.route, request, askSignal, emitAsk);
       }, signal)];
     const selectedTools = filterTools(
       [
@@ -1674,7 +1429,7 @@ class AgentHostImplementation implements AgentHost {
             if (tool !== undefined
               && effects.length > 0
               && this.config.raw.policy.approvals.default === "ask") {
-              const decision = await this.#requestApproval(
+              const decision = await this.#interactions.approval(
                 input,
                 active,
                 route,
@@ -1731,7 +1486,7 @@ class AgentHostImplementation implements AgentHost {
           ...(input.interactionHandler === undefined && emitAsk === undefined ? {} : {
             askUser: (request: AskUserRequest, askSignal: AbortSignal) => {
               observeEffect();
-              return this.#requestAskUser(
+              return this.#interactions.askUser(
                 input,
                 active,
                 route,
@@ -1744,7 +1499,7 @@ class AgentHostImplementation implements AgentHost {
           ...(routeNativeTools.some((tool) => tool.approval === "core-callback") ? {
             requestApproval: (request: ApprovalRequest, approvalSignal: AbortSignal) => {
               observeEffect();
-              return this.#requestRuntimeApproval(
+              return this.#interactions.runtimeApproval(
                 input,
                 active,
                 route,
@@ -1869,7 +1624,7 @@ class AgentHostImplementation implements AgentHost {
           && typed.sideEffects === "none"
           && !sessionRecoveryRoutes.has(runtimeSessionRouteKey(route))
         ) {
-          await this.#evictRetainedSession(
+          await this.#sessionStore.evict(
             input,
             route,
             runtimeSessionMapKey(route, input.conversationId),
@@ -1898,217 +1653,6 @@ class AgentHostImplementation implements AgentHost {
       moduleBindings.revoke();
     }
   }
-  async #requestAskUser(
-    input: AgentSubmitInput,
-    active: ActiveTurn,
-    route: RuntimeRoute,
-    request: AskUserRequest,
-    signal: AbortSignal,
-    emitAsk: ((request: AskUserRequest) => Promise<void>) | undefined,
-  ): Promise<AskUserAnswer> {
-    throwIfAborted(signal);
-    const parsedRequest = parseAskUserRequest(request);
-    await this.#appendInteractionEvidence(input, active, {
-      kind: "ask-user",
-      interactionId: parsedRequest.interactionId,
-      phase: "requested",
-      requestedAt: parsedRequest.requestedAt,
-      questionCount: parsedRequest.questions.length,
-    }, renderAskUserRequest(parsedRequest), signal);
-    let parsedAnswer: AskUserAnswer;
-    try {
-      parsedAnswer = input.interactionHandler !== undefined
-        ? parseAskUserAnswer(
-            await waitForValueWithAbort(
-              Promise.resolve().then(() => input.interactionHandler!.askUser(parsedRequest, {
-                conversationId: input.conversationId,
-                turnId: active.id,
-                route: { runtimeInstanceId: route.runtime, model: route.model },
-                signal,
-              })),
-              signal,
-            ),
-            parsedRequest,
-          )
-        : emitAsk === undefined
-          ? (() => {
-              throw new Error("AskUser interaction handler is unavailable");
-            })()
-          : await active.waitForAsk(parsedRequest, signal, emitAsk);
-    } catch (error) {
-      const settledAt = new Date().toISOString();
-      const settlementSignal = AbortSignal.timeout(this.#options.lifecycleTimeoutMs);
-      await this.#appendInteractionEvidence(input, active, {
-        kind: "ask-user",
-        interactionId: parsedRequest.interactionId,
-        phase: signal.aborted ? "cancelled" : "expired",
-        requestedAt: parsedRequest.requestedAt,
-        settledAt,
-        questionCount: parsedRequest.questions.length,
-      }, signal.aborted
-        ? "AskUser interaction cancelled."
-        : "AskUser interaction expired without an answer.", settlementSignal);
-      throw error;
-    }
-    await this.#appendInteractionEvidence(input, active, {
-      kind: "ask-user",
-      interactionId: parsedRequest.interactionId,
-      phase: "answered",
-      requestedAt: parsedRequest.requestedAt,
-      settledAt: parsedAnswer.answeredAt,
-      questionCount: parsedRequest.questions.length,
-      answeredQuestionCount: Object.keys(parsedAnswer.answers).length,
-    }, renderAskUserAnswer(parsedRequest, parsedAnswer), signal);
-    return parsedAnswer;
-  }
-  async #requestRuntimeApproval(
-    input: AgentSubmitInput,
-    active: ActiveTurn,
-    route: RuntimeRoute,
-    nativeTools: readonly RuntimeNativeToolDescriptor[],
-    request: ApprovalRequest,
-    signal: AbortSignal,
-    emitApproval: ((request: ApprovalRequest) => Promise<void>) | undefined,
-  ): Promise<ApprovalDecision> {
-    const parsedRequest = parseApprovalRequest(request);
-    const descriptor = nativeTools.find((tool) => tool.id === parsedRequest.toolId);
-    if (descriptor === undefined || descriptor.approval !== "core-callback") {
-      throw new Error(
-        `Runtime approval request ${parsedRequest.toolId} is not bound to a core-callback native tool`,
-      );
-    }
-    if (
-      parsedRequest.displayName !== descriptor.displayName
-      || !sameStringSet(parsedRequest.effects, descriptor.effects)
-    ) {
-      throw new Error(
-        `Runtime approval request ${parsedRequest.toolId} does not match its advertised authority`,
-      );
-    }
-    let automatic:
-      | { readonly decision: "allow_once" | "deny"; readonly reason: string }
-      | undefined;
-    if (!nativeToolAllowed(
-      descriptor.id,
-      this.config.raw,
-      input.toolPolicy,
-    )) {
-      automatic = {
-        decision: "deny",
-        reason: "denied by the effective Core tool policy",
-      };
-    } else if (this.config.raw.policy.approvals.default === "deny") {
-      automatic = {
-        decision: "deny",
-        reason: "denied by the Core approval policy",
-      };
-    } else if (this.config.raw.policy.approvals.default === "allow") {
-      automatic = {
-        decision: "allow_once",
-        reason: "allowed by the Core approval policy",
-      };
-    }
-    return this.#requestApproval(
-      input,
-      active,
-      route,
-      parsedRequest,
-      signal,
-      emitApproval,
-      automatic,
-    );
-  }
-  async #requestApproval(
-    input: AgentSubmitInput,
-    active: ActiveTurn,
-    route: RuntimeRoute,
-    request: ApprovalRequest,
-    signal: AbortSignal,
-    emitApproval: ((request: ApprovalRequest) => Promise<void>) | undefined,
-    automatic?: {
-      readonly decision: "allow_once" | "deny";
-      readonly reason: string;
-    },
-  ): Promise<ApprovalDecision> {
-    throwIfAborted(signal);
-    const parsedRequest = parseApprovalRequest(request);
-    await this.#appendInteractionEvidence(input, active, {
-      kind: "approval",
-      interactionId: parsedRequest.interactionId,
-      phase: "requested",
-      requestedAt: parsedRequest.requestedAt,
-      toolId: parsedRequest.toolId,
-      effects: parsedRequest.effects,
-    }, `Approval requested for ${parsedRequest.displayName}: ${parsedRequest.summary}`, signal);
-    const timeoutMs =
-      this.config.raw.policy.approvals.timeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
-    let parsedDecision: ApprovalDecision;
-    try {
-      const decision = automatic === undefined
-        ? await withTimeoutSignal(
-            async (boundedSignal) => {
-              if (input.interactionHandler !== undefined) {
-                return input.interactionHandler.requestApproval(parsedRequest, {
-                  conversationId: input.conversationId,
-                  turnId: active.id,
-                  route: { runtimeInstanceId: route.runtime, model: route.model },
-                  signal: boundedSignal,
-                });
-              }
-              if (emitApproval === undefined) {
-                throw new Error("Approval interaction handler is unavailable");
-              }
-              return active.waitForApproval(parsedRequest, boundedSignal, emitApproval);
-            },
-            timeoutMs,
-            signal,
-            `Approval ${parsedRequest.interactionId}`,
-          )
-        : {
-            interactionId: parsedRequest.interactionId,
-            decision: automatic.decision,
-            decidedAt: new Date().toISOString(),
-            reason: automatic.reason,
-          };
-      if (decision === undefined) throw new Error("Approval handler returned no decision");
-      parsedDecision = parseApprovalDecision(decision, parsedRequest);
-    } catch (error) {
-      if (signal.aborted) {
-        const settledAt = new Date().toISOString();
-        await this.#appendInteractionEvidence(input, active, {
-          kind: "approval",
-          interactionId: parsedRequest.interactionId,
-          phase: "cancelled",
-          requestedAt: parsedRequest.requestedAt,
-          settledAt,
-          toolId: parsedRequest.toolId,
-          effects: parsedRequest.effects,
-        }, "Approval interaction cancelled.", AbortSignal.timeout(
-          this.#options.lifecycleTimeoutMs,
-        ));
-        throw abortError();
-      }
-      parsedDecision = parseApprovalDecision({
-        interactionId: parsedRequest.interactionId,
-        decision: "deny",
-        decidedAt: new Date().toISOString(),
-        reason: "approval failed closed",
-      }, parsedRequest);
-    }
-    await this.#appendInteractionEvidence(input, active, {
-      kind: "approval",
-      interactionId: parsedRequest.interactionId,
-      phase: "answered",
-      requestedAt: parsedRequest.requestedAt,
-      settledAt: parsedDecision.decidedAt,
-      toolId: parsedRequest.toolId,
-      effects: parsedRequest.effects,
-      decision: parsedDecision.decision,
-    }, `Approval ${parsedDecision.decision === "allow_once" ? "allowed once" : "denied"}.${
-      parsedDecision.reason === undefined ? "" : ` Reason: ${parsedDecision.reason}`
-    }`, signal);
-    return parsedDecision;
-  }
   async #runtimeRequest(
     input: AgentSubmitInput,
     route: RuntimeRoute,
@@ -2123,7 +1667,7 @@ class AgentHostImplementation implements AgentHost {
     const sessionKey = runtimeSessionMapKey(route, input.conversationId);
     const session = forceSessionless
       ? undefined
-      : await this.#sessionForRequest(
+      : await this.#sessionStore.forRequest(
         input,
         route,
         sessionKey,
@@ -2185,7 +1729,7 @@ class AgentHostImplementation implements AgentHost {
     signal: AbortSignal,
   ): Promise<AgentResponse> {
     const settledResult = result;
-    const sessionDisposition = this.#sessionDisposition(input, sessionsSupported);
+    const sessionDisposition = this.#sessionStore.disposition(input, sessionsSupported);
     if (settledResult.message !== undefined && settledResult.message.role !== "assistant") {
       throw new Error(`${route.runtime} returned a non-assistant turn message`);
     }
@@ -2427,20 +1971,13 @@ class AgentHostImplementation implements AgentHost {
       this.#loadedConversations.add(input.conversationId);
     }
     this.#conversationUpdatedAt.set(input.conversationId, updatedAt);
-    const key = runtimeSessionMapKey(route, input.conversationId);
-    if (
-      sessionDisposition === "evict"
-      || (
-        sessionDisposition === "retain"
-        && result.usage?.sessionEvicted === true
-      )
-    ) {
-      this.#sessions.delete(key);
-      this.#sessionUpdatedAt.delete(key);
-    } else if (sessionDisposition === "retain" && result.session !== undefined) {
-      this.#sessions.set(key, immutableClone(result.session));
-      this.#sessionUpdatedAt.set(key, updatedAt);
-    }
+    this.#sessionStore.commit(
+      runtimeSessionMapKey(route, input.conversationId),
+      sessionDisposition,
+      result.session,
+      result.usage?.sessionEvicted === true,
+      updatedAt,
+    );
   }
   async #loadConversation(conversationId: string, signal: AbortSignal): Promise<CanonicalTranscript | undefined> {
     if (this.#loadedConversations.has(conversationId)) return this.#transcripts.get(conversationId);
@@ -2509,108 +2046,6 @@ class AgentHostImplementation implements AgentHost {
     else this.#conversationTitles.set(conversation.conversationId, conversation.title);
     if (conversation.metadata === undefined) this.#conversationMetadata.delete(conversation.conversationId);
     else this.#conversationMetadata.set(conversation.conversationId, immutableClone(conversation.metadata));
-  }
-  async #sessionForRequest(
-    input: AgentSubmitInput,
-    route: RuntimeRoute,
-    sessionKey: string,
-    sessionsSupported: boolean,
-    signal: AbortSignal,
-  ): Promise<RuntimeSession | undefined> {
-    const disposition = this.#sessionDisposition(input, sessionsSupported);
-    if (disposition === "isolate") return undefined;
-    await this.#loadRetainedSession(input, route, sessionKey, signal);
-    if (disposition === "evict") {
-      await this.#evictRetainedSession(input, route, sessionKey, signal);
-      return undefined;
-    }
-    if (this.#isSessionReusable(sessionKey, new Date().toISOString())) {
-      return this.#sessions.get(sessionKey);
-    }
-    await this.#evictRetainedSession(input, route, sessionKey, signal);
-    return undefined;
-  }
-  async #loadRetainedSession(
-    input: AgentSubmitInput,
-    route: RuntimeRoute,
-    sessionKey: string,
-    signal: AbortSignal,
-  ): Promise<void> {
-    if (!this.#sessions.has(sessionKey) && this.#execution !== undefined) {
-      const durable = await this.#execution.loadSession(
-        input.conversationId,
-        { runtimeInstanceId: route.runtime, model: route.model },
-        signal,
-      );
-      if (durable !== undefined) {
-        this.#sessions.set(sessionKey, immutableClone(durable.value));
-        this.#sessionUpdatedAt.set(sessionKey, durable.updatedAt);
-      }
-    }
-  }
-  async #evictRetainedSession(
-    input: AgentSubmitInput,
-    route: RuntimeRoute,
-    sessionKey: string,
-    signal: AbortSignal,
-  ): Promise<boolean> {
-    await this.#loadRetainedSession(input, route, sessionKey, signal);
-    const staleSession = this.#sessions.get(sessionKey);
-    const staleUpdatedAt = this.#sessionUpdatedAt.get(sessionKey);
-    this.#sessions.delete(sessionKey);
-    this.#sessionUpdatedAt.delete(sessionKey);
-    if (
-      this.#execution !== undefined
-      && staleSession !== undefined
-      && staleUpdatedAt !== undefined
-    ) {
-      await this.#execution.evictSession(
-        input.conversationId,
-        { runtimeInstanceId: route.runtime, model: route.model },
-        { sessionId: staleSession.id, updatedAt: staleUpdatedAt },
-        signal,
-      );
-    }
-    return staleSession !== undefined;
-  }
-  #sessionDisposition(
-    input: AgentSubmitInput,
-    sessionsSupported: boolean,
-  ): SessionDisposition {
-    if (!sessionsSupported || this.config.raw.session?.mode === "per-message") {
-      return "evict";
-    }
-    if (
-      this.config.raw.session?.isolateProactiveRuns === true
-      && (input.conversationId.startsWith("trigger:")
-        || input.conversationId.startsWith("proactive:")
-        || (isRecord(input.metadata) && typeof input.metadata.triggerId === "string"))
-    ) {
-      return "isolate";
-    }
-    return "retain";
-  }
-  #isSessionReusable(sessionKey: string, now: string): boolean {
-    const retained = this.#sessions.get(sessionKey);
-    if (retained === undefined) return false;
-    if (
-      retained.expiresAt !== undefined
-      && Date.parse(retained.expiresAt) <= Date.parse(now)
-    ) {
-      return false;
-    }
-    const updatedAt = this.#sessionUpdatedAt.get(sessionKey);
-    if (updatedAt === undefined) return false;
-    const session = this.config.raw.session;
-    if (session?.idleTimeoutMs !== undefined) {
-      const elapsed = Date.parse(now) - Date.parse(updatedAt);
-      if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed >= session.idleTimeoutMs) return false;
-    }
-    if (session?.rollover === "daily") {
-      const timezone = session.timezone ?? "UTC";
-      if (calendarDateKey(updatedAt, timezone) !== calendarDateKey(now, timezone)) return false;
-    }
-    return true;
   }
   async #recallMemory(input: AgentSubmitInput, signal: AbortSignal): Promise<readonly MemoryRecord[]> {
     if (this.#memory === undefined) return [];
@@ -2907,6 +2342,7 @@ class AgentHostImplementation implements AgentHost {
     this.#execution = undefined;
     this.#stateStore = undefined;
     this.#sandbox = undefined;
+    this.#sessionStore.clear();
     return failures;
   }
   #watchForIdle(): { readonly promise: Promise<void>; cancel(): void } {
@@ -2941,19 +2377,6 @@ class AgentHostImplementation implements AgentHost {
     }
     return new Error(message);
   }
-  #moduleCommandError(error: unknown, loaded: LoadedAgentModule, commandName: string,
-    phase: "create" | "run" | "stop" | "run_and_stop"): AgentModuleError {
-    const cause = sanitizeModuleCommandError(error, (value) => this.#redact(value));
-    const code = `module_command_${phase}_failed`;
-    return new AgentModuleError(boundedUtf8(
-      this.#redact(`${code}: ${loaded.instanceId} command ${commandName} ${phase.replaceAll("_", " ")} failed: ${cause.message}`),
-      4_096,
-    ), {
-      code,
-      packageName: this.#redact(loaded.packageName), configPath: this.#redact(loaded.configPath),
-      moduleInstanceId: this.#redact(loaded.instanceId), commandName: boundedUtf8(this.#redact(commandName), 512), phase, cause,
-    });
-  }
   #safePublicCause(
     error: unknown,
     snapshot: RuntimeTurnErrorSnapshot | undefined = snapshotRuntimeTurnError(error),
@@ -2963,58 +2386,6 @@ class AgentHostImplementation implements AgentHost {
       4_096,
     ));
   }
-}
-function calendarDateKey(timestamp: string, timeZone: string): string {
-  const date = new Date(timestamp);
-  if (!Number.isFinite(date.valueOf())) return "invalid";
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date);
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${values.year ?? ""}-${values.month ?? ""}-${values.day ?? ""}`;
-}
-function turnExecutionError(
-  status: "failed" | "uncertain",
-  code: string,
-  message: string,
-  input: AgentSubmitInput,
-  active: ActiveTurn,
-  cause?: unknown,
-): RunExecutionError {
-  return new RunExecutionError(status, code, message, {
-    ...(cause === undefined ? {} : { cause }),
-    ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
-    runId: active.id,
-  });
-}
-function boundedRuntimeFailureMessage(
-  error: unknown,
-  snapshot: RuntimeTurnErrorSnapshot | undefined,
-): string {
-  if (snapshot !== undefined) return snapshot.message;
-  try {
-    if (!(error instanceof Error)) return "Runtime attempt failed";
-    const descriptor = Object.getOwnPropertyDescriptor(error, "message");
-    if (
-      descriptor === undefined
-      || !("value" in descriptor)
-      || typeof descriptor.value !== "string"
-    ) {
-      return "Runtime attempt failed";
-    }
-    return descriptor.value.slice(0, 65_536);
-  } catch {
-    return "Runtime attempt failed";
-  }
-}
-function isSafeRuntimeFallback(
-  failure: RuntimeTurnErrorSnapshot | undefined,
-): boolean {
-  return failure?.retryability === "retryable"
-    && failure.sideEffects === "none";
 }
 function declaresHostCapability(module: LoadedAgentModule, capability: string): boolean {
   return module.definition.manifest.capabilities.includes(capability);
@@ -3044,9 +2415,3 @@ function stableReplayId(conversationId: string, index: number, message: TurnMess
     .update(encodePersistedValue(message))
     .digest("hex");
 }
-const NULL_LOGGER: ModuleLogger = Object.freeze({
-  debug() {},
-  info() {},
-  warn() {},
-  error() {},
-});
