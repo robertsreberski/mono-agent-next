@@ -22,6 +22,19 @@ const identifierBoundaryEnd = "(?![A-Za-z0-9])";
 const identifierSeparator = "[\\s/_.-]+";
 const privateReferenceRules = Object.freeze([
   Object.freeze({
+    // A gate that a contributor can switch off in the file under review is not
+    // a gate. Skipped tests and coverage/mutation pragmas disarm the very
+    // checks that are supposed to bind the change introducing them.
+    // `skipIf`/`runIf` are deliberately NOT banned: they are environment guards
+    // (platform, tool availability, Node version), not disabled tests.
+    label: "disabled-test",
+    pattern: /\b(?:it|test|describe)\s*\.\s*(?:skip(?!If)|only|todo|fails)\s*\(/gu,
+  }),
+  Object.freeze({
+    label: "coverage-or-mutation-pragma",
+    pattern: /(?:^|\s)(?:\/\*|\/\/)\s*(?:v8|c8|istanbul)\s+ignore\b|Stryker\s+disable\b/gu,
+  }),
+  Object.freeze({
     label: "employer-reference",
     pattern: new RegExp(
       `${identifierBoundaryStart}${["a8", "c"].join("")}${identifierBoundaryEnd}`,

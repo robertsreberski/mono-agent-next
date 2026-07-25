@@ -120,11 +120,27 @@ describe("durable settlement honesty", () => {
     // invariant is narrower: a caller told the run is definitively over must not
     // find it still running, or the requestId stays wedged behind a live
     // admission lease and the operator run listing shows a phantom active run.
+    //
+    // Asserted unconditionally. An earlier draft skipped each `uncertain` case
+    // with `continue`, so once the settlement fix made *every* path uncertain
+    // the loop body stopped running and the test passed having asserted
+    // nothing. `--expect.requireAssertions` is what surfaced that.
+    const outcomes = [];
     for (const path of TERMINAL_PATHS) {
       const attempt = await runTurnUnderSettlementFailure(path);
-      if (attempt.thrown?.status === "uncertain") continue;
-      expect({ path, durable: attempt.durableStatus })
-        .toStrictEqual({ path, durable: attempt.thrown?.status });
+      outcomes.push({
+        path,
+        status: attempt.thrown?.status,
+        durable: attempt.durableStatus,
+      });
+    }
+
+    expect(outcomes.map((outcome) => outcome.status))
+      .toStrictEqual(TERMINAL_PATHS.map(() => "uncertain"));
+
+    for (const outcome of outcomes.filter((candidate) => candidate.status !== "uncertain")) {
+      expect({ path: outcome.path, durable: outcome.durable })
+        .toStrictEqual({ path: outcome.path, durable: outcome.status });
     }
   }, 300_000);
 });
