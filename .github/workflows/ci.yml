@@ -104,6 +104,14 @@ jobs:
       - name: Prove standalone operator products
         run: pnpm run verify:v1-operator-products
 
+      - name: Install the browser lane's browser
+        if: ${{ matrix.node-version == '22.19.0' }}
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Prove the console renders in a real browser
+        if: ${{ matrix.node-version == '22.19.0' }}
+        run: pnpm run test:browser
+
       - name: Prove packed minimal v1 consumer
         if: ${{ matrix.node-version == '22.19.0' }}
         run: pnpm run verify:v1-minimal
