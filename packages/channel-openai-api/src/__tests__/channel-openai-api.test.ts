@@ -11,7 +11,10 @@ import {
   type ChannelReplySink,
   type ChannelTurnResult,
 } from "@mono-agent/module-sdk";
-import { assertChannelModuleCompliance } from "@mono-agent/module-sdk/testing";
+import {
+  assertChannelBehaviorCompliance,
+  assertChannelModuleCompliance,
+} from "@mono-agent/module-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -953,6 +956,42 @@ function waitForAbort(signal: AbortSignal): Promise<void> {
     signal.addEventListener("abort", () => resolve(), { once: true });
   });
 }
+
+describe("openai-api channel conformance", () => {
+  it("holds the shared channel behavior contract", async () => {
+    // The lane three other channels already run and this one did not. It
+    // covers the parts every channel gets wrong in the same way: start, drain,
+    // a bounded health report, stop called twice, and no configured secret
+    // anywhere in what it reports.
+    const lifecycle = new AbortController();
+    await assertChannelBehaviorCompliance({
+      create: (signal) => monoAgentModule.create({
+        instanceId: "openai-conformance",
+        config: monoAgentModule.schema.parse({ apiKey: KEY, modelId: "personal" }),
+        provenance: {},
+        configDirectory: "/config",
+        workspaceDirectory: "/workspace",
+        dataDirectory: "/data",
+        logger: noopLogger(),
+        host: {
+          grantedCapabilities: new Set<string>(),
+          getCapability() { return undefined; },
+          async dispatch() { return { status: "completed", text: "conformance" } as const; },
+        },
+        signal,
+      }),
+      secrets: [KEY],
+      exercise(instance) {
+        // Proactive delivery is genuinely absent here, and the kit requires
+        // the capability and the delivery scenarios to agree exactly -- so
+        // this asserts the absence rather than leaving it implied.
+        expect(instance.capabilities.proactive).toBe(false);
+        expect(instance.deliver).toBeUndefined();
+      },
+    });
+    lifecycle.abort();
+  });
+});
 
 function noopLogger(): {
   readonly debug: () => void;
