@@ -73,6 +73,7 @@ import {
 } from "./host-delivery.js";
 import {
   HostHealthMonitor,
+  moduleHealthSummary,
   normalizeModuleJson,
   normalizeModuleHealth,
   redactJson,
@@ -794,6 +795,11 @@ class AgentHostImplementation implements AgentHost {
   async #readChannelHealth(signal: AbortSignal): Promise<ModuleHealth> {
     throwIfAborted(signal);
     const health = await this.health();
+    // The per-module entries and the modules' own summaries used to be dropped
+    // here, so an operator saw a degraded agent with a counter for a summary and
+    // no way to attribute the degradation to a module. A module that reports
+    // "Telegram polling is degraded." must reach the operator saying that.
+    const unhealthy = health.modules.filter((module) => module.status !== "healthy");
     return {
       status: health.status === "healthy"
         ? "healthy"
@@ -801,8 +807,28 @@ class AgentHostImplementation implements AgentHost {
           ? "degraded"
           : "unhealthy",
       checkedAt: new Date().toISOString(),
-      summary: `${health.active} active, ${health.pending} pending`,
-      details: { accepting: health.accepting, active: health.active, pending: health.pending },
+      summary: unhealthy.length === 0
+        ? `${health.active} active, ${health.pending} pending`
+        : unhealthy
+            .map((module) => `${module.instanceId} ${module.status}${
+              moduleHealthSummary(module.detail) === undefined
+                ? ""
+                : `: ${moduleHealthSummary(module.detail)!}`
+            }`)
+            .join("; "),
+      details: {
+        accepting: health.accepting,
+        active: health.active,
+        pending: health.pending,
+        modules: health.modules.map((module) => ({
+          kind: module.kind,
+          instanceId: module.instanceId,
+          status: module.status,
+          ...(moduleHealthSummary(module.detail) === undefined
+            ? {}
+            : { summary: moduleHealthSummary(module.detail)! }),
+        })),
+      },
     };
   }
   async #openConversation(request: ChannelOpenConversationRequest): Promise<ChannelOpenConversationResult> {

@@ -100,3 +100,14 @@ export function redactJson(value: JsonValue, redact: (value: string) => string):
   return Object.fromEntries(Object.entries(value).map(([key, entry]) =>
     [redact(key), redactJson(entry, redact)]));
 }
+/**
+ * The module's own health summary, if it supplied one.
+ *
+ * Core stores the normalized ModuleHealth under `detail`; the operator
+ * projection needs the module's sentence, not a recomputed counter.
+ */
+export function moduleHealthSummary(detail: JsonValue | undefined): string | undefined {
+  if (detail === null || typeof detail !== "object" || Array.isArray(detail)) return undefined;
+  const summary = (detail as JsonObject).summary;
+  return typeof summary === "string" && summary.length > 0 ? summary : undefined;
+}
