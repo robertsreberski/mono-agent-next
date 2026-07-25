@@ -35,7 +35,7 @@
     "build:webapp": "vite build --config webapp/vite.config.ts",
     "dev:webapp": "vite --config webapp/vite.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p webapp/tsconfig.json --noEmit",
-    "test": "pnpm run build:webapp && vitest run"
+    "test": "pnpm run build:webapp && vitest run --expect.requireAssertions"
   },
   "dependencies": {
     "@mono-agent/operator": "workspace:0.15.0"

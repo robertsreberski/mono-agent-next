@@ -22,7 +22,6 @@ const TRANSCRIPT_MAX_CONTENT_PARTS = 128;
 const TRANSCRIPT_MAX_TEXT_BYTES = 1024 * 1024;
 const TRANSCRIPT_MAX_IDENTIFIER_BYTES = 512;
 const TRANSCRIPT_MAX_CONVERSATION_ID_BYTES = 4_096;
-const TRANSCRIPT_MAX_SOURCE_BYTES = 4_096;
 
 /**
  * Durable transcripts never retain attachment bytes. Every binary input is

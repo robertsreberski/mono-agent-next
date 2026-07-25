@@ -2,7 +2,7 @@
 import { defineRuntimeModule } from "@mono-agent/module-sdk";
 
 import { codexAuthCommands } from "./auth-command.js";
-import { parseRuntimeCodexConfig, runtimeCodexJsonSchema, type RuntimeCodexConfig } from "./config.js";
+import { parseRuntimeCodexConfig, runtimeCodexJsonSchema } from "./config.js";
 import { validateRuntimeCodexModel } from "./model.js";
 import { createRuntimeCodex } from "./runtime.js";
 

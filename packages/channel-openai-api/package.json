@@ -5,16 +5,46 @@
   "type": "module",
   "sideEffects": false,
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/robertsreberski/mono-agent-next.git", "directory": "packages/channel-openai-api" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
+    "directory": "packages/channel-openai-api"
+  },
   "private": false,
-  "engines": { "node": ">=22.19.0" },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist", "README.md", "LICENSE"],
-  "keywords": ["mono-agent-module"],
-  "mono-agent": { "packageName": "@mono-agent/channel-openai-api", "apiVersion": 1, "kind": "channel", "responsibility": "Serves one selected agent through a bounded authenticated OpenAI-compatible API." },
-  "scripts": { "build": "tsc -p tsconfig.build.json", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "vitest run" },
-  "dependencies": { "@mono-agent/module-sdk": "workspace:0.15.0" },
-  "publishConfig": { "access": "public" }
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mono-agent-module"
+  ],
+  "mono-agent": {
+    "packageName": "@mono-agent/channel-openai-api",
+    "apiVersion": 1,
+    "kind": "channel",
+    "responsibility": "Serves one selected agent through a bounded authenticated OpenAI-compatible API."
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --expect.requireAssertions"
+  },
+  "dependencies": {
+    "@mono-agent/module-sdk": "workspace:0.15.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

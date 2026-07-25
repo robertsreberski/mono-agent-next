@@ -10,12 +10,10 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { OperatorActivity } from "@mono-agent/operator";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 
 import { useConsole, type ConsoleConnection } from "./console";
 import { Icon } from "./components/Icon";
-import { ContextDisplay } from "./components/assistant-ui/ContextDisplay";
 import { ModelSelector } from "./components/assistant-ui/ModelSelector";
 import {
   CompactionRow,
@@ -23,7 +21,7 @@ import {
   Reasoning,
   ToolCall,
 } from "./components/assistant-ui/Reasoning";
-import type { AskQuestion, Attachment, Telemetry } from "./types";
+import type { AskQuestion, Attachment } from "./types";
 
 function QuoteBlock({ text }: QuoteMessagePartProps) {
   return <blockquote className="message-quote">
@@ -146,20 +144,6 @@ function AssistantMessage() {
       </div>
     </MessagePrimitive.Root>
   );
-}
-
-function compactCount(value: number): string {
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1).replace(/\.0$/u, "")}m`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1).replace(/\.0$/u, "")}k`;
-  return String(value);
-}
-
-function safeJson(value: unknown): string {
-  try {
-    return JSON.stringify(value ?? {}, null, 2);
-  } catch {
-    return "Structured value unavailable";
-  }
 }
 
 function SelectionToolbar() {

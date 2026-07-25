@@ -140,7 +140,7 @@ for (const catalogEntry of packageCatalog) {
 
   const manifest = JSON.parse(readFileSync(packageJsonPath, "utf8"));
   if (catalogEntry.publishable === true) {
-    errors.push(...findPackageVerificationErrors({ manifest, packagePath }));
+    errors.push(...findPackageVerificationErrors({ manifest, packagePath, repoRoot: root }));
   }
   const packageName = manifest.name;
   if (packageName !== catalogEntry.name) {
