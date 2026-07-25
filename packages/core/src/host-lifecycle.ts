@@ -120,3 +120,14 @@ export class TurnSemaphore {
     next.resolve(() => this.#release());
   }
 }
+/**
+ * A bounded settlement window that also ends when the host itself stops.
+ *
+ * Settlement and evidence writes must not outlive `stop()`: the state module
+ * they write through is torn down in reverse ownership order once the host
+ * aborts, so an uncomposed timeout can reach a closing store. Drain completes
+ * before the host aborts, so ordinary in-flight settlement is unaffected.
+ */
+export function settlementSignal(timeoutMs: number, hostSignal: AbortSignal): AbortSignal {
+  return AbortSignal.any([AbortSignal.timeout(timeoutMs), hostSignal]);
+}

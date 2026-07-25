@@ -4,6 +4,7 @@ import type { Channel, ChannelDeliveryResult, ChannelOutboundMessage } from "@mo
 import { assertOwnKeys, ownDataRecord } from "./bounded-value.js";
 import { errorMessage } from "./errors.js";
 import { ConversationTails, durableFingerprint } from "./host-admission.js";
+import { settlementSignal } from "./host-lifecycle.js";
 import { normalizeOutboundMessage } from "./host-outbound.js";
 import type { VerbatimEntry } from "./host-types.js";
 import { normalizeModuleDiagnostic } from "./runtime-result-normalizer.js";
@@ -154,7 +155,7 @@ export class HostDelivery {
           destination, signal, () => this.#appendLocal(destination, entry),
         );
       } else {
-        const lifecycleSignal = AbortSignal.timeout(this.context.lifecycleTimeoutMs);
+        const lifecycleSignal = settlementSignal(this.context.lifecycleTimeoutMs, this.context.hostSignal);
         if (intent?.status === "send") {
           const settled = await execution.retryDeliveryWithHistory({
             idempotencyKey: message.idempotencyKey, fingerprint,
@@ -197,7 +198,7 @@ export class HostDelivery {
     const pending = this.context.execution()!.settleDelivery({
       idempotencyKey: message.idempotencyKey, fingerprint,
       attempt: intent.attempt, token: intent.token, ...settlement,
-      signal: AbortSignal.timeout(this.context.lifecycleTimeoutMs),
+      signal: settlementSignal(this.context.lifecycleTimeoutMs, this.context.hostSignal),
     });
     return bestEffort ? pending.catch(() => undefined) : pending;
   }

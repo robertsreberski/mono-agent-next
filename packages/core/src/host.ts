@@ -81,6 +81,7 @@ import {
   HostLifecycleCalls,
   TurnSemaphore,
   abortError,
+  settlementSignal,
   isAbort,
   throwIfAborted,
   waitForValueWithAbort,
@@ -108,6 +109,7 @@ import type { AgentHealth, AgentHost, AgentHostOptions, AgentHostStartInfo, Agen
 const DEFAULT_MAX_CONCURRENT_TURNS = 4, DEFAULT_MAX_PENDING_TURNS = 64;
 const DEFAULT_DRAIN_TIMEOUT_MS = 30_000, DEFAULT_LIFECYCLE_TIMEOUT_MS = 10_000, DEFAULT_LIVE_INPUT_ACK_TIMEOUT_MS = 5_000;
 const MODULE_DIAGNOSTIC_MAX_ITEMS = 100;
+const MAX_TRIGGER_CLAIMS = 10_000;
 const PROACTIVE_SUPPRESSION_SENTINEL = "NOTHING_TO_REPORT";
 export async function createAgentHost(
   config: string | LoadedAgentConfig,
@@ -164,6 +166,12 @@ class AgentHostImplementation implements AgentHost {
   readonly #conversationMetadata = new Map<string, JsonObject>();
   readonly #activeTurns = new Map<string, ActiveTurn>();
   readonly #triggerClaims = new Map<string, "pending" | "delivery_unknown" | "execution_unknown">();
+  /**
+   * Unknown trigger outcomes are retained so a replayed event cannot execute
+   * twice. Retention is bounded: the oldest claim is dropped past the cap, and
+   * a dropped claim degrades to at-least-once for that one event rather than
+   * growing the ledger without limit.
+   */
   readonly #health: HostHealthMonitor;
   readonly #conversationTails = new ConversationTails();
   readonly #localHistoryTails = new ConversationTails();
@@ -351,7 +359,10 @@ class AgentHostImplementation implements AgentHost {
     return {
       revision: createHash("sha256").update(source).digest("hex"),
       generatedAt: new Date().toISOString(),
-      value: structuredClone(this.config.raw) as unknown as Readonly<Record<string, unknown>>,
+      value: redactJson(
+        structuredClone(this.config.raw) as unknown as JsonValue,
+        (text) => this.#redact(text),
+      ) as unknown as Readonly<Record<string, unknown>>,
       redacted: true,
     };
   }
@@ -551,7 +562,14 @@ class AgentHostImplementation implements AgentHost {
     const details: Record<string, JsonValue> = Object.create(null) as Record<string, JsonValue>;
     for (const [instanceId, channel] of [...this.#channelInstances.entries()]
       .sort(([left], [right]) => left.localeCompare(right))) {
-      const fragment = channel.readHostPresence?.();
+      // readHostPresence is module code: a blocking implementation must not
+      // stall startup, so it runs under the same bound as the publish below.
+      const fragment = channel.readHostPresence === undefined
+        ? undefined
+        : await this.#lifecycle.run(
+            `${instanceId} host presence`,
+            () => channel.readHostPresence?.(),
+          );
       if (fragment === undefined) continue;
       if (!isRecord(fragment) || !isJsonValue(fragment)) {
         throw new Error(`Channel ${instanceId} returned invalid host presence JSON.`);
@@ -904,11 +922,18 @@ class AgentHostImplementation implements AgentHost {
     } catch (error) {
       if (isAbort(error)) return { status: "cancelled" };
       const conflict = error instanceof AgentAdmissionError && error.code === "request_conflict";
+      // An uncertain run is not a failed run. Collapsing the two told the
+      // channel the turn definitively failed while the durable record stayed
+      // unproven, which is the one thing the settlement contract forbids.
+      const uncertain = error instanceof RunExecutionError && error.status === "uncertain";
       return {
         status: "rejected",
         diagnostics: [{
-          code: conflict ? "request_conflict" : "turn_failed", severity: "error",
-          message: conflict ? "Request identity conflicts with prior input" : this.#redact(errorMessage(error)),
+          code: conflict ? "request_conflict" : uncertain ? "turn_uncertain" : "turn_failed",
+          severity: "error",
+          message: conflict
+            ? "Request identity conflicts with prior input"
+            : this.#redact(errorMessage(error)),
         }],
       };
     }
@@ -1014,7 +1039,7 @@ class AgentHostImplementation implements AgentHost {
                   if (this.#hostAbort.signal.aborted) {
                     throw abortError("Agent host stopped before the run could settle");
                   }
-                  const settlementSignal = AbortSignal.timeout(this.#options.lifecycleTimeoutMs);
+                  const settlement = this.#settlementSignal();
                   const activeAbortReason = active.controller.signal.reason;
                   const classified = activeAbortReason instanceof RunExecutionError
                     ? activeAbortReason
@@ -1032,7 +1057,7 @@ class AgentHostImplementation implements AgentHost {
                       runId: active.id,
                       status: classified.status,
                       failureCode: classified.failureCode,
-                      signal: settlementSignal,
+                      signal: settlement,
                     }).catch((error: unknown) => { settlementError = error; });
                     // A definitive status asserts that settlement was proved.
                     // Discarding the write reported `failed` while the durable
@@ -1054,7 +1079,7 @@ class AgentHostImplementation implements AgentHost {
                     try {
                       await this.#settle(
                         input, route, { status: "cancelled" },
-                        active.sessionsSupported ?? true, active, settlementSignal,
+                        active.sessionsSupported ?? true, active, settlement,
                       );
                     } catch (settlementError) {
                       const uncertain = turnExecutionError(
@@ -1068,8 +1093,12 @@ class AgentHostImplementation implements AgentHost {
                         runId: active.id,
                         status: "uncertain",
                         failureCode: uncertain.failureCode,
-                        signal: AbortSignal.timeout(this.#options.lifecycleTimeoutMs),
-                      }).catch(() => undefined);
+                        signal: this.#settlementSignal(),
+                      }).catch((persistError: unknown) => {
+                        this.#health.record(
+                          `uncertain settlement after cancellation: ${errorMessage(persistError)}`,
+                        );
+                      });
                       throw uncertain;
                     }
                     throw abortError();
@@ -1084,7 +1113,7 @@ class AgentHostImplementation implements AgentHost {
                       runId: active.id,
                       status: failure.status,
                       failureCode: failure.failureCode,
-                      signal: settlementSignal,
+                      signal: settlement,
                     });
                   } catch (settlementError) {
                     throw turnExecutionError(
@@ -1536,7 +1565,7 @@ class AgentHostImplementation implements AgentHost {
             input, active,
           );
         }
-        const settlementSignal = AbortSignal.timeout(this.#options.lifecycleTimeoutMs);
+        const settlement = this.#settlementSignal();
         assertRuntimeTurnEventBoundaryHealthy(eventBoundary);
         closeAttempt();
         const normalizedResult = normalizeRuntimeTurnResult(result, {
@@ -1556,14 +1585,14 @@ class AgentHostImplementation implements AgentHost {
           status: "completed",
           startedAt: attemptStartedAt,
           endedAt: new Date().toISOString(),
-        }, settlementSignal);
+        }, settlement);
         const response = await this.#settle(
           input,
           route,
           normalizedResult,
           routeCapabilities.sessions,
           active,
-          settlementSignal,
+          settlement,
         );
         await this.#exportTurn("mono_agent.turn.settled", input, route, response);
         return response;
@@ -2110,7 +2139,7 @@ class AgentHostImplementation implements AgentHost {
       status: "unknown", code: claimed === "pending" ? "execution_unknown" : claimed,
       reason: this.#redact("The prior trigger outcome is unknown"),
     };
-    this.#triggerClaims.set(event.id, "pending");
+    this.#claimTrigger(event.id, "pending");
     const conversationId = `trigger:${event.triggerInstanceId}:${event.id}`;
     let delivery: ChannelDeliveryResult | undefined;
     let replayed = false;
@@ -2168,7 +2197,7 @@ class AgentHostImplementation implements AgentHost {
       return { status: "accepted", runId: response.runId };
     } catch (error) {
       if (error instanceof AgentAdmissionError && error.code === "request_in_progress") {
-        this.#triggerClaims.set(event.id, "execution_unknown");
+        this.#claimTrigger(event.id, "execution_unknown");
         return { status: "unknown", code: "execution_unknown", reason: this.#redact(errorMessage(error)) };
       }
       if (error instanceof AgentAdmissionError && error.code === "request_conflict") {
@@ -2180,11 +2209,11 @@ class AgentHostImplementation implements AgentHost {
         || error instanceof AgentAdmissionError
           && (error.code === "uncertain_admission" || error.code === "stale_admission");
       if (deliveryUnknown) {
-        this.#triggerClaims.set(event.id, "delivery_unknown");
+        this.#claimTrigger(event.id, "delivery_unknown");
         return { status: "unknown", code: "delivery_unknown", reason: this.#redact(errorMessage(error)) };
       }
       if (executionUnknown) {
-        this.#triggerClaims.set(event.id, "execution_unknown");
+        this.#claimTrigger(event.id, "execution_unknown");
         return { status: "unknown", code: "execution_unknown", reason: this.#redact(errorMessage(error)) };
       }
       this.#triggerClaims.delete(event.id);
@@ -2343,6 +2372,17 @@ class AgentHostImplementation implements AgentHost {
     this.#stateStore = undefined;
     this.#sandbox = undefined;
     this.#sessionStore.clear();
+    // Conversation caches are per-host process state, not durable state. They
+    // previously survived stop() entirely, so a long-lived host grew without
+    // bound in conversation count and a restarted host answered from caches
+    // whose backing modules were already gone.
+    this.#history.clear();
+    this.#transcripts.clear();
+    this.#loadedConversations.clear();
+    this.#conversationUpdatedAt.clear();
+    this.#conversationTitles.clear();
+    this.#conversationMetadata.clear();
+    this.#triggerClaims.clear();
     return failures;
   }
   #watchForIdle(): { readonly promise: Promise<void>; cancel(): void } {
@@ -2356,6 +2396,20 @@ class AgentHostImplementation implements AgentHost {
       promise,
       cancel: () => this.#idleWaiters.delete(resolveIdle),
     };
+  }
+  #claimTrigger(id: string, state: "pending" | "delivery_unknown" | "execution_unknown"): void {
+    this.#triggerClaims.delete(id);
+    this.#triggerClaims.set(id, state);
+    while (this.#triggerClaims.size > MAX_TRIGGER_CLAIMS) {
+      const oldest = this.#triggerClaims.keys().next();
+      if (oldest.done === true) break;
+      this.#triggerClaims.delete(oldest.value);
+      this.#health.record("trigger claim ledger is full; the oldest claim was dropped");
+    }
+  }
+  /** A settlement window bounded by both the lifecycle timeout and host shutdown. */
+  #settlementSignal(): AbortSignal {
+    return settlementSignal(this.#options.lifecycleTimeoutMs, this.#hostAbort.signal);
   }
   #redact(message: string): string {
     return redactBounded(message, this.#redactionValues, DEFAULT_MESSAGE_BYTES);

@@ -6,7 +6,7 @@ import {
   type RuntimeNativeToolDescriptor,
 } from "@mono-agent/module-sdk";
 import {
-  abortError, throwIfAborted, waitForValueWithAbort, withTimeoutSignal,
+  abortError, settlementSignal, throwIfAborted, waitForValueWithAbort, withTimeoutSignal,
 } from "./host-lifecycle.js";
 import { renderAskUserAnswer, renderAskUserRequest } from "./host-transcript.js";
 import { ActiveTurn, turnExecutionError } from "./host-turn.js";
@@ -85,7 +85,7 @@ export class HostInteractions {
           receivedAt: normalizedInput.receivedAt, settledAt,
         },
         normalizedInput.text,
-        AbortSignal.timeout(this.context.lifecycleTimeoutMs),
+        this.#settlementSignal(),
       ).catch(() => undefined);
       active.controller.abort(turnExecutionError(
         "uncertain", failureCode, message, turnInput, active, cause,
@@ -321,7 +321,7 @@ export class HostInteractions {
   }
 
   #settlementSignal(): AbortSignal {
-    return AbortSignal.timeout(this.context.lifecycleTimeoutMs);
+    return settlementSignal(this.context.lifecycleTimeoutMs, this.context.hostSignal);
   }
 }
 
