@@ -210,7 +210,12 @@ it("stages isolated host-owned attachment authority for concurrent selected MCP 
             const inspection = await context.executeTool(
               { id: "inspect", name: "context_probe", input: {
                 inspectFiles: true, writeOutput: "transcript.md", outputText: "host-owned output",
-                delayMs: 40, progressEveryMs: 10, boundaryProgress: true,
+                // burstProgress writes every notification before the result is
+                // even scheduled. Timer-spaced progress raced the result on the
+                // wall clock, so under CPU contention fewer than progressCount
+                // notifications landed first and the exact-count assertion below
+                // failed for reasons that had nothing to do with Core.
+                delayMs: 40, progressEveryMs: 10, burstProgress: true, boundaryProgress: true,
                 ...(retainUnsafeOutput ? { retainUnsafeOutput: true } : {}),
               } },
               new AbortController().signal,
