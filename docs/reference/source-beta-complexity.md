@@ -17,38 +17,38 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `d8e3c94b5d167319817a6a547f0f5eb8fdd583a05927dd9d7e05d3b7c7b8ccec`
+Source manifest digest: `c5820fa12702b69b8e141dfe87a9745f6d97b3d8226bfa1bbf14eee66c5ce02c`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 295 | 94194 |
-| Tests | 146 | 72907 |
+| Production | 295 | 94229 |
+| Tests | 147 | 73299 |
 | Repository and product tooling | 54 | 18406 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **495** | **185507** |
+| **Total executable source** | **496** | **185934** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 319.3 lines.
+Average production file size is 319.4 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 94194 | 130000 | within limit |
-| kernel-production | 15364 | 15500 | within limit |
+| repository-production | 94229 | 130000 | within limit |
+| kernel-production | 15399 | 15500 | within limit |
 
 ## Largest package ownership surfaces
 
 | Package | Production files | Production lines | Test lines |
 | --- | ---: | ---: | ---: |
 | `@mono-agent/state-local` | 27 | 14300 | 5459 |
-| `@mono-agent/core` | 23 | 12131 | 17144 |
+| `@mono-agent/core` | 23 | 12146 | 17501 |
 | `@mono-agent/runtime-pi` | 28 | 8832 | 4966 |
 | `@mono-agent/memory-local` | 19 | 7721 | 4133 |
 | `@mono-agent/web` | 28 | 7147 | 2341 |
@@ -67,7 +67,7 @@ The complete package table is retained in the generated report model exposed by
 | First-party dependency edges | 22 |
 | First-party dependency cycles | 0 |
 | Public code entrypoints | 28 |
-| Public named exports | 990 |
+| Public named exports | 991 |
 | Distinct scaffold config paths | 104 |
 
 The first-party package graph is acyclic.
