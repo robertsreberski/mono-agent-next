@@ -44,6 +44,7 @@
     "@assistant-ui/react": "0.14.27",
     "@assistant-ui/react-markdown": "0.14.6",
     "@base-ui/react": "1.6.0",
+    "@testing-library/react": "16.3.2",
     "@types/react": "19.1.17",
     "@types/react-dom": "19.1.11",
     "@vitejs/plugin-react": "4.7.0",

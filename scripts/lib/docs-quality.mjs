@@ -483,9 +483,17 @@ function stripInlineMarkdown(value) {
   return value.replace(/[`*_~]/gu, "").replace(/<[^>]+>/gu, "");
 }
 
+/**
+ * Build outputs and tool scratch directories hold copies of real documentation.
+ * `.stryker-tmp` is a per-package sandbox written during mutation testing; its
+ * copied READMEs resolve their relative links against the sandbox root, so
+ * walking it reports link failures for documentation that is actually correct.
+ */
+const SKIPPED_DIRECTORIES = new Set([".git", "node_modules", "dist", ".astro", ".stryker-tmp"]);
+
 function walk(path, visit) {
   for (const entry of readdirSync(path, { withFileTypes: true })) {
-    if (entry.name === ".git" || entry.name === "node_modules" || entry.name === "dist" || entry.name === ".astro") continue;
+    if (SKIPPED_DIRECTORIES.has(entry.name)) continue;
     const absolutePath = join(path, entry.name);
     if (entry.isDirectory()) walk(absolutePath, visit);
     else if (entry.isFile()) visit(absolutePath);
