@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { packageCatalog } from "./package-catalog.mjs";
+import { packageCatalog } from "./lib/package-catalog.mjs";
 
 const execFileAsync = promisify(execFile);
 const MAX_COMMAND_OUTPUT_BYTES = 64 * 1024 * 1024;

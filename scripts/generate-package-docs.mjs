@@ -3,7 +3,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { packageCatalog } from "./package-catalog.mjs";
+import { packageCatalog } from "./lib/package-catalog.mjs";
 import {
   collectPackageDocModel,
   PACKAGE_DIRECTORY_END,

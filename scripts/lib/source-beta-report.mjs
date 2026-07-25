@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { extname, join, posix } from "node:path";
 
-import { packageCatalog, packageRelativePath } from "../package-catalog.mjs";
+import { packageCatalog, packageRelativePath } from "./package-catalog.mjs";
 import { collectPackagePublicApiInventories } from "./public-api-docs.mjs";
 
 export const SOURCE_BETA_REPORT_SCHEMA = "mono-agent.source-beta-report.v1";

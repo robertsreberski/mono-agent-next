@@ -139,13 +139,12 @@ describe("verify-deep-imports", () => {
 
   it("runs the import probe with package-scoped read-only Node permissions", () => {
     const entry = mappedEntries(repoRoot)[0];
-    const args = importSafetyNodeArguments("/repo/scripts/import-safety-harness.mjs", entry);
+    const args = importSafetyNodeArguments("/repo/scripts/lib/import-safety-harness.mjs", entry);
     const workspaceRoot = dirname(dirname(entry.packageDirectory));
 
     expect(args[0]).toBe("--permission");
     expect(args.filter((argument) => argument.startsWith("--allow-"))).toEqual([
-      "--allow-fs-read=/repo/scripts/import-safety-harness.mjs",
-      "--allow-fs-read=/repo/package.json",
+      "--allow-fs-read=/repo/scripts/lib/import-safety-harness.mjs",
       `--allow-fs-read=${resolve(workspaceRoot, "package.json")}`,
       `--allow-fs-read=${resolve(workspaceRoot, "packages")}`,
       `--allow-fs-read=${resolve(workspaceRoot, "extras")}`,

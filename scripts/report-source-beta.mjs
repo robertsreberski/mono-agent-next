@@ -13,7 +13,7 @@ export function parseSourceBetaReportArgs(argv) {
   const normalized = argv[0] === "--" ? argv.slice(1) : argv;
   if (normalized.length === 0) return false;
   if (normalized.length === 1 && normalized[0] === "--json") return true;
-  throw new Error("Usage: node --experimental-strip-types scripts/source-beta-report.mjs [--json]");
+  throw new Error("Usage: node --experimental-strip-types scripts/report-source-beta.mjs [--json]");
 }
 
 async function main() {

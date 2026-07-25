@@ -18,7 +18,7 @@ config/skill selection cannot own the capability first. A new MCP server is rung
    `@mono-agent/<name>`. Match the lockstep version in
    `packages/module-sdk/package.json`, use exact `workspace:<version>` internal
    dependencies, and point `types`/`exports` at `dist/`.
-2. Add the package to `scripts/package-catalog.mjs` with one category, one
+2. Add the package to `scripts/lib/package-catalog.mjs` with one category, one
    responsibility, the narrowest allowed dependency categories, and
    `publishable: true`.
 3. Use the standard README section order:
@@ -33,7 +33,7 @@ config/skill selection cannot own the capability first. A new MCP server is rung
    workspace version, then refresh `pnpm-lock.yaml`.
 
 Valid catalog categories are defined by `PACKAGE_CATEGORIES` in
-`scripts/package-catalog.mjs`; do not copy an older list into the manifest.
+`scripts/lib/package-catalog.mjs`; do not copy an older list into the manifest.
 
 ## Verify
 

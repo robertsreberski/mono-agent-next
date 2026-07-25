@@ -41,7 +41,7 @@
     "generate:public-api-docs": "node scripts/generate-public-api-docs.mjs",
     "generate:package-docs": "node scripts/generate-package-docs.mjs",
     "generate:source-beta-docs": "node --experimental-strip-types scripts/generate-source-beta-docs.mjs",
-    "report:source-beta": "node --experimental-strip-types scripts/source-beta-report.mjs",
+    "report:source-beta": "node --experimental-strip-types scripts/report-source-beta.mjs",
     "typecheck": "pnpm -r --sort run typecheck",
     "test": "pnpm -r --sort run test",
     "release:guard": "node scripts/release/check-publish-guard.mjs",

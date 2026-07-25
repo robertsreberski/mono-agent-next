@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   packageCatalog,
   packageRelativePath,
-} from "./package-catalog.mjs";
+} from "./lib/package-catalog.mjs";
 
 const userDocRoots = [
   "AGENTS.md",
@@ -27,7 +27,7 @@ const artifactContractSourcePaths = [
   "packages/tui/package.json",
   "packages/tui/src/ui/app.ts",
   "packages/tui/src/ui/terminal-text.ts",
-  "scripts/package-catalog.mjs",
+  "scripts/lib/package-catalog.mjs",
 ];
 
 const monoPackage = (...nameParts) => `@mono-agent/${nameParts.join("-")}`;

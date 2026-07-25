@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   packageCatalog,
   packageRelativePath,
-} from "./package-catalog.mjs";
+} from "./lib/package-catalog.mjs";
 
 /**
  * Return every importable export in the cataloged publishable package roster.
@@ -176,7 +176,7 @@ async function realImporter(_specifier, entry) {
  * @param {ReturnType<typeof mappedEntries>[number]} entry
  */
 export function instrumentedImporter(entry) {
-  const harness = fileURLToPath(new URL("./import-safety-harness.mjs", import.meta.url));
+  const harness = fileURLToPath(new URL("./lib/import-safety-harness.mjs", import.meta.url));
   const args = importSafetyNodeArguments(harness, entry);
   return new Promise((resolveImport, rejectImport) => {
     const child = spawn(process.execPath, args, {
@@ -257,7 +257,11 @@ export function importSafetyNodeArguments(harness, entry) {
   const workspaceRoot = canonicalExistingPath(dirname(dirname(entry.packageDirectory)));
   const readablePaths = new Set([
     canonicalHarness,
-    resolve(dirname(canonicalHarness), "..", "package.json"),
+    // Was `dirname(canonicalHarness)/../package.json`, which silently pointed
+    // at a directory that has no manifest the moment the harness moved one
+    // level deeper. A permission grant derived by counting `..` from a file is
+    // a grant that changes when the file does.
+    resolve(workspaceRoot, "package.json"),
     resolve(workspaceRoot, "package.json"),
     resolve(workspaceRoot, "packages"),
     resolve(workspaceRoot, "extras"),

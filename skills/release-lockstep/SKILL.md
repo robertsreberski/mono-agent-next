@@ -15,7 +15,7 @@ version to equal the tag and every internal dependency to use the exact matching
 workspace range.
 
 **Lockstep set:** all **23 `publishable: true` entries** in
-`scripts/package-catalog.mjs` release together: 21 core-tier packages, the
+`scripts/lib/package-catalog.mjs` release together: 21 core-tier packages, the
 unscoped `create-mono-agent` alias under `packages/*`, and the
 `@mono-agent/docs-mcp` plugin-tier extra under `extras/*`. The plugin extra is
 version-bumped and published alongside core.

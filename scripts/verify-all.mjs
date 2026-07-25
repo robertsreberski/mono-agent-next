@@ -9,7 +9,7 @@ import { MINIMUM_NODE_VERSION } from "./node-version.mjs";
 import {
   packageCatalog,
   packageRelativePath,
-} from "./package-catalog.mjs";
+} from "./lib/package-catalog.mjs";
 import { runVerifyConsumers } from "./verify-consumers.mjs";
 
 export function createRepoGate({ releaseTag, nodeVersion = process.versions.node }) {

@@ -1,6 +1,6 @@
 # Package Layers
 
-`scripts/package-catalog.mjs` is the source of truth for package category
+`scripts/lib/package-catalog.mjs` is the source of truth for package category
 metadata and dependency boundary checks. Twenty-two v1 packages live under
 `packages/<package-name>`; the independently installed documentation MCP
 companion lives under `extras/docs-mcp`. The catalog's historical `plugin` tier

@@ -3,7 +3,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { packageCatalog } from "./package-catalog.mjs";
+import { packageCatalog } from "./lib/package-catalog.mjs";
 import {
   collectPackagePublicApiInventories,
   JS_SUBPATH_INVENTORY_START,

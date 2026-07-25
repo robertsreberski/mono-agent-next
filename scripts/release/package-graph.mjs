@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { packageCatalog, packageRelativePath } from "../package-catalog.mjs";
+import { packageCatalog, packageRelativePath } from "../lib/package-catalog.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(SCRIPT_DIR, "../..");
