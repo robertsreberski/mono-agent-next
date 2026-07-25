@@ -1449,7 +1449,7 @@ function packedSystemConfig({ providerBaseUrl, otlpEndpoint, deliveryEndpoint })
         $use: "@mono-agent/channel-webhook",
         listen: { host: "127.0.0.1", port: 0 },
         apiKey: { $env: "SYSTEM_WEBHOOK_TOKEN" },
-        mode: "sync",
+        defaultMode: "sync",
         maxRunMs: 10_000,
         outbound: {
           url: deliveryEndpoint,

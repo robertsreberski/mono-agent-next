@@ -70,7 +70,6 @@ describe("webhook config", () => {
       apiKey: TEST_API_KEY,
       path: "/webhook/invoke",
       defaultMode: "sync",
-      mode: "sync",
       maxBodyBytes: DEFAULT_MAX_BODY_BYTES,
       maxRunMs: 1_200_000,
       retentionMs: 300_000,
@@ -86,7 +85,6 @@ describe("webhook config", () => {
     })).toMatchObject({
       routesDirectory: "./webhook",
       defaultMode: "async",
-      mode: "async",
     });
     expect(() => parseWebhookConfig({
       apiKey: TEST_API_KEY,
@@ -101,7 +99,7 @@ describe("webhook config", () => {
       apiKey: TEST_API_KEY,
       defaultMode: "async",
       mode: "sync",
-    })).toThrow(/cannot be configured together/u);
+    })).toThrow(/unknown/iu);
   });
 
   it("requires env-only secrets and gates non-loopback binds behind explicit strong dual authentication", () => {
@@ -306,7 +304,7 @@ describe("webhook HTTP channel", () => {
     const submit: WebhookSubmit = async () => new Promise((resolve) => {
       finish = resolve;
     });
-    const { channel, info } = await startChannel({ mode: "async" }, submit, "async-key");
+    const { channel, info } = await startChannel({ defaultMode: "async" }, submit, "async-key");
 
     const acceptedResponse = await invoke(info.invokeUrl, { text: "work" }, "async-key");
     expect(acceptedResponse.status).toBe(202);
@@ -382,7 +380,7 @@ describe("webhook HTTP channel", () => {
 
   it("aborts active work and drains idempotently on shutdown", async () => {
     let observed: WebhookInboundRequest | undefined;
-    const { channel, info } = await startChannel({ mode: "async" }, async (request) => {
+    const { channel, info } = await startChannel({ defaultMode: "async" }, async (request) => {
       observed = request;
       return new Promise(() => undefined);
     });
@@ -530,7 +528,7 @@ describe("webhook HTTP channel", () => {
 
   it("returns the same async status authority after terminal Idempotency-Key retries", async () => {
     const submit = vi.fn<WebhookSubmit>(async () => ({ text: "async done" }));
-    const { channel, info } = await startChannel({ mode: "async" }, submit);
+    const { channel, info } = await startChannel({ defaultMode: "async" }, submit);
     const headers = { "idempotency-key": "async-operation-1" };
     const accepted = await invoke(info.invokeUrl, { text: "work" }, TEST_API_KEY, headers);
     const original = await accepted.json() as { requestId: string; statusUrl: string };
