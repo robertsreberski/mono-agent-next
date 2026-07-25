@@ -404,7 +404,13 @@ describe("durable AgentHost execution", () => {
       config: {
         routing: {
           primary: { runtime: "main", model: "fixture:model-a" },
-          fallbacks: [{ runtime: "other", model: "fixture:model-a" }],
+          // This case proves session keys isolate per exact route, so every
+          // route it selects has to be a configured one: an unconfigured
+          // selection is now rejected at admission rather than absorbed.
+          fallbacks: [
+            { runtime: "other", model: "fixture:model-a" },
+            { runtime: "main", model: "fixture:model-b" },
+          ],
         },
         session: {
           mode: "continuous",

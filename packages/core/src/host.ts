@@ -42,7 +42,8 @@ import {
   boundedUtf8, inspectModuleFailure, redactBounded, redactChannelToolEvent, sanitizeModuleCommandError,
 } from "./host-redaction.js";
 import {
-  routeCandidates, runtimeEligibility, runtimeSessionMapKey, runtimeSessionRouteKey,
+  assertConfiguredRoute, routeCandidates, runtimeEligibility, runtimeSessionMapKey,
+  runtimeSessionRouteKey,
 } from "./host-routing.js";
 import { HostDiagnostics } from "./host-diagnostics.js";
 import { HostInteractions } from "./host-interactions.js";
@@ -393,6 +394,7 @@ class AgentHostImplementation implements AgentHost {
     if (typeof input.text !== "string" || (input.text.length === 0 && (input.attachments?.length ?? 0) === 0)) {
       throw new TypeError("text or at least one attachment is required");
     }
+    assertConfiguredRoute(this.config, input);
     if (this.#pending >= this.#options.maxPendingTurns) {
       throw new AgentAdmissionError(
         "capacity_exceeded",
@@ -1704,10 +1706,12 @@ class AgentHostImplementation implements AgentHost {
         signal,
       );
     const metadata = toJsonObject(input.metadata);
-    const effort = escalateMessageEffort(
+    const effortDecision = escalateMessageEffort(
       input.text,
       input.effort ?? this.config.raw.routing.effort,
+      this.config.raw.routing.effortKeywords,
     );
+    const effort = effortDecision.effort;
     return {
       turnId,
       conversationId: input.conversationId,

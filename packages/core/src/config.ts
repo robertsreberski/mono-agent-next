@@ -325,7 +325,7 @@ function validateAgent(value: unknown, issues: AgentConfigIssue[]): void {
 }
 function validateRouting(value: unknown, runtimes: unknown, issues: AgentConfigIssue[]): void {
   if (!expectRecord(value, "routing", issues)) return;
-  rejectUnknown(value, new Set(["primary", "fallbacks", "effort"]), "routing", issues);
+  rejectUnknown(value, new Set(["primary", "fallbacks", "effort", "effortKeywords"]), "routing", issues);
   validateRoute(value.primary, "routing.primary", runtimes, issues);
   if (!Array.isArray(value.fallbacks)) {
     issue(issues, "routing.fallbacks", "must be an array", "type");
@@ -333,6 +333,17 @@ function validateRouting(value: unknown, runtimes: unknown, issues: AgentConfigI
     value.fallbacks.forEach((route, index) => validateRoute(route, `routing.fallbacks.${index}`, runtimes, issues));
   }
   if (value.effort !== undefined) expectNonEmptyString(value.effort, "routing.effort", issues);
+  if (value.effortKeywords !== undefined) validateEffortKeywords(value.effortKeywords, issues);
+}
+function validateEffortKeywords(value: unknown, issues: AgentConfigIssue[]): void {
+  if (!expectRecord(value, "routing.effortKeywords", issues)) return;
+  const keywords = ["ultraThink", "extraThink", "think"] as const;
+  rejectUnknown(value, new Set(keywords), "routing.effortKeywords", issues);
+  for (const keyword of keywords) {
+    if (value[keyword] !== undefined) {
+      expectBoolean(value[keyword], `routing.effortKeywords.${keyword}`, issues);
+    }
+  }
 }
 function validateRoute(value: unknown, path: string, runtimes: unknown, issues: AgentConfigIssue[]): void {
   if (!expectRecord(value, path, issues)) return;
