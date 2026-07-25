@@ -1,17 +1,24 @@
 // SPDX-License-Identifier: MIT
 
-// Properties of the always-on effort keyword contract (src/effort.ts).
+// Properties of the configured effort keyword contract (src/effort.ts).
 //
-// This contract silently raises the provider effort — and therefore latency and
-// cost — based on words in the operator's message. `effort.test.ts` already
-// pins a dozen hand-picked strings; what it cannot do is establish that the
-// invariants hold for arbitrary prose. These properties do, over generated
-// text, and they shrink to a minimal counterexample when one does not.
+// This contract raises the provider effort — and therefore latency and cost —
+// based on words in the operator's message. `effort.test.ts` already pins a
+// dozen hand-picked strings; what it cannot do is establish that the invariants
+// hold for arbitrary prose. These properties do, over generated text, and they
+// shrink to a minimal counterexample when one does not.
+//
+// The bare `think` tier is opt-in, so the properties that exercise it enable it
+// explicitly; that keeps them testing the escalation semantics rather than the
+// default.
 
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 
 import { escalateMessageEffort } from "../effort.js";
+
+/** Every tier on, so the properties exercise escalation rather than the defaults. */
+const ALL_TIERS = { ultraThink: true, extraThink: true, think: true } as const;
 
 /** Ordered weakest to strongest, mirroring `EFFORT_LEVELS`. */
 const LEVELS = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"] as const;
@@ -31,7 +38,7 @@ const knownLevel = fc.constantFrom(...LEVELS);
 describe("effort keyword contract", () => {
   it("never lowers an already selected effort", () => {
     fc.assert(fc.property(fc.string(), knownLevel, (text, current) => {
-      expect(rank(escalateMessageEffort(text, current))).toBeGreaterThanOrEqual(rank(current));
+      expect(rank(escalateMessageEffort(text, current, ALL_TIERS).effort)).toBeGreaterThanOrEqual(rank(current));
     }));
   });
 
@@ -41,20 +48,20 @@ describe("effort keyword contract", () => {
     // the weakest levels.
     const weakerThanHigh = fc.constantFrom(...LEVELS.filter((level) => rank(level) < rank("high")));
     fc.assert(fc.property(innocuousText, weakerThanHigh, (filler, current) => {
-      expect(escalateMessageEffort(`${filler} think`, current)).toBe("high");
+      expect(escalateMessageEffort(`${filler} think`, current, ALL_TIERS).effort).toBe("high");
     }));
   });
 
   it("only ever returns a known level or the caller's own value", () => {
     fc.assert(fc.property(fc.string(), fc.option(knownLevel, { nil: undefined }), (text, current) => {
-      const result = escalateMessageEffort(text, current);
+      const result = escalateMessageEffort(text, current, ALL_TIERS).effort;
       expect(result === current || LEVELS.includes(result as (typeof LEVELS)[number])).toBe(true);
     }));
   });
 
   it("leaves text without a trigger word completely untouched", () => {
     fc.assert(fc.property(innocuousText, fc.option(knownLevel, { nil: undefined }), (text, current) => {
-      expect(escalateMessageEffort(text, current)).toBe(current);
+      expect(escalateMessageEffort(text, current, ALL_TIERS).effort).toBe(current);
     }));
   });
 
@@ -64,23 +71,23 @@ describe("effort keyword contract", () => {
     fc.assert(fc.property(fc.string(), unknownLevel, (text, current) => {
       // Runtime-owned configuration is never silently replaced, even when the
       // message would otherwise escalate.
-      expect(escalateMessageEffort(text, current)).toBe(current);
+      expect(escalateMessageEffort(text, current, ALL_TIERS).effort).toBe(current);
     }));
   });
 
   it("matches whole words only, wherever the trigger sits in the message", () => {
     fc.assert(fc.property(innocuousText, innocuousText, (before, after) => {
       const embedded = `${before} think ${after}`.trim();
-      expect(escalateMessageEffort(embedded, undefined)).toBe("high");
+      expect(escalateMessageEffort(embedded, undefined, ALL_TIERS).effort).toBe("high");
       // The same letters inside a larger word must not trigger.
-      expect(escalateMessageEffort(`${before} rethinking ${after}`, undefined)).toBeUndefined();
+      expect(escalateMessageEffort(`${before} rethinking ${after}`, undefined, ALL_TIERS).effort).toBeUndefined();
     }));
   });
 
   it("resolves the strongest matching trigger regardless of order", () => {
     fc.assert(fc.property(innocuousText, (filler) => {
-      expect(escalateMessageEffort(`think ${filler} ultra think`, undefined)).toBe("max");
-      expect(escalateMessageEffort(`ultra think ${filler} think`, undefined)).toBe("max");
+      expect(escalateMessageEffort(`think ${filler} ultra think`, undefined, ALL_TIERS).effort).toBe("max");
+      expect(escalateMessageEffort(`ultra think ${filler} think`, undefined, ALL_TIERS).effort).toBe("max");
     }));
   });
 });

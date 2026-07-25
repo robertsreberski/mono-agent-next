@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-import type { JsonObject, JsonValue, ModuleHealth, ModuleInstance } from "@mono-agent/module-sdk";
+import type { JsonObject, JsonValue, ModuleHealth } from "@mono-agent/module-sdk";
 import { assertOwnKeys, ownDataRecord, snapshotBoundedValue } from "./bounded-value.js";
 import { errorMessage } from "./errors.js";
 import type { HostLifecycleCalls } from "./host-lifecycle.js";
-import type { AgentHealth, LoadedAgentModule } from "./types.js";
+import type { RunningModule } from "./host-types.js";
+import type { AgentHealth } from "./types.js";
 
 export type HostLifecycleState = "new" | "starting" | "running" | "draining" | "stopped" | "failed";
-interface RunningModule { readonly loaded: LoadedAgentModule; readonly instance: ModuleInstance }
 interface HealthSnapshot {
   readonly state: HostLifecycleState;
   readonly pending: number;
@@ -99,4 +99,15 @@ export function redactJson(value: JsonValue, redact: (value: string) => string):
   if (Array.isArray(value)) return value.map((entry) => redactJson(entry, redact));
   return Object.fromEntries(Object.entries(value).map(([key, entry]) =>
     [redact(key), redactJson(entry, redact)]));
+}
+/**
+ * The module's own health summary, if it supplied one.
+ *
+ * Core stores the normalized ModuleHealth under `detail`; the operator
+ * projection needs the module's sentence, not a recomputed counter.
+ */
+export function moduleHealthSummary(detail: JsonValue | undefined): string | undefined {
+  if (detail === null || typeof detail !== "object" || Array.isArray(detail)) return undefined;
+  const summary = (detail as JsonObject).summary;
+  return typeof summary === "string" && summary.length > 0 ? summary : undefined;
 }

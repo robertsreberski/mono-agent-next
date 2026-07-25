@@ -59,6 +59,11 @@ function composeLoadedAgentConfigSchema(loaded: LoadedAgentConfig): JsonSchema {
         primary: routeSchema(loaded),
         fallbacks: { type: "array", items: routeSchema(loaded) },
         effort: nonEmptyStringSchema(),
+        effortKeywords: objectSchema({
+          ultraThink: { type: "boolean", default: true },
+          extraThink: { type: "boolean", default: true },
+          think: { type: "boolean", default: false },
+        }, []),
       },
       ["primary", "fallbacks"],
     ),

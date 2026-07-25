@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+import type { RuntimeTurnErrorSnapshot } from "@mono-agent/module-sdk";
+import { RunExecutionError } from "./errors.js";
+import type { AgentSubmitInput } from "./types.js";
 import {
   parseApprovalDecision,
   parseAskUserAnswer,
@@ -123,4 +126,45 @@ export class ActiveTurn {
     this.#ask.reject("Runtime attempt settled before AskUser completed");
     this.#approval.reject("Runtime attempt settled before approval completed");
   }
+}
+
+export function turnExecutionError(
+  status: "failed" | "uncertain",
+  code: string,
+  message: string,
+  input: AgentSubmitInput,
+  active: ActiveTurn,
+  cause?: unknown,
+): RunExecutionError {
+  return new RunExecutionError(status, code, message, {
+    ...(cause === undefined ? {} : { cause }),
+    ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
+    runId: active.id,
+  });
+}
+export function boundedRuntimeFailureMessage(
+  error: unknown,
+  snapshot: RuntimeTurnErrorSnapshot | undefined,
+): string {
+  if (snapshot !== undefined) return snapshot.message;
+  try {
+    if (!(error instanceof Error)) return "Runtime attempt failed";
+    const descriptor = Object.getOwnPropertyDescriptor(error, "message");
+    if (
+      descriptor === undefined
+      || !("value" in descriptor)
+      || typeof descriptor.value !== "string"
+    ) {
+      return "Runtime attempt failed";
+    }
+    return descriptor.value.slice(0, 65_536);
+  } catch {
+    return "Runtime attempt failed";
+  }
+}
+export function isSafeRuntimeFallback(
+  failure: RuntimeTurnErrorSnapshot | undefined,
+): boolean {
+  return failure?.retryability === "retryable"
+    && failure.sideEffects === "none";
 }

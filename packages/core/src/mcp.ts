@@ -174,7 +174,11 @@ export async function connectProjectMcpTools(
         connected.push({ server, client, transport });
       } catch (error) {
         await bestEffortClose(client, transport);
-        throw error;
+        // "MCP error -32000: Connection closed" on its own names neither the
+        // server nor the cause, so isolating a bad server meant hand-running
+        // each one's handshake outside the agent. The child's stderr is already
+        // captured; attach it and say which server failed.
+        throw attributeMcpConnectionFailure(server, entry, transport, error);
       }
     }
     const catalog: PendingMcpTool[] = [];
@@ -966,6 +970,11 @@ export class BoundedStdioMcpTransport {
     return safe;
   }
 
+  /** The bounded, redacted child stderr captured so far, if any. */
+  stderrDiagnostic(): string | undefined {
+    return this.#safeStderrDiagnostic();
+  }
+
   #safeStderrDiagnostic(): string | undefined {
     if (this.#stderrBytes === 0 && !this.#stderrTruncated) return undefined;
     const decoded = Buffer.concat(this.#stderrChunks, this.#stderrBytes).toString("utf8");
@@ -1166,4 +1175,26 @@ async function closeWithin(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Wraps an MCP connection failure with the server it belongs to and its captured stderr. */
+function attributeMcpConnectionFailure(
+  server: string,
+  entry: McpServerConfig,
+  transport: unknown,
+  error: unknown,
+): Error {
+  const stderr = transport instanceof BoundedStdioMcpTransport
+    ? transport.stderrDiagnostic()
+    : undefined;
+  const command = "command" in entry && typeof entry.command === "string"
+    ? entry.command
+    : "url" in entry && typeof entry.url === "string" ? entry.url : undefined;
+  const detail = [
+    `MCP server ${JSON.stringify(server)} failed to connect`,
+    ...(command === undefined ? [] : [`(${command})`]),
+    `: ${errorMessage(error)}`,
+    ...(stderr === undefined ? [] : [`; ${stderr}`]),
+  ].join("");
+  return new Error(detail, { cause: error });
 }

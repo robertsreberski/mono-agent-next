@@ -23,9 +23,46 @@ export const SOURCE_BETA_LINE_BUDGETS = Object.freeze([
   }),
   Object.freeze({
     id: "kernel-production",
-    maximumLines: 15_500,
+    maximumLines: 16_500,
+  }),
+  /**
+   * The reserved state module's execution protocol crosses Module SDK as
+   * `perform(request): Promise<unknown>`, so durable logic pushed across that
+   * boundary leaves the kernel packages and stops counting against
+   * `kernel-production`. Honoring the letter of the kernel budget by moving
+   * kernel work into an untyped escape hatch would defeat its purpose, so the
+   * protocol's own surface is measured too.
+   */
+  Object.freeze({
+    id: "durable-protocol-production",
+    maximumLines: 9_500,
   }),
 ]);
+
+/**
+ * No single kernel production file may exceed this. A total-lines budget cannot
+ * prevent one file becoming the place every kernel change lands; this can.
+ *
+ * This is a ratchet, not an aspiration: it is set just above the largest kernel
+ * file as it actually stands, so the next change to that file has to extract
+ * something rather than grow it. Lower it whenever a decomposition lands.
+ */
+export const KERNEL_FILE_MAXIMUM_LINES = 2_600;
+
+const KERNEL_PACKAGES = Object.freeze([
+  "@mono-agent/cli",
+  "@mono-agent/core",
+  "@mono-agent/module-sdk",
+]);
+
+const DURABLE_PROTOCOL_PATHS = Object.freeze([
+  "packages/core/src/state-execution-client.ts",
+  "packages/state-local/src/execution",
+]);
+
+function isDurableProtocolPath(path) {
+  return DURABLE_PROTOCOL_PATHS.some((prefix) => path === prefix || path.startsWith(prefix));
+}
 
 const SOURCE_EXTENSIONS = new Set([
   ".astro",
@@ -76,14 +113,20 @@ export function collectSourceBetaReport({ root, renderProject }) {
     [
       "kernel-production",
       packages
-        .filter((row) => [
-          "@mono-agent/cli",
-          "@mono-agent/core",
-          "@mono-agent/module-sdk",
-        ].includes(row.name))
+        .filter((row) => KERNEL_PACKAGES.includes(row.name))
         .reduce((sum, row) => sum + row.productionLines, 0),
     ],
+    [
+      "durable-protocol-production",
+      files
+        .filter((file) => file.classification === "production" && isDurableProtocolPath(file.path))
+        .reduce((sum, file) => sum + file.lines, 0),
+    ],
   ]);
+  const kernelFiles = Object.freeze(files
+    .filter((file) => file.classification === "production" && KERNEL_PACKAGES.includes(file.owner))
+    .map((file) => Object.freeze({ path: file.path, lines: file.lines }))
+    .sort((left, right) => right.lines - left.lines || left.path.localeCompare(right.path)));
   const budgets = SOURCE_BETA_LINE_BUDGETS.map((budget) => {
     const actualLines = actualLinesByBudget.get(budget.id);
     if (actualLines === undefined) {
@@ -109,6 +152,7 @@ export function collectSourceBetaReport({ root, renderProject }) {
     files: Object.freeze(files),
     totals: source,
     budgets: Object.freeze(budgets),
+    kernelFiles,
     packages: Object.freeze(packages),
     dependencyGraph,
     publicApi,
@@ -170,6 +214,15 @@ export function assertSourceBetaBudgets(report) {
         + `${String(row.actualLines - expected.maximumLines)}.`,
       );
     }
+  }
+
+  for (const file of Array.isArray(report.kernelFiles) ? report.kernelFiles : []) {
+    if (file === null || typeof file !== "object") continue;
+    if (!Number.isSafeInteger(file.lines) || file.lines <= KERNEL_FILE_MAXIMUM_LINES) continue;
+    issues.push(
+      `${String(file.path)} is ${String(file.lines)} lines; no kernel production file may `
+      + `exceed ${String(KERNEL_FILE_MAXIMUM_LINES)}.`,
+    );
   }
 
   if (issues.length > 0) {

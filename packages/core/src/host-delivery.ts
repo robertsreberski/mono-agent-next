@@ -4,11 +4,13 @@ import type { Channel, ChannelDeliveryResult, ChannelOutboundMessage } from "@mo
 import { assertOwnKeys, ownDataRecord } from "./bounded-value.js";
 import { errorMessage } from "./errors.js";
 import { ConversationTails, durableFingerprint } from "./host-admission.js";
+import { settlementSignal } from "./host-lifecycle.js";
+import { normalizeOutboundMessage } from "./host-outbound.js";
+import type { VerbatimEntry } from "./host-types.js";
 import { normalizeModuleDiagnostic } from "./runtime-result-normalizer.js";
 import type { CanonicalTranscript, DurableFingerprint, StateExecutionClient } from "./state-execution-client.js";
 import type { AgentTranscriptEntry } from "./types.js";
 
-type VerbatimEntry = Extract<AgentTranscriptEntry, { readonly kind: "verbatim" }>;
 type DeliveryIntent = Awaited<ReturnType<StateExecutionClient["prepareDelivery"]>> | undefined;
 export interface ChannelDeliveryOutcome {
   readonly result: ChannelDeliveryResult;
@@ -20,10 +22,6 @@ interface DeliveryContext {
   readonly channels: ReadonlyMap<string, Channel>;
   readonly transcripts: Map<string, CanonicalTranscript>;
   readonly localHistoryTails: ConversationTails;
-  normalizeMessage(
-    message: ChannelOutboundMessage,
-    resolveDefault?: () => string | undefined,
-  ): ChannelOutboundMessage;
   execution(): StateExecutionClient | undefined;
   loadConversation(id: string, signal: AbortSignal): Promise<CanonicalTranscript | undefined>;
   appendLocalVerbatim(id: string, entries: readonly VerbatimEntry[], updatedAt: string): void;
@@ -41,7 +39,7 @@ export class HostDelivery {
     channelId: string, message: ChannelOutboundMessage, signal: AbortSignal,
   ): Promise<ChannelDeliveryOutcome> {
     const channel = this.context.channels.get(channelId);
-    const normalized = this.context.normalizeMessage(
+    const normalized = normalizeOutboundMessage(
       message,
       channel?.resolveDefaultDeliveryConversationId?.bind(channel),
     );
@@ -157,7 +155,7 @@ export class HostDelivery {
           destination, signal, () => this.#appendLocal(destination, entry),
         );
       } else {
-        const lifecycleSignal = AbortSignal.timeout(this.context.lifecycleTimeoutMs);
+        const lifecycleSignal = settlementSignal(this.context.lifecycleTimeoutMs, this.context.hostSignal);
         if (intent?.status === "send") {
           const settled = await execution.retryDeliveryWithHistory({
             idempotencyKey: message.idempotencyKey, fingerprint,
@@ -200,7 +198,7 @@ export class HostDelivery {
     const pending = this.context.execution()!.settleDelivery({
       idempotencyKey: message.idempotencyKey, fingerprint,
       attempt: intent.attempt, token: intent.token, ...settlement,
-      signal: AbortSignal.timeout(this.context.lifecycleTimeoutMs),
+      signal: settlementSignal(this.context.lifecycleTimeoutMs, this.context.hostSignal),
     });
     return bestEffort ? pending.catch(() => undefined) : pending;
   }

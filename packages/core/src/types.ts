@@ -46,6 +46,17 @@ export interface RuntimeRoute {
   readonly model: string;
 }
 
+/**
+ * Opt-in message keyword tiers that may raise the configured routing effort.
+ * `ultraThink` and `extraThink` default on; the bare `think` tier defaults off
+ * because it matches ordinary English.
+ */
+export interface AgentEffortKeywordConfig {
+  readonly ultraThink?: boolean;
+  readonly extraThink?: boolean;
+  readonly think?: boolean;
+}
+
 export interface AgentPolicyConfig {
   readonly tools: {
     readonly default: "allow" | "deny";
@@ -68,6 +79,7 @@ export interface AgentConfig {
     readonly primary: RuntimeRoute;
     readonly fallbacks: readonly RuntimeRoute[];
     readonly effort?: string;
+    readonly effortKeywords?: AgentEffortKeywordConfig;
   };
   readonly session?: {
     readonly mode: "continuous" | "per-message";
