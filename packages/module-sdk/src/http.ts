@@ -1,6 +1,8 @@
+import { boundedInteger } from "./bounded-integer.js";
 export const DEFAULT_HTTP_MAX_RESPONSE_BYTES = 1_048_576;
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;
 export const DEFAULT_HTTP_MAX_REDIRECTS = 3;
+const CROSS_ORIGIN_HEADER_ALLOWLIST = new Set(["accept", "content-type", "user-agent"]);
 export type HttpSafetyErrorCode =
   | "invalid_url"
   | "unsafe_protocol"
@@ -35,7 +37,7 @@ export interface CheckedFetchOptions {
   readonly maxResponseBytes?: number;
   readonly timeoutMs?: number;
   readonly maxRedirects?: number;
-  /** Cross-origin redirects are denied by default and always lose sensitive headers. */
+  /** Allowed cross-origin redirects retain only Accept, Content-Type, and User-Agent. */
   readonly allowCrossOriginRedirects?: boolean;
 }
 export interface BoundedHttpResponse {
@@ -87,18 +89,21 @@ export async function checkedFetch(
     "maxResponseBytes",
     1,
     1_073_741_824,
+    (message) => httpError("invalid_limit", message),
   );
   const timeoutMs = boundedInteger(
     options.timeoutMs ?? DEFAULT_HTTP_TIMEOUT_MS,
     "timeoutMs",
     1,
     3_600_000,
+    (message) => httpError("invalid_limit", message),
   );
   const maxRedirects = boundedInteger(
     options.maxRedirects ?? DEFAULT_HTTP_MAX_REDIRECTS,
     "maxRedirects",
     0,
     20,
+    (message) => httpError("invalid_limit", message),
   );
   let url = assertSafeHttpUrl(input);
   let headers = new Headers(init.headers);
@@ -209,8 +214,12 @@ function boundedResponse(response: Response, body: Uint8Array): BoundedHttpRespo
   });
 }
 function withoutSensitiveHeaders(input: Headers): Headers {
-  const headers = new Headers(input);
-  for (const name of ["authorization", "cookie", "proxy-authorization"]) headers.delete(name);
+  const headers = new Headers();
+  for (const [name, value] of input) {
+    if (CROSS_ORIGIN_HEADER_ALLOWLIST.has(name.toLowerCase())) {
+      headers.append(name, value);
+    }
+  }
   return headers;
 }
 function isRedirectStatus(status: number): boolean {
@@ -231,15 +240,6 @@ function hasLiteralLoopbackAuthority(input: string | URL, parsed: URL): boolean 
     hostname = authority.split(":", 1)[0] ?? "";
   }
   return isLiteralLoopbackHostname(hostname) && isLiteralLoopbackHostname(parsed.hostname);
-}
-function boundedInteger(value: number, name: string, minimum: number, maximum: number): number {
-  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
-    throw httpError(
-      "invalid_limit",
-      `${name} must be an integer from ${minimum} through ${maximum}`,
-    );
-  }
-  return value;
 }
 function httpError(
   code: HttpSafetyErrorCode,

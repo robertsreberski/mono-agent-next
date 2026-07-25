@@ -475,6 +475,20 @@ describe("public compliance assertions", () => {
       exercise() {},
       secrets: ["secret"],
     })).rejects.toThrow("reports contain a configured secret");
+
+    const escapedSecret = "quote\"slash\\line\n";
+    await expect(assertChannelBehaviorCompliance({
+      create: () => ({
+        capabilities: { ...capabilities, proactive: false },
+        health: () => ({
+          status: "healthy",
+          checkedAt: new Date().toISOString(),
+          summary: escapedSecret,
+        }),
+      }),
+      exercise() {},
+      secrets: [escapedSecret],
+    })).rejects.toThrow("reports contain a configured secret");
   });
 
   it("validates model-visible channel send tools", () => {

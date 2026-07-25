@@ -25,11 +25,11 @@ repository's explicit inbound contribution terms.
 
 ## Audited classifications
 
-The current record covers 36 tracked files exactly:
+The current record covers 40 tracked files exactly:
 
 | Classification | Files | Authority |
 | --- | ---: | --- |
-| Successor-original | 27 | Robert Sreberski's original work, expressly offered under Apache-2.0 |
+| Successor-original | 31 | Robert Sreberski's original work, expressly offered under Apache-2.0 |
 | Predecessor-authorized adaptation | 7 | Robert Sreberski's sole-holder relicensing authorization above |
 | Canonical license text | 2 | Verbatim Apache License 2.0 text published by the Apache Software Foundation for inclusion |
 

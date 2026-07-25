@@ -155,6 +155,45 @@ describe("AskUser codecs", () => {
     }, ASK_USER_REQUEST)).toThrow("does not match the request");
   });
 
+  it("accepts multiple selections only for questions that declare them", () => {
+    const multipleRequest = parseAskUserRequest({
+      interactionId: "ask-multiple",
+      requestedAt: REQUESTED_AT,
+      questions: [{
+        id: "targets",
+        prompt: "Which targets?",
+        choices: [
+          { value: "staging", label: "Staging" },
+          { value: "production", label: "Production" },
+        ],
+        allowFreeText: false,
+        multiple: true,
+      }],
+    });
+    const answer = parseAskUserAnswer({
+      interactionId: multipleRequest.interactionId,
+      answers: { targets: ["staging", "production"] },
+      answeredAt: ANSWERED_AT,
+    }, multipleRequest);
+
+    expect(answer.answers.targets).toEqual(["staging", "production"]);
+    expect(parseAskUserAnswer(answer, multipleRequest)).toEqual(answer);
+
+    const singleRequest = parseAskUserRequest({
+      ...multipleRequest,
+      questions: multipleRequest.questions.map((question) => ({
+        ...question,
+        multiple: false,
+      })),
+    });
+    expect(() => parseAskUserAnswer({
+      ...answer,
+      answers: { targets: ["staging", "production"] },
+    }, singleRequest)).toThrow(
+      "must contain exactly one value for a single-select question",
+    );
+  });
+
   it("represents every valid identifier as a prototype-safe answer key", () => {
     const request = parseAskUserRequest({
       interactionId: "prototype-safe",

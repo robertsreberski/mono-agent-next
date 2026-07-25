@@ -61,10 +61,11 @@ describe("checkedFetch", () => {
     expect(result.json()).toEqual({ ok: true });
   });
 
-  it("aborts a response that crosses the byte limit", async () => {
+  it("aborts a chunked response that crosses the streaming byte limit", async () => {
     const origin = await listen((_request, response) => {
-      response.writeHead(200);
-      response.end("0123456789");
+      response.writeHead(200, { "transfer-encoding": "chunked" });
+      response.write("01234");
+      response.end("56789");
     });
 
     await expect(checkedFetch(origin, {}, { maxResponseBytes: 5 })).rejects.toMatchObject({
@@ -73,9 +74,9 @@ describe("checkedFetch", () => {
   });
 
   it("rejects unsafe, cross-origin, and mutating redirects", async () => {
-    let receivedAuthorization: string | undefined;
+    let receivedHeaders: Headers | undefined;
     const target = await listen((request, response) => {
-      receivedAuthorization = request.headers.authorization;
+      receivedHeaders = new Headers(request.headers as Record<string, string>);
       response.end("target");
     });
     const origin = await listen((request, response) => {
@@ -91,10 +92,18 @@ describe("checkedFetch", () => {
     });
 
     const allowed = await checkedFetch(origin, {
-      headers: { authorization: "Bearer secret" },
+      headers: {
+        accept: "application/json",
+        authorization: "Bearer secret",
+        "x-api-key": "custom-secret",
+        "api-key": "azure-secret",
+      },
     }, { allowCrossOriginRedirects: true });
     expect(allowed.text()).toBe("target");
-    expect(receivedAuthorization).toBeUndefined();
+    expect(receivedHeaders?.get("accept")).toBe("application/json");
+    expect(receivedHeaders?.get("authorization")).toBeNull();
+    expect(receivedHeaders?.get("x-api-key")).toBeNull();
+    expect(receivedHeaders?.get("api-key")).toBeNull();
   });
 
   it("enforces a whole-request timeout", async () => {
