@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: MIT
-import { createServer, request as httpRequest, type Server } from "node:http";
+import {
+  createServer,
+  request as httpRequest,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse,
+} from "node:http";
 import { chmod, mkdir, rename, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -644,7 +650,14 @@ function capabilities(): Record<string, boolean> {
 
 async function startOperatorFixture(): Promise<{ readonly url: string; readonly startedAt: string }> {
   const startedAt = new Date().toISOString();
-  const server = createServer(async (request, response) => {
+  // Wrapped rather than passed straight in: `createServer` expects a void
+  // handler, so a rejection thrown inside an async one becomes an unhandled
+  // rejection and the request hangs. The test then times out with the reason
+  // detached from the failure that caused it.
+  const handle = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> => {
     if (request.headers.authorization !== `Bearer ${OPERATOR_TOKEN}`) {
       response.writeHead(401, { "content-type": "application/json" }); response.end('{"error":"unauthorized"}'); return;
     }
@@ -671,6 +684,12 @@ async function startOperatorFixture(): Promise<{ readonly url: string; readonly 
       return;
     }
     response.writeHead(404, { "content-type": "application/json" }); response.end('{"error":"not_found"}');
+  };
+  const server = createServer((request, response) => {
+    void handle(request, response).catch((error: unknown) => {
+      if (!response.headersSent) response.writeHead(500, { "content-type": "text/plain" });
+      response.end(String(error));
+    });
   });
   operatorServers.add(server);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

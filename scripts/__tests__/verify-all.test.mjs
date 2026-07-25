@@ -58,6 +58,7 @@ describe("verify-all", () => {
       "release:validate",
       "check:architecture",
       "build",
+      "check:lint",
       "check:doc-snippets",
       "check:deep-imports",
       "verify:v1-operator-products",

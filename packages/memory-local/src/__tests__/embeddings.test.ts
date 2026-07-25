@@ -119,8 +119,23 @@ function config(endpoint: string, dimensions: number) {
   }).embeddings!;
 }
 
-async function listen(listener: RequestListener): Promise<string> {
-  const server = createServer(listener);
+/**
+ * Adapts an async handler, because `RequestListener` returns void.
+ *
+ * A rejection thrown inside an async handler passed straight to `createServer`
+ * has nowhere to go: it becomes an unhandled rejection, the request never gets
+ * a response, and the test times out with the reason detached from the failure.
+ * Answering 500 keeps the reason attached to the request that caused it.
+ */
+async function listen(
+  listener: (...args: Parameters<RequestListener>) => void | Promise<void>,
+): Promise<string> {
+  const server = createServer((request, response) => {
+    void (async () => listener(request, response))().catch((error: unknown) => {
+      if (!response.headersSent) response.writeHead(500, { "content-type": "text/plain" });
+      response.end(String(error));
+    });
+  });
   servers.push(server);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);

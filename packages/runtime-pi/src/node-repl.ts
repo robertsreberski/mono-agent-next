@@ -200,18 +200,25 @@ export function createNodeReplController(
       const pending = record.pending;
       if (pending === undefined || !isWorkerResult(message, pending.id)) return;
       clearPending(record, pending);
-      setImmediate(async () => {
-        let output: string;
-        try {
-          output = combinedOutput(record, message);
-        } catch (error) {
-          await terminateRecord(record);
+      setImmediate(() => {
+        // The callback returns void, so nothing observes a rejection thrown
+        // inside it: an unhandled rejection, and `pending` never settles.
+        // Every failure path has to end at `pending` instead.
+        void (async () => {
+          let output: string;
+          try {
+            output = combinedOutput(record, message);
+          } catch (error) {
+            await terminateRecord(record);
+            pending.reject(new Error(`${errorMessage(error)} Session state was reset.`));
+            return;
+          }
+          if (message.reset === true) await terminateRecord(record);
+          if (message.ok) pending.resolve(output);
+          else pending.reject(new Error(output));
+        })().catch((error: unknown) => {
           pending.reject(new Error(`${errorMessage(error)} Session state was reset.`));
-          return;
-        }
-        if (message.reset === true) await terminateRecord(record);
-        if (message.ok) pending.resolve(output);
-        else pending.reject(new Error(output));
+        });
       });
     });
     child.once("close", (code, signal) => {

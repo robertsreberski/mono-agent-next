@@ -85,6 +85,9 @@ jobs:
           pnpm run build
           pnpm run typecheck
 
+      - name: Lint typed promise handling
+        run: pnpm run check:lint
+
       - name: Check built package exports and import safety
         run: pnpm run check:deep-imports
 
