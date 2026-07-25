@@ -112,6 +112,37 @@ V1 still has no continuation or child-run spawn/observe/cancel grant. Independen
 durable work belongs in an external service and re-enters through an explicit
 channel or webhook.
 
+### The agent's own configuration file is in its workspace
+
+`mono-agent.config.json` is an ordinary file. When `agent.workspace` contains the
+directory holding it, the agent's own file-reading tools can read it like any
+other file in the workspace, and Core has no path-scoped deny: policy selects
+whole tools by name, and the runtime's own read tool performs the access.
+
+The `personal` template ships `agent.workspace: "."` with
+`policy.tools.default: "allow"`, `policy.approvals.default: "allow"`, and
+`policy.sandbox.mode: "off"`, so on that template the read is reachable and
+auto-approved. What it exposes is operator configuration, not credentials: the
+routing topology, the full fallback chain, and the **names** of the environment
+variables holding secrets. Secret values are never inlined -- schema paths marked
+secret reject literals and only accept `$env` references -- so no secret value is
+in the file to read.
+
+An agent has no need to read it. Core injects the resolved `{runtime, model,
+effort}` for each attempt as ground truth (see [Runtimes and routing](/runtime/)),
+so questions about which model is serving a turn are answerable without it.
+
+If that exposure is not acceptable for your deployment, any of these closes it
+today, in increasing order of cost:
+
+- Keep the config outside the workspace. `--config` and `agent.workspace` are
+  independent, so the file can live in a parent or sibling directory.
+- Set `policy.approvals.default: "ask"` so reads are mediated rather than
+  auto-approved.
+- Name the runtime's read tool in `policy.tools.deny`, or switch
+  `policy.tools.default` to `"deny"` and allow explicitly.
+- Select a sandbox, which bounds command execution independently of tool policy.
+
 ## Sandbox
 
 The sandbox is either explicitly off or a selected package. The first-party SRT
