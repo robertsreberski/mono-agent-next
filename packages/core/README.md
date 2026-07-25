@@ -297,6 +297,9 @@ is an internal module behind it. None of these are public: the package maps only
 | `host-sessions.ts` | Runtime-native session retention and the durable load/evict handshake. |
 | `host-interactions.ts` | AskUser, approvals, live input, and their interaction evidence. |
 | `host-delivery.ts` | Idempotent proactive channel delivery and its durable settlement. |
+| `host-triggers.ts` | Proactive trigger execution and the bounded at-most-once claim ledger. |
+| `host-memory.ts` | Automatic recall, capture after settlement, and granted runtime capture. |
+| `host-export.ts` | Bounded turn telemetry export across selected exporters. |
 | `host-outbound.ts` | Outbound message normalization and completion-delivery shapes. |
 | `host-routing.ts` | Route candidates, runtime eligibility, configured-route enforcement. |
 | `host-tool-catalog.ts` | Tool policy, catalog resolution, identity assignment, and dispatch. |

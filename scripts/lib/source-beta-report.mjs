@@ -47,7 +47,7 @@ export const SOURCE_BETA_LINE_BUDGETS = Object.freeze([
  * file as it actually stands, so the next change to that file has to extract
  * something rather than grow it. Lower it whenever a decomposition lands.
  */
-export const KERNEL_FILE_MAXIMUM_LINES = 2_600;
+export const KERNEL_FILE_MAXIMUM_LINES = 2_400;
 
 const KERNEL_PACKAGES = Object.freeze([
   "@mono-agent/cli",
