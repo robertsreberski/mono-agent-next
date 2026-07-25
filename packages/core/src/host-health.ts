@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
-import type { JsonObject, JsonValue, ModuleHealth, ModuleInstance } from "@mono-agent/module-sdk";
+import type { JsonObject, JsonValue, ModuleHealth } from "@mono-agent/module-sdk";
 import { assertOwnKeys, ownDataRecord, snapshotBoundedValue } from "./bounded-value.js";
 import { errorMessage } from "./errors.js";
 import type { HostLifecycleCalls } from "./host-lifecycle.js";
-import type { AgentHealth, LoadedAgentModule } from "./types.js";
+import type { RunningModule } from "./host-types.js";
+import type { AgentHealth } from "./types.js";
 
 export type HostLifecycleState = "new" | "starting" | "running" | "draining" | "stopped" | "failed";
-interface RunningModule { readonly loaded: LoadedAgentModule; readonly instance: ModuleInstance }
 interface HealthSnapshot {
   readonly state: HostLifecycleState;
   readonly pending: number;

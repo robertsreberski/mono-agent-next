@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { waitForValueWithAbort } from "./host-lifecycle.js";
 import type { DurableFingerprint } from "./state-execution-client.js";
+import type { AgentSubmitInput } from "./types.js";
 
 export class ConversationTails {
   readonly #tails = new Map<string, Promise<void>>();
@@ -42,4 +43,29 @@ export function durableFingerprint(value: unknown): DurableFingerprint {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+export function submissionFingerprint(input: AgentSubmitInput): DurableFingerprint {
+  return durableFingerprint({
+    schemaVersion: 1,
+    kind: "mono-agent.submission-fingerprint",
+    conversationId: input.conversationId,
+    text: input.text,
+    attachments: (input.attachments ?? []).map((attachment) => ({
+      id: attachment.id,
+      kind: attachment.kind,
+      name: attachment.name,
+      mediaType: attachment.mediaType,
+      sizeBytes: attachment.sizeBytes,
+      sha256: `sha256:${createHash("sha256").update(attachment.data).digest("hex")}`,
+    })),
+    runtime: input.runtime ?? null,
+    model: input.model ?? null,
+    effort: input.effort ?? null,
+    maxTurns: input.maxTurns ?? null,
+    maxOutputTokens: input.maxOutputTokens ?? null,
+    responseSchema: input.responseSchema ?? null,
+    metadata: input.metadata ?? null,
+    requiredCapabilities: input.requiredCapabilities ?? [],
+    toolPolicy: input.toolPolicy ?? null,
+  });
 }
