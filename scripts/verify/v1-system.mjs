@@ -14,8 +14,8 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { packageCatalog, packageRelativePath } from "./lib/package-catalog.mjs";
-import { publicExportSpecifiers } from "./release/fixtures/packed-consumer/public-exports.mjs";
+import { packageCatalog, packageRelativePath } from "../lib/package-catalog.mjs";
+import { publicExportSpecifiers } from "../release/fixtures/packed-consumer/public-exports.mjs";
 import {
   assertFreshPackageOutputs,
   assertLockfileArtifactIntegrities,
@@ -32,9 +32,9 @@ import {
   createFreshProofWorkspace,
   removeFreshProofWorkspace,
   snapshotTarball,
-} from "./lib/v1-system-proof.mjs";
+} from "../lib/v1-system-proof.mjs";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const VERSION = "0.15.0";
 const COMMAND_TIMEOUT_MS = 300_000;
 const SHUTDOWN_TIMEOUT_MS = 10_000;

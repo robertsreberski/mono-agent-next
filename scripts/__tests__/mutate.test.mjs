@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { collectFloorViolations } from "../mutate.mjs";
+import { collectFloorViolations } from "../measure/mutation.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -61,7 +61,7 @@ describe("mutation logic-score floors", () => {
     const scheduled = new Set(
       matrix.split(",").map((entry) => `@mono-agent/${entry.trim().replaceAll('"', "")}`),
     );
-    const usage = readFileSync(resolve(root, "scripts/mutate.mjs"), "utf8");
+    const usage = readFileSync(resolve(root, "scripts/measure/mutation.mjs"), "utf8");
     const floored = [...usage.matchAll(/"(@mono-agent\/[a-z-]+)":\s*\d+,/gu)].map((match) => match[1]);
 
     expect(floored.length).toBeGreaterThan(0);

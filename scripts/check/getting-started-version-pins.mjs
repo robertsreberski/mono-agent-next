@@ -85,7 +85,7 @@ async function readGettingStartedDocs(repoRoot) {
 }
 
 function cliRepoRoot() {
-  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 }
 
 async function main() {

@@ -3,7 +3,7 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { packageCatalog } from "./lib/package-catalog.mjs";
+import { packageCatalog } from "../lib/package-catalog.mjs";
 import {
   collectPackagePublicApiInventories,
   JS_SUBPATH_INVENTORY_START,
@@ -11,7 +11,7 @@ import {
   renderPublicApiInventory,
   updateMigrationJsSubpathInventory,
   updateReadmePublicApiInventory,
-} from "./lib/public-api-docs.mjs";
+} from "../lib/public-api-docs.mjs";
 
 const root = process.cwd();
 const { inventories, errors } = collectPackagePublicApiInventories({ root, catalog: packageCatalog });

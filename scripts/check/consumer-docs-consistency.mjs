@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import {
   packageCatalog,
   packageRelativePath,
-} from "./lib/package-catalog.mjs";
+} from "../lib/package-catalog.mjs";
 
 const userDocRoots = [
   "AGENTS.md",
@@ -699,7 +699,7 @@ async function main() {
 }
 
 function cliRepoRoot() {
-  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 }
 
 const isCli = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);

@@ -453,7 +453,7 @@ async function createIsolatedPnpmConfigEnvironment(baseEnv) {
 }
 
 function usage() {
-  return "Usage: node scripts/pnpm-release-age-policy.mjs";
+  return "Usage: node scripts/check/pnpm-release-age-policy.mjs";
 }
 
 function reasonOf(error) {

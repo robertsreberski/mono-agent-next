@@ -14,7 +14,7 @@ import {
   parsePnpmConfigGetOutput,
   runCheckPnpmReleaseAgePolicy,
   validatePnpmReleaseAgePolicy,
-} from "../pnpm-release-age-policy.mjs";
+} from "../check/pnpm-release-age-policy.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const tempDirs = [];
@@ -28,7 +28,7 @@ describe("pnpm release-age policy", () => {
     const workspaceSource = await readFile(join(repoRoot, "pnpm-workspace.yaml"), "utf8");
     const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
 
-    const cli = spawnSync(process.execPath, [join(repoRoot, "scripts/pnpm-release-age-policy.mjs")], {
+    const cli = spawnSync(process.execPath, [join(repoRoot, "scripts/check/pnpm-release-age-policy.mjs")], {
       cwd: repoRoot,
       encoding: "utf8",
       env: process.env,
@@ -346,7 +346,7 @@ describe("pnpm release-age policy", () => {
       npm_config_minimum_release_age: "1440",
       PNPM_CONFIG_MINIMUM_RELEASE_AGE_EXCLUDE: "polluted-package",
     };
-    const cli = spawnSync(process.execPath, [join(repoRoot, "scripts/pnpm-release-age-policy.mjs")], {
+    const cli = spawnSync(process.execPath, [join(repoRoot, "scripts/check/pnpm-release-age-policy.mjs")], {
       cwd,
       encoding: "utf8",
       env: environment,
@@ -381,12 +381,12 @@ describe("pnpm release-age policy", () => {
     const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
     const ci = await readFile(join(repoRoot, ".github/workflows/ci.yml"), "utf8");
     const release = await readFile(join(repoRoot, ".github/workflows/npm-release.yml"), "utf8");
-    const verifyAll = await readFile(join(repoRoot, "scripts/verify-all.mjs"), "utf8");
+    const verifyAll = await readFile(join(repoRoot, "scripts/verify/all.mjs"), "utf8");
 
     const expectedLifecycle =
-      "node scripts/node-version.mjs && node scripts/pnpm-release-age-policy.mjs";
+      "node scripts/check/node-version.mjs && node scripts/check/pnpm-release-age-policy.mjs";
     expect(packageJson.engines.pnpm).toBe(">=10.16.0");
-    expect(packageJson.scripts["check:pnpm-policy"]).toBe("node scripts/pnpm-release-age-policy.mjs");
+    expect(packageJson.scripts["check:pnpm-policy"]).toBe("node scripts/check/pnpm-release-age-policy.mjs");
     expect(packageJson.scripts["pnpm:devPreinstall"]).toBe(expectedLifecycle);
     expect(packageJson.scripts.preinstall).toBe(expectedLifecycle);
     const ciVerifyJob = ci.split("\n  website:")[0];
@@ -394,14 +394,14 @@ describe("pnpm release-age policy", () => {
       expect(workflow).toContain("uses: pnpm/action-setup@v4");
       expect(workflow).toContain('version: "10.28.2"');
       expect(workflow).not.toContain("corepack");
-      const directGuard = workflow.indexOf("node scripts/pnpm-release-age-policy.mjs");
+      const directGuard = workflow.indexOf("node scripts/check/pnpm-release-age-policy.mjs");
       expect(directGuard).toBeGreaterThan(-1);
       expect(directGuard).toBeLessThan(workflow.indexOf("pnpm install --frozen-lockfile"));
       expect(workflow).not.toContain("run: pnpm run check:pnpm-policy");
     }
     const websiteJob = /\n  website:(?<body>[\s\S]*?)(?=\n  [a-z][a-z0-9-]*:|\s*$)/u.exec(ci)?.groups?.body;
     expect(websiteJob).toBeDefined();
-    expect(websiteJob).not.toContain("scripts/pnpm-release-age-policy.mjs");
+    expect(websiteJob).not.toContain("scripts/check/pnpm-release-age-policy.mjs");
     expect(verifyAll).toContain('{ label: "check:pnpm-policy"');
   });
 });

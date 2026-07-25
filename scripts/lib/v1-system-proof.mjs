@@ -21,7 +21,7 @@ import {
 import {
   SUPPORTED_NODE_ENGINE,
   assertSupportedNodeVersion,
-} from "../node-version.mjs";
+} from "../check/node-version.mjs";
 
 export const V1_SYSTEM_PROOF_SCHEMA = "mono-agent.v1-system-proof.v1";
 export const V1_ARTIFACT_SET_SCHEMA = "mono-agent.v1-artifact-set.v1";

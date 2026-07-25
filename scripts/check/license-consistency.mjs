@@ -5,11 +5,11 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { packageCatalog, packageRelativePath } from "./lib/package-catalog.mjs";
+import { packageCatalog, packageRelativePath } from "../lib/package-catalog.mjs";
 
 export const REQUIRED_LICENSE = "MIT";
 export const CANONICAL_MIT_SHA256 = "dd64c8ae63e0624cad201a3fa3465388dffaaf0079058b6871e40f4b1431e64a";
-const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 export async function checkLicenseConsistency(options = {}) {
   const repoRoot = resolve(options.repoRoot ?? defaultRepoRoot);

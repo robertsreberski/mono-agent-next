@@ -9,7 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   packageCatalog,
   packageRelativePath,
-} from "./lib/package-catalog.mjs";
+} from "../lib/package-catalog.mjs";
 
 /**
  * Return every importable export in the cataloged publishable package roster.
@@ -176,7 +176,7 @@ async function realImporter(_specifier, entry) {
  * @param {ReturnType<typeof mappedEntries>[number]} entry
  */
 export function instrumentedImporter(entry) {
-  const harness = fileURLToPath(new URL("./lib/import-safety-harness.mjs", import.meta.url));
+  const harness = fileURLToPath(new URL("../lib/import-safety-harness.mjs", import.meta.url));
   const args = importSafetyNodeArguments(harness, entry);
   return new Promise((resolveImport, rejectImport) => {
     const child = spawn(process.execPath, args, {
@@ -415,7 +415,7 @@ function resolvePackageTarget(packageDirectory, target, label) {
 }
 
 function defaultRepoRoot() {
-  return dirname(dirname(fileURLToPath(import.meta.url)));
+  return dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 }
 
 function reasonOf(error) {

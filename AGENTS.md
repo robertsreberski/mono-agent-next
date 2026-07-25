@@ -74,6 +74,6 @@ Choose the lowest rung that satisfies the capability; see [docs/reference/capabi
 
 1. Existing package / existing public surface. Cost: lowest; no new ownership surface. Gate: use the current package responsibility and API without adding a new config or runtime concept.
 2. Config field or selected skill. Cost: new user-facing option or loaded instruction surface. Gate: typed config/validation/docs for config; selected skills stay under `context.selectedSkills` without host glue.
-3. New adapter/package in the correct package category. Cost: new package ownership, README, tests, and catalog metadata. Gate: add `category`, `responsibility`, and `allowedDependencyCategories` to `scripts/lib/package-catalog.mjs`; `scripts/check-package-architecture.mjs` must pass.
+3. New adapter/package in the correct package category. Cost: new package ownership, README, tests, and catalog metadata. Gate: add `category`, `responsibility`, and `allowedDependencyCategories` to `scripts/lib/package-catalog.mjs`; `scripts/check/package-architecture.mjs` must pass.
 4. MCP server / explicitly configured MCP tool. Cost: runtime-visible tool lifecycle, policy/security/docs, and tool-result behavior. Gate: use when the model needs an explicit callable tool boundary; project tools remain ordinary `.mcp.json` entries.
 5. Shared contract change in `@mono-agent/module-sdk`. Cost: highest blast radius and likely semver/release coordination. Gate: last resort for provider- and channel-neutral framework semantics; `@mono-agent/core` must not expose implementation-specific contracts.

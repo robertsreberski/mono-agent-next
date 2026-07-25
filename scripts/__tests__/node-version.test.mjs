@@ -7,7 +7,7 @@ import {
   assertSupportedNodeVersion,
   isSupportedNodeVersion,
   parseNodeVersion,
-} from "../node-version.mjs";
+} from "../check/node-version.mjs";
 
 describe("Node.js support floor", () => {
   test("keeps the exact v1 minimum and engine range together", () => {

@@ -9,7 +9,7 @@ import {
   renderOssHygieneReport,
   runCheckOssHygiene,
   scanOssHygieneRecords,
-} from "../check-oss-hygiene.mjs";
+} from "../check/oss-hygiene.mjs";
 
 const tempDirs = [];
 

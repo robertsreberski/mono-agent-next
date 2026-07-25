@@ -15,9 +15,9 @@ import {
   renderSourceBetaConfigMarkdown,
   renderSourceBetaProductsMarkdown,
   renderSourceBetaPublicApiMarkdown,
-} from "./lib/source-beta-report.mjs";
+} from "../lib/source-beta-report.mjs";
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const check = parseArgs(process.argv.slice(2));
 const typedModulePackages = discoverTypedModulePackages(root);
 buildExecutableSchemas(root, typedModulePackages);
@@ -81,7 +81,7 @@ console.log(
 function parseArgs(argv) {
   if (argv.length === 0) return false;
   if (argv.length === 1 && argv[0] === "--check") return true;
-  throw new Error("Usage: node --experimental-strip-types scripts/generate-source-beta-docs.mjs [--check]");
+  throw new Error("Usage: node --experimental-strip-types scripts/generate/source-beta-docs.mjs [--check]");
 }
 
 function isMissing(error) {

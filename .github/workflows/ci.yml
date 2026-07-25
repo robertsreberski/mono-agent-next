@@ -43,7 +43,7 @@ jobs:
 
       - name: Check runtime floors
         run: |
-          node scripts/pnpm-release-age-policy.mjs
+          node scripts/check/pnpm-release-age-policy.mjs
           pnpm run check:node
 
       - name: Install dependencies

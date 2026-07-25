@@ -46,7 +46,7 @@ site.
 - Retired-surface mentions are policed by:
 
 ```bash
-node scripts/check-consumer-docs-consistency.mjs
+node scripts/check/consumer-docs-consistency.mjs
 ```
 
 ## Per-PR drift checks

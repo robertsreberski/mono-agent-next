@@ -7,17 +7,17 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   collectSourceBetaReport,
   renderSourceBetaComplexityMarkdown,
-} from "./lib/source-beta-report.mjs";
+} from "../lib/source-beta-report.mjs";
 
 export function parseSourceBetaReportArgs(argv) {
   const normalized = argv[0] === "--" ? argv.slice(1) : argv;
   if (normalized.length === 0) return false;
   if (normalized.length === 1 && normalized[0] === "--json") return true;
-  throw new Error("Usage: node --experimental-strip-types scripts/report-source-beta.mjs [--json]");
+  throw new Error("Usage: node --experimental-strip-types scripts/measure/source-beta.mjs [--json]");
 }
 
 async function main() {
-  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   const { renderProject } = await import(
     pathToFileURL(join(root, "packages/create-mono-agent/src/templates.ts")).href
   );

@@ -5,12 +5,12 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { MINIMUM_NODE_VERSION } from "./node-version.mjs";
+import { MINIMUM_NODE_VERSION } from "../check/node-version.mjs";
 import {
   packageCatalog,
   packageRelativePath,
-} from "./lib/package-catalog.mjs";
-import { runVerifyConsumers } from "./verify-consumers.mjs";
+} from "../lib/package-catalog.mjs";
+import { runVerifyConsumers } from "../verify/consumers.mjs";
 
 export function createRepoGate({ releaseTag, nodeVersion = process.versions.node }) {
   const packedConsumerArgs = ["run", "release:consumer", "--", "--tag", releaseTag];
