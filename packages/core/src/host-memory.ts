@@ -46,10 +46,13 @@ export class HostMemory {
     }
   }
   async capture(record: MemoryRecord, signal: AbortSignal): Promise<void> {
-    const capture = this.context.memory()?.capture;
-    if (capture === undefined) return;
+    // Bind the module once so the guard and the call cannot see different
+    // values, but call through it: `capture` is a module method and extracting
+    // it as a bare reference drops its receiver.
+    const memory = this.context.memory();
+    if (memory?.capture === undefined) return;
     try {
-      await capture({ record, signal });
+      await memory.capture({ record, signal });
     } catch (error) {
       this.context.recordFailure(`memory capture: ${errorMessage(error)}`);
     }
