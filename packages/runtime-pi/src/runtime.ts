@@ -112,11 +112,13 @@ const TRANSIENT_PROVIDER_STATUS = new Set([408, 425, 429, 500, 502, 503, 504]);
 const TRANSIENT_PROVIDER_CODE = new Set([
   "ECONNRESET",
   "ECONNREFUSED",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "ENETUNREACH",
   "ETIMEDOUT",
-  "EPIPE",
+  "EAI_AGAIN",
   "UND_ERR_CONNECT_TIMEOUT",
   "UND_ERR_HEADERS_TIMEOUT",
-  "UND_ERR_BODY_TIMEOUT",
   "UND_ERR_SOCKET",
 ]);
 
@@ -124,10 +126,14 @@ function ownDataValue(value: unknown, key: string): unknown {
   if (value === null || (typeof value !== "object" && typeof value !== "function")) {
     return undefined;
   }
-  const descriptor = Object.getOwnPropertyDescriptor(value, key);
-  return descriptor !== undefined && "value" in descriptor
-    ? descriptor.value
-    : undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor !== undefined && "value" in descriptor
+      ? descriptor.value
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -136,13 +142,13 @@ function ownDataValue(value: unknown, key: string): unknown {
  */
 export function isCheckedTransientProviderFailure(error: unknown): boolean {
   const status = ownDataValue(error, "status") ?? ownDataValue(error, "statusCode");
-  if (typeof status === "number" && TRANSIENT_PROVIDER_STATUS.has(status)) return true;
+  if (typeof status === "number"
+    && Number.isSafeInteger(status)
+    && TRANSIENT_PROVIDER_STATUS.has(status)) {
+    return true;
+  }
   const code = ownDataValue(error, "code");
-  if (typeof code === "string" && TRANSIENT_PROVIDER_CODE.has(code)) return true;
-  const cause = ownDataValue(error, "cause");
-  if (cause === error) return false;
-  const causeCode = ownDataValue(cause, "code");
-  return typeof causeCode === "string" && TRANSIENT_PROVIDER_CODE.has(causeCode);
+  return typeof code === "string" && TRANSIENT_PROVIDER_CODE.has(code);
 }
 
 async function waitForSettled(
@@ -173,6 +179,15 @@ async function waitForSettled(
   if (failures.length > 0) throw new AggregateError(failures, message);
 }
 
+function runBestEffortCleanup(cleanup: (() => void) | undefined): void {
+  try {
+    cleanup?.();
+  } catch {
+    // Host and harness cleanup callbacks must not mask a settled turn or
+    // prevent the remaining mandatory cleanup from running.
+  }
+}
+
 export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
   const cwd = options.workspaceDirectory;
   const authPath = resolveRuntimePiPath(
@@ -195,6 +210,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
     ...(sessionsRoot === undefined ? {} : { sessionsRoot }),
   });
   let state: RuntimeState = "created";
+  let stopRequested = false;
   const active = new Set<AgentHarness>();
   const credentialSecrets = async (): Promise<readonly string[]> => {
     try {
@@ -239,6 +255,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
 
     async stop(context: ModuleStopContext) {
       if (state === "stopped") return;
+      stopRequested = true;
       state = "draining";
       const failures: unknown[] = [];
       try {
@@ -403,6 +420,9 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
         return [...new Set(values)];
       };
 
+      if (stopRequested || request.signal.aborted) {
+        return { status: "cancelled" };
+      }
       let committedSideEffects = false;
       try {
         const turnResult = await sessions.withAttempt(
@@ -418,7 +438,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
           async (
             attempt,
           ): Promise<RuntimePiSessionAttemptResult<RuntimeTurnResult>> => {
-            if (request.signal.aborted) {
+            if (stopRequested || request.signal.aborted) {
               return { completed: false, value: { status: "cancelled" } };
             }
             if (request.session === undefined) {
@@ -427,7 +447,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                 model,
               )) {
                 await attempt.session.appendMessage(message);
-                if (request.signal.aborted) {
+                if (stopRequested || request.signal.aborted) {
                   return { completed: false, value: { status: "cancelled" } };
                 }
               }
@@ -464,6 +484,9 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                     },
                   })
                 : [];
+              if (stopRequested || request.signal.aborted) {
+                return { completed: false, value: { status: "cancelled" } };
+              }
               const harness = new AgentHarness({
                 env: sessions.env,
                 session: attempt.session,
@@ -591,6 +614,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                   abortHarness,
                 });
 
+                let providerSettled = false;
                 try {
                   if (effort.clamped) {
                     await context.emit({
@@ -616,6 +640,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                   );
                   await harness.waitForIdle();
                   if (abortPromise !== undefined) await abortPromise;
+                  providerSettled = result.stopReason !== "aborted";
                   const usage = runtimeUsage(result.usage);
                   await context.emit({ type: "usage", usage });
                   const message = assistantTurnMessage(result);
@@ -625,8 +650,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                       value: { status: "max-turns", message, usage },
                     };
                   }
-                  if (result.stopReason === "aborted"
-                    || request.signal.aborted) {
+                  if (result.stopReason === "aborted") {
                     return {
                       completed: false,
                       value: { status: "cancelled", message, usage },
@@ -674,11 +698,12 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                     },
                   };
                 } catch (error) {
-                  if (request.signal.aborted
-                    || eventState.maxTurnsHit
-                    || (state !== "running"
-                      && error instanceof Error
-                      && error.name === "AbortError")) {
+                  if (eventState.maxTurnsHit
+                    || (!providerSettled
+                      && (request.signal.aborted
+                        || (state !== "running"
+                          && error instanceof Error
+                          && error.name === "AbortError")))) {
                     return {
                       completed: false,
                       value: {
@@ -705,9 +730,9 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                 }
               } finally {
                 request.signal.removeEventListener("abort", abortHarness);
-                unregisterLiveInput?.();
-                unsubscribe?.();
-                removeToolResultHandler();
+                runBestEffortCleanup(unregisterLiveInput);
+                runBestEffortCleanup(unsubscribe);
+                runBestEffortCleanup(removeToolResultHandler);
                 active.delete(harness);
               }
             } finally {

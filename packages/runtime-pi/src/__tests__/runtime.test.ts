@@ -88,7 +88,12 @@ function turnContext(
   };
 }
 
-function fauxRuntime(options: { tokensPerSecond?: number; authPath?: string; attachments?: boolean } = {}): {
+function fauxRuntime(options: {
+  tokensPerSecond?: number;
+  authPath?: string;
+  attachments?: boolean;
+  sessionsRoot?: string;
+} = {}): {
   runtime: Runtime;
   faux: ReturnType<typeof fauxProvider>;
   models: Models;
@@ -101,7 +106,14 @@ function fauxRuntime(options: { tokensPerSecond?: number; authPath?: string; att
   const models = createModels();
   models.setProvider(faux.provider);
   const runtime = createRuntimePi({
-    config: parseRuntimePiConfig(options.authPath === undefined ? {} : { auth: { path: options.authPath } }),
+    config: parseRuntimePiConfig({
+      ...(options.authPath === undefined
+        ? {}
+        : { auth: { path: options.authPath } }),
+      ...(options.sessionsRoot === undefined
+        ? {}
+        : { sessions: { root: options.sessionsRoot } }),
+    }),
     instanceId: "test-runtime",
     configDirectory: process.cwd(),
     workspaceDirectory: process.cwd(),
@@ -122,8 +134,26 @@ describe("Pi-native runtime module", () => {
   it("retries only explicit own transient provider status and transport codes", () => {
     expect(isCheckedTransientProviderFailure({ status: 503 })).toBe(true);
     expect(isCheckedTransientProviderFailure({ statusCode: 429 })).toBe(true);
-    expect(isCheckedTransientProviderFailure({ code: "ECONNRESET" })).toBe(true);
+    for (const code of [
+      "ECONNRESET",
+      "ECONNREFUSED",
+      "EHOSTUNREACH",
+      "ENETDOWN",
+      "ENETUNREACH",
+      "ETIMEDOUT",
+      "EAI_AGAIN",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_HEADERS_TIMEOUT",
+      "UND_ERR_SOCKET",
+    ]) {
+      expect(isCheckedTransientProviderFailure({ code }), code).toBe(true);
+    }
     expect(isCheckedTransientProviderFailure({ status: 401 })).toBe(false);
+    expect(isCheckedTransientProviderFailure({ status: 503.5 })).toBe(false);
+    expect(isCheckedTransientProviderFailure({ code: "EPIPE" })).toBe(false);
+    expect(isCheckedTransientProviderFailure({
+      cause: { code: "ECONNRESET" },
+    })).toBe(false);
     expect(isCheckedTransientProviderFailure(new Error("HTTP 503"))).toBe(false);
     let getterCalls = 0;
     const accessor = Object.defineProperty({}, "status", {
@@ -134,6 +164,9 @@ describe("Pi-native runtime module", () => {
     });
     expect(isCheckedTransientProviderFailure(accessor)).toBe(false);
     expect(getterCalls).toBe(0);
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    expect(isCheckedTransientProviderFailure(revoked.proxy)).toBe(false);
   });
 
   it("runs through the real AgentHarness and reconstructs continuity from canonical messages", async () => {
@@ -1159,6 +1192,131 @@ describe("Pi-native runtime module", () => {
     });
     expect(providerAttempt).not.toHaveBeenCalled();
     await stop(runtime);
+  });
+
+  it("treats live-input unregister failure as best-effort cleanup", async () => {
+    const { runtime, faux } = fauxRuntime();
+    faux.setResponses([fauxAssistantMessage([fauxText("completed answer")])]);
+    const unregister = vi.fn(() => {
+      throw new Error("unregister failed");
+    });
+    const { context } = turnContext();
+    await start(runtime);
+
+    await expect(runtime.runTurn(request("cleanup failure"), {
+      ...context,
+      registerLiveInput() {
+        return unregister;
+      },
+    })).resolves.toMatchObject({
+      status: "completed",
+      message: { content: [{ type: "text", text: "completed answer" }] },
+    });
+
+    expect(unregister).toHaveBeenCalledOnce();
+    expect(await runtime.health?.({ signal: abortSignal() })).toMatchObject({
+      status: "healthy",
+      details: { state: "running", activeTurns: 0 },
+    });
+    await stop(runtime);
+  });
+
+  it("commits a settled provider answer when usage emission triggers a late abort", async () => {
+    const { runtime, faux } = fauxRuntime();
+    faux.setResponses([
+      fauxAssistantMessage([fauxText("completed answer")]),
+      fauxAssistantMessage([fauxText("resumed answer")]),
+    ]);
+    const controller = new AbortController();
+    const { context, events } = turnContext();
+    await start(runtime);
+
+    const first = await runtime.runTurn(request("late abort", {
+      signal: controller.signal,
+    }), {
+      ...context,
+      async emit(event) {
+        events.push(event);
+        if (event.type === "usage") {
+          controller.abort(new Error("abort after provider settlement"));
+        }
+      },
+    });
+
+    expect(first).toMatchObject({
+      status: "completed",
+      message: { content: [{ type: "text", text: "completed answer" }] },
+    });
+    expect(first.session).toBeDefined();
+    await expect(runtime.runTurn(request("resume committed answer", {
+      messages: [{
+        role: "user",
+        content: [{ type: "text", text: "resume committed answer" }],
+      }],
+      session: first.session!,
+    }), turnContext().context)).resolves.toMatchObject({
+      status: "completed",
+      message: { content: [{ type: "text", text: "resumed answer" }] },
+    });
+    await stop(runtime);
+  });
+
+  it("does not enter the provider when stop begins during session seeding", async () => {
+    const root = await mkdtemp(join(tmpdir(), "runtime-pi-stop-seeding-"));
+    roots.push(root);
+    const sessionsRoot = join(root, "sessions");
+    const { runtime, faux } = fauxRuntime({ sessionsRoot });
+    const providerAttempt = vi.fn(() =>
+      fauxAssistantMessage([fauxText("must not run")]));
+    faux.setResponses([providerAttempt]);
+    const history = Array.from({ length: 500 }, (_, index) => [
+      {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: `user-${String(index)}` }],
+      },
+      {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: `assistant-${String(index)}` }],
+      },
+    ]).flat();
+    await start(runtime);
+
+    const turn = runtime.runTurn(request("stop while seeding", {
+      messages: [
+        ...history,
+        {
+          role: "user",
+          content: [{ type: "text", text: "final prompt" }],
+        },
+      ],
+    }), turnContext().context);
+    const reservationDirectory = join(
+      sessionsRoot,
+      ".mono-agent-runtime-pi-attempts",
+    );
+    let reservationObserved = false;
+    for (let attempt = 0; attempt < 2_000; attempt += 1) {
+      try {
+        reservationObserved = (await readdir(reservationDirectory))
+          .some((entry) => entry.endsWith(".json"));
+      } catch {
+        // The owner-private reservation directory is created asynchronously.
+      }
+      if (reservationObserved) break;
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+    }
+    expect(reservationObserved).toBe(true);
+    expect(await runtime.health?.({ signal: abortSignal() })).toMatchObject({
+      details: { state: "running", activeTurns: 0 },
+    });
+
+    const stopping = stop(runtime);
+    await expect(turn).resolves.toMatchObject({ status: "cancelled" });
+    await expect(stopping).resolves.toBeUndefined();
+    expect(providerAttempt).not.toHaveBeenCalled();
+    expect(await runtime.health?.({ signal: abortSignal() })).toMatchObject({
+      details: { state: "stopped", activeTurns: 0 },
+    });
   });
 
   it("classifies typed model-discovery failures for safe fallback", async () => {
