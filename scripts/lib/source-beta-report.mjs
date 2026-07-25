@@ -49,6 +49,26 @@ export const SOURCE_BETA_LINE_BUDGETS = Object.freeze([
  */
 export const KERNEL_FILE_MAXIMUM_LINES = 2_400;
 
+/**
+ * Test source must stay at least this multiple of production source.
+ *
+ * The same ratchet pointing the other way: set just below the ratio as it
+ * actually stands, so the cheapest way to make a change fit is no longer to
+ * delete the test that objects to it. Raise it whenever the ratio rises.
+ *
+ * This bounds test volume, not test value; `--expect.requireAssertions` and the
+ * mutation score bound value. It exists because those two cannot see the one
+ * move that defeats them both -- deleting the failing test rather than fixing
+ * the code. A deleted test asserts nothing and mutates nothing, so it scores
+ * perfectly on every quality measure the repository has.
+ */
+export const TEST_TO_PRODUCTION_MINIMUM_RATIO = 0.75;
+
+/** Fewest test lines that `productionLines` may be accompanied by. */
+export function minimumTestLines(productionLines) {
+  return Math.ceil(productionLines * TEST_TO_PRODUCTION_MINIMUM_RATIO);
+}
+
 const KERNEL_PACKAGES = Object.freeze([
   "@mono-agent/cli",
   "@mono-agent/core",
@@ -225,10 +245,32 @@ export function assertSourceBetaBudgets(report) {
     );
   }
 
+  issues.push(...testRatioIssues(report));
+
   if (issues.length > 0) {
     throw new Error(`Source-beta production budget assertion failed:\n${issues.map((issue) => `- ${issue}`).join("\n")}`);
   }
   return report;
+}
+
+function testRatioIssues(report) {
+  const classifications = isRecord(report.totals) && isRecord(report.totals.byClassification)
+    ? report.totals.byClassification
+    : undefined;
+  const production = classifications?.production?.lines;
+  const test = classifications?.test?.lines;
+  // Fails closed: a report that cannot be measured is not a report that passes.
+  if (!Number.isSafeInteger(production) || !Number.isSafeInteger(test) || production < 0 || test < 0) {
+    return ["Production and test line totals are required to check the test-source ratio."];
+  }
+  const minimum = minimumTestLines(production);
+  if (test >= minimum) return [];
+  return [
+    `Test source is ${String(test)} lines against ${String(production)} production lines; `
+    + `at least ${String(minimum)} are required to hold the `
+    + `${TEST_TO_PRODUCTION_MINIMUM_RATIO.toFixed(2)} floor (short by `
+    + `${String(minimum - test)}).`,
+  ];
 }
 
 export function summarizeSourceFiles(files) {
@@ -303,6 +345,16 @@ Average production file size is ${average.toFixed(1)} lines.
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
 ${report.budgets.map((budget) => `| ${budget.id} | ${budget.actualLines} | ${budget.maximumLines} | ${budget.withinLimit ? "within limit" : "over limit"} |`).join("\n")}
+
+One budget binds from below rather than above. Test source may not fall under a
+fixed multiple of production source, so a change cannot be made to fit by
+deleting the test that objects to it.
+
+| Floor | Actual | Minimum | Result |
+| --- | ---: | ---: | --- |
+| test source, at ${TEST_TO_PRODUCTION_MINIMUM_RATIO.toFixed(2)} of production | ${test.lines} | ${minimumTestLines(production.lines)} | ${test.lines >= minimumTestLines(production.lines) ? "within limit" : "under limit"} |
+
+The current ratio is ${(production.lines === 0 ? 0 : test.lines / production.lines).toFixed(3)}.
 
 ## Largest package ownership surfaces
 

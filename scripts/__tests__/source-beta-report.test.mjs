@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import {
   KERNEL_FILE_MAXIMUM_LINES,
   SOURCE_BETA_LINE_BUDGETS,
+  TEST_TO_PRODUCTION_MINIMUM_RATIO,
   assertSourceBetaBudgets,
   classifySourcePath,
   collectSourceBetaReport,
@@ -24,6 +25,7 @@ import {
   collectSchemaFieldRows,
   discoverTypedModulePackages,
   listReportablePaths,
+  minimumTestLines,
   renderSourceBetaConfigMarkdown,
 } from "../lib/source-beta-report.mjs";
 import { parseSourceBetaReportArgs } from "../source-beta-report.mjs";
@@ -96,6 +98,51 @@ describe("source-beta production budgets", () => {
     expect(() => assertSourceBetaBudgets(report)).toThrow(
       "kernel-production maximum must remain 16500 lines; found 16501.",
     );
+  });
+
+  it("holds the test-source floor at exact equality and rejects one line below", () => {
+    const budgets = {
+      "repository-production": 1,
+      "kernel-production": 1,
+      "durable-protocol-production": 1,
+    };
+    const production = 4_000;
+    const floor = minimumTestLines(production);
+    expect(floor).toBe(3_000);
+
+    const atFloor = budgetReport(budgets, { production, test: floor });
+    expect(assertSourceBetaBudgets(atFloor)).toBe(atFloor);
+
+    expect(() => assertSourceBetaBudgets(
+      budgetReport(budgets, { production, test: floor - 1 }),
+    )).toThrow(
+      `Test source is ${String(floor - 1)} lines against ${String(production)} production `
+      + `lines; at least ${String(floor)} are required to hold the 0.75 floor (short by 1).`,
+    );
+  });
+
+  it("fails closed when the totals a ratio needs are absent", () => {
+    // A budget row can be forged; an absent measurement must not read as a pass.
+    const report = budgetReport({
+      "repository-production": 1,
+      "kernel-production": 1,
+      "durable-protocol-production": 1,
+    });
+    delete report.totals;
+
+    expect(() => assertSourceBetaBudgets(report)).toThrow(
+      "Production and test line totals are required to check the test-source ratio.",
+    );
+  });
+
+  it("pins the floor so lowering it cannot pass unremarked", () => {
+    // `check:source-beta-budgets` measures the real tree on every run, so this
+    // does not restate that. It makes weakening the constant -- the cheapest way
+    // to satisfy the gate without restoring a deleted test -- fail a test too.
+    expect(TEST_TO_PRODUCTION_MINIMUM_RATIO).toBe(0.75);
+    expect(minimumTestLines(0)).toBe(0);
+    expect(minimumTestLines(3)).toBe(3);
+    expect(minimumTestLines(1_000)).toBe(750);
   });
 
   it("accepts both direct and pnpm-separated JSON arguments", () => {
@@ -375,13 +422,19 @@ describe("executable config schema reference", () => {
   });
 });
 
-function budgetReport(actualLinesById) {
+function budgetReport(actualLinesById, { production = 1_000, test = 1_000 } = {}) {
   return {
     budgets: SOURCE_BETA_LINE_BUDGETS.map((budget) => ({
       ...budget,
       actualLines: actualLinesById[budget.id],
       withinLimit: actualLinesById[budget.id] <= budget.maximumLines,
     })),
+    totals: {
+      byClassification: {
+        production: { files: 1, lines: production },
+        test: { files: 1, lines: test },
+      },
+    },
   };
 }
 
