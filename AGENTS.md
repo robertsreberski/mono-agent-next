@@ -13,7 +13,7 @@ adoption are separate, explicitly authorized phases.
 
 ## V1 architecture authority
 
-- `docs/reference/v1-architecture.md`, `scripts/package-catalog.mjs`, the
+- `docs/reference/v1-architecture.md`, `scripts/lib/package-catalog.mjs`, the
   package contracts, and their CI gates define the product boundaries and
   exact 23-package roster.
 - Implement coherent vertical outcomes. Do not recreate deleted v0 packages as
@@ -28,7 +28,7 @@ adoption are separate, explicitly authorized phases.
 - Publishable packages live under `packages/<package-name>/`.
 - The only publishable package under `extras/` is the explicitly paired `@mono-agent/docs-mcp` companion. It is not selected by agent config and has no runtime dependency on Core.
 - Published package names should use the `@mono-agent/<package-name>` scope.
-- Package categories live in `scripts/package-catalog.mjs` and README docs; keep the physical workspace layout flat unless a task explicitly asks for a mechanical migration.
+- Package categories live in `scripts/lib/package-catalog.mjs` and README docs; keep the physical workspace layout flat unless a task explicitly asks for a mechanical migration.
 - Root instructions apply to every package unless a package-local `AGENTS.md` narrows them.
 - Keep root workspace/package-manager scaffolding limited to the checked-in pnpm workspace setup unless a task explicitly asks to broaden it.
 
@@ -74,6 +74,6 @@ Choose the lowest rung that satisfies the capability; see [docs/reference/capabi
 
 1. Existing package / existing public surface. Cost: lowest; no new ownership surface. Gate: use the current package responsibility and API without adding a new config or runtime concept.
 2. Config field or selected skill. Cost: new user-facing option or loaded instruction surface. Gate: typed config/validation/docs for config; selected skills stay under `context.selectedSkills` without host glue.
-3. New adapter/package in the correct package category. Cost: new package ownership, README, tests, and catalog metadata. Gate: add `category`, `responsibility`, and `allowedDependencyCategories` to `scripts/package-catalog.mjs`; `scripts/check-package-architecture.mjs` must pass.
+3. New adapter/package in the correct package category. Cost: new package ownership, README, tests, and catalog metadata. Gate: add `category`, `responsibility`, and `allowedDependencyCategories` to `scripts/lib/package-catalog.mjs`; `scripts/check-package-architecture.mjs` must pass.
 4. MCP server / explicitly configured MCP tool. Cost: runtime-visible tool lifecycle, policy/security/docs, and tool-result behavior. Gate: use when the model needs an explicit callable tool boundary; project tools remain ordinary `.mcp.json` entries.
 5. Shared contract change in `@mono-agent/module-sdk`. Cost: highest blast radius and likely semver/release coordination. Gate: last resort for provider- and channel-neutral framework semantics; `@mono-agent/core` must not expose implementation-specific contracts.

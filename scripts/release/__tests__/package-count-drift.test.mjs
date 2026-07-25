@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, test } from "vitest";
 
-import { packageCatalog } from "../../package-catalog.mjs";
+import { packageCatalog } from "../../lib/package-catalog.mjs";
 
 const publishablePackages = packageCatalog.filter((entry) => entry.publishable === true);
 const pluginTierCount = publishablePackages.filter((entry) => entry.tier === "plugin").length;
@@ -74,7 +74,7 @@ function assertGuardedPackageCount(reference, contents) {
 
   if (foundCount !== expected) {
     throw new Error(
-      `${reference.filePath} has stale ${reference.tier} package count ${foundCount}; expected ${expected} from scripts/package-catalog.mjs`,
+      `${reference.filePath} has stale ${reference.tier} package count ${foundCount}; expected ${expected} from scripts/lib/package-catalog.mjs`,
     );
   }
 }

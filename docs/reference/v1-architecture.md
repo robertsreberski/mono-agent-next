@@ -11,7 +11,7 @@ Decision date: 2026-07-22
 
 This page is the canonical reader-facing architecture contract. The exact
 roster and allowed dependency categories live in
-`scripts/package-catalog.mjs`; package exports and CI gates make the contract
+`scripts/lib/package-catalog.mjs`; package exports and CI gates make the contract
 machine-checkable. It describes source behavior, not a registry release or
 consumer adoption.
 
@@ -358,7 +358,7 @@ they name; they are not evidence that every historical behavior was retained.
 
 | Boundary | Current status | Deciding evidence |
 | --- | --- | --- |
-| Architecture and 23-package roster | Implemented | This page, `scripts/package-catalog.mjs`, generated package docs, and `check:architecture`. |
+| Architecture and 23-package roster | Implemented | This page, `scripts/lib/package-catalog.mjs`, generated package docs, and `check:architecture`. |
 | Strict config, module selection, and public APIs | Implemented | Package contracts, focused tests, generated config/API docs, and packed consumer proofs. |
 | Source build and clean packed execution | Implemented | `verify:v1-minimal`, `verify:v1-operator-products`, and `verify:v1-system`. |
 | npm publication and clean registry install | Not completed | Release guard, pack/consumer checks, and a later explicitly authorized release. |

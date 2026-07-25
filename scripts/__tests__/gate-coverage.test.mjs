@@ -77,4 +77,19 @@ describe("gate coverage", () => {
 
     expect(dangling).toEqual([]);
   });
+
+  it("keeps every top-level script an entrypoint and every library in lib/", () => {
+    // `scripts/` is flat and holds two kinds of file that read identically: an
+    // entrypoint some `package.json` script runs, and a module other scripts
+    // import. Two libraries sat among twenty-six entrypoints, one of them
+    // imported nineteen times, and nothing said which was which. This is the
+    // rule that says it: if nothing runs it, it belongs in `lib/`.
+    const invoked = Object.values(manifest.scripts).join(" ");
+    const orphans = readdirSync(resolve(root, "scripts"))
+      .filter((name) => name.endsWith(".mjs"))
+      .filter((name) => !invoked.includes(`scripts/${name}`))
+      .sort();
+
+    expect(orphans).toEqual([]);
+  });
 });

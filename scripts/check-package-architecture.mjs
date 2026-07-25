@@ -9,7 +9,7 @@ import {
   packageByName,
   packageCatalog,
   packageRelativePath,
-} from "./package-catalog.mjs";
+} from "./lib/package-catalog.mjs";
 import { findAdapterNeutralityErrors } from "./lib/adapter-neutrality.mjs";
 import { findPackagePublicApiDocErrors } from "./lib/public-api-docs.mjs";
 import {
@@ -72,7 +72,7 @@ const packagePaths = workspacePackagePaths()
 
 for (const packagePath of packagePaths) {
   if (!catalogPaths.has(packagePath)) {
-    errors.push(`${packagePath} is missing from scripts/package-catalog.mjs.`);
+    errors.push(`${packagePath} is missing from scripts/lib/package-catalog.mjs.`);
   }
 }
 
@@ -88,7 +88,7 @@ for (const catalogEntry of packageCatalog) {
     }
   }
   if (catalogEntry.category === "communication" && !Array.isArray(catalogEntry.channelIds)) {
-    errors.push(`${packagePath} must declare channelIds in scripts/package-catalog.mjs.`);
+    errors.push(`${packagePath} must declare channelIds in scripts/lib/package-catalog.mjs.`);
     continue;
   }
   if (catalogEntry.category !== "communication" && catalogEntry.channelIds !== undefined) {

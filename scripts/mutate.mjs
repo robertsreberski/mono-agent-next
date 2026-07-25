@@ -17,7 +17,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { packageCatalog, packageRelativePath } from "./package-catalog.mjs";
+import { packageCatalog, packageRelativePath } from "./lib/package-catalog.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 

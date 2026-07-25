@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 
 import { describe, expect, test } from "vitest";
 
-import { packageCatalog } from "../../package-catalog.mjs";
+import { packageCatalog } from "../../lib/package-catalog.mjs";
 import { PINNED_RUNTIME_DEPENDENCIES } from "../dependency-policy.mjs";
 import {
   discoverPackages,

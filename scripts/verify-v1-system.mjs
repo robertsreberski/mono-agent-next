@@ -14,7 +14,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { packageCatalog, packageRelativePath } from "./package-catalog.mjs";
+import { packageCatalog, packageRelativePath } from "./lib/package-catalog.mjs";
 import { publicExportSpecifiers } from "./release/fixtures/packed-consumer/public-exports.mjs";
 import {
   assertFreshPackageOutputs,

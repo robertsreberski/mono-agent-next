@@ -9,7 +9,7 @@ import {
   SHIPPED_CHANNEL_IDS,
   packageCatalog,
   shippedChannelIdsFromCatalog,
-} from "../package-catalog.mjs";
+} from "../lib/package-catalog.mjs";
 import {
   ADAPTER_NEUTRAL_SOURCE_DIRS,
   findAdapterNeutralityErrors,

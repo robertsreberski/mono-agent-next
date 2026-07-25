@@ -777,7 +777,7 @@ describe("check-consumer-docs-consistency", () => {
     await writeRepoDoc(repoRoot, "packages/tui/package.json", JSON.stringify({
       description: "live chat with full stream-event insight",
     }));
-    await writeRepoDoc(repoRoot, "scripts/package-catalog.mjs", [
+    await writeRepoDoc(repoRoot, "scripts/lib/package-catalog.mjs", [
       "const responsibility = 'full-fidelity TUI NDJSON turns';",
     ].join("\n"));
     await writeRepoDoc(repoRoot, "docs/channels/tui.md", [
@@ -828,7 +828,7 @@ describe("check-consumer-docs-consistency", () => {
       "packages/operator/package.json",
       "packages/operator/src/state.ts",
       "packages/tui/package.json",
-      "scripts/package-catalog.mjs",
+      "scripts/lib/package-catalog.mjs",
       "docs/channels/tui.md",
       "docs/observability/tui.md",
     ]) {
@@ -886,7 +886,7 @@ describe("check-consumer-docs-consistency", () => {
     await writeRepoDoc(repoRoot, "packages/tui/package.json", JSON.stringify({
       description: "live chat with structured stream-event insight and bounded replay",
     }));
-    await writeRepoDoc(repoRoot, "scripts/package-catalog.mjs", [
+    await writeRepoDoc(repoRoot, "scripts/lib/package-catalog.mjs", [
       "const responsibility = 'structured stream-event insight with bounded replay';",
     ].join("\n"));
 

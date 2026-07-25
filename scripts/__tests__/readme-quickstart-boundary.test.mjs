@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   packageCatalog,
   packageRelativePath,
-} from "../package-catalog.mjs";
+} from "../lib/package-catalog.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 

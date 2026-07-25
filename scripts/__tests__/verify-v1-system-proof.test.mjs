@@ -16,7 +16,7 @@ import { spawnSync } from "node:child_process";
 
 import { afterEach, describe, expect, test } from "vitest";
 
-import { packageCatalog, packageRelativePath } from "../package-catalog.mjs";
+import { packageCatalog, packageRelativePath } from "../lib/package-catalog.mjs";
 import { publicExportSpecifiers } from "../release/fixtures/packed-consumer/public-exports.mjs";
 import {
   V1_SYSTEM_PROOF_SCHEMA,
