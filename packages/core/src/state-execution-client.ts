@@ -268,7 +268,8 @@ function jsonValue(value: unknown, label: string): void {
 
 function runAttempt(value: unknown): void {
   const attempt = object(value, "run attempt");
-  keys(attempt, ["attempt", "route", "status", "startedAt", "endedAt", "code", "retryability", "sideEffects"], "run attempt");
+  keys(attempt, ["attempt", "route", "status", "startedAt", "endedAt", "code", "retryability",
+    "sideEffects", "effortEscalation"], "run attempt");
   integer(attempt.attempt, "run attempt number", 1);
   routeIdentity(attempt.route, "run attempt route");
   oneOf(attempt.status, ["started", "ineligible", "failed", "completed"], "run attempt status");
@@ -278,6 +279,14 @@ function runAttempt(value: unknown): void {
   if (attempt.retryability !== undefined)
     oneOf(attempt.retryability, ["retryable", "not-retryable", "unknown"], "run attempt retryability");
   if (attempt.sideEffects !== undefined) oneOf(attempt.sideEffects, ["none", "committed", "unknown"], "run attempt sideEffects");
+  if (attempt.effortEscalation !== undefined) effortEscalation(attempt.effortEscalation);
+}
+function effortEscalation(value: unknown): void {
+  const escalation = object(value, "run attempt effort escalation");
+  keys(escalation, ["keyword", "from", "to"], "run attempt effort escalation");
+  oneOf(escalation.keyword, ["ultraThink", "extraThink", "think"], "run attempt effort escalation keyword");
+  if (escalation.from !== undefined) text(escalation.from, "run attempt effort escalation from", 256);
+  text(escalation.to, "run attempt effort escalation to", 256);
 }
 function transcriptEntry(value: unknown): void {
   const entry = object(value, "transcript entry");

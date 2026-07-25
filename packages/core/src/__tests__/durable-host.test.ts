@@ -65,6 +65,55 @@ afterEach(async () => {
 });
 
 describe("durable AgentHost execution", () => {
+  it("records on the run why a keyword raised this turn's effort", async () => {
+    // Without this the escalation was invisible: an operator could not tell why
+    // an otherwise identical question cost several times more.
+    const state = new MemoryStateStore();
+    const efforts: (string | undefined)[] = [];
+    const runtime = runtimeController(async (request) => {
+      const options = (request as { options?: { effort?: string } }).options;
+      efforts.push(options?.effort);
+      return completedResult("ok");
+    });
+    const project = await durableProject({
+      state,
+      runtimes: { main: runtime },
+      config: {
+        routing: {
+          primary: { runtime: "main", model: "fixture:model" },
+          fallbacks: [],
+          effort: "low",
+          effortKeywords: { think: true },
+        },
+      },
+    });
+    const host = await trackedHost(project);
+
+    const escalated = await host.submit({
+      requestId: "effort-request-1",
+      conversationId: "effort-conversation",
+      text: "what do you think?",
+    });
+    const ordinary = await host.submit({
+      requestId: "effort-request-2",
+      conversationId: "effort-conversation",
+      text: "and now without the word",
+    });
+
+    expect(efforts).toEqual(["high", "low"]);
+    await expect(host.readRun(escalated.runId)).resolves.toMatchObject({
+      summary: {
+        attempts: [{
+          status: "completed",
+          effortEscalation: { keyword: "think", from: "low", to: "high" },
+        }],
+      },
+    });
+    const unescalated = await host.readRun(ordinary.runId);
+    expect(unescalated?.summary.attempts[0]).not.toHaveProperty("effortEscalation");
+    await host.stop();
+  });
+
   it("joins exact in-process duplicates, replays a settled response after restart, and conflicts on changed authority", async () => {
     const state = new MemoryStateStore();
     const entered = deferred<void>();

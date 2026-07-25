@@ -39,6 +39,7 @@ export type {
   AgentResponse,
   AgentResponseMessage,
   AgentInteractionEvidence,
+  AgentEffortEscalationEvidence,
   AgentRunAttemptEvidence,
   AgentRunEvent,
   AgentRunHistoryPage,

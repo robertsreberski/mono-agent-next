@@ -353,6 +353,7 @@ AgentConfigIssue
 AgentConfigView
 AgentConversationReplay
 AgentConversationSummary
+AgentEffortEscalationEvidence
 AgentHealth
 AgentHost
 AgentHostOptions

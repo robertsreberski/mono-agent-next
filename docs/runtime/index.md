@@ -56,6 +56,12 @@ it, and never rewrite an unrecognized provider-specific value:
 
 The strongest matching tier wins regardless of where it sits in the message.
 
+When a tier fires, the run record says so: every attempt of that turn carries
+`effortEscalation` with the keyword that matched, the effort it raised to, and
+the effort it raised from. `mono-agent` surfaces it through `readRun`, so an
+otherwise identical question costing several times more is attributable rather
+than mysterious.
+
 `ultra think` and `extra think` are deliberate operator idioms, so they are on by
 default. The bare `think` tier is off by default because it matches ordinary
 English — "what do you think?", "I think we should use the other approach" — and

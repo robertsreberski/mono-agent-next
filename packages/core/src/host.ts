@@ -1335,6 +1335,18 @@ class AgentHostImplementation implements AgentHost {
   ): Promise<AgentResponse> {
     await this.#loadConversation(input.conversationId, signal);
     const recalled = await this.#memoryFacet.recall(input, signal);
+    // Route-independent, so it is resolved once for the turn rather than
+    // recomputed per attempt, and the same decision is what gets recorded.
+    const effortDecision = escalateMessageEffort(
+      input.text,
+      input.effort ?? this.config.raw.routing.effort,
+      this.config.raw.routing.effortKeywords,
+    );
+    // The run summary merges attempt records by number and keeps the terminal
+    // one, so this rides every record rather than only the "started" one.
+    const escalationEvidence = effortDecision.escalation === undefined
+      ? {}
+      : { effortEscalation: effortDecision.escalation } as const;
     const routes = routeCandidates(this.config, input);
     const memoryRecallTool = this.#memoryRecallEnabled && this.#memory !== undefined
       ? [createMemoryRecallTool(this.#memory, input.conversationId, signal)] : [];
@@ -1385,6 +1397,7 @@ class AgentHostImplementation implements AgentHost {
         await this.#recordRunAttempt(active.id, {
           attempt: attemptNumber, route: attemptRoute, status: "ineligible",
           startedAt: attemptStartedAt, endedAt: new Date().toISOString(), code,
+          ...escalationEvidence,
         }, signal);
       };
       if (signal.aborted) throw abortError();
@@ -1459,6 +1472,7 @@ class AgentHostImplementation implements AgentHost {
           route: attemptRoute,
           status: "started",
           startedAt: attemptStartedAt,
+          ...escalationEvidence,
         }, signal);
         const emitRuntimeEvent = async (event: RuntimeTurnEvent): Promise<void> => {
           const normalizedEvent = normalizeRuntimeTurnEvent(event, eventBoundary, {
@@ -1575,6 +1589,7 @@ class AgentHostImplementation implements AgentHost {
           tools,
           active.id,
           recalled,
+          effortDecision.effort,
           signal,
         );
         runtimeSessionUsed = runtimeRequest.session !== undefined;
@@ -1612,6 +1627,7 @@ class AgentHostImplementation implements AgentHost {
           status: "completed",
           startedAt: attemptStartedAt,
           endedAt: new Date().toISOString(),
+          ...escalationEvidence,
         }, settlement);
         const response = await this.#settle(
           input,
@@ -1661,6 +1677,7 @@ class AgentHostImplementation implements AgentHost {
             code: typed?.code ?? "runtime-attempt-failed",
             retryability,
             sideEffects,
+            ...escalationEvidence,
           }, signal);
         } catch (evidenceError) {
           if (hasUncertainEffects) {
@@ -1717,6 +1734,7 @@ class AgentHostImplementation implements AgentHost {
     tools: readonly CoreRuntimeTool[],
     turnId: string,
     recalled: readonly MemoryRecord[],
+    effort: string | undefined,
     signal: AbortSignal,
   ) {
     const history = (this.#history.get(input.conversationId) ?? []).map((message) => immutableClone(message));
@@ -1731,12 +1749,6 @@ class AgentHostImplementation implements AgentHost {
         signal,
       );
     const metadata = toJsonObject(input.metadata);
-    const effortDecision = escalateMessageEffort(
-      input.text,
-      input.effort ?? this.config.raw.routing.effort,
-      this.config.raw.routing.effortKeywords,
-    );
-    const effort = effortDecision.effort;
     return {
       turnId,
       conversationId: input.conversationId,
