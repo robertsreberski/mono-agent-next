@@ -127,7 +127,7 @@
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "f76feaa7b5085016d60fd9c8cd1a776bf3c3d536",
+        "commit": "497004ed67dfe5c3f16be43c21eb98676c836264",
         "path": "packages/module-sdk/src/bounded-integer.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -139,7 +139,7 @@
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "f76feaa7b5085016d60fd9c8cd1a776bf3c3d536",
+        "commit": "497004ed67dfe5c3f16be43c21eb98676c836264",
         "path": "packages/module-sdk/src/config.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -175,7 +175,7 @@
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "f76feaa7b5085016d60fd9c8cd1a776bf3c3d536",
+        "commit": "497004ed67dfe5c3f16be43c21eb98676c836264",
         "path": "packages/module-sdk/src/interactions.ts"
       },
       "copyrightHolder": "Robert Sreberski",
@@ -199,7 +199,7 @@
       "origin": {
         "classification": "successor-original",
         "repository": "mono-agent-next",
-        "commit": "f76feaa7b5085016d60fd9c8cd1a776bf3c3d536",
+        "commit": "497004ed67dfe5c3f16be43c21eb98676c836264",
         "path": "packages/module-sdk/src/modules.ts"
       },
       "copyrightHolder": "Robert Sreberski",
