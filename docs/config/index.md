@@ -49,6 +49,6 @@ current scaffold closure, selected environment names, and sanitized seed
 configs. Generate the installed project's composed schema with:
 
 ```bash
-mono-agent config schema --config ./mono-agent.config.json --write
-mono-agent config explain --config ./mono-agent.config.json routing.primary
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js config schema --config ./mono-agent.config.json --write
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js config explain --config ./mono-agent.config.json routing.primary
 ```

@@ -17,7 +17,7 @@ Choose the highest applicable lane:
 |---|---|---|
 | Process | `AGENTS.md`, `skills/`, agent metadata, internal docs | Relevant contract tests, discoverability, OSS hygiene, whitespace |
 | Package | Ordinary implementation within existing package boundaries | Dependency-closure build, focused tests, package typecheck, one broad CI gate |
-| High risk | Security/sandbox, storage or migration, lifecycle, provider routing, delivery, public package boundaries | Focused checks, one local `verify:all`, CI, one matching live smoke |
+| High risk | Security/sandbox, storage or migration, lifecycle, provider routing, delivery, public package boundaries | Focused checks, one local `verify:all`, CI, and one matching live smoke when supported; otherwise an explicit focused-proof substitution |
 | Release | Mechanical lockstep version/publish work | Use `release-lockstep`; do not add deployment or consumer checks here |
 
 A mixed diff uses the highest lane. Explain the classification in the final
@@ -65,9 +65,11 @@ Run the focused package checks above, then:
 pnpm run verify:all
 ```
 
-Require hosted CI for the exact head SHA and select exactly one scenario from
-`live-smoke` that exercises the risky boundary. Add a second scenario only when
-the diff independently changes a second live surface.
+Require hosted CI for the exact head SHA. Select exactly one scenario from
+`live-smoke` that exercises the risky boundary. When its table has no matching
+scenario, use scenario E and name the focused package-owned proof that
+substitutes for unavailable live coverage. Add a second scenario only when the
+diff independently changes a second live surface.
 
 Provider-backed smoke is reserved for provider behavior. UI, worker transport,
 and lifecycle changes should use their narrower local scenarios instead of paid

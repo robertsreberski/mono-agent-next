@@ -15,10 +15,13 @@ configuration.
 1. Establish the intended agent, runtime/model routes, channels, durable
    capabilities, tool policy, sandbox, and smoke test.
 2. Read [the v1 config reference](references/config.md).
-3. Scaffold a new absent directory with one explicit template:
+3. From the built v1 source checkout, scaffold a new absent directory with one
+   explicit template:
 
    ```bash
-   mono-agent init ./my-agent --template minimal
+   node packages/create-mono-agent/dist/bin/create-mono-agent.js \
+     ./my-agent \
+     --template minimal
    # alternatives: personal, multi-runtime
    ```
 
@@ -45,6 +48,7 @@ configuration.
 ## Done
 
 - The config describes the requested product without hidden capabilities.
-- `mono-agent validate --config ./mono-agent.config.json` exits successfully.
+- The project-local validation command in
+  [validation and smoke](references/validation.md) exits successfully.
 - The configured foreground agent completes the agreed real smoke test.
 - No credential value or local environment file was exposed or committed.

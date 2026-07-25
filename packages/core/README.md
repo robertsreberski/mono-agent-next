@@ -27,8 +27,13 @@ proactive-delivery receipts, health, drain, and shutdown.
 
 ## Install / Usage
 
+Existing registry artifacts under these package names belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
 ```bash
-npm install @mono-agent/core @mono-agent/module-sdk
+pnpm --filter @mono-agent/core... run build
 ```
 
 ```ts

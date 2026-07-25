@@ -32,9 +32,5 @@ connection. Neither proof deploys or restarts an existing agent.
 ## What remains later
 
 Registry publication, clean installation from the real registry, provider
-credential setup, consumer data migration, service reconciliation, live smoke,
-soak, observation, cutover, and predecessor retirement are intentionally
-outside this phase.
-
-The [migration guide](/migration/v0-to-v1-source-beta/) describes the isolated
-rehearsal that must be green before any of those operations can be proposed.
+credential setup, consumer data adoption, service reconciliation, live smoke,
+soak, observation, and cutover are intentionally outside this phase.

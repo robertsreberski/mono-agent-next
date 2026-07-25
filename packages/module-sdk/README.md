@@ -27,8 +27,13 @@ behavior does not drift by implementation.
 
 ## Install / Usage
 
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
 ```bash
-npm install @mono-agent/module-sdk
+pnpm --filter @mono-agent/module-sdk run build
 ```
 
 An installed runtime package exports one side-effect-free `monoAgentModule`:
@@ -653,7 +658,7 @@ render resolved secrets in diagnostics.
 
 - [V1 architecture](../../docs/reference/v1-architecture.md)
 - [Capability ladder](../../docs/reference/capability-ladder.md)
-- [Refactor PRD](../../refactor/mono-agent-v1-prd.md)
+- [Generated public API inventory](../../docs/reference/public-api.md)
 
 ## Verification
 

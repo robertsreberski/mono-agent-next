@@ -7,6 +7,14 @@ export const PACKAGE_GRAPH_START = "<!-- package-dependency-graph:start -->";
 export const PACKAGE_GRAPH_END = "<!-- package-dependency-graph:end -->";
 export const PACKAGE_DIRECTORY_START = "<!-- package-directory:start -->";
 export const PACKAGE_DIRECTORY_END = "<!-- package-directory:end -->";
+export const PACKAGE_DIRECTORY_PAGE_FRONTMATTER = [
+  "---",
+  'title: "Packages"',
+  'description: "Directory of every mono-agent v1 source package, its ownership tier, responsibility, and authoritative README."',
+  "sidebar:",
+  "  order: 1",
+  "---",
+].join("\n");
 export const REQUIRED_PACKAGE_README_SECTIONS = Object.freeze([
   "Category",
   "Responsibility",
@@ -160,13 +168,26 @@ export function renderPackageDirectory(model, { website = false } = {}) {
     const readmeUrl = website
       ? `https://github.com/robertsreberski/mono-agent-next/blob/main/${entry.packagePath}/README.md`
       : `./${entry.packagePath}/README.md`;
-    const npmUrl = `https://www.npmjs.com/package/${entry.name}`;
     lines.push(
-      `| \`${entry.name}\` | \`${entry.tier}\` / \`${entry.category}\` | ${escapeTable(entry.responsibility)} | [README for ${entry.name}](${readmeUrl}) · [npm for ${entry.name}](${npmUrl}) |`,
+      `| \`${entry.name}\` | \`${entry.tier}\` / \`${entry.category}\` | ${escapeTable(entry.responsibility)} | [README for ${entry.name}](${readmeUrl}) |`,
     );
   }
   lines.push("", PACKAGE_DIRECTORY_END);
   return lines.join("\n");
+}
+
+export function updatePackageDirectoryPage(text, renderedDirectory) {
+  const body = text.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n*/u, "");
+  return [
+    PACKAGE_DIRECTORY_PAGE_FRONTMATTER,
+    "",
+    updateMarkedBlock(
+      body,
+      PACKAGE_DIRECTORY_START,
+      PACKAGE_DIRECTORY_END,
+      renderedDirectory,
+    ),
+  ].join("\n");
 }
 
 export function updateMarkedBlock(text, startMarker, endMarker, rendered) {
@@ -218,8 +239,10 @@ export function findPackageDocGenerationErrors({ root, catalog }) {
     errors.push("docs/reference/packages.md is missing; run pnpm run generate:package-docs.");
   } else {
     const websiteDirectory = readFileSync(websiteDirectoryPath, "utf8");
-    if (markedBlock(websiteDirectory, PACKAGE_DIRECTORY_START, PACKAGE_DIRECTORY_END)
-      !== renderPackageDirectory(model, { website: true })) {
+    if (updatePackageDirectoryPage(
+      websiteDirectory,
+      renderPackageDirectory(model, { website: true }),
+    ) !== websiteDirectory) {
       errors.push("docs/reference/packages.md package directory has drifted; run pnpm run generate:package-docs.");
     }
   }

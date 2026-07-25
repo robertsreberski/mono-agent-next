@@ -13,7 +13,8 @@ Documentation work is diff-scoped:
   do not require package docs or an Astro build.
 - Package behavior/API changes update the owning README and relevant canonical
   `docs/` pages.
-- Config changes also update the feature registry and closest task playbook.
+- Config changes also regenerate the config reference and update the closest
+  conceptual or task page.
 - Website-only presentation changes run the website gate.
 - A PR-range audit is explicit work; never infer it from a single feature PR.
 
@@ -31,25 +32,17 @@ site.
 ## Doc surfaces checklist (when affected)
 
 - `docs/<area>/*.md` (channels, config, runtime, memory, tools, observability, …)
-- `docs/reference/feature-registry.md` — the feature→config map; every new config key lands here
-- `docs/reference/feature-matrix.md`, `docs/reference/presets.md`
+- `docs/config/reference.md` — generated selected-module schema and scaffold
+  examples
+- `docs/reference/v1-architecture.md`, `docs/reference/packages.md`
 - `docs/playbooks/*` — task-shaped playbooks; extend the closest one
 - Package READMEs — 9 required sections in a fixed order, enforced by
   `check:architecture`; `## Architecture` includes data flow and package
   structure, while `## Public API` starts with a curated entry-point map and
   keeps its generated inventory in parity with the real export map
 - Root `README.md`, `PACKAGES.md`
-- `demos/*/IDENTITY.example.md`, `demos/*/SOUL.example.md`, and any other
-  `demos/*/*.example.md` — copy-paste seed templates that actively break a fresh
-  agent when stale, and a `docs/`-only pass misses them. Add them to the checklist
-  on every memory / tool-surface PR.
-- `packages/agent-app/skills/mono-agent-composer/references/*.md` — the composer
-  skill's knowledge base; fold it into the "after any user-facing feature lands"
-  pass. It silently drifted out of the loop for ≥3 PRs (native-notify #98,
-  per-trigger-model-effort, external-memory-backends #52), and because that
-  `SKILL.md` tells composing agents never to read `feature-registry.md` or package
-  source, these references are the single point of failure for "does the framework
-  support X."
+- `packages/create-mono-agent/skills/mono-agent-composer/references/*.md` — the
+  bundled composer skill's source knowledge
 - Retired-surface mentions are policed by:
 
 ```bash
@@ -78,12 +71,10 @@ pnpm run check:architecture
 
 Do not edit content between `public-api-inventory` or
 `public-api-js-subpaths` markers by hand. The architecture gate rejects missing
-or invented exports, stale `*FieldGroup` README identifiers, and drift between a
-classified MIGRATION subpath inventory and its package export map.
+or invented exports, stale README identifiers, and drift between generated
+inventories and package export maps.
 
-This check caught the observability README drift, stale `*FieldGroup` names,
-the missing `toCronJobs` export, the phantom `AgentMessageStreamResult`, and the
-agent-runtime deep-subpath count drift.
+This check catches invented symbols, stale export names, and deep-subpath drift.
 
 **Catalog metadata and package navigation are generated.** After changing a
 catalog entry, workspace dependency, or package README, refresh metadata,
@@ -99,41 +90,34 @@ pnpm run check:architecture
 Do not edit content inside `package-metadata`, `package-dependency-graph`, or
 `package-directory` markers by hand.
 
-**Rename ⇒ grep the old name across docs.** When a PR renames/removes an exported
-symbol, grep the old name before closing the pass — README samples and docs prose
+**Rename ⇒ search the old name across docs.** When a PR renames/removes an
+exported symbol, search the old name before closing the pass — README samples and docs prose
 don't move with the code:
 
 ```bash
-grep -rn '<old-name>' packages/*/README.md docs/
+rg -n '<old-name>' packages/*/README.md docs
 ```
 
-`telegramFieldGroup`/`slackFieldGroup` → `TELEGRAM_CONFIG_FIELDS`/`SLACK_CONFIG_FIELDS`
-left the README samples stale.
+Treat the old name reaching zero documentation matches as explicit rename proof.
 
 **Behavior-prose drift on a new opt-in mode.** When a PR adds a new opt-in
 mode/enum, grep the package README prose for a stale absolute claim ("does not …
-X", "always Y, never Z") the new code just falsified. cron-adapter README line 87
-"does not … queue overlapping jobs" survived the arrival of the new
-`overlap:"queue"`.
+X", "always Y, never Z") that the new code just falsified.
 
-**Cross-cutting operator tables.** When a PR introduces a new durable store, grep
-its new root/store name across `docs/**/*.md` and patch any table/matrix that
-enumerates "what does X reset/purge/survive" — not just the prose.
-`docs/runtime/sessions-concurrency.md`'s boundary-rules table went silent on
-v0.11.0 durable conversation-history.
+**Cross-cutting durable-state boundaries.** When a PR introduces a new durable
+store, search its root/store name across `docs/` and patch every current page
+that enumerates what reset, purge, or restart preserves.
 
-**`config-reference.ts` ⇒ `feature-registry.md` row + prose page.** If a PR
-touches `packages/agent-app/src/config-reference.ts`, grep the new `jsonPath`
-against the registry and its prose page before calling the PR doc-complete:
+**Scaffold/config source ⇒ regenerated reference + prose page.** If a PR changes
+`packages/create-mono-agent/src/templates.ts`, a selected module schema, or the
+source-doc generator, regenerate the source documentation twice and update the
+closest hand-authored config/concept page:
 
 ```bash
-comm -23 \
-  <(grep -oE '"[a-z]+\.[a-zA-Z]+"' packages/agent-app/src/config-reference.ts | sort -u) \
-  <(grep -oE '`[a-z]+\.[a-zA-Z]+`' docs/reference/feature-registry.md | tr -d '`' | sort -u)
+pnpm run generate:source-beta-docs
+pnpm run generate:source-beta-docs
+pnpm run check:source-beta-docs
 ```
-
-Any left-only line is a config key with no registry row (would have caught the
-F2/F3 misses).
 
 ## Build + verify only when published inputs changed
 
@@ -151,11 +135,11 @@ node website/scripts/check-links.mjs       # link check only (needs dist/)
 pnpm -C website preview -- --port 4329     # manual review
 ```
 
-## PR-range audit recipe (the PR #110 pattern)
+## Explicit PR-range audit
 
 1. List the range: `gh pr list --state merged --base main --json number,title,mergedAt --limit 40`
-2. For each PR, classify **user-facing** vs **internal-only** (say so explicitly —
-   the #110 audit found 11/30 internal; don't invent docs for internal work).
+2. For each PR, classify **user-facing** vs **internal-only**; do not invent
+   documentation for internal-only work.
 3. For user-facing PRs, walk the checklist above and patch `docs/` file-by-file.
 4. `pnpm -C website build` green (includes the link checker).
 5. Work in a worktree, branch `docs/<topic>`, PR with `gh pr create --base main`.
@@ -166,8 +150,8 @@ pnpm -C website preview -- --port 4329     # manual review
   custom rehype plugins use `unified`, and current Starlight sidebar groups wrap
   `autogenerate` entries in `items`. Do not upgrade either dependency without
   rerunning both the website build and accessibility suite.
-- In a worktree, website node_modules are absent: `pnpm -C website install` or
-  `ln -sfn <main-repo>/website/node_modules website/node_modules`.
+- In a worktree, website dependencies are independent: run
+  `pnpm -C website install`.
 - Starlight only applies markdown features to files physically under
   `src/content/docs` — that's why sync copies instead of loading `../docs`.
 - Keep the nine README section headings and order byte-exact: `## Category`,

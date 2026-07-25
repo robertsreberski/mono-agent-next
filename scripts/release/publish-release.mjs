@@ -7,9 +7,16 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
+  BUILD_MARKER_SCHEMA_VERSION,
+  acquireBuildLock,
+  clearBuildMarker,
   computeBuildOutputDigest,
+  computeDeploymentStateFingerprint,
   computeRuntimeDependencyDigest,
+  preserveBuildLock,
+  publishBuildMarker,
   readBuildMarker,
+  releaseBuildLock,
 } from "../lib/build-provenance.mjs";
 import { assertPublishingAllowed } from "./check-publish-guard.mjs";
 import { packReleasePackage } from "./pack-release.mjs";
@@ -21,6 +28,12 @@ const NULL_CONFIG = "/dev/null";
 export const EMPTY_NPM_GLOBAL_CONFIG = path.join(REPO_ROOT, "scripts", "release", "empty.npmrc");
 const EMPTY_NPM_GLOBAL_CONFIG_CONTENT = "; Intentionally empty neutral npm global configuration for release subprocesses.\n";
 const REGISTRY_AUTH_ENV = "npm_config_//registry.npmjs.org/:_authToken";
+const TRUSTED_GIT_CANDIDATES = Object.freeze(["/usr/bin/git", "/bin/git"]);
+const CLOSED_GIT_ENV = Object.freeze({
+  PATH: "/usr/bin:/bin",
+  LANG: "C",
+  LC_ALL: "C",
+});
 
 export function assertNeutralNpmGlobalConfig(configPath = EMPTY_NPM_GLOBAL_CONFIG) {
   const configStat = fs.lstatSync(configPath);
@@ -132,34 +145,113 @@ function npmConfigArgs() {
   ];
 }
 
-function gitResult(args, options = {}) {
+function canonicalRepository(repo) {
+  const canonical = fs.realpathSync.native(repo);
+  if (!path.isAbsolute(canonical) || !fs.statSync(canonical).isDirectory()) {
+    throw new Error("refusing to publish: release repository is unavailable or unsafe");
+  }
+  return canonical;
+}
+
+export function resolveTrustedGitExecutable() {
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  for (const candidate of TRUSTED_GIT_CANDIDATES) {
+    if (typeof candidate !== "string" || !path.isAbsolute(candidate)) continue;
+    try {
+      const canonical = fs.realpathSync.native(candidate);
+      const stat = fs.statSync(canonical);
+      if (path.isAbsolute(canonical)
+        && stat.isFile()
+        && (stat.mode & 0o111) !== 0
+        && (stat.mode & 0o6022) === 0
+        && (currentUid === undefined || stat.uid === 0 || stat.uid === currentUid)) {
+        return canonical;
+      }
+    } catch {
+      // Try the next fixed system candidate.
+    }
+  }
+  throw new Error("refusing to publish: trusted Git executable is unavailable");
+}
+
+function pathIsWithin(root, candidate) {
+  const relativePath = path.relative(root, candidate);
+  return relativePath === ""
+    || (relativePath !== ".."
+      && !relativePath.startsWith(`..${path.sep}`)
+      && !path.isAbsolute(relativePath));
+}
+
+export function resolveTrustedPnpmEntrypoint(repo = REPO_ROOT) {
+  const canonicalRepo = canonicalRepository(repo);
+  const nodeDirectory = path.dirname(process.execPath);
+  const candidates = [
+    path.join(nodeDirectory, "pnpm"),
+    process.env.npm_execpath,
+    typeof process.env.PNPM_HOME === "string"
+      ? path.join(process.env.PNPM_HOME, "pnpm")
+      : undefined,
+  ];
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !path.isAbsolute(candidate)) continue;
+    try {
+      const canonical = fs.realpathSync.native(candidate);
+      const stat = fs.statSync(canonical);
+      if (/^pnpm(?:\.(?:cjs|mjs|js))?$/u.test(path.basename(canonical))
+        && !pathIsWithin(canonicalRepo, canonical)
+        && stat.isFile()
+        && stat.nlink === 1
+        && (stat.mode & 0o022) === 0
+        && (currentUid === undefined || stat.uid === 0 || stat.uid === currentUid)) {
+        return canonical;
+      }
+    } catch {
+      // Try the next process-owned package-manager authority.
+    }
+  }
+  throw new Error("refusing to publish: trusted pnpm entrypoint is unavailable");
+}
+
+function gitResult(args, options) {
   const spawn = options.spawn ?? spawnSync;
-  return spawn("git", args, {
-    cwd: options.repo ?? REPO_ROOT,
+  return spawn(options.gitExecutable, ["-C", options.repo, ...args], {
+    cwd: options.repo,
     encoding: "utf8",
-    env: {
-      ...environmentWithoutNpmCredentials(options.envSource ?? process.env),
-      LANG: "C",
-      LC_ALL: "C",
-    },
+    env: { ...CLOSED_GIT_ENV },
   });
 }
 
 /** Require a clean HEAD whose commit is the exact target of the release tag. */
 export function assertReleaseGitState(tag, options = {}) {
+  const gitOptions = {
+    ...options,
+    repo: canonicalRepository(options.repo ?? REPO_ROOT),
+    gitExecutable: resolveTrustedGitExecutable(),
+  };
+  const topLevel = commandOutput(
+    gitResult(["rev-parse", "--show-toplevel"], gitOptions),
+    "git rev-parse --show-toplevel",
+  );
+  if (canonicalRepository(topLevel) !== gitOptions.repo) {
+    throw new Error("refusing to publish: Git top level does not match the release repository");
+  }
   const status = commandOutput(
-    gitResult(["status", "--porcelain=v1", "--untracked-files=all"], options),
+    gitResult(["status", "--porcelain=v1", "--untracked-files=all"], gitOptions),
     "git status",
   );
   if (status !== "") {
     throw new Error("refusing to publish: git HEAD is not clean");
   }
 
-  const head = commandOutput(gitResult(["rev-parse", "HEAD"], options), "git rev-parse HEAD").toLowerCase();
+  const head = commandOutput(
+    gitResult(["rev-parse", "HEAD"], gitOptions),
+    "git rev-parse HEAD",
+  ).toLowerCase();
   let taggedCommit;
   try {
     taggedCommit = commandOutput(
-      gitResult(["rev-parse", "--verify", `refs/tags/${tag}^{commit}`], options),
+      gitResult(["rev-parse", "--verify", `refs/tags/${tag}^{commit}`], gitOptions),
       `git tag ${tag}`,
     ).toLowerCase();
   } catch {
@@ -219,18 +311,153 @@ export function assertCurrentBuildProvenance(head, options = {}) {
 export function runWorkspaceBuild(options = {}) {
   const spawn = options.spawn ?? spawnSync;
   const log = options.log ?? console.log;
+  const repo = canonicalRepository(options.repo ?? REPO_ROOT);
+  const pnpmEntrypoint = resolveTrustedPnpmEntrypoint(repo);
+  const env = publicNpmEnvironment(
+    options.envSource ?? process.env,
+    { authenticated: false },
+  );
+  const nodeDirectory = path.dirname(process.execPath);
+  env.PATH = [nodeDirectory, "/usr/bin", "/bin"].join(path.delimiter);
   log("$ pnpm run build");
-  const result = spawn("pnpm", ["run", "build"], {
-    cwd: options.repo ?? REPO_ROOT,
-    env: publicNpmEnvironment(
-      options.envSource ?? process.env,
-      { authenticated: false },
-    ),
+  const result = spawn(process.execPath, [pnpmEntrypoint, "run", "build"], {
+    cwd: repo,
+    env,
     stdio: "inherit",
   });
   if (result.status !== 0) {
     throw new Error("workspace build failed before release packing");
   }
+}
+
+/**
+ * Run the real release build under the provenance lock, then publish one
+ * schema-v2 marker only after the source and complete deployment state remain
+ * stable across attestation.
+ */
+export function runReleaseBuildWithProvenance(tag, options = {}) {
+  const repo = options.repo ?? REPO_ROOT;
+  const assertGitState = options.assertGitState
+    ?? ((releaseTag) => assertReleaseGitState(releaseTag, {
+      repo,
+      envSource: options.envSource,
+    }));
+  const runBuild = options.runBuild
+    ?? (() => runWorkspaceBuild({
+      repo,
+      envSource: options.envSource,
+      log: options.log,
+      spawn: options.spawn,
+    }));
+  const deploymentFingerprint = options.computeDeploymentFingerprint
+    ?? computeDeploymentStateFingerprint;
+  const outputDigest = options.computeOutputDigest ?? computeBuildOutputDigest;
+  const dependencyDigest = options.computeDependencyDigest ?? computeRuntimeDependencyDigest;
+  const acquireLock = options.acquireLock ?? acquireBuildLock;
+  const clearMarker = options.clearMarker ?? clearBuildMarker;
+  const preserveLock = options.preserveLock ?? preserveBuildLock;
+  const publishMarker = options.publishMarker ?? publishBuildMarker;
+  const releaseLock = options.releaseLock ?? releaseBuildLock;
+  const now = options.now ?? (() => new Date());
+
+  let lock;
+  try {
+    lock = acquireLock(repo);
+  } catch (error) {
+    throw new Error("refusing to publish: build provenance lock is unavailable", { cause: error });
+  }
+
+  let head;
+  let failure;
+  let releaseNormally = true;
+  try {
+    clearMarker(repo);
+    head = assertGitState(tag);
+    runBuild();
+    const builtHead = assertGitState(tag);
+    if (builtHead.toLowerCase() !== head.toLowerCase()) {
+      throw new Error("refusing to publish: git HEAD changed during the release build");
+    }
+
+    const deploymentState = deploymentFingerprint(repo);
+    const currentOutputDigest = outputDigest(repo, { sync: true });
+    const currentDependencyDigest = dependencyDigest(repo);
+    options.afterDeploymentDigests?.();
+
+    const attestedHead = assertGitState(tag);
+    if (attestedHead.toLowerCase() !== head.toLowerCase()) {
+      throw new Error("refusing to publish: git HEAD changed during build attestation");
+    }
+    if (deploymentFingerprint(repo) !== deploymentState) {
+      throw new Error("refusing to publish: deployment state changed during build attestation");
+    }
+
+    const marker = {
+      schemaVersion: BUILD_MARKER_SCHEMA_VERSION,
+      gitSha: head,
+      completedAt: now().toISOString(),
+      nodeVersion: process.versions.node,
+      nodeAbi: process.versions.modules,
+      sourceState: "clean",
+      outputDigest: currentOutputDigest,
+      dependencyDigest: currentDependencyDigest,
+    };
+    publishMarker(repo, marker);
+
+    const publishedHead = assertGitState(tag);
+    if (publishedHead.toLowerCase() !== head.toLowerCase()) {
+      throw new Error("refusing to publish: git HEAD changed during build provenance publication");
+    }
+    if (deploymentFingerprint(repo) !== deploymentState) {
+      throw new Error("refusing to publish: deployment state changed during build provenance publication");
+    }
+  } catch (error) {
+    failure = error;
+    try {
+      clearMarker(repo);
+    } catch (cleanupError) {
+      releaseNormally = false;
+      failure = new Error("refusing to publish: failed to invalidate build provenance", {
+        cause: new AggregateError([error, cleanupError]),
+      });
+      try {
+        preserveLock(repo, lock);
+      } catch (preserveError) {
+        failure = new Error("refusing to publish: failed to preserve the build provenance lock", {
+          cause: new AggregateError([error, cleanupError, preserveError]),
+        });
+      }
+    }
+  }
+
+  if (!releaseNormally) throw failure;
+  try {
+    releaseLock(repo, lock);
+  } catch (error) {
+    let releaseFailure = new Error(
+      "refusing to publish: build provenance lock cleanup failed",
+      { cause: error },
+    );
+    try {
+      clearMarker(repo);
+    } catch (cleanupError) {
+      try {
+        preserveLock(repo, lock);
+        releaseFailure = new Error(
+          "refusing to publish: build provenance lock cleanup failed; marker invalidation failed closed",
+          { cause: new AggregateError([error, cleanupError]) },
+        );
+      } catch (preserveError) {
+        releaseFailure = new Error(
+          "refusing to publish: build provenance lock and marker cleanup failed",
+          { cause: new AggregateError([error, cleanupError, preserveError]) },
+        );
+      }
+    }
+    throw releaseFailure;
+  }
+  if (failure !== undefined) throw failure;
+  return head;
 }
 
 export function computeTarballIntegrity(tarballPath) {
@@ -501,7 +728,11 @@ async function main() {
 
   let head;
   if (!dryRun) head = assertReleaseGitState(tag);
-  runWorkspaceBuild();
+  if (dryRun) {
+    runWorkspaceBuild();
+  } else {
+    head = runReleaseBuildWithProvenance(tag);
+  }
   if (!dryRun) {
     head = assertReleaseGitState(tag);
     assertCurrentBuildProvenance(head);

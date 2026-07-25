@@ -39,12 +39,17 @@ command count, and selected digests without exposing command data.
 
 ## Install / Usage
 
-Install the sandbox as a direct dependency, independently provision a reviewed
-SRT executable and settings file, and select both by canonical absolute path
-and lowercase SHA-256 digest:
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
+Build the sandbox and independently provision a reviewed SRT executable and
+settings file, selecting both by canonical absolute path and lowercase SHA-256
+digest:
 
 ```bash
-pnpm add @mono-agent/sandbox-srt
+pnpm --filter @mono-agent/sandbox-srt... run build
 shasum -a 256 /absolute/private/path/to/srt
 shasum -a 256 /absolute/private/path/to/settings.json
 ```
@@ -108,7 +113,7 @@ The selected module exposes a read-only status command without starting a
 serving lifecycle or executing the SRT binary:
 
 ```bash
-mono-agent sandbox sandbox-srt:status \
+node packages/cli/dist/bin/mono-agent.js sandbox sandbox-srt:status \
   --config ./mono-agent.config.json
 ```
 
@@ -198,7 +203,6 @@ provider-native runtimes. Setup and Core own those decisions.
 
 ## Related Documentation
 
-- [V1 product requirements](../../refactor/mono-agent-v1-prd.md)
 - [V1 architecture](../../docs/reference/v1-architecture.md)
 - [Sandbox behavior](../../docs/tools/sandbox.md)
 - [Module SDK](../module-sdk/README.md)

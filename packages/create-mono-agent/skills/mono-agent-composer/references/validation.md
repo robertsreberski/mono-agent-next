@@ -5,8 +5,10 @@ Run commands from the generated agent directory.
 ## Static contract
 
 ```bash
-mono-agent validate --config ./mono-agent.config.json
-mono-agent inspect --config ./mono-agent.config.json
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js validate \
+  --config ./mono-agent.config.json
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js inspect \
+  --config ./mono-agent.config.json
 ```
 
 Validation must prove the config, direct dependencies, lockfile selections,
@@ -16,18 +18,23 @@ every error; do not reinterpret a missing package or credential as success.
 After dependencies are present, compose the exact selected-module schema:
 
 ```bash
-mono-agent config schema \
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js config schema \
   --config ./mono-agent.config.json \
   --write
 ```
 
-Use `mono-agent config explain --config ./mono-agent.config.json [path]` for
-redacted field ownership and environment provenance.
+For redacted field ownership and environment provenance:
+
+```bash
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js config explain \
+  --config ./mono-agent.config.json [path]
+```
 
 ## Foreground smoke
 
 ```bash
-mono-agent start --config ./mono-agent.config.json
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js start \
+  --config ./mono-agent.config.json
 ```
 
 Exercise the configured channel with one real request and require a real model

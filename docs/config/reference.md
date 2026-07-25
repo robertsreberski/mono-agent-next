@@ -10,7 +10,7 @@ agent envelope; each literal `$use` selection contributes its own schema.
 Generate the exact installed project schema with:
 
 ```bash
-mono-agent config schema --config ./mono-agent.config.json --write
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js config schema --config ./mono-agent.config.json --write
 ```
 
 That command first proves every selection is a matching direct production

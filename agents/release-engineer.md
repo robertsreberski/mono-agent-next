@@ -1,6 +1,6 @@
 ---
 name: release-engineer
-description: Cuts lockstep npm releases of the @mono-agent packages and (optionally) coordinates fleet redeploy after. Use when asked to release, publish, or bump versions. <example>user: "Release 0.5.0" → engineer bumps all manifests, runs the CI-order preflight, tags, watches the publish run, post-verifies npm metadata with a clean userconfig.</example> <example>user: "Did 0.4.0 actually publish?" → engineer checks gh run + npm view against registry.npmjs.org.</example>
+description: Cuts and verifies lockstep npm releases of the @mono-agent packages. Use when asked to release, publish, or bump versions. <example>user: "Release 0.5.0" → engineer bumps all manifests, runs the CI-order preflight, tags, watches the publish run, post-verifies npm metadata with a clean userconfig.</example> <example>user: "Did 0.4.0 actually publish?" → engineer checks gh run + npm view against registry.npmjs.org.</example>
 tools: Bash, Read, Edit, Grep, Glob
 ---
 
@@ -33,14 +33,14 @@ git diff --check
   A local fallback must still pass `pnpm run release:guard` and use
   `pnpm run release:publish -- --tag vX.Y.Z`; never call raw `npm publish`.
 
-## Registry gotcha (always)
+## Registry reads
 
-The machine's AutoProxxy `.npmrc` breaks npm against npmjs. Every npm read/write
-pins the registry or blanks the userconfig:
+Local npm configuration can redirect registry reads. Verification pins the
+public registry or uses an empty user config:
 
 ```bash
-npm view @mono-agent/agent-app version --registry https://registry.npmjs.org/
-npm view @mono-agent/agent-app version --userconfig /dev/null
+npm view @mono-agent/module-sdk version --registry https://registry.npmjs.org/
+npm view @mono-agent/module-sdk version --userconfig /dev/null
 npm whoami --registry https://registry.npmjs.org/
 ```
 
@@ -48,7 +48,7 @@ npm whoami --registry https://registry.npmjs.org/
 
 ```bash
 pnpm run release:verify -- --tag vX.Y.Z
-TMP=$(mktemp -d); npm install -g --prefix "$TMP" --userconfig /dev/null @mono-agent/agent-app@X.Y.Z
+TMP=$(mktemp -d); npm install -g --prefix "$TMP" --userconfig /dev/null create-mono-agent@X.Y.Z
 "$TMP/bin/mono-agent" --help
 ```
 
@@ -59,9 +59,8 @@ before declaring failure (CI's own smoke retries ~150s).
 
 - While the successor guard remains, do not deploy, restart, or repoint any
   consumer from this checkout.
-- The live fleet runs this repo's dist, not npm — ask whether to redeploy
-  (`fleet-deploy` skill) so agents match the release.
-- Deprecations of retired packages go through the npm web UI (CLI is blocked by
-  the proxy npmrc).
+- A release does not imply consumer deployment or restart.
+- Record any retired-package deprecation as its own explicitly authorized
+  registry action.
 - Report: version, tag, CI run URL/conclusion, verification outputs, and any
   package added/removed from the publish graph since last release.

@@ -53,6 +53,7 @@ describe("verify-all", () => {
       "check:source-beta-budgets",
       "check:source-beta-docs",
       "check:docs",
+      "release:test:unit",
       "release:validate",
       "check:architecture",
       "build",
@@ -72,6 +73,37 @@ describe("verify-all", () => {
     expect(stdout.text).toContain("personal template contract ok");
     expect(stdout.text).toContain("multi-runtime template contract ok");
     expect(stdout.text).toContain("verification green");
+  });
+
+  it("keeps release unit tests in the bounded gate without repeating packed consumers", () => {
+    const gate = createRepoGate({
+      releaseTag: "v0.15.0",
+      nodeVersion: MINIMUM_NODE_VERSION,
+    });
+    const labels = gate.map((entry) => entry.label);
+
+    expect(labels.filter((label) => label === "release:test:unit")).toHaveLength(1);
+    expect(labels.filter((label) => label === "release:consumer")).toHaveLength(1);
+    expect(labels).not.toContain("release:test");
+  });
+
+  it("keeps provenance and release contract tests wired into automated verification", () => {
+    const manifest = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8"));
+    const workflow = readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
+
+    expect(manifest.scripts["scripts:test"]).toContain(
+      "scripts/__tests__/build-provenance.test.mjs",
+    );
+    expect(manifest.scripts["release:test:unit"]).toContain(
+      "scripts/release/__tests__/release.test.mjs",
+    );
+    expect(manifest.scripts["release:test:unit"]).toContain(
+      "scripts/release/__tests__/package-count-drift.test.mjs",
+    );
+    expect(manifest.scripts["release:test:unit"]).not.toContain("packed-consumer");
+    expect(manifest.scripts["release:test"]).toContain("pnpm run release:test:unit");
+    expect(manifest.scripts["release:test"]).toContain("packed-consumer.test.mjs");
+    expect(workflow).toContain("pnpm run release:test:unit");
   });
 
   it("stops before consumers when an earlier repo gate fails", async () => {

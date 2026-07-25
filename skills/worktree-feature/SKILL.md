@@ -133,11 +133,10 @@ pnpm -C website install
 ## Ship
 
 **Before shipping — new durable state?** If this PR adds a new on-disk store
-under `.mono-agent/` (session history, continuation ledger, memory index, …),
-confirm an existing purge/reset/clear surface covers it too — a CLI command, the
-`doctor`/`validate` status, and any docs boundary/reset table. A durable store
-that nothing can clear and no boundary doc mentions is a merge blocker; v0.11.0
-durable conversation-history shipped ahead of its boundary-rules table.
+under `.mono-agent/`, confirm an existing purge/reset/clear surface covers it
+too, along with the relevant `doctor`/`validate` status and documentation
+boundary. A durable store that nothing can clear and no current boundary doc
+mentions is a merge blocker.
 
 Verify with the `verify-green` skill first. Then:
 
@@ -152,8 +151,8 @@ gh pr create --base main --head <branch> --title "<title>" --body "<body>"
 gh pr checks <n> --watch --interval 30
 ```
 
-Commits are authored as `robertsreberski@gmail.com` (enforced by the local
-`.githooks/pre-commit`; see AGENTS.local.md).
+Preserve the repository-configured author identity. Local identity policy, if
+any, belongs outside the tracked public workflow.
 
 **After merge (mandatory), not optional.** The instant the PR is merged, clean
 up both sides. Do not trust `gh pr merge`'s exit status or commit ancestry as the

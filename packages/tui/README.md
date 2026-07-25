@@ -30,10 +30,15 @@ self-configuration flow, or second protocol reducer in this package.
 
 ## Install / Usage
 
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
 ```bash
-pnpm add -g @mono-agent/tui
+pnpm --filter @mono-agent/tui... run build
 export MONO_AGENT_OPERATOR_TOKEN="owner-only-token"
-mono-agent-tui --endpoint http://127.0.0.1:52341
+node packages/tui/dist/bin/mono-agent-tui.js --endpoint http://127.0.0.1:52341
 ```
 
 To use another environment variable, pass its name. The secret itself never
@@ -41,14 +46,18 @@ appears in the process arguments. Direct CLI connections require the selected
 environment variable; the default is `MONO_AGENT_OPERATOR_TOKEN`.
 
 ```bash
-mono-agent-tui --endpoint http://127.0.0.1:52341 --token-env PERSONAL_OPERATOR_TOKEN
+node packages/tui/dist/bin/mono-agent-tui.js \
+  --endpoint http://127.0.0.1:52341 \
+  --token-env PERSONAL_OPERATOR_TOKEN
 ```
 
 Without `--endpoint`, the product asks `@mono-agent/operator` to discover a
 running agent. Registry roots can be supplied explicitly and repeatedly:
 
 ```bash
-mono-agent-tui --registry ~/.mono-agent/trace-sources --agent personal
+node packages/tui/dist/bin/mono-agent-tui.js \
+  --registry ~/.mono-agent/trace-sources \
+  --agent personal
 ```
 
 Controls:

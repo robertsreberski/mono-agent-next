@@ -6,8 +6,8 @@ description: Cut and registry-verify a lockstep npm release of all @mono-agent p
 # Lockstep npm release
 
 This workflow ends when the tag is published and the public registry is
-verified. Restarting Personal Agent, other mono-agent instances, or the web
-console is separate work and happens only when explicitly requested.
+verified. Consumer deployment or restart is separate work and happens only when
+explicitly requested.
 
 All catalog-publishable packages release in lockstep.
 `scripts/release/validate-release.mjs` requires every publishable package
@@ -42,11 +42,12 @@ range, and demo/consumer manifest, then refresh the lockfile:
 pnpm install
 ```
 
-Grep hand-authored package-version constants once. Update only constants that
+Search hand-authored package-version constants once. Update only constants that
 mirror their own package version:
 
 ```bash
-grep -rnE "_VERSION\s*[:=]\s*[\"'][0-9]" packages/*/src extras/*/src --include="*.ts" | grep -v __tests__
+rg -n "_VERSION\\s*[:=]\\s*[\"'][0-9]" packages/*/src extras/*/src \
+  --glob '*.ts' --glob '!**/__tests__/**'
 ```
 
 ## 2. Run one preflight path
@@ -114,7 +115,7 @@ or blank user config:
 
 ```bash
 NPM_CONFIG_USERCONFIG=/dev/null pnpm run release:verify -- --tag vX.Y.Z
-npm view @mono-agent/agent-app version --registry https://registry.npmjs.org/
+npm view @mono-agent/module-sdk version --registry https://registry.npmjs.org/
 ```
 
 The release verifier covers the whole lockstep set; the single `npm view` is a
@@ -125,10 +126,10 @@ poll loops.
 ## 5. Closeout
 
 Report the release commit, tag, publish path (CI or authorized local fallback),
-and registry verification. Then stop. If consumer adoption was also requested,
-start a separate exact-target workflow with `fleet-deploy` or that consumer's
-own runbook, and only after `pnpm run release:guard` passes.
+and registry verification. Then stop. Consumer adoption remains a separate,
+explicitly authorized workflow and can begin only after
+`pnpm run release:guard` passes.
 
-Package deprecations must retain an explicit removal version/date or permanent
-retention decision in `docs/reference/deprecations.md`; remove due code, tests,
-and documentation together during the target release.
+Package deprecation is a separate, explicitly authorized registry action.
+Remove due code, tests, and current documentation together when that scope is
+approved.

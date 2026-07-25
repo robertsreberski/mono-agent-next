@@ -26,8 +26,13 @@ the same configured chat allowlist remains authoritative.
 
 ## Install / Usage
 
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
 ```bash
-pnpm add @mono-agent/channel-telegram
+pnpm --filter @mono-agent/channel-telegram... run build
 ```
 
 Select `@mono-agent/channel-telegram` under `channels`. `botToken` must be an
@@ -200,7 +205,7 @@ evicting that guard when its capacity is exhausted.
 ## Related Documentation
 
 - [V1 architecture](../../docs/reference/v1-architecture.md)
-- [V1 product requirements](../../refactor/mono-agent-v1-prd.md)
+- [Generated config reference](../../docs/config/reference.md)
 
 ## Verification
 

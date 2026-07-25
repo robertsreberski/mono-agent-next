@@ -30,8 +30,13 @@ byte budget in addition to the per-file bound.
 
 ## Install / Usage
 
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
 ```bash
-pnpm add @mono-agent/channel-slack
+pnpm --filter @mono-agent/channel-slack... run build
 ```
 
 Select it under `channels`. Both `appToken` and `botToken` are env-only secrets.
@@ -226,7 +231,7 @@ silent delivery or quiet hours.
 ## Related Documentation
 
 - [V1 architecture](../../docs/reference/v1-architecture.md)
-- [V1 product requirements](../../refactor/mono-agent-v1-prd.md)
+- [Generated config reference](../../docs/config/reference.md)
 
 ## Verification
 

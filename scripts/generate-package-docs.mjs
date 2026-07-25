@@ -12,6 +12,7 @@ import {
   renderPackageDependencyGraph,
   renderPackageDirectory,
   renderPackageMetadata,
+  updatePackageDirectoryPage,
   updateMarkedBlock,
   updatePackageReadmeMetadata,
 } from "./lib/package-docs.mjs";
@@ -44,10 +45,8 @@ changedFiles += writeWhenChanged(packagesPath, packages, nextPackages);
 
 const websiteDirectoryPath = join(root, "docs/reference/packages.md");
 const websiteDirectory = readFileSync(websiteDirectoryPath, "utf8");
-const nextWebsiteDirectory = updateMarkedBlock(
+const nextWebsiteDirectory = updatePackageDirectoryPage(
   websiteDirectory,
-  PACKAGE_DIRECTORY_START,
-  PACKAGE_DIRECTORY_END,
   renderPackageDirectory(model, { website: true }),
 );
 changedFiles += writeWhenChanged(websiteDirectoryPath, websiteDirectory, nextWebsiteDirectory);

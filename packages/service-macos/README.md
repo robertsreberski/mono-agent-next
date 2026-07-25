@@ -23,34 +23,39 @@ or host-product lifecycle into core.
 
 ## Install / Usage
 
-Install the product explicitly:
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
+Build the product and its workspace dependencies:
 
 ```bash
-pnpm add @mono-agent/service-macos
+pnpm --filter @mono-agent/service-macos... run build
 ```
 
 Author its separate strict JSON file, then inspect and plan without mutation:
 
 ```bash
-mono-agent-service-macos inspect --config ./service-macos.json
-mono-agent-service-macos plan --config ./service-macos.json
+node packages/service-macos/dist/bin/service-macos.js inspect --config ./service-macos.json
+node packages/service-macos/dist/bin/service-macos.js plan --config ./service-macos.json
 ```
 
 Apply requires the conspicuous mutation flag:
 
 ```bash
-mono-agent-service-macos apply --config ./service-macos.json --allow-mutation
+node packages/service-macos/dist/bin/service-macos.js apply --config ./service-macos.json --allow-mutation
 ```
 
 Each deliberate lifecycle operation selects exactly one configured service:
 
 ```bash
-mono-agent-service-macos start --config ./service-macos.json --service personal-agent --allow-mutation
-mono-agent-service-macos stop --config ./service-macos.json --service personal-agent --allow-mutation
-mono-agent-service-macos restart --config ./service-macos.json --service personal-agent --allow-mutation
-mono-agent-service-macos status --config ./service-macos.json --service personal-agent
-mono-agent-service-macos logs --config ./service-macos.json --service personal-agent
-mono-agent-service-macos remove --config ./service-macos.json --service personal-agent --allow-mutation
+node packages/service-macos/dist/bin/service-macos.js start --config ./service-macos.json --service personal-agent --allow-mutation
+node packages/service-macos/dist/bin/service-macos.js stop --config ./service-macos.json --service personal-agent --allow-mutation
+node packages/service-macos/dist/bin/service-macos.js restart --config ./service-macos.json --service personal-agent --allow-mutation
+node packages/service-macos/dist/bin/service-macos.js status --config ./service-macos.json --service personal-agent
+node packages/service-macos/dist/bin/service-macos.js logs --config ./service-macos.json --service personal-agent
+node packages/service-macos/dist/bin/service-macos.js remove --config ./service-macos.json --service personal-agent --allow-mutation
 ```
 
 Removal unloads only the configured LaunchAgent labels and deletes their
@@ -293,7 +298,7 @@ foreground operation remains valid when this product is absent.
 ## Related Documentation
 
 - [V1 architecture](../../docs/reference/v1-architecture.md)
-- [V1 refactor PRD](../../refactor/mono-agent-v1-prd.md)
+- [Setup and security](../../docs/reference/setup-security.md)
 
 ## Verification
 

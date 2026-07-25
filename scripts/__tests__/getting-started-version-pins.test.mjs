@@ -8,26 +8,26 @@ describe("check-getting-started-version-pins", () => {
     expect(result.issues, result.issues.join("\n")).toEqual([]);
   });
 
-  it("flags a pin that disagrees with the agent-app version", async () => {
+  it("flags a pin that disagrees with the lockstep version", async () => {
     const result = await checkGettingStartedVersionPins({
-      agentAppVersion: "0.4.1",
+      lockstepVersion: "0.4.1",
       docRecords: [
-        { path: "docs/getting-started/install.md", text: "npm i -g @mono-agent/agent-app@0.4.0" },
+        { path: "docs/getting-started/install.md", text: "npm i @mono-agent/core@0.4.0" },
       ],
     });
     expect(result.pins).toHaveLength(1);
     expect(result.issues).toHaveLength(1);
-    expect(result.issues[0]).toContain("@mono-agent/agent-app@0.4.0");
+    expect(result.issues[0]).toContain("@mono-agent/core@0.4.0");
     expect(result.issues[0]).toContain("0.4.1");
   });
 
-  it("accepts a pin that matches the agent-app version", async () => {
+  it("accepts a pin that matches the lockstep version", async () => {
     const result = await checkGettingStartedVersionPins({
-      agentAppVersion: "0.4.1",
+      lockstepVersion: "0.4.1",
       docRecords: [
         {
           path: "docs/getting-started/install.md",
-          text: "npm i -g @mono-agent/agent-app@0.4.1 @mono-agent/tui@0.4.1",
+          text: "npm i @mono-agent/core@0.4.1 @mono-agent/tui@0.4.1",
         },
       ],
     });
@@ -37,15 +37,15 @@ describe("check-getting-started-version-pins", () => {
 
   it("ignores shell placeholders and dist-tags (versionless docs are always clean)", async () => {
     const result = await checkGettingStartedVersionPins({
-      agentAppVersion: "0.4.1",
+      lockstepVersion: "0.4.1",
       docRecords: [
         {
           path: "docs/getting-started/install.md",
           text: [
             'version=<published-version>',
-            'npm i -g "@mono-agent/agent-app@$version" "@mono-agent/tui@$version"',
+            'npm i "@mono-agent/module-sdk@$version" "@mono-agent/tui@$version"',
             'npm i -g "mono-agent@$version"',
-            "npm i -g @mono-agent/agent-app@latest",
+            "npm i @mono-agent/module-sdk@latest",
             "npx mono-agent init",
           ].join("\n"),
         },
@@ -57,7 +57,7 @@ describe("check-getting-started-version-pins", () => {
 
   it("flags a drifted unscoped `mono-agent@X.Y.Z` alias pin", async () => {
     const result = await checkGettingStartedVersionPins({
-      agentAppVersion: "0.5.0",
+      lockstepVersion: "0.5.0",
       docRecords: [
         { path: "docs/getting-started/install.md", text: "npm i -g mono-agent@0.4.1" },
       ],
@@ -71,20 +71,20 @@ describe("check-getting-started-version-pins", () => {
 
   it("does not double-count the `mono-agent` inside a scoped `@mono-agent/<pkg>` pin", async () => {
     const result = await checkGettingStartedVersionPins({
-      agentAppVersion: "0.5.0",
+      lockstepVersion: "0.5.0",
       docRecords: [
-        { path: "docs/getting-started/install.md", text: "npm i -g @mono-agent/agent-app@0.5.0" },
+        { path: "docs/getting-started/install.md", text: "npm i @mono-agent/module-sdk@0.5.0" },
       ],
     });
     // Exactly one pin (the scoped name), not an extra spurious `mono-agent@0.5.0`.
     expect(result.pins).toHaveLength(1);
-    expect(result.pins[0].pin).toBe("@mono-agent/agent-app@0.5.0");
+    expect(result.pins[0].pin).toBe("@mono-agent/module-sdk@0.5.0");
     expect(result.issues).toEqual([]);
   });
 
   it("flags a drifted `create-mono-agent@X.Y.Z` installer pin", async () => {
     const result = await checkGettingStartedVersionPins({
-      agentAppVersion: "0.5.1",
+      lockstepVersion: "0.5.1",
       docRecords: [
         { path: "docs/getting-started/install.md", text: "npm i -g create-mono-agent@0.5.0" },
       ],
@@ -98,7 +98,7 @@ describe("check-getting-started-version-pins", () => {
 
   it("does not double-count the `mono-agent` inside a `create-mono-agent` pin", async () => {
     const result = await checkGettingStartedVersionPins({
-      agentAppVersion: "0.5.1",
+      lockstepVersion: "0.5.1",
       docRecords: [
         { path: "docs/getting-started/install.md", text: "npm i -g create-mono-agent@0.5.1" },
       ],
@@ -109,11 +109,11 @@ describe("check-getting-started-version-pins", () => {
     expect(result.issues).toEqual([]);
   });
 
-  it("accepts the `npm create mono-agent@latest` dist-tag form (no version pin)", async () => {
+  it("ignores a dist tag because only exact versions are pins", async () => {
     const result = await checkGettingStartedVersionPins({
-      agentAppVersion: "0.5.1",
+      lockstepVersion: "0.5.1",
       docRecords: [
-        { path: "docs/getting-started/install.md", text: "npm create mono-agent@latest init\nnpx create-mono-agent init" },
+        { path: "docs/getting-started/install.md", text: "create-mono-agent@latest" },
       ],
     });
     expect(result.pins).toEqual([]);

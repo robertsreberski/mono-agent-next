@@ -1,36 +1,94 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { constants } from "node:fs";
+import { lstat, open, readlink } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const consumerFixturePrefix = "packages/agent-app/src/__tests__/fixtures/consumers/";
-const publicConsumerFixtureNames = new Set(["local-agent-alpha", "local-agent-beta"]);
 const publicHomePathNames = new Set(["example", "me", "runner", "u", "user"]);
-const homePathPattern = /\/(?:Users|home)\/([^/\s"'`<>]+)/gu;
+const homePathPattern =
+  /(?:\/(?:Users|home)\/|[A-Za-z]:[\\/]+Users[\\/]+)([^/\\\s"'`<>]+)/giu;
+const authorFile = "AUTHORS.md";
+const personalEmailPattern = new RegExp(
+  `${["roberts", "reberski"].join("")}@${["gmail", "com"].join("\\.")}`,
+  "giu",
+);
+const identifierBoundaryStart = "(?<![A-Za-z0-9])";
+const identifierBoundaryEnd = "(?![A-Za-z0-9])";
+const identifierSeparator = "[\\s/_.-]+";
+const privateReferenceRules = Object.freeze([
+  Object.freeze({
+    label: "employer-reference",
+    pattern: new RegExp(
+      `${identifierBoundaryStart}${["a8", "c"].join("")}${identifierBoundaryEnd}`,
+      "giu",
+    ),
+  }),
+  Object.freeze({
+    label: "private-fleet-path",
+    pattern: new RegExp(
+      `~/(?:${["personal", "agent"].join("-")}|${["a8", "c", "agents"].join("-")})(?:/|${identifierBoundaryEnd})`,
+      "giu",
+    ),
+  }),
+  Object.freeze({
+    label: "private-service-identifier",
+    pattern: new RegExp(
+      `${["personal", "agent", "059657c8"].join("-")}|${identifierBoundaryStart}(?:${[
+        ["45", "99"].join(""),
+        ["54", "17"].join(""),
+        ["54", "18"].join(""),
+        ["54", "19"].join(""),
+        ["54", "20"].join(""),
+      ].join("|")})${identifierBoundaryEnd}`,
+      "giu",
+    ),
+  }),
+  Object.freeze({
+    label: "private-persona-reference",
+    pattern: new RegExp(
+      [
+        ["Sleep", "Ambra"],
+        ["Ambra", "Sleep"],
+        ["Therapy", "Council"],
+        ["Inner", "Child"],
+      ].map(([first, second]) =>
+        `${identifierBoundaryStart}${first}${identifierSeparator}${second}${identifierBoundaryEnd}`)
+        .join("|"),
+      "giu",
+    ),
+  }),
+]);
+const redactedTrackedPath = "[redacted-tracked-path]";
 
 export function scanOssHygieneRecords(records) {
-  const disallowedConsumerNames = collectDisallowedConsumerNames(records);
   const findings = [];
 
   for (const record of records) {
-    const fixtureName = consumerFixtureNameFromPath(record.path);
-    const safeFile = sanitizeFilePath(record.path, disallowedConsumerNames);
-    if (fixtureName !== undefined && !publicConsumerFixtureNames.has(fixtureName)) {
+    const pathFindings = scanPathForPrivateReferences(record.path);
+    const safeFile = pathFindings.length > 0 ? redactedTrackedPath : record.path;
+    findings.push(...pathFindings);
+    if (record.isUnsafeSymlink === true) {
       findings.push({
         file: safeFile,
         line: 0,
         column: 1,
-        label: "non-synthetic-consumer-fixture-name",
+        label: "tracked-symlink",
       });
     }
-
-    if (record.text !== undefined) {
-      findings.push(...scanTextForDisallowedConsumerNames(record.text, safeFile, disallowedConsumerNames));
-      findings.push(...scanTextForHomePaths(record.text, safeFile));
+    if (record.text === undefined) continue;
+    findings.push(...scanTextForPrivateReferences(record.text, safeFile));
+    findings.push(...scanTextForHomePaths(record.text, safeFile));
+    if (record.path !== authorFile) {
+      findings.push(...scanPattern(
+        record.text,
+        safeFile,
+        personalEmailPattern,
+        "personal-email-outside-authors",
+      ));
     }
   }
 
@@ -51,14 +109,46 @@ export async function runCheckOssHygiene(options = {}) {
 
   const records = [];
   for (const path of listed.stdout.split("\0").filter(Boolean).sort()) {
-    const record = { path, text: undefined };
+    const record = { path, text: undefined, isUnsafeSymlink: false };
+    let handle;
     try {
-      const buffer = await readFile(resolve(cwd, path));
-      if (!buffer.includes(0)) {
-        record.text = buffer.toString("utf8");
+      const absolutePath = resolve(cwd, path);
+      const listedDetails = await lstat(absolutePath);
+      if (listedDetails.isSymbolicLink()) {
+        const target = await readlink(absolutePath);
+        const resolvedTarget = resolve(dirname(absolutePath), target);
+        const targetWithinRepo = relative(cwd, resolvedTarget);
+        record.text = target;
+        record.isUnsafeSymlink = isAbsolute(target)
+          || targetWithinRepo === ".."
+          || targetWithinRepo.startsWith(`..${sep}`)
+          || isAbsolute(targetWithinRepo);
+        records.push(record);
+        continue;
       }
+      if (!listedDetails.isFile()) {
+        records.push(record);
+        continue;
+      }
+      handle = await open(
+        absolutePath,
+        constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0),
+      );
+      const openedDetails = await handle.stat();
+      if (
+        !openedDetails.isFile()
+        || openedDetails.dev !== listedDetails.dev
+        || openedDetails.ino !== listedDetails.ino
+      ) {
+        records.push(record);
+        continue;
+      }
+      const buffer = await handle.readFile();
+      if (!buffer.includes(0)) record.text = buffer.toString("utf8");
     } catch {
       // Deleted or unreadable tracked files are not hygiene findings.
+    } finally {
+      await handle?.close();
     }
     records.push(record);
   }
@@ -69,9 +159,7 @@ export async function runCheckOssHygiene(options = {}) {
 }
 
 export function renderOssHygieneReport(findings) {
-  if (findings.length === 0) {
-    return "OSS hygiene check passed\n";
-  }
+  if (findings.length === 0) return "OSS hygiene check passed\n";
 
   const lines = [
     "OSS hygiene check failed",
@@ -83,56 +171,36 @@ export function renderOssHygieneReport(findings) {
   return `${lines.join("\n")}\n`;
 }
 
-function collectDisallowedConsumerNames(records) {
-  const names = new Set();
-  for (const record of records) {
-    const fixtureName = consumerFixtureNameFromPath(record.path);
-    if (fixtureName !== undefined && !publicConsumerFixtureNames.has(fixtureName)) {
-      names.add(fixtureName);
-    }
-  }
-  return names;
+function scanTextForPrivateReferences(text, file) {
+  return privateReferenceRules.flatMap((rule) =>
+    scanPattern(text, file, rule.pattern, rule.label));
 }
 
-function consumerFixtureNameFromPath(path) {
-  if (!path.startsWith(consumerFixturePrefix)) {
-    return undefined;
+function scanPathForPrivateReferences(path) {
+  const labels = new Set();
+  for (const rule of privateReferenceRules) {
+    rule.pattern.lastIndex = 0;
+    if (rule.pattern.test(path)) labels.add(rule.label);
   }
-  const rest = path.slice(consumerFixturePrefix.length);
-  const name = rest.split("/")[0];
-  return name.length === 0 ? undefined : name;
-}
-
-function scanTextForDisallowedConsumerNames(text, file, disallowedConsumerNames) {
-  const findings = [];
-  for (const name of disallowedConsumerNames) {
-    let start = 0;
-    while (start < text.length) {
-      const index = text.indexOf(name, start);
-      if (index === -1) {
-        break;
-      }
-      const location = locationForIndex(text, index);
-      findings.push({
-        file,
-        line: location.line,
-        column: location.column,
-        label: "non-synthetic-consumer-fixture-reference",
-      });
-      start = index + name.length;
-    }
+  personalEmailPattern.lastIndex = 0;
+  if (personalEmailPattern.test(path)) labels.add("personal-email-outside-authors");
+  if (scanTextForHomePaths(`/${path.replace(/^\/+/u, "")}`, redactedTrackedPath).length > 0) {
+    labels.add("non-example-home-path");
   }
-  return findings;
+  return [...labels].map((label) => ({
+    file: redactedTrackedPath,
+    line: 0,
+    column: 1,
+    label,
+  }));
 }
 
 function scanTextForHomePaths(text, file) {
   const findings = [];
   homePathPattern.lastIndex = 0;
   for (const match of text.matchAll(homePathPattern)) {
-    const username = match[1];
-    if (username === undefined || publicHomePathNames.has(username)) {
-      continue;
-    }
+    const username = match[1]?.toLowerCase();
+    if (username === undefined || publicHomePathNames.has(username)) continue;
     const location = locationForIndex(text, match.index ?? 0);
     findings.push({
       file,
@@ -144,13 +212,14 @@ function scanTextForHomePaths(text, file) {
   return findings;
 }
 
-function sanitizeFilePath(path, disallowedConsumerNames) {
-  let result = path;
-  for (const name of disallowedConsumerNames) {
-    result = result.split(`${consumerFixturePrefix}${name}/`).join(`${consumerFixturePrefix}[non-synthetic-consumer]/`);
-    result = result.split(name).join("[non-synthetic-consumer]");
+function scanPattern(text, file, pattern, label) {
+  const findings = [];
+  pattern.lastIndex = 0;
+  for (const match of text.matchAll(pattern)) {
+    const location = locationForIndex(text, match.index ?? 0);
+    findings.push({ file, line: location.line, column: location.column, label });
   }
-  return result;
+  return findings;
 }
 
 function locationForIndex(text, index) {

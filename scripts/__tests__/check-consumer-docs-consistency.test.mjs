@@ -119,13 +119,13 @@ describe("check-consumer-docs-consistency", () => {
     ]);
   });
 
-  it("enforces canonical MemoryRecall spelling in the app, memory, config, and Supermemory READMEs", async () => {
+  it("enforces canonical MemoryRecall spelling in current package READMEs", async () => {
     const repoRoot = await tempRepo();
     const readmePaths = [
-      "packages/agent-app/README.md",
-      "packages/config/README.md",
-      "packages/memory/README.md",
-      "extras/memory-supermemory/README.md",
+      "packages/core/README.md",
+      "packages/memory-local/README.md",
+      "packages/module-sdk/README.md",
+      "packages/create-mono-agent/README.md",
     ];
     for (const relativePath of readmePaths) {
       await writeRepoDoc(repoRoot, relativePath, "Use canonical `MemoryRecall`.\n");
@@ -643,7 +643,7 @@ describe("check-consumer-docs-consistency", () => {
       "Artifacts are the always-on local traceability fallback.",
       "",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/observability/README.md", [
+    await writeRepoDoc(repoRoot, "packages/exporter-otlp/README.md", [
       "# Observability",
       "",
       "Raw `.events.jsonl` artifacts stay append-only.",
@@ -677,20 +677,20 @@ describe("check-consumer-docs-consistency", () => {
       "# TUI package",
       "Open any run for its full coalesced event timeline (nothing dropped).",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/operator-adapter/README.md", [
-      "# Operator adapter",
+    await writeRepoDoc(repoRoot, "packages/operator/README.md", [
+      "# Operator",
       "The endpoint streams at full `AgentStreamEvent` fidelity.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/tui/src/ui/components/tool-panel.ts", [
+    await writeRepoDoc(repoRoot, "packages/tui/src/ui/terminal-text.ts", [
       "const notice = '(payload truncated for streaming — full data in run artifacts)';",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/operator-adapter/src/tui/constants.ts", [
+    await writeRepoDoc(repoRoot, "packages/operator/src/state.ts", [
       "// The full data remains in the run's JSONL artifacts.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/operator-adapter/src/tui/server.ts", [
+    await writeRepoDoc(repoRoot, "packages/channel-operator/src/server.ts", [
       "// The full payload stays available in run artifacts.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/tui/src/ui/views/replay.ts", [
+    await writeRepoDoc(repoRoot, "packages/operator/package.json", [
       "// A full event timeline is richer than live since nothing is dropped.",
     ].join("\n"));
     await writeRepoDoc(repoRoot, "packages/tui/src/ui/app.ts", [
@@ -710,11 +710,11 @@ describe("check-consumer-docs-consistency", () => {
       "docs/channels/tui.md",
       "docs/observability/tui.md",
       "packages/tui/README.md",
-      "packages/operator-adapter/README.md",
-      "packages/tui/src/ui/components/tool-panel.ts",
-      "packages/operator-adapter/src/tui/constants.ts",
-      "packages/operator-adapter/src/tui/server.ts",
-      "packages/tui/src/ui/views/replay.ts",
+      "packages/operator/README.md",
+      "packages/tui/src/ui/terminal-text.ts",
+      "packages/operator/src/state.ts",
+      "packages/channel-operator/src/server.ts",
+      "packages/operator/package.json",
       "packages/tui/src/ui/app.ts",
     ]) {
       expect(reported).toContain(relativePath);
@@ -723,60 +723,54 @@ describe("check-consumer-docs-consistency", () => {
 
   it("flags residual absolute observability claims in playbooks, composer references, and operator sources", async () => {
     const repoRoot = await tempRepo();
-    await writeRepoDoc(repoRoot, "docs/reference/feature-registry.md", [
-      "# Features",
+    await writeRepoDoc(repoRoot, "docs/reference/v1-architecture.md", [
+      "# Architecture",
       "live chat with full stream-event insight",
       "every structured `AgentStreamEvent` verbatim",
       "Serialized event frames over 256 KiB receive field-level reduction.",
       "Rich traces are exported on every run.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "docs/playbooks/phoenix-observed-agent.md", [
-      "# Phoenix",
+    await writeRepoDoc(repoRoot, "docs/playbooks/index.md", [
+      "# Playbooks",
       "Every run lifecycle streams to a [Phoenix] dashboard.",
       "Redacted JSONL artifacts are always written locally as the fallback.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "docs/config/blueprint.md", [
-      "# Blueprint",
+    await writeRepoDoc(repoRoot, "docs/config/reference.md", [
+      "# Config",
       "JSONL artifacts (always written; the local fallback)",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "docs/runtime/tools-and-guards.md", [
-      "# Tool guard",
+    await writeRepoDoc(repoRoot, "docs/runtime/index.md", [
+      "# Runtime",
       "When a tool result exceeds the budget it is persisted as an artifact, so nothing is silently lost.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/agent-app/skills/mono-agent-composer/references/package-map.md", [
-      "# Package map",
+    await writeRepoDoc(repoRoot, "packages/create-mono-agent/skills/mono-agent-composer/references/config.md", [
+      "# Config",
       "live chat with full stream-event insight",
       "Serialized remote event frames are field-reduced to a strict cap.",
-    ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/agent-app/skills/mono-agent-composer/references/playbooks.md", [
-      "# Playbooks",
-      "stream every run to Phoenix as OpenInference spans",
-    ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/agent-app/skills/mono-agent-composer/references/config-blueprint.md", [
-      "# Blueprint",
       "JSONL artifacts are always written regardless of exporter state.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/agent-app/skills/mono-agent-composer/references/discovery-questions.md", [
-      "# Discovery",
+    await writeRepoDoc(repoRoot, "packages/create-mono-agent/skills/mono-agent-composer/references/validation.md", [
+      "# Validation",
+      "stream every run to Phoenix as OpenInference spans",
       "Local JSONL artifacts are always written and are the fallback.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/operator-adapter/src/tui/constants.ts", [
+    await writeRepoDoc(repoRoot, "packages/operator/src/state.ts", [
       "// Upper bound for one serialized NDJSON frame.",
       "// Oversized events are field-reduced until the encoded frame fits.",
       "// Every oversized event is field reduced.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/agent-app/src/cli-background-command.ts", [
+    await writeRepoDoc(repoRoot, "packages/channel-operator/src/server.ts", [
       "function describeExporter() {",
       "  return \"JSONL artifacts are always written locally\";",
       "}",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/agent-app/src/cli-help.ts", [
+    await writeRepoDoc(repoRoot, "packages/tui/src/ui/app.ts", [
       "const HELP_COMMANDS = [",
       "  \"Open the operator console from any directory: live chat with full\",",
       "  \"thinking/tool/telemetry insight, recorded-run replay, and config view.\",",
       "];",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/operator-adapter/package.json", JSON.stringify({
+    await writeRepoDoc(repoRoot, "packages/operator/package.json", JSON.stringify({
       description: "Loopback operator adapters: full-fidelity TUI NDJSON turns and live SSE.",
     }));
     await writeRepoDoc(repoRoot, "packages/tui/package.json", JSON.stringify({
@@ -802,14 +796,14 @@ describe("check-consumer-docs-consistency", () => {
     const result = await checkConsumerDocsConsistency([], { repoRoot });
     const reported = result.issues.join("\n");
 
-    expect(result.userDocsChecked).toBe(10);
+    expect(result.userDocsChecked).toBe(8);
     expect(result.artifactContractSourcesChecked).toBe(6);
     expect(reported).toContain("full stream-event insight");
     expect(reported).toContain("guaranteed every-run Phoenix stream");
     expect(reported).toContain("guaranteed every-run Phoenix export");
     expect(reported).toContain("always-written JSONL artifacts");
     expect(result.issues).toContain(
-      `${join(repoRoot, "packages/agent-app/src/cli-background-command.ts")}:2:11: ` +
+      `${join(repoRoot, "packages/channel-operator/src/server.ts")}:2:11: ` +
         "uses absolute observability/replay wording \"always-written JSONL artifacts\". " +
         "Describe transport and string caps, best-effort export, the start snapshot, " +
         "in-memory buffering, terminal replacement, and crash-loss/reconciliation boundaries instead.",
@@ -822,18 +816,16 @@ describe("check-consumer-docs-consistency", () => {
     expect(reported).toContain("full-fidelity TUI NDJSON metadata");
     expect(reported).toContain("guaranteed tool-output artifact persistence");
     for (const relativePath of [
-      "docs/reference/feature-registry.md",
-      "docs/playbooks/phoenix-observed-agent.md",
-      "docs/config/blueprint.md",
-      "docs/runtime/tools-and-guards.md",
-      "packages/agent-app/skills/mono-agent-composer/references/package-map.md",
-      "packages/agent-app/skills/mono-agent-composer/references/playbooks.md",
-      "packages/agent-app/skills/mono-agent-composer/references/config-blueprint.md",
-      "packages/agent-app/skills/mono-agent-composer/references/discovery-questions.md",
-      "packages/agent-app/src/cli-background-command.ts",
-      "packages/agent-app/src/cli-help.ts",
-      "packages/operator-adapter/package.json",
-      "packages/operator-adapter/src/tui/constants.ts",
+      "docs/reference/v1-architecture.md",
+      "docs/playbooks/index.md",
+      "docs/config/reference.md",
+      "docs/runtime/index.md",
+      "packages/create-mono-agent/skills/mono-agent-composer/references/config.md",
+      "packages/create-mono-agent/skills/mono-agent-composer/references/validation.md",
+      "packages/channel-operator/src/server.ts",
+      "packages/tui/src/ui/app.ts",
+      "packages/operator/package.json",
+      "packages/operator/src/state.ts",
       "packages/tui/package.json",
       "scripts/package-catalog.mjs",
       "docs/channels/tui.md",
@@ -854,14 +846,14 @@ describe("check-consumer-docs-consistency", () => {
       "# TUI package",
       "Replay is bounded; a separate tool-output file exists only when persistence succeeds.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/tui/src/ui/components/tool-panel.ts", [
+    await writeRepoDoc(repoRoot, "packages/tui/src/ui/terminal-text.ts", [
       "const notice = '(payload truncated for streaming; replay may also be bounded)';",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/agent-app/skills/mono-agent-composer/references/package-map.md", [
+    await writeRepoDoc(repoRoot, "packages/create-mono-agent/skills/mono-agent-composer/references/package-map.md", [
       "# Package map",
       "Remote event frames have a strict 256 KiB UTF-8 NDJSON cap: assistant-thought/tool-call payload fields are reduced, while other oversized variants become bounded markers; other frame kinds are unaffected.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/agent-app/skills/mono-agent-composer/references/discovery-questions.md", [
+    await writeRepoDoc(repoRoot, "packages/create-mono-agent/skills/mono-agent-composer/references/discovery-questions.md", [
       "# Discovery",
       "Phoenix provides best-effort export of every run lifecycle at the terminal boundary.",
       "JSONL artifacts are not always written to a terminal state; a crash can lose buffered events.",
@@ -870,18 +862,18 @@ describe("check-consumer-docs-consistency", () => {
       "# Tool guard",
       "The guard attempts best-effort persistence; missing or failed sinks leave omitted bytes unavailable.",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/agent-app/src/cli-background-command.ts", [
+    await writeRepoDoc(repoRoot, "packages/channel-operator/src/server.ts", [
       "function describeExporter() {",
       "  return \"JSONL artifacts remain local\";",
       "}",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/agent-app/src/cli-help.ts", [
+    await writeRepoDoc(repoRoot, "packages/tui/src/ui/app.ts", [
       "const HELP_COMMANDS = [",
       "  \"Open the operator console from any directory: live chat with structured\",",
       "  \"thinking/tool/telemetry insight, recorded-run replay, and config view.\",",
       "];",
     ].join("\n"));
-    await writeRepoDoc(repoRoot, "packages/operator-adapter/package.json", JSON.stringify({
+    await writeRepoDoc(repoRoot, "packages/operator/package.json", JSON.stringify({
       description: "Loopback operator adapters: structured TUI NDJSON turns and live SSE.",
     }));
     await writeRepoDoc(repoRoot, "docs/channels/tui.md", [

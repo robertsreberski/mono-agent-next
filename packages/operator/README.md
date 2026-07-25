@@ -37,10 +37,15 @@ absent field means "not advertised" and is never guessed.
 
 ## Install / Usage
 
-Install the library in an operator product:
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
+Build the library and its workspace dependencies:
 
 ```bash
-pnpm add @mono-agent/operator
+pnpm --filter @mono-agent/operator... run build
 ```
 
 Discover a running agent, connect, and reduce one turn without interpreting the

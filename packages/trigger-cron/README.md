@@ -24,10 +24,15 @@ the typed trigger host with stable run and idempotency metadata.
 
 ## Install / Usage
 
-Install the package and select it in `mono-agent.config.json`:
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
+Build the package and its workspace dependencies:
 
 ```bash
-pnpm add @mono-agent/trigger-cron
+pnpm --filter @mono-agent/trigger-cron... run build
 ```
 
 ```json
@@ -166,7 +171,7 @@ proactive channel owns delivery.
 ## Related Documentation
 
 - [V1 architecture](../../docs/reference/v1-architecture.md)
-- [V1 refactor PRD](../../refactor/mono-agent-v1-prd.md)
+- [Generated config reference](../../docs/config/reference.md)
 
 ## Verification
 

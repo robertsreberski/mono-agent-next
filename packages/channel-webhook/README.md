@@ -25,10 +25,15 @@ optionally HMAC-signed webhook destination.
 
 ## Install / Usage
 
-Install the package as a direct dependency of the agent project:
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
+Build this module and its workspace dependencies:
 
 ```bash
-pnpm add @mono-agent/channel-webhook
+pnpm --filter @mono-agent/channel-webhook... run build
 ```
 
 Select it in `mono-agent.config.json`. Secret values are never accepted inline;

@@ -229,6 +229,42 @@ export function releaseBuildLock(repo, lock) {
   if (releaseError !== undefined) throw releaseError;
 }
 
+/**
+ * Close a held lock descriptor without unlinking its pathname. If normal
+ * release already removed the pathname, recreate one durable blocker instead.
+ * Any surviving lock entry makes marker readers fail closed.
+ */
+export function preserveBuildLock(repo, lock) {
+  if (!isRecord(lock) || typeof lock.fd !== "number") {
+    throw new Error("invalid build lock handle");
+  }
+  if (lock.released !== true) {
+    lock.released = true;
+    try {
+      closeSync(lock.fd);
+    } catch {
+      // Pathname preservation, not descriptor lifetime, is the reader guard.
+    }
+  }
+  if (!buildLockIsAbsent(repo)) return;
+
+  let replacement;
+  try {
+    replacement = acquireBuildLock(repo);
+  } catch (error) {
+    if (!buildLockIsAbsent(repo)) return;
+    throw error;
+  }
+  replacement.released = true;
+  try {
+    closeSync(replacement.fd);
+  } finally {
+    if (buildLockIsAbsent(repo)) {
+      throw new Error("build lock could not be preserved");
+    }
+  }
+}
+
 export function publishBuildMarker(repo, marker, options = {}) {
   const parsed = parseBuildMarker(marker);
   if (parsed === null) {
@@ -384,7 +420,6 @@ function outputRoots(repo) {
 
   for (const required of [
     join(repo, "packages", "web", "webapp", "dist"),
-    join(repo, "demos", "final-agent", "dist"),
   ]) {
     assertDirectory(required);
     roots.add(required);

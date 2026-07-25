@@ -42,6 +42,23 @@ describe("runCreateMonoAgentCli", () => {
     expect(JSON.parse(await readFile(join(root, "my-agent", "package.json"), "utf8")).name).toBe("my-agent");
   });
 
+  it("keeps source-preview help off predecessor registry entry points", async () => {
+    const stdout: string[] = [];
+
+    await expect(runCreateMonoAgentCli(["--help"], {
+      stdout: (text) => stdout.push(text),
+      stderr: () => undefined,
+    }, { invocationName: "create-mono-agent" })).resolves.toBe(0);
+
+    const usage = stdout.join("");
+    expect(usage).toContain("create-mono-agent [directory]");
+    expect(usage).toContain("built mono-agent-next checkout");
+    expect(usage).toContain("predecessor repository");
+    expect(usage).toContain("Do not use --install");
+    expect(usage).not.toContain("npm create");
+    expect(usage).not.toContain("@latest");
+  });
+
   it.each(["init", "setup"])(
     "treats %s as a create target instead of a mono-agent subcommand",
     async (targetName) => {

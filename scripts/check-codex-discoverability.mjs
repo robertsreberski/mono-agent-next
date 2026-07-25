@@ -3,7 +3,7 @@ import { lstat, readFile, readlink, readdir } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const skillRoots = ["skills", "packages/agent-app/skills"];
+const skillRoots = ["skills", "packages/create-mono-agent/skills"];
 const requiredSymlinks = new Map([
   [".agents/skills", "../skills"],
   [".claude/skills", "../skills"],

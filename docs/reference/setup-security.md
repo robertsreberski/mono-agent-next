@@ -128,14 +128,13 @@ never deletes agent config, memory, state, logs, or web data.
 
 The repository is public and CI may run on it. Public visibility does not
 authorize publishing packages, deploying a consumer, restarting or removing a
-service, migrating data, running a production soak, or retiring v0.
+service, adopting data, or running a production soak.
 
-## Migration
+## Data adoption
 
-Keep the v0 project and service definition read-only during source rehearsal.
-Back up BuJo and rehearse on a complete copy. Do not import conversation
-history, run artifacts, provider-native sessions, web state, A2A, or
-continuation records. Follow the [migration guide](/migration/v0-to-v1-source-beta/)
-and treat duplicate consumption, memory loss, unprovable process identity,
-hidden auth failure, false health, missed schedules, crash loops, or secret
-exposure as immediate rollback triggers.
+Keep the source project and service definition read-only during rehearsal. Back
+up durable data and rehearse on a complete copy. Do not automatically import
+conversation history, run artifacts, provider-native sessions, web state, or
+retired extension records. Treat duplicate consumption, memory loss,
+unprovable process identity, hidden auth failure, false health, missed
+schedules, crash loops, or secret exposure as immediate rollback triggers.

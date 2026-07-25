@@ -1,48 +1,30 @@
 ---
 title: "Your First Agent"
-description: "Run the packed minimal v1 proof, inspect a generated template, and learn the exact foreground CLI workflow."
+description: "Render a minimal agent from the built source, run its hermetic package proof, and learn the foreground CLI workflow."
 sidebar:
   order: 2
 ---
 
-The fastest honest first-agent result in the public source repository is the packed
-minimal verification. It exercises a clean installed consumer and one real HTTP
-turn without requiring registry publication or live provider credentials.
+The v1 packages are not published to npm during the source preview. Existing
+registry artifacts under the same package names belong to the predecessor
+repository, not this v1 source. Start with the built scaffolder to create and
+inspect your agent folder, then use the repository's hermetic packed proof for
+the runnable installed boundary.
 
-## Run the end-to-end proof
+## Render the minimal template
 
-From the installed repository:
-
-```bash
-pnpm run verify:v1-minimal
-```
-
-The verifier:
-
-1. builds and packs the SDK, core, CLI, Pi runtime, webhook channel, and
-   scaffolder;
-2. installs the scaffolder into a temporary bootstrap project;
-3. renders the default `minimal` template;
-4. installs only the five selected agent-process packages into a clean consumer;
-5. validates the untouched config and composes its selected-module schema;
-6. starts a local OpenAI-compatible test provider and the foreground CLI;
-7. proves unauthenticated webhook rejection, then completes one authenticated
-   turn; and
-8. sends `SIGTERM` and verifies a clean drain and stop.
-
-Success ends with a single verification message. Temporary files and processes
-are removed in the script's cleanup path.
-
-## Inspect the minimal template
-
-Render another copy without trying to install unreleased versions:
+From the built repository, render a project without trying to install
+unreleased versions:
 
 ```bash
+SOURCE_ROOT="$(pwd -P)"
+SCAFFOLD_PARENT="$(mktemp -d)"
+SCAFFOLD_PARENT="$(cd "$SCAFFOLD_PARENT" && pwd -P)"
 node packages/create-mono-agent/dist/bin/create-mono-agent.js \
-  /tmp/my-first-agent \
+  "$SCAFFOLD_PARENT/my-first-agent" \
   --template minimal
 
-cd /tmp/my-first-agent
+cd "$SCAFFOLD_PARENT/my-first-agent"
 sed -n '1,240p' mono-agent.config.json
 sed -n '1,200p' package.json
 ```
@@ -62,16 +44,43 @@ Its config selects one Pi instance and one authenticated loopback webhook. The
 name `WEBHOOK_API_KEY=` with no value; the scaffolder does not write provider or
 channel credentials.
 
+## Run the end-to-end proof
+
+Return to the source repository and run:
+
+```bash
+cd "$SOURCE_ROOT"
+pnpm run verify:v1-minimal
+```
+
+The verifier:
+
+1. builds and packs the SDK, core, CLI, Pi runtime, webhook channel, and
+   scaffolder;
+2. installs the scaffolder into a temporary bootstrap project;
+3. renders the default `minimal` template;
+4. installs only the five selected agent-process packages into a clean consumer;
+5. validates the untouched config and composes its selected-module schema;
+6. starts a local OpenAI-compatible test provider and the foreground CLI;
+7. proves unauthenticated webhook rejection, then completes one authenticated
+   turn; and
+8. sends `SIGTERM` and verifies a clean drain and stop.
+
+Success ends with a single verification message. Temporary files and processes
+are removed in the script's cleanup path. The proof does not publish packages,
+read production credentials, or modify an existing agent.
+
 ## Understand the installed CLI workflow
 
 Once an agent project has been installed from reviewed v1 artifacts and has a
-root lockfile, use the following exact commands.
+root lockfile, invoke that project's exact CLI package path. This prevents a
+global predecessor command from shadowing v1.
 
 ### Validate
 
 ```bash
-mono-agent validate --config ./mono-agent.config.json
-mono-agent validate --config ./mono-agent.config.json --json
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js validate --config ./mono-agent.config.json
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js validate --config ./mono-agent.config.json --json
 ```
 
 Validation parses strict JSON, resolves every selected direct dependency from
@@ -82,8 +91,8 @@ cross-module references. It does not start module instances.
 ### Inspect
 
 ```bash
-mono-agent inspect --config ./mono-agent.config.json
-mono-agent inspect --config ./mono-agent.config.json --json
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js inspect --config ./mono-agent.config.json
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js inspect --config ./mono-agent.config.json --json
 ```
 
 Inspection performs the same load/import validation and prints the agent,
@@ -93,8 +102,8 @@ configured MCP server names. It does not create or start modules.
 ### Generate the exact schema
 
 ```bash
-mono-agent config schema --config ./mono-agent.config.json --write
-mono-agent config explain --config ./mono-agent.config.json channels.inbound.apiKey
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js config schema --config ./mono-agent.config.json --write
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js config explain --config ./mono-agent.config.json channels.inbound.apiKey
 ```
 
 The schema command replaces the scaffold seed schema with one composed from the
@@ -108,7 +117,7 @@ authentication, then start:
 
 ```bash
 export WEBHOOK_API_KEY='replace-with-a-long-random-token'
-mono-agent start --config ./mono-agent.config.json
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js start --config ./mono-agent.config.json
 ```
 
 The first output line is one JSON `started` event with the actual channel
@@ -135,7 +144,7 @@ not discover or list them. Supply the configured instance id, exact command
 name, and schema-valid JSON input:
 
 ```bash
-mono-agent module command --config ./mono-agent.config.json \
+node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js module command --config ./mono-agent.config.json \
   --module cron \
   --name trigger-cron:invoke \
   --input-json '{"jobId":"heartbeat"}'

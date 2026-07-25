@@ -35,7 +35,7 @@ Create a strict `web.config.json`:
   "allowInsecureHttp": false,
   "dataDirectory": "./.mono-agent/web",
   "agentRegistries": [
-    "../personal-agent/.mono-agent/trace-sources"
+    "../example-agent/.mono-agent/trace-sources"
   ]
 }
 ```
@@ -48,7 +48,7 @@ Start the foreground product:
 
 ```bash
 MONO_AGENT_WEB_AUTH_TOKEN="replace-with-a-long-random-token" \
-  mono-agent-web ./web.config.json
+  node packages/web/dist/bin.js ./web.config.json
 ```
 
 The default listener is `127.0.0.1:5050`. This package does not install an OS

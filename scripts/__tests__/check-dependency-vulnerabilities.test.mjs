@@ -738,19 +738,19 @@ describe("dependency vulnerability gate", () => {
     const options = {
       packageName: "ws",
       versions: ["8.20.1"],
-      rootPackageNames: ["@mono-agent/agent-app", "@mono-agent/slack-adapter"],
+      rootPackageNames: ["@mono-agent/core", "@mono-agent/channel-slack"],
     };
     const expected = {
       "ws@8.20.1": [
-        "@mono-agent/agent-app -> provider@2.0.0 -> ws@8.20.1",
-        "@mono-agent/slack-adapter -> ws@8.20.1",
+        "@mono-agent/channel-slack -> ws@8.20.1",
+        "@mono-agent/core -> provider@2.0.0 -> ws@8.20.1",
       ],
     };
 
     expect(parsePnpmWhyDependencyPaths(JSON.stringify([
       {
-        name: "@mono-agent/agent-app",
-        path: "/repo/packages/agent-app",
+        name: "@mono-agent/core",
+        path: "/repo/packages/core",
         dependencies: {
           provider: {
             version: "2.0.0",
@@ -759,14 +759,14 @@ describe("dependency vulnerability gate", () => {
         },
       },
       {
-        name: "@mono-agent/slack-adapter",
-        path: "/repo/packages/slack-adapter",
+        name: "@mono-agent/channel-slack",
+        path: "/repo/packages/channel-slack",
         dependencies: { "socket-alias": { from: "ws", version: "8.20.1" } },
       },
     ]), { ...options, pnpmMajor: 10 })).toEqual(expected);
 
     expect(parsePnpmWhyDependencyPaths(JSON.stringify([
-      { name: "@mono-agent/agent-app", version: "0.11.2", path: "/repo/packages/agent-app" },
+      { name: "@mono-agent/core", version: "0.11.2", path: "/repo/packages/core" },
       {
         name: "ws",
         version: "8.20.1",
@@ -776,13 +776,13 @@ describe("dependency vulnerability gate", () => {
             name: "provider",
             version: "2.0.0",
             dependents: [{
-              name: "@mono-agent/agent-app",
+              name: "@mono-agent/core",
               version: "0.11.2",
               depField: "dependencies",
             }],
           },
           {
-            name: "@mono-agent/slack-adapter",
+            name: "@mono-agent/channel-slack",
             version: "0.11.2",
             depField: "dependencies",
           },
@@ -794,7 +794,7 @@ describe("dependency vulnerability gate", () => {
       name: "ws",
       version: "8.20.1",
       dependents: [{
-        name: "@mono-agent/agent-app",
+        name: "@mono-agent/core",
         version: "0.11.2",
         depField: "dependencies",
         dependencies: {},
@@ -937,7 +937,7 @@ describe("dependency vulnerability gate", () => {
       packageName: "ws",
       pnpmMajor: 11,
       versions: ["8.20.1"],
-      rootPackageNames: ["@mono-agent/agent-app"],
+      rootPackageNames: ["@mono-agent/core"],
     };
     expect(parsePnpmWhyDependencyPaths(JSON.stringify([{
       name: "ws",
@@ -948,7 +948,7 @@ describe("dependency vulnerability gate", () => {
           version: "2.0.0",
           peersSuffixHash: "same",
           dependents: [{
-            name: "@mono-agent/agent-app",
+            name: "@mono-agent/core",
             version: "0.11.3",
             depField: "dependencies",
           }],
@@ -966,8 +966,8 @@ describe("dependency vulnerability gate", () => {
       ],
     }]), options)).toEqual({
       "ws@8.20.1": [
-        "@mono-agent/agent-app -> provider@2.0.0 -> wrapper@3.0.0 -> ws@8.20.1",
-        "@mono-agent/agent-app -> provider@2.0.0 -> ws@8.20.1",
+        "@mono-agent/core -> provider@2.0.0 -> wrapper@3.0.0 -> ws@8.20.1",
+        "@mono-agent/core -> provider@2.0.0 -> ws@8.20.1",
       ],
     });
   });
@@ -977,10 +977,10 @@ describe("dependency vulnerability gate", () => {
       packageName: "ws",
       pnpmMajor: 11,
       versions: ["8.20.1"],
-      rootPackageNames: ["@mono-agent/slack-adapter"],
+      rootPackageNames: ["@mono-agent/channel-slack"],
     };
     const rootDependent = {
-      name: "@mono-agent/slack-adapter",
+      name: "@mono-agent/channel-slack",
       version: "0.11.3",
       depField: "dependencies",
     };
@@ -1002,7 +1002,7 @@ describe("dependency vulnerability gate", () => {
       }],
     }];
     expect(parsePnpmWhyDependencyPaths(JSON.stringify(legitimateCycle), options)).toEqual({
-      "ws@8.20.1": ["@mono-agent/slack-adapter -> provider@1.0.0 -> ws@8.20.1"],
+      "ws@8.20.1": ["@mono-agent/channel-slack -> provider@1.0.0 -> ws@8.20.1"],
     });
 
     const hydratedCircular = [{
@@ -1030,8 +1030,8 @@ describe("dependency vulnerability gate", () => {
     }];
     expect(parsePnpmWhyDependencyPaths(JSON.stringify(hydratedCircular), options)).toEqual({
       "ws@8.20.1": [
-        "@mono-agent/slack-adapter -> provider@1.0.0 -> a@1.0.0 -> ws@8.20.1",
-        "@mono-agent/slack-adapter -> provider@1.0.0 -> z@1.0.0 -> ws@8.20.1",
+        "@mono-agent/channel-slack -> provider@1.0.0 -> a@1.0.0 -> ws@8.20.1",
+        "@mono-agent/channel-slack -> provider@1.0.0 -> z@1.0.0 -> ws@8.20.1",
       ],
     });
 
@@ -1060,8 +1060,8 @@ describe("dependency vulnerability gate", () => {
     }];
     expect(parsePnpmWhyDependencyPaths(JSON.stringify(hydrationCreatedCycle), options)).toEqual({
       "ws@8.20.1": [
-        "@mono-agent/slack-adapter -> provider@1.0.0 -> a@1.0.0 -> ws@8.20.1",
-        "@mono-agent/slack-adapter -> provider@1.0.0 -> z@1.0.0 -> ws@8.20.1",
+        "@mono-agent/channel-slack -> provider@1.0.0 -> a@1.0.0 -> ws@8.20.1",
+        "@mono-agent/channel-slack -> provider@1.0.0 -> z@1.0.0 -> ws@8.20.1",
       ],
     });
 
@@ -1142,7 +1142,7 @@ describe("dependency vulnerability gate", () => {
       packageName: "ws",
       pnpmMajor: 11,
       versions: ["8.20.1"],
-      rootPackageNames: ["@mono-agent/slack-adapter"],
+      rootPackageNames: ["@mono-agent/channel-slack"],
     };
     expect(() => parsePnpmWhyDependencyPaths(JSON.stringify([{
       name: "ws",
@@ -1154,7 +1154,7 @@ describe("dependency vulnerability gate", () => {
       name: "ws",
       version: "8.20.1",
       dependents: [{
-        name: "@mono-agent/slack-adapter",
+        name: "@mono-agent/channel-slack",
         version: "0.11.3",
         depField: "devDependencies",
       }],
@@ -1166,7 +1166,7 @@ describe("dependency vulnerability gate", () => {
         name: "ws",
         version: "8.20.1",
         dependents: [{
-          name: "@mono-agent/slack-adapter",
+          name: "@mono-agent/channel-slack",
           version: "0.11.3",
           depField: "dependencies",
         }],
@@ -1184,7 +1184,7 @@ describe("dependency vulnerability gate", () => {
         version: "8.20.1",
         peersSuffixHash: "complete",
         dependents: [{
-          name: "@mono-agent/slack-adapter",
+          name: "@mono-agent/channel-slack",
           version: "0.11.3",
           depField: "dependencies",
         }],
@@ -1203,7 +1203,7 @@ describe("dependency vulnerability gate", () => {
         version: "8.20.1",
         peersSuffixHash: "complete",
         dependents: [{
-          name: "@mono-agent/slack-adapter",
+          name: "@mono-agent/channel-slack",
           version: "0.11.3",
           depField: "dependencies",
         }],
@@ -1218,7 +1218,7 @@ describe("dependency vulnerability gate", () => {
           name: "provider",
           version: "1.0.0",
           dependents: [{
-            name: "@mono-agent/slack-adapter",
+            name: "@mono-agent/channel-slack",
             version: "0.11.3",
             depField: "dependencies",
           }],
@@ -1242,7 +1242,7 @@ describe("dependency vulnerability gate", () => {
       dependents: [
         { name: "orphan", version: "1.0.0", dependents: [] },
         {
-          name: "@mono-agent/slack-adapter",
+          name: "@mono-agent/channel-slack",
           version: "0.11.3",
           depField: "dependencies",
         },
@@ -1262,7 +1262,7 @@ describe("dependency vulnerability gate", () => {
         version: "8.20.1",
         peersSuffixHash: "valid",
         dependents: [{
-          name: "@mono-agent/slack-adapter",
+          name: "@mono-agent/channel-slack",
           version: "0.11.3",
           depField: "dependencies",
         }],
@@ -1272,7 +1272,7 @@ describe("dependency vulnerability gate", () => {
 
   it("bounds reverse-path hydration before a compact diamond can expand exponentially", () => {
     const rootDependent = {
-      name: "@mono-agent/slack-adapter",
+      name: "@mono-agent/channel-slack",
       version: "0.11.3",
       depField: "dependencies",
     };
@@ -1305,7 +1305,7 @@ describe("dependency vulnerability gate", () => {
       packageName: "ws",
       pnpmMajor: 11,
       versions: ["8.20.1"],
-      rootPackageNames: ["@mono-agent/slack-adapter"],
+      rootPackageNames: ["@mono-agent/channel-slack"],
     })).toThrow("exceeded 10000 complete production dependency paths");
 
     const peerVariants = ["peer-a", "peer-b"].map((peersSuffixHash) => ({
@@ -1320,7 +1320,7 @@ describe("dependency vulnerability gate", () => {
       packageName: "ws",
       pnpmMajor: 11,
       versions: ["8.20.1"],
-      rootPackageNames: ["@mono-agent/slack-adapter"],
+      rootPackageNames: ["@mono-agent/channel-slack"],
     })).toThrow("target ws@8.20.1 exceeded 10000 complete production dependency paths");
   });
 

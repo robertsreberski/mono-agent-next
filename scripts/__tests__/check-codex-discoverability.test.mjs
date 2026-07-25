@@ -20,7 +20,7 @@ describe("check-codex-discoverability", () => {
   it("accepts repo skills, Codex metadata, and TOML companions", async () => {
     const cwd = await tempRepo();
     await writeSkill(cwd, "skills/verify-green", "verify-green");
-    await writeSkill(cwd, "packages/agent-app/skills/mono-agent-composer", "mono-agent-composer");
+    await writeSkill(cwd, "packages/create-mono-agent/skills/mono-agent-composer", "mono-agent-composer");
     await writeAgentPair(cwd, "implementer");
 
     await symlink("../skills", join(cwd, ".agents", "skills"));
@@ -83,7 +83,7 @@ async function tempRepo() {
   await mkdir(join(dir, ".codex"), { recursive: true });
   await mkdir(join(dir, "agents"), { recursive: true });
   await mkdir(join(dir, "skills"), { recursive: true });
-  await mkdir(join(dir, "packages/agent-app/skills"), { recursive: true });
+  await mkdir(join(dir, "packages/create-mono-agent/skills"), { recursive: true });
   return dir;
 }
 

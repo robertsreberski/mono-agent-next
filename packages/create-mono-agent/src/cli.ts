@@ -279,12 +279,14 @@ function collectReasons(
 function createUsage(): string {
   return [
     "Usage:",
-    "  npm create mono-agent@latest [directory] [-- --template <minimal|personal|multi-runtime>]",
     "  create-mono-agent [directory] [--template <minimal|personal|multi-runtime>] [--install] [--package-manager <pnpm|npm>]",
     "  mono-agent init [directory] [--template <minimal|personal|multi-runtime>] [--install] [--package-manager <pnpm|npm>] [--name <package-name>]",
     "  mono-agent setup [directory] [--template <minimal|personal|multi-runtime>] [--install] [--package-manager <pnpm|npm>] [--name <package-name>]",
     "  mono-agent install-skill [--target <claude|codex|both>] [--force]",
     "",
+    "Source preview: use this executable from the built mono-agent-next checkout.",
+    "Existing registry artifacts under these names belong to the predecessor repository.",
+    "Do not use --install until an authorized v1 release passes clean registry verification.",
     "The default template is minimal.",
     "Package installation never runs unless --install is supplied.",
     "",

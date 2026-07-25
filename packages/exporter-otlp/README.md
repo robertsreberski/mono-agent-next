@@ -26,10 +26,15 @@ accepted/rejected counts and degraded health.
 
 ## Install / Usage
 
-Install the exporter as a direct dependency and select it under observability:
+Existing registry artifacts under this package name belong to the predecessor
+repository, not this v1 source. Do not install them during the source preview;
+build this checkout through the
+[workspace source setup](../../docs/getting-started/install.md) instead.
+
+Build the exporter and its workspace dependencies:
 
 ```bash
-pnpm add @mono-agent/exporter-otlp
+pnpm --filter @mono-agent/exporter-otlp... run build
 ```
 
 ```json
@@ -178,7 +183,7 @@ values.
 
 ## Related Documentation
 
-- [V1 product requirements](../../refactor/mono-agent-v1-prd.md)
+- [V1 architecture](../../docs/reference/v1-architecture.md)
 - [Module SDK](../module-sdk/README.md)
 
 ## Verification

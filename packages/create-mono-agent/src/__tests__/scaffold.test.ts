@@ -164,6 +164,21 @@ describe("project templates", () => {
     });
   });
 
+  it.each(PROJECT_TEMPLATES)(
+    "keeps the rendered %s README off unpublished registry execution",
+    (template) => {
+      const files = fileMap(renderProject({ projectName: `${template}-example`, template }));
+      const readme = files.get("README.md");
+
+      expect(readme).toContain("not published to npm during the source preview");
+      expect(readme).toContain("belong to the predecessor repository");
+      expect(readme).toContain("pnpm run verify:consumers");
+      expect(readme).not.toMatch(/\b(?:npm|pnpm|yarn)\s+(?:i|install|add)\b/iu);
+      expect(readme).not.toMatch(/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?start\b/iu);
+      expect(readme).not.toMatch(/\bnpx\b/iu);
+    },
+  );
+
   it("renders the retained Personal Agent contract with current module fields", () => {
     const files = fileMap(renderProject({ projectName: "personal-agent", template: "personal" }));
     const config = parseJson(files, "mono-agent.config.json");
