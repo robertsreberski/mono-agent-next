@@ -179,7 +179,10 @@ export function createOpenAiApiServer(options: CreateOpenAiApiServerOptions): Op
 
   const drain = (context: ModuleDrainContext): Promise<void> => {
     if (shutdownPromise !== undefined) return shutdownPromise;
-    beginClose();
+    // Started here so the listener stops accepting while active requests
+    // drain; `finishShutdown` below calls the same memoized promise and is
+    // where its outcome is actually observed.
+    void beginClose();
     shutdownPromise = (async () => {
       const idle = await waitForIdle(
         active,

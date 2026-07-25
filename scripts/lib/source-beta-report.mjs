@@ -1214,6 +1214,9 @@ export function classifySourcePath(path) {
     || /^tests\//u.test(path)
     || /^website\/(?:scripts\/__tests__|tests)\//u.test(path)
   ) return "test";
+  // Repository tooling that has to sit at the root because its tool resolves
+  // config upward from the working directory.
+  if (path === "eslint.config.mjs") return "tooling";
   if (
     path.startsWith("scripts/")
     || path.startsWith("website/scripts/")

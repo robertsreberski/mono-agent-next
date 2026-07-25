@@ -610,7 +610,7 @@ export async function acquireProcessLease(
   let created = false;
   if (identity === undefined) {
     try {
-      identity = await createSecureFile(path, await createLeaseDatabase());
+      identity = await createSecureFile(path, createLeaseDatabase());
       created = true;
     } catch (error) {
       if (!isAlreadyExists(error)) throw error;

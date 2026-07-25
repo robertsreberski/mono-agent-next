@@ -169,6 +169,7 @@ describe("source-beta production budgets", () => {
     expect(classifySourcePath("extras/docs-mcp/scripts/smoke-packed-contract.mjs"))
       .toBe("tooling");
     expect(classifySourcePath("website/scripts/check-links.mjs")).toBe("tooling");
+    expect(classifySourcePath("eslint.config.mjs")).toBe("tooling");
     for (const path of [
       "packages/core/src/test/hidden.ts",
       "packages/core/src/tests/hidden.ts",

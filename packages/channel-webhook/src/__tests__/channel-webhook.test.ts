@@ -1237,8 +1237,10 @@ describe("mono-agent channel module", () => {
     });
     moduleChannels.add(channel);
     await channel.start?.({ signal: lifecycle.signal });
+    const deliver = channel.deliver;
+    expect(deliver, "the capacity test needs a channel that delivers").toBeDefined();
     const pending = Array.from({ length: 1_000 }, (_, index) =>
-      channel.deliver?.({
+      deliver!.call(channel, {
         conversationId: "webhook:outbound",
         text: `notice-${String(index)}`,
         idempotencyKey: `capacity-health-${String(index)}`,
