@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  OperatorClient,
   OPERATOR_REGISTRY_SCHEMA,
   serializeOperatorFrame,
   type OperatorFrame,
@@ -18,6 +19,7 @@ import {
 } from "@mono-agent/operator/testing";
 
 import { startMonoAgentTui } from "../runtime/start.js";
+import { MonoAgentTuiApp } from "../ui/app.js";
 import { stripAnsi, TestTerminal } from "./test-terminal.js";
 
 const json = (value: unknown): Response => new Response(JSON.stringify(value), {
@@ -39,6 +41,25 @@ function delayedFixtureStream(): ReadableStream<Uint8Array> {
   });
 }
 
+function openFixtureStream(
+  frames: readonly OperatorFrame[],
+  signal?: AbortSignal | null,
+): Response {
+  const encoder = new TextEncoder();
+  return new Response(new ReadableStream({
+    start(controller) {
+      for (const frame of frames) {
+        controller.enqueue(encoder.encode(serializeOperatorFrame(frame)));
+      }
+      const abort = () => controller.error(signal?.reason ?? new Error("fixture stream aborted"));
+      if (signal?.aborted === true) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
+    },
+  }), {
+    headers: { "content-type": "application/x-ndjson" },
+  });
+}
+
 async function eventually(assertion: () => void, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
@@ -52,6 +73,11 @@ async function eventually(assertion: () => void, timeoutMs = 2_000): Promise<voi
     }
   }
   throw lastError;
+}
+
+function submit(terminal: TestTerminal, value: string): void {
+  for (const character of value) terminal.feed(character);
+  terminal.feed("\r");
 }
 
 describe("standalone TUI", () => {
@@ -472,6 +498,169 @@ describe("standalone TUI", () => {
     expect(answerBody).toEqual(MULTI_QUESTION_ASK_USER_ANSWER);
     await eventually(() => expect(stripAnsi(terminal.output())).toContain("Answers recorded."));
     await handle.stop();
+  });
+
+  it("surfaces a rejecting answerAsk as a warning notice and keeps the renderer alive", async () => {
+    const terminal = new TestTerminal();
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v1/turns")) {
+        return openFixtureStream(MULTI_QUESTION_ASK_USER_TURN_FRAMES.slice(0, -1), init?.signal);
+      }
+      if (url.endsWith("/v1/conversations/fixture-conversation/ask")) {
+        return new Response("ask unavailable", { status: 500 });
+      }
+      throw new Error(`unexpected request ${url}`);
+    };
+    const handle = await startMonoAgentTui({
+      endpoint: "http://127.0.0.1:4321/operator",
+      fetch: fetchImpl,
+      terminal,
+      conversationId: "fixture-conversation",
+    });
+
+    try {
+      submit(terminal, "ask me");
+      await eventually(() => expect(stripAnsi(terminal.output())).toContain("Answer every question"));
+      submit(terminal, `/answer ${JSON.stringify(MULTI_QUESTION_ASK_USER_ANSWER.answers)}`);
+      await eventually(() => {
+        expect(stripAnsi(terminal.output())).toContain("operator request failed with HTTP 500");
+        expect(terminal.output()).toContain("\u001b[38;5;214moperator request failed with HTTP 500");
+      });
+      submit(terminal, "/help");
+      await eventually(() => expect(stripAnsi(terminal.output())).toContain("/attach <path>"));
+      await expect(handle.stop()).resolves.toBeUndefined();
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it("surfaces a rejecting offerLiveInput as a warning notice and keeps the renderer alive", async () => {
+    const terminal = new TestTerminal();
+    const activeFrames = VALID_TURN_FRAMES.slice(0, 2);
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v1/turns")) return openFixtureStream(activeFrames, init?.signal);
+      if (url.endsWith("/v1/conversations/fixture-conversation/live-input")) {
+        return new Response("live input unavailable", { status: 500 });
+      }
+      throw new Error(`unexpected request ${url}`);
+    };
+    const handle = await startMonoAgentTui({
+      endpoint: "http://127.0.0.1:4321/operator",
+      fetch: fetchImpl,
+      terminal,
+      conversationId: "fixture-conversation",
+    });
+
+    try {
+      submit(terminal, "start a turn");
+      await eventually(() => expect(stripAnsi(terminal.output())).toContain("capabilities updated"));
+      submit(terminal, "steer this turn");
+      await eventually(() => {
+        expect(stripAnsi(terminal.output())).toContain("operator request failed with HTTP 500");
+        expect(terminal.output()).toContain("\u001b[38;5;214moperator request failed with HTTP 500");
+      });
+      submit(terminal, "/help");
+      await eventually(() => expect(stripAnsi(terminal.output())).toContain("/attach <path>"));
+      await expect(handle.stop()).resolves.toBeUndefined();
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it("/send refuses a second turn while the first turn has not been accepted", async () => {
+    const terminal = new TestTerminal();
+    let turnRequests = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v1/turns")) {
+        turnRequests += 1;
+        return openFixtureStream([], init?.signal);
+      }
+      throw new Error(`unexpected request ${url}`);
+    };
+    const handle = await startMonoAgentTui({
+      endpoint: "http://127.0.0.1:4321/operator",
+      fetch: fetchImpl,
+      terminal,
+      conversationId: "fixture-conversation",
+    });
+
+    try {
+      submit(terminal, "first turn");
+      await eventually(() => expect(turnRequests).toBe(1));
+      submit(terminal, "/send follow-up");
+      await eventually(() => {
+        expect(stripAnsi(terminal.output())).toContain("A turn is starting or already active");
+      });
+      expect(turnRequests).toBe(1);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it("preserves line breaks in structured config notices", async () => {
+    const terminal = new TestTerminal();
+    const now = new Date().toISOString();
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+      if (url.endsWith("/v1/config")) {
+        return json({ revision: "config-r1", generatedAt: now, value: { safe: true }, redacted: true });
+      }
+      throw new Error(`unexpected request ${url}`);
+    };
+    const handle = await startMonoAgentTui({
+      endpoint: "http://127.0.0.1:4321/operator",
+      fetch: fetchImpl,
+      terminal,
+      conversationId: "fixture-conversation",
+    });
+
+    try {
+      submit(terminal, "/config");
+      await eventually(() => {
+        const output = stripAnsi(terminal.output());
+        expect(output).toMatch(/\n\s*"safe": true/u);
+        expect(output).not.toContain("\\u000a");
+        expect(output).not.toContain("\\n");
+      });
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it("evicts the oldest transcript children at the fixed renderer bound", async () => {
+    const terminal = new TestTerminal();
+    const client = new OperatorClient({
+      endpoint: "http://127.0.0.1:4321/operator",
+      fetch: async (input) => {
+        if (String(input).endsWith("/v1/info")) return json(VALID_OPERATOR_INFO);
+        throw new Error(`unexpected request ${String(input)}`);
+      },
+    });
+    const app = new MonoAgentTuiApp({
+      terminal,
+      client,
+      conversationId: "fixture-conversation",
+    });
+    await app.start();
+
+    try {
+      for (let index = 0; index < 260; index += 1) {
+        submit(terminal, `/unknown-${String(index)}`);
+      }
+      const transcript = (app as unknown as {
+        transcript: { readonly children: readonly unknown[] };
+      }).transcript;
+      expect(transcript.children).toHaveLength(256);
+    } finally {
+      app.stop();
+    }
   });
 
   it("enforces model and effort allowlists when the endpoint advertises them", async () => {
