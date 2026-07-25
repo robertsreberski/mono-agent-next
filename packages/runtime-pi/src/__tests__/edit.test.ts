@@ -199,6 +199,27 @@ describe("literal Edit implementation", () => {
     expect(await readFile(target, "utf8")).toBe("old value");
   });
 
+  it("removes an exclusive temporary file when setup fails after creation", async () => {
+    const root = await workspace();
+    const target = join(root, "target.txt");
+    await writeFile(target, "old value", "utf8");
+
+    await expect(editLiteralFile(root, {
+      filePath: "target.txt",
+      oldString: "old",
+      newString: "new",
+      replaceAll: false,
+    }, {
+      afterTemporaryCreate() {
+        throw new Error("injected chmod/stat failure");
+      },
+    })).rejects.toThrow("injected chmod/stat failure");
+
+    expect(await readFile(target, "utf8")).toBe("old value");
+    expect((await readdir(root)).filter((entry) =>
+      entry.endsWith(".mono-agent-edit.tmp"))).toEqual([]);
+  });
+
   it("bounds invalid UTF-8 input, source files, and replacement output", async () => {
     const root = await workspace();
     await writeFile(join(root, "invalid.txt"), Buffer.from([0xc3, 0x28]));

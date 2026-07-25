@@ -234,14 +234,15 @@ before model resolution or any provider request.
 | --- | --- |
 | `auth-command.ts` | Strict pre-start credential status, bounded model discovery, and honest login support reporting. |
 | `coding-tool-descriptors.ts` | Import-safe native-tool authority metadata used during synchronous model validation. |
-| `coding-tools.ts` | Governed Personal-compatible wrappers around Pi coding tools plus WebFetch. |
+| `coding-tools.ts`, `coding-tools-*.ts` | Native-tool composition plus shared validation and per-tool governed Pi/WebFetch handlers. |
 | `config.ts` | Strict runtime configuration schema and validation. |
 | `credentials.ts` | Descriptor-validated owner-private API-key/OAuth loading and identity-checked atomic refresh rotation. |
 | `edit.ts` | Bounded literal workspace editing with no-follow identity checks and atomic replacement. |
 | `models.ts` | Built-in models plus bounded, redirect-safe local-provider discovery. |
 | `node-repl.ts`, `node-repl-worker.ts` | Bounded run-scoped Node REPL child lifecycle and evaluation. |
-| `sessions.ts` | Durable owner-private reservation/commit markers and atomic fresh/forked native attempts. |
-| `runtime.ts` | Native harness lifecycle, sessions, live input, events, tools, schema-constrained output, token bounds, and settlement. |
+| `session-storage.ts`, `session-manager.ts`, `sessions.ts` | Guarded owner-private session storage, reservation/attempt lifecycle, and the stable internal facade. |
+| `runtime.ts`, `runtime-errors.ts` | Native harness lifecycle, classified failures, session settlement, and live-input cleanup. |
+| `runtime-messages.ts`, `runtime-events.ts`, `runtime-tools.ts` | Message translation, Pi-event normalization, and governed runtime tool adapters. |
 | `web-search.ts` | Bounded checked HTTP lifecycle and strict search-result parsing. |
 | `web-fetch.ts` | DNS-pinned public-HTTPS fetching with redirect and response bounds. |
 | `index.ts` | The typed `monoAgentModule` definition. |

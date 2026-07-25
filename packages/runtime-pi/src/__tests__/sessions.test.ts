@@ -207,10 +207,39 @@ describe("RuntimePiSessionManager", () => {
     const controller = new AbortController();
     await expect(manager.withAttempt(options("cancelled", controller.signal), async () => {
       controller.abort(new Error("turn cancelled"));
-      return { completed: true, value: undefined };
+      return { completed: false, value: undefined };
     })).rejects.toThrow("turn cancelled");
     expect(await jsonlFiles(sessionsRoot)).toHaveLength(1);
 
+    await manager.stop();
+  });
+
+  it("commits and returns a completed attempt after a post-task abort", async () => {
+    const root = await temporaryRoot();
+    const sessionsRoot = join(root, "sessions");
+    const manager = new RuntimePiSessionManager({
+      cwd: root,
+      namespace: "completed-late-abort",
+      sessionsRoot,
+    });
+    const controller = new AbortController();
+
+    await expect(manager.withAttempt({
+      conversationId: "conversation",
+      modelKey: "provider/model",
+      turnId: "completed",
+      signal: controller.signal,
+    }, async () => {
+      queueMicrotask(() => controller.abort(new Error("late abort")));
+      return { completed: true, value: "committed answer" };
+    })).resolves.toBe("committed answer");
+
+    expect(await jsonlFiles(sessionsRoot)).toHaveLength(1);
+    const markers = await filesWithSuffix(sessionsRoot, ".json");
+    expect(markers).toHaveLength(1);
+    expect(JSON.parse(await readFile(markers[0]!, "utf8"))).toMatchObject({
+      phase: "committed",
+    });
     await manager.stop();
   });
 

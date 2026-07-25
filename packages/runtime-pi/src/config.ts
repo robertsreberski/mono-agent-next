@@ -1,3 +1,5 @@
+import { envEligibleSchema } from "@mono-agent/module-sdk";
+
 export const DEFAULT_PI_AUTH_PATH = "~/.pi/agent/auth.json";
 
 export interface RuntimePiModelConfig {
@@ -285,4 +287,3 @@ export function parsePiModelReference(reference: string): { provider: string; mo
   }
   return { provider, model };
 }
-import { envEligibleSchema } from "@mono-agent/module-sdk";

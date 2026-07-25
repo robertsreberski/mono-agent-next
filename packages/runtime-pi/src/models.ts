@@ -96,7 +96,6 @@ export interface RuntimePiModelCapabilities {
 
 export interface RuntimePiModelRegistry {
   readonly models: Models;
-  readonly configuredSecrets: readonly string[];
   resolve(reference: string, signal?: AbortSignal): Promise<Model<string>>;
   capabilities(reference: string, signal?: AbortSignal): Promise<RuntimePiModelCapabilities>;
 }
@@ -400,7 +399,6 @@ export function createRuntimePiModelRegistry(
     }
     models = mutableModels;
   }
-  const configuredSecrets: string[] = [];
   const resolve = async (reference: string, signal?: AbortSignal): Promise<Model<string>> => {
     const { provider, model } = parsePiModelReference(reference);
     let resolved = models.getModel(provider, model);
@@ -421,7 +419,6 @@ export function createRuntimePiModelRegistry(
   };
   return {
     models,
-    configuredSecrets,
     resolve,
     async capabilities(reference, signal) {
       const model = await resolve(reference, signal);
