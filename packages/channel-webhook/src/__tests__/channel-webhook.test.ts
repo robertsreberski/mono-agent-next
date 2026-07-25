@@ -3,7 +3,7 @@ import { once } from "node:events";
 import { createHmac } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +20,7 @@ import {
   type ModuleLogger,
 } from "@mono-agent/module-sdk";
 import {
+  assertChannelBehaviorCompliance,
   assertChannelInstanceCompliance,
   assertChannelModuleCompliance,
 } from "@mono-agent/module-sdk/testing";
@@ -1583,6 +1584,88 @@ function chunkedInvoke(
     request.end();
   });
 }
+
+describe("webhook channel conformance", () => {
+  it("holds the shared channel behavior contract", async () => {
+    // The lane three other channels already run and this one did not. It is
+    // worth having here specifically: it starts the channel, delivers through
+    // the real outbound path, drains, and then calls `stop()` twice -- which
+    // is the shape of the shutdown defects this channel has produced.
+    const outboundSecret = "webhook-conformance-outbound-key";
+    const received: string[] = [];
+    // A real receiver rather than a stubbed fetch, because the module
+    // constructs its own `WebhookDelivery` against global fetch. Destroying
+    // the socket is how a transport failure -- and therefore an honest
+    // `unknown` outcome -- is produced without inventing an injection point.
+    const receiver = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => chunks.push(chunk));
+      request.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        received.push(body);
+        if (body.includes("ambiguous conformance")) {
+          request.socket.destroy();
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end('{"messageId":"conformance-delivered"}');
+      });
+    });
+    await new Promise<void>((resolve) => receiver.listen(0, "127.0.0.1", resolve));
+    const address = receiver.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+
+    try {
+      await assertChannelBehaviorCompliance({
+        create: (signal) => monoAgentModule.create({
+          instanceId: "webhook-conformance",
+          config: monoAgentModule.schema.parse({
+            apiKey: "webhook-conformance-inbound-key",
+            outbound: {
+              url: `http://127.0.0.1:${String(port)}/deliver`,
+              apiKey: outboundSecret,
+            },
+          }),
+          provenance: {},
+          configDirectory: "/config",
+          workspaceDirectory: "/workspace",
+          dataDirectory: "/data",
+          logger: noopLogger(),
+          host: {
+            grantedCapabilities: new Set<string>(),
+            getCapability() { return undefined; },
+            async dispatch() { return { status: "completed", text: "conformance" } as const; },
+          },
+          signal,
+        }),
+        delivery: {
+          delivered: {
+            conversationId: "webhook:outbound",
+            text: "conformance",
+            idempotencyKey: "webhook-conformance",
+          },
+          conflicting: {
+            conversationId: "webhook:outbound",
+            text: "conflicting conformance",
+            idempotencyKey: "webhook-conformance",
+          },
+          unknown: {
+            conversationId: "webhook:outbound",
+            text: "ambiguous conformance",
+            idempotencyKey: "webhook-conformance-unknown",
+          },
+        },
+        secrets: [outboundSecret, "webhook-conformance-inbound-key"],
+        exercise(instance) {
+          expect(instance.capabilities.proactive).toBe(true);
+        },
+      });
+      expect(received.length).toBeGreaterThan(0);
+    } finally {
+      await new Promise<void>((resolve) => receiver.close(() => resolve()));
+    }
+  });
+});
 
 function noopLogger(): ModuleLogger {
   return {
