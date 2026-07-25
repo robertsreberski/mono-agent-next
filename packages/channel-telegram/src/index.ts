@@ -115,6 +115,7 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
   let offset = 0;
   let confirmedOffset = 0;
   let running = false;
+  let startAttempted = false;
   let stopped = false;
   let forceStopped = false;
   let active = 0;
@@ -686,6 +687,7 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
       if (running) return;
       if (stopped) throw new Error("Telegram channel cannot restart after stop.");
       throwIfAborted(startContext.signal);
+      startAttempted = true;
       pollLifecycle = new AbortController();
       turnLifecycle = new AbortController();
       running = true;
@@ -735,12 +737,19 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
       const deliveryReceiptCapacityExhausted = delivery.receiptCapacityExhausted;
       const deliveryAmbiguousOutcome = delivery.hasAmbiguousOutcome;
       return {
+        // A channel whose start-up poll threw was reported as "unknown", making
+        // it indistinguishable from one that was never started at all — while
+        // the channel was completely dead.
         status: lastError !== undefined || deliveryDegraded
           ? "degraded"
-          : running ? "healthy" : "unknown",
+          : running
+            ? "healthy"
+            : startAttempted && !stopped ? "unhealthy" : "unknown",
         checkedAt: new Date().toISOString(),
         ...(lastError !== undefined
           ? { summary: lastError }
+          : !running && startAttempted && !stopped
+            ? { summary: "Telegram polling stopped unexpectedly after start." }
           : deliveryDegraded
             ? { summary: deliveryReceiptCapacityExhausted
                 ? "Telegram delivery receipt capacity is exhausted."

@@ -1366,6 +1366,31 @@ describe("mono-agent channel module", () => {
     await channel.stop?.({ signal: lifecycle.signal, reason: "shutdown" });
   });
 
+  it("reports every rejected webhook route in one pass", async () => {
+    // Validating until the first rejection meant a directory with several
+    // incompatible routes took several start attempts to fully diagnose.
+    const root = mkdtempSync(join(tmpdir(), "mono-agent-webhook-one-pass-"));
+    temporaryDirectories.push(root);
+    await writeFile(join(root, "good.md"), [
+      "---", "name: good", "path: /good", "mode: sync", "---", "Run it.",
+    ].join("\n"), "utf8");
+    await writeFile(join(root, "bad-one.md"), "no frontmatter at all\n", "utf8");
+    await writeFile(join(root, "bad-two.md"), [
+      "---", "name: bad-two", "path: not-absolute", "mode: sync", "---", "Run it.",
+    ].join("\n"), "utf8");
+    await writeFile(join(root, "bad-three.md"), "also missing frontmatter\n", "utf8");
+
+    await expect(loadWebhookRoutesFromDirectory(root, "sync")).rejects.toThrow(
+      /3 webhook routes were rejected/u,
+    );
+    const error = await loadWebhookRoutesFromDirectory(root, "sync").catch((raised: unknown) => raised);
+    const message = error instanceof Error ? error.message : "";
+    for (const name of ["bad-one.md", "bad-two.md", "bad-three.md"]) {
+      expect(message).toContain(name);
+    }
+    expect(message).not.toContain("good.md");
+  });
+
   it("runs a loaded route at the prompt cap with non-empty invocation text", async () => {
     const root = mkdtempSync(join(tmpdir(), "mono-agent-webhook-prompt-cap-"));
     temporaryDirectories.push(root);

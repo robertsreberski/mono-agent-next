@@ -37,6 +37,35 @@ describe("trigger-cron job loader", () => {
     });
   });
 
+  it("reports every rejected job in one pass", async () => {
+    // Validating until the first rejection meant a directory with four
+    // incompatible files took four start attempts to fully diagnose.
+    await withTempDirectory(async (root) => {
+      await writeFile(join(root, "good.md"), jobMarkdown(['expression: "* * * * *"']));
+      await writeFile(join(root, "bad-one.md"), "no frontmatter at all\n");
+      await writeFile(join(root, "bad-two.md"), jobMarkdown(["expression: not-a-cron-expression"]));
+      await writeFile(join(root, "bad-three.md"), "also missing frontmatter\n");
+
+      const error = await configFailure(loadCronJobsFromDirectory(root));
+      expect(error.message).toMatch(/3 cron jobs were rejected/u);
+      expect(error.message).toContain("bad-one.md");
+      expect(error.message).toContain("bad-two.md");
+      expect(error.message).toContain("bad-three.md");
+      expect(error.message).not.toContain("good.md");
+    });
+  });
+
+  it("still reports a lone rejection without aggregate framing", async () => {
+    await withTempDirectory(async (root) => {
+      await writeFile(join(root, "good.md"), jobMarkdown(['expression: "* * * * *"']));
+      await writeFile(join(root, "only-bad.md"), "no frontmatter at all\n");
+
+      const error = await configFailure(loadCronJobsFromDirectory(root));
+      expect(error.message).toContain("only-bad.md");
+      expect(error.message).not.toMatch(/cron jobs were rejected/u);
+    });
+  });
+
   it("rejects a symlinked jobs directory", async () => {
     await withTempDirectory(async (root) => {
       const realDirectory = join(root, "real");

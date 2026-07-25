@@ -344,3 +344,26 @@ export function snapshotMemoryRecord(value: unknown, label: string): MemoryRecor
     throw new TypeError(`${label}.metadata must be a JSON object`);
   return record;
 }
+/**
+ * The resolved route for this attempt, stated as ground truth.
+ *
+ * Core records `runtime`/`model` on every run entry but never told the model,
+ * so "what model are you running?" was answered by reading the agent's own
+ * config file — which reports the *configured* primary and the whole fallback
+ * chain, not the model actually serving the turn. After an override that made a
+ * working feature look broken. Only the active route appears here: the routing
+ * topology and the names of configured environment variables are operator
+ * configuration the model has no reason to recite.
+ */
+export function renderRouteIdentity(
+  route: { readonly runtime: string; readonly model: string },
+  effort: string | undefined,
+): string {
+  return [
+    "Active route for this turn. This is ground truth: answer questions about which",
+    "model or runtime is serving you from these values, never from configuration files.",
+    `- runtime instance: ${route.runtime}`,
+    `- model: ${route.model}`,
+    ...(effort === undefined ? [] : [`- effort: ${effort}`]),
+  ].join("\n");
+}
