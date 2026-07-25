@@ -3,7 +3,7 @@ import {
 } from "@mono-agent/module-sdk";
 import type { StateExecution } from "@mono-agent/module-sdk/internal";
 
-import { assertOwnKeys, snapshotBoundedValue } from "./bounded-value.js";
+import { assertOwnKeys, ownDataRecord, snapshotBoundedValue } from "./bounded-value.js";
 import type {
   AgentInteractionEvidence, AgentRunAttemptEvidence, AgentRunHistoryPage, AgentRunRecord,
   AgentRunStatus, AgentRunSummary, AgentTranscriptEntry,
@@ -219,9 +219,7 @@ export class StateExecutionClient {
 }
 
 function object(value: unknown, label: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)
-    || value instanceof Uint8Array) malformed(label);
-  return value as Record<string, unknown>;
+  try { return ownDataRecord(value, label); } catch { return malformed(label); }
 }
 function keys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   try { assertOwnKeys(value, allowed, label); } catch { malformed(label); }
