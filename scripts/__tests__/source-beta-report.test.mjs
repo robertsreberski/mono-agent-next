@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import {
+  KERNEL_FILE_MAXIMUM_LINES,
   SOURCE_BETA_LINE_BUDGETS,
   assertSourceBetaBudgets,
   classifySourcePath,
@@ -30,17 +31,41 @@ import { parseSourceBetaReportArgs } from "../source-beta-report.mjs";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 describe("source-beta production budgets", () => {
-  it("accepts both binding budgets at exact equality", () => {
+  it("accepts every binding budget at exact equality", () => {
     expect(SOURCE_BETA_LINE_BUDGETS).toEqual([
       { id: "repository-production", maximumLines: 130_000 },
-      { id: "kernel-production", maximumLines: 15_500 },
+      { id: "kernel-production", maximumLines: 16_500 },
+      { id: "durable-protocol-production", maximumLines: 9_500 },
     ]);
     const report = budgetReport({
       "repository-production": 130_000,
-      "kernel-production": 15_500,
+      "kernel-production": 16_500,
+      "durable-protocol-production": 9_500,
     });
 
     expect(assertSourceBetaBudgets(report)).toBe(report);
+  });
+
+  it("caps any single kernel production file", () => {
+    // A total-lines budget cannot stop one file becoming the place every kernel
+    // change lands, which is exactly how host.ts reached 5,251 lines.
+    const report = budgetReport({
+      "repository-production": 1,
+      "kernel-production": 1,
+      "durable-protocol-production": 1,
+    });
+    report.kernelFiles = [
+      { path: "packages/core/src/host.ts", lines: KERNEL_FILE_MAXIMUM_LINES },
+    ];
+    expect(assertSourceBetaBudgets(report)).toBe(report);
+
+    report.kernelFiles = [
+      { path: "packages/core/src/host.ts", lines: KERNEL_FILE_MAXIMUM_LINES + 1 },
+    ];
+    expect(() => assertSourceBetaBudgets(report)).toThrow(
+      `packages/core/src/host.ts is ${String(KERNEL_FILE_MAXIMUM_LINES + 1)} lines; `
+      + `no kernel production file may exceed ${String(KERNEL_FILE_MAXIMUM_LINES)}.`,
+    );
   });
 
   it.each(SOURCE_BETA_LINE_BUDGETS)(
@@ -64,11 +89,12 @@ describe("source-beta production budgets", () => {
 
     const report = budgetReport({
       "repository-production": 130_000,
-      "kernel-production": 15_500,
+      "kernel-production": 16_500,
+      "durable-protocol-production": 9_500,
     });
-    report.budgets[1].maximumLines = 15_501;
+    report.budgets[1].maximumLines = 16_501;
     expect(() => assertSourceBetaBudgets(report)).toThrow(
-      "kernel-production maximum must remain 15500 lines; found 15501.",
+      "kernel-production maximum must remain 16500 lines; found 16501.",
     );
   });
 

@@ -280,7 +280,33 @@ resent.
 | `native-tool-policy.ts` | Runtime-owned tool, approval, request-narrowing, and sandbox-policy intersection. |
 | `state-execution-client.ts` | Typed, bounded, fail-closed client for the state module's opaque execution protocol. Durable storage formats remain state-owned. |
 | `bounded-value.ts` | Shared descriptor-safe snapshots and exact object/array boundary checks. |
-| `host.ts` | Admission, serialized turns, deterministic tool catalog and dispatch, exact sessions, safe fallback, model-visible memory recall and AskUser, settlement, lifecycle, and health. |
+| `effort.ts` | Configured message keyword tiers that may only raise the routed effort. |
+| `host.ts` | Admission, serialized turns, deterministic tool catalog and dispatch, safe fallback, settlement, lifecycle, and the module-host protocol. |
+
+`host.ts` keeps the facade and the audited turn engine; every other host concern
+is an internal module behind it. None of these are public: the package maps only
+`"."`, so they exist for auditability, not for consumers.
+
+| Internal host module | Purpose |
+| --- | --- |
+| `host-types.ts` | Shared internal host types and bounds. |
+| `host-values.ts` | JSON, binary, clone, and text primitives. |
+| `host-lifecycle.ts` | Bounded lifecycle calls, turn semaphore, abort and settlement windows. |
+| `host-admission.ts` | Conversation tails, durable fingerprints, submission fingerprints. |
+| `host-turn.ts` | Per-turn state, interaction slots, and turn error shaping. |
+| `host-sessions.ts` | Runtime-native session retention and the durable load/evict handshake. |
+| `host-interactions.ts` | AskUser, approvals, live input, and their interaction evidence. |
+| `host-delivery.ts` | Idempotent proactive channel delivery and its durable settlement. |
+| `host-outbound.ts` | Outbound message normalization and completion-delivery shapes. |
+| `host-routing.ts` | Route candidates, runtime eligibility, configured-route enforcement. |
+| `host-tool-catalog.ts` | Tool policy, catalog resolution, identity assignment, and dispatch. |
+| `host-instructions.ts` | Instructions, bounded skill discovery, and the Core tools. |
+| `host-transcript.ts` | Cached-response codec, transcript/message conversion, memory rendering. |
+| `host-submit-input.ts` | Submit and live-input normalization. |
+| `host-diagnostics.ts` | Module commands, module diagnostics, and failure attribution. |
+| `host-module-instances.ts` | Selected-module instance compliance checks. |
+| `host-health.ts` | Host health projection and module health normalization. |
+| `host-redaction.ts` | Error sanitization, redaction, and UTF-8 bounds. |
 
 ## Public API
 

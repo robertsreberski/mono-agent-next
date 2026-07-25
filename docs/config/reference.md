@@ -95,6 +95,10 @@ instance ids.
 | `policy.tools.deny[]` | `string` | item | — | `minLength 1` | no | no | — |
 | `routing` | `object` | yes | — | `closed object` | no | no | — |
 | `routing.effort` | `string` | no | — | `minLength 1` | no | no | — |
+| `routing.effortKeywords` | `object` | no | — | `closed object` | no | no | — |
+| `routing.effortKeywords.extraThink` | `boolean` | no | `true` | — | no | no | — |
+| `routing.effortKeywords.think` | `boolean` | no | `false` | — | no | no | — |
+| `routing.effortKeywords.ultraThink` | `boolean` | no | `true` | — | no | no | — |
 | `routing.fallbacks` | `array` | yes | — | — | no | no | — |
 | `routing.fallbacks[]` | `object` | item | — | `closed object` | no | no | — |
 | `routing.fallbacks[].model` | `string` | yes | — | `minLength 1` | no | no | — |
