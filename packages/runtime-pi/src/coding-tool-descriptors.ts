@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { RuntimeNativeToolDescriptor } from "@mono-agent/module-sdk";
 
 export const runtimePiBashTool: RuntimeNativeToolDescriptor = Object.freeze({

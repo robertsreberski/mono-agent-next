@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { runCli, type CliIo } from "@mono-agent/cli";
 import { resolve } from "node:path";
 

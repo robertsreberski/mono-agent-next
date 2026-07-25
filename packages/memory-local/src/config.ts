@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { assertSafeHttpUrl } from "@mono-agent/module-sdk";
 
 export const DEFAULT_MEMORY_MAX_BYTES = 96_000;

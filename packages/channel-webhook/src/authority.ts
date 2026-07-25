@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { isIP } from "node:net";
 import { hostname as systemHostname } from "node:os";
 

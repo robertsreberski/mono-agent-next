@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { EventEmitter } from "node:events";
 import type { ServerResponse } from "node:http";
 

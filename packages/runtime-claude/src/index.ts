@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { defineRuntimeModule } from "@mono-agent/module-sdk";
 
 import { claudeAuthCommands } from "./auth-command.js";

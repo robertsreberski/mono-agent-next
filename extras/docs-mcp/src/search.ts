@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { embed } from "@yarflam/potion-base-8m";
 
 import { loadDocsCorpus } from "./corpus.js";

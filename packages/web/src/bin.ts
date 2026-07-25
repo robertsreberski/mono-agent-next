@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 import { resolve } from "node:path";
 
 import { startWebServer } from "./server.js";

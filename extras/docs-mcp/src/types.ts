@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export interface MonoAgentDocsSearchAction {
   readonly action: "search";
   readonly query: string;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { BigIntStats } from "node:fs";
 
 import { ServiceMacosDriftError } from "./errors.js";

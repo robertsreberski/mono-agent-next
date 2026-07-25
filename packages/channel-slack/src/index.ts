@@ -1,1 +1,2 @@
+// SPDX-License-Identifier: MIT
 export * from "./channel.js";

@@ -167,7 +167,7 @@ parseOtlpExporterConfig
 
 ## Dependency Boundary
 
-This GPL package depends on the first-party reserved contracts at
+This package depends on the first-party reserved contracts at
 `@mono-agent/module-sdk/internal`, the official OpenTelemetry protobuf
 transformer and trace types, and Node built-ins. It does not import the v0
 observability package, Core, products, state, channels, runtimes, or

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { RuntimeTurnContext } from "@mono-agent/module-sdk";
 
 export type CodexApprovalPolicy = "on-request" | "never";

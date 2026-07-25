@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { JsonSchema, JsonValue, RuntimeUsage } from "@mono-agent/module-sdk";
 
 import { claudeProcessEnvironment } from "./environment.js";

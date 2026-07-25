@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /**
  * Add keyboard focus to rendered Markdown tables.
  *

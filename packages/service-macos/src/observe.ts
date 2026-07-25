@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { lstat } from "node:fs/promises";
 import { dirname } from "node:path";
 

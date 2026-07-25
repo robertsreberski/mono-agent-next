@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 self.addEventListener("message", (event) => {
   const payload = event.data;
   if (!payload || payload.type !== "mono-agent:notify") return;

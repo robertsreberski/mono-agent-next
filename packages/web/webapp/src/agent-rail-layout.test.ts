@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { describe, expect, it, vi } from "vitest";
 import {
   AGENT_RAIL_COLLAPSED_WIDTH,

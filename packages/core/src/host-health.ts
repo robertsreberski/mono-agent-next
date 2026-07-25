@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { JsonObject, JsonValue, ModuleHealth, ModuleInstance } from "@mono-agent/module-sdk";
 import { assertOwnKeys, ownDataRecord, snapshotBoundedValue } from "./bounded-value.js";
 import { errorMessage } from "./errors.js";

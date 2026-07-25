@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { RuntimeUsage } from "@mono-agent/module-sdk";
 
 export function record(value: unknown): Record<string, unknown> {

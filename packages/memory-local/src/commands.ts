@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { JsonValue, ModuleCommand } from "@mono-agent/module-sdk";
 
 import type {

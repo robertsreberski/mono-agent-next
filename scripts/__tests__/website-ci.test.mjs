@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { readFileSync } from "node:fs";
 
 import { describe, expect, test } from "vitest";
@@ -20,11 +21,19 @@ describe("website CI contract", () => {
       steps: [
         { name: "Checkout", uses: "actions/checkout@v4" },
         {
+          name: "Setup pnpm",
+          uses: "pnpm/action-setup@v4",
+          with: { version: "10.28.2" },
+        },
+        {
           name: "Setup Node",
           uses: "actions/setup-node@v4",
-          with: { "node-version": "22.19.0" },
+          with: {
+            "node-version": "22.19.0",
+            cache: "pnpm",
+            "cache-dependency-path": "website/pnpm-lock.yaml",
+          },
         },
-        { name: "Enable Corepack", run: "corepack enable" },
         { name: "Install website dependencies", run: "pnpm install --frozen-lockfile" },
         { name: "Test website transforms", run: "pnpm run test:unit" },
         { name: "Install Chromium", run: "pnpm exec playwright install --with-deps chromium" },
@@ -41,11 +50,31 @@ describe("website CI contract", () => {
       uses: "actions/checkout@v4",
       with: { "fetch-depth": 0 },
     });
+    expect(verify.steps.slice(1, 3)).toEqual([
+      {
+        name: "Setup pnpm",
+        uses: "pnpm/action-setup@v4",
+        with: { version: "10.28.2" },
+      },
+      {
+        name: "Setup Node",
+        uses: "actions/setup-node@v4",
+        with: {
+          "node-version": "${{ matrix.node-version }}",
+          cache: "pnpm",
+          "cache-dependency-path": "pnpm-lock.yaml",
+        },
+      },
+    ]);
 
     const verifyRuns = verify.steps
       .map((step) => step.run)
       .filter((run) => typeof run === "string");
-    expect(verifyRuns.some((run) => run.includes("pnpm run check:apache-provenance"))).toBe(true);
+    const websiteRuns = website.steps
+      .map((step) => step.run)
+      .filter((run) => typeof run === "string");
+    expect([...verifyRuns, ...websiteRuns].some((run) => run.includes("corepack"))).toBe(false);
+    expect(verifyRuns.some((run) => run.includes("pnpm run check:licenses"))).toBe(true);
     expect(verifyRuns.some((run) => run.includes("pnpm run check:source-line-length"))).toBe(true);
     expect(verifyRuns.some((run) => run.includes("pnpm run check:source-beta-budgets"))).toBe(true);
     expect(verifyRuns.some((run) => run.includes("pnpm run scripts:test"))).toBe(true);

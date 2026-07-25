@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { readFile } from "node:fs/promises";
 import { request as httpRequest, type Server } from "node:http";
 import { hostname as systemHostname } from "node:os";

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import packageManifest from "../package.json" with { type: "json" };
 
 import {

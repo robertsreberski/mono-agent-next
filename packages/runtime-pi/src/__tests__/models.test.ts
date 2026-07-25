@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { createServer, type RequestListener, type Server } from "node:http";
 
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";

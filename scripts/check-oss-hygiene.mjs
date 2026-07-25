@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { lstat, open, readlink } from "node:fs/promises";

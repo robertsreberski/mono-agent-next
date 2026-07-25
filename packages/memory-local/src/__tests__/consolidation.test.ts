@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { DatabaseSync } from "node:sqlite";
 import {
   chmod,

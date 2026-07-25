@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export function parsePackedSmokeArgs(argv) {
   let target = null;
   for (let index = 0; index < argv.length; index += 1) {

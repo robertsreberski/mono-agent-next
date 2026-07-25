@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { readFile, stat } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";

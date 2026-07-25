@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { useConsole } from "../console";
 import { Icon } from "./Icon";
 

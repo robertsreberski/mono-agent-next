@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export type OtlpExporterErrorCode =
   | "OTLP_ABORTED"
   | "OTLP_CLOSED"

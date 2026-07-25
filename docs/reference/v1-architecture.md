@@ -33,7 +33,7 @@ the documentation MCP companion is the only publishable package under `extras/`.
 
 | Package | Category | Contract |
 | --- | --- | --- |
-| `@mono-agent/module-sdk` | core | Apache-licensed typed module contracts, schemas, compliance helpers, and bounded host primitives. |
+| `@mono-agent/module-sdk` | core | Typed module contracts, schemas, compliance helpers, and bounded host primitives. |
 | `@mono-agent/core` | core | Strict config loading and execution without concrete implementation imports. |
 | `@mono-agent/cli` | app | Validate, inspect, author schema/provenance, run module commands, and start in the foreground. |
 | `@mono-agent/runtime-pi` | runtime | Pi-native provider attempts with native session linkage. |
@@ -50,7 +50,7 @@ the documentation MCP companion is the only publishable package under `extras/`.
 | `@mono-agent/state-local` | execution | Owner-private CAS state, durable conversation/run records, idempotency, and presence. |
 | `@mono-agent/exporter-otlp` | observability | Bounded normalized OTLP HTTP export. |
 | `@mono-agent/sandbox-srt` | execution | Fingerprinted fail-closed SRT command execution. |
-| `@mono-agent/operator` | operator-surface | Apache-licensed protocol, strict client, directory, reducer, actions, and fixtures. |
+| `@mono-agent/operator` | operator-surface | Operator protocol, strict client, directory, reducer, actions, and fixtures. |
 | `@mono-agent/tui` | operator-surface | Standalone pi-tui renderer over the shared operator client. |
 | `@mono-agent/web` | operator-surface | Standalone authenticated browser product with owner-private durable conversations. |
 | `create-mono-agent` | app | Transactional minimal, Personal, and multi-runtime project scaffolding. |

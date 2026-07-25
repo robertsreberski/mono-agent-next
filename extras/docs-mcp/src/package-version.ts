@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { createRequire } from "node:module";
 
 export function docsMcpPackageVersion(): string {

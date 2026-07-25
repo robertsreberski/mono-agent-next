@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 

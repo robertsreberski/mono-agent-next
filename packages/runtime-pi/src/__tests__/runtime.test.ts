@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { createServer, type Server } from "node:http";
 import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

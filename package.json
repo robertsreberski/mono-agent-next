@@ -4,7 +4,7 @@
   "private": true,
   "packageManager": "pnpm@10.28.2",
   "description": "Small agent framework building blocks under the @mono-agent scope.",
-  "license": "GPL-3.0-only",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=22.19.0",
@@ -18,8 +18,8 @@
     "check:pnpm-policy": "node scripts/pnpm-release-age-policy.mjs",
     "check:secrets": "node scripts/check-secrets.mjs",
     "check:oss-hygiene": "node scripts/check-oss-hygiene.mjs",
-    "check:licenses": "node scripts/check-license-consistency.mjs",
-    "check:apache-provenance": "node scripts/check-apache-provenance.mjs",
+    "check:licenses": "node scripts/check-license-consistency.mjs && node scripts/check-spdx-headers.mjs",
+    "check:spdx-headers": "node scripts/check-spdx-headers.mjs",
     "check:dependency-vulnerabilities": "node scripts/check-dependency-vulnerabilities.mjs",
     "check:v1-dependency-vulnerabilities": "node scripts/check-dependency-vulnerabilities.mjs",
     "check:codex-discoverability": "node scripts/check-codex-discoverability.mjs",
@@ -49,7 +49,7 @@
     "release:consumer": "node scripts/release/verify-packed-consumer.mjs",
     "release:publish": "node scripts/release/publish-release.mjs",
     "release:verify": "node scripts/release/verify-release.mjs",
-    "scripts:test": "vitest run scripts/__tests__/build-provenance.test.mjs scripts/__tests__/check-package-architecture.test.mjs scripts/__tests__/check-license-consistency.test.mjs scripts/__tests__/check-apache-provenance.test.mjs scripts/__tests__/check-dependency-vulnerabilities.test.mjs scripts/__tests__/check-oss-hygiene.test.mjs scripts/__tests__/check-source-line-length.test.mjs scripts/__tests__/docs-mcp-smoke-packed.test.mjs scripts/__tests__/readme-quickstart-boundary.test.mjs scripts/__tests__/repo-hygiene-skills.test.mjs scripts/__tests__/source-beta-report.test.mjs scripts/__tests__/verify-all.test.mjs scripts/__tests__/verify-consumers.test.mjs scripts/__tests__/verify-deep-imports.test.mjs scripts/__tests__/verify-v1-system-proof.test.mjs scripts/__tests__/website-ci.test.mjs",
+    "scripts:test": "vitest run scripts/__tests__/build-provenance.test.mjs scripts/__tests__/check-package-architecture.test.mjs scripts/__tests__/check-license-consistency.test.mjs scripts/__tests__/check-spdx-headers.test.mjs scripts/__tests__/check-dependency-vulnerabilities.test.mjs scripts/__tests__/check-oss-hygiene.test.mjs scripts/__tests__/check-source-line-length.test.mjs scripts/__tests__/community-files.test.mjs scripts/__tests__/docs-mcp-smoke-packed.test.mjs scripts/__tests__/readme-quickstart-boundary.test.mjs scripts/__tests__/repo-hygiene-skills.test.mjs scripts/__tests__/source-beta-report.test.mjs scripts/__tests__/verify-all.test.mjs scripts/__tests__/verify-consumers.test.mjs scripts/__tests__/verify-deep-imports.test.mjs scripts/__tests__/verify-v1-system-proof.test.mjs scripts/__tests__/website-ci.test.mjs",
     "release:test:unit": "vitest run scripts/release/__tests__/release.test.mjs scripts/release/__tests__/package-count-drift.test.mjs",
     "release:test": "pnpm run release:test:unit && vitest run scripts/release/__tests__/packed-consumer.test.mjs"
   },

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export type VersionTuple = readonly [number, number, number];
 
 const STABLE_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;

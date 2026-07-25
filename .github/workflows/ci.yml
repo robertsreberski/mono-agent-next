@@ -29,13 +29,17 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.28.2"
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "${{ matrix.node-version }}"
-
-      - name: Enable Corepack
-        run: corepack enable
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Check runtime floors
         run: |
@@ -60,8 +64,7 @@ jobs:
       - name: Check OSS and package boundaries
         run: |
           pnpm run check:oss-hygiene
-          node scripts/check-license-consistency.mjs
-          pnpm run check:apache-provenance
+          pnpm run check:licenses
           pnpm run check:source-line-length
           pnpm run check:architecture
 
@@ -116,13 +119,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.28.2"
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22.19.0"
-
-      - name: Enable Corepack
-        run: corepack enable
+          cache: pnpm
+          cache-dependency-path: website/pnpm-lock.yaml
 
       - name: Install website dependencies
         run: pnpm install --frozen-lockfile

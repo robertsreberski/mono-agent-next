@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { isProxy } from "node:util/types";
 
 import type {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { ProcessTerminal, type Terminal } from "@earendil-works/pi-tui";
 import {
   createOperatorClientForEntry,

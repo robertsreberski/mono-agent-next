@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { OperatorActivity } from "@mono-agent/operator";
 
 export const WEB_API_VERSION = 1 as const;

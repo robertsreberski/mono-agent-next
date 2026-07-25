@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { join, resolve } from "node:path";
 
 export const DEFAULT_STATE_ROOT = "./.mono-agent/state";

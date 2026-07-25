@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { SandboxSrtError } from "./errors.js";
 
 const DEFAULT_TIMEOUT_MS = 120_000;

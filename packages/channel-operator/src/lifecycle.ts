@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) {
     return Promise.reject(abortReason(signal));

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 const REQUIRED_PACKAGE_SCRIPTS = Object.freeze(["build", "typecheck", "test"]);
 
 /**

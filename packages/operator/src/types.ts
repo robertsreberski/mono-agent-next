@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export const OPERATOR_PROTOCOL = "mono-agent.operator.v1" as const;
 export const OPERATOR_REGISTRY_SCHEMA = "mono-agent.operator-registry.v1" as const;
 export const OPERATOR_REGISTRY_DETAILS_SCHEMA = "mono-agent.operator-registry-details.v1" as const;

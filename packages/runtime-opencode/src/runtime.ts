@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";

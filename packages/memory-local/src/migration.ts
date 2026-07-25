@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { backup as backupSqlite, DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";

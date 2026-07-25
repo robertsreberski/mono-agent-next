@@ -1,6 +1,6 @@
 # create-mono-agent
 
-The GPL-3.0-only npm-init package for transactionally creating minimal,
+The npm-init package for transactionally creating minimal,
 personal, and multi-runtime mono-agent projects. It also ships the `mono-agent`
 bin so global installs retain one natural command name.
 

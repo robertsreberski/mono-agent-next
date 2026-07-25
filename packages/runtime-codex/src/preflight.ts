@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";

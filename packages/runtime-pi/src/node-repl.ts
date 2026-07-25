@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { Buffer } from "node:buffer";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";

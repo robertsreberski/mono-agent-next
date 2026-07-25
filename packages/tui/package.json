@@ -3,7 +3,7 @@
   "version": "0.15.0",
   "description": "Standalone pi-tui operator console over the shared mono-agent operator protocol.",
   "type": "module",
-  "license": "GPL-3.0-only",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/robertsreberski/mono-agent-next.git",

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -353,7 +354,7 @@ async function packPackages(tarballDirectory, repoRoot) {
       : `${entry.name.replace(/^@/u, "").replace("/", "-")}-${VERSION}.tgz`;
     const tarballPath = resolve(tarballDirectory, filename);
     const manifest = readPackedManifest(tarballPath);
-    const expectedLicense = entry.license ?? "GPL-3.0-only";
+    const expectedLicense = "MIT";
     if (manifest.license !== expectedLicense) {
       throw new Error(`${entry.name} packed license must be ${expectedLicense}; found ${String(manifest.license)}`);
     }

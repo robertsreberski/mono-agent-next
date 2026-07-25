@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { Popover } from "@base-ui/react/popover";
 import { Radio } from "@base-ui/react/radio";
 import { RadioGroup } from "@base-ui/react/radio-group";

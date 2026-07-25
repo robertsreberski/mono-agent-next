@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { appendFile, chmod, link, mkdtemp, open as openFile, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

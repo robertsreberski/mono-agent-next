@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,9 +20,9 @@ describe("runCreateMonoAgentCli", () => {
       "mono-agent": "./dist/bin/mono-agent.js",
     });
     expect(manifest.files).toContain("skills");
-    expect(manifest.license).toBe("GPL-3.0-only");
+    expect(manifest.license).toBe("MIT");
     expect(await readFile(new URL("../../LICENSE", import.meta.url), "utf8"))
-      .toContain("GNU GENERAL PUBLIC LICENSE");
+      .toContain("MIT License");
   });
 
   it("uses create-mono-agent as a no-wizard scaffolder", async () => {

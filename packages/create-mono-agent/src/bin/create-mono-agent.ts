@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 
 import { runCreateMonoAgentCli } from "../index.js";
 

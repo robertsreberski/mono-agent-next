@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";

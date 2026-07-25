@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { ServerResponse } from "node:http";
 
 import {

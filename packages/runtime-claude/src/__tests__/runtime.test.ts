@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { EventEmitter } from "node:events";
 import { existsSync, readFileSync } from "node:fs";
 import { PassThrough, Writable } from "node:stream";

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { checkedFetch } from "@mono-agent/module-sdk";
 
 import type { MemoryLocalEmbeddingsConfig } from "./config.js";

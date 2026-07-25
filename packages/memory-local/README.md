@@ -306,7 +306,7 @@ snapshotV0MemoryLocalRoot
 
 ## Dependency Boundary
 
-This GPL package depends on public memory contracts from
+This package depends on public memory contracts from
 `@mono-agent/module-sdk`, Node built-ins, and `sqlite-vec`. It does not import
 Core, channels, products, runtimes, state implementations, or predecessor
 persistence code.

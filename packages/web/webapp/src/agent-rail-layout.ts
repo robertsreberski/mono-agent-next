@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export const AGENT_RAIL_COLLAPSED_WIDTH = 72;
 export const AGENT_RAIL_EXPANDED_WIDTH = 240;
 export const AGENT_RAIL_LEGACY_EXPANSION_THRESHOLD = 160;

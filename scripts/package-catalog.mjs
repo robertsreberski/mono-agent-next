@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export const PACKAGE_CATEGORIES = [
   "runtime",
   "core",
@@ -19,10 +20,9 @@ export const packageCatalog = [
     dir: "module-sdk",
     name: "@mono-agent/module-sdk",
     category: "core",
-    responsibility: "Defines Apache-licensed typed module, selected-instance tool, schema, compliance, and bounded host contracts.",
+    responsibility: "Defines typed module, selected-instance tool, schema, compliance, and bounded host contracts.",
     allowedDependencyCategories: [],
     publishable: true,
-    license: "Apache-2.0",
   },
   {
     dir: "core",
@@ -161,10 +161,9 @@ export const packageCatalog = [
     dir: "operator",
     name: "@mono-agent/operator",
     category: "operator-surface",
-    responsibility: "Defines the Apache-licensed operator protocol, strict client, directory, domain state, actions, and fixtures.",
+    responsibility: "Defines the operator protocol, strict client, directory, domain state, actions, and fixtures.",
     allowedDependencyCategories: [],
     publishable: true,
-    license: "Apache-2.0",
   },
   {
     dir: "tui",

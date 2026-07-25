@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";

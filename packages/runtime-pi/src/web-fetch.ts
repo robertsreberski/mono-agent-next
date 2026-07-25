@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { Buffer } from "node:buffer";
 import { lookup } from "node:dns/promises";
 import {

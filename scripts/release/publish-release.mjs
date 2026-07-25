@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -202,6 +203,7 @@ export function resolveTrustedPnpmEntrypoint(repo = REPO_ROOT) {
         && !pathIsWithin(canonicalRepo, canonical)
         && stat.isFile()
         && stat.nlink === 1
+        && (stat.mode & 0o111) !== 0
         && (stat.mode & 0o022) === 0
         && (currentUid === undefined || stat.uid === 0 || stat.uid === currentUid)) {
         return canonical;
@@ -211,6 +213,36 @@ export function resolveTrustedPnpmEntrypoint(repo = REPO_ROOT) {
     }
   }
   throw new Error("refusing to publish: trusted pnpm entrypoint is unavailable");
+}
+
+function trustedPnpmCommandDirectories(repo, pnpmEntrypoint) {
+  const currentUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  const candidates = [
+    path.dirname(pnpmEntrypoint),
+    typeof process.env.npm_execpath === "string"
+      ? path.dirname(process.env.npm_execpath)
+      : undefined,
+    process.env.PNPM_HOME,
+  ];
+  const directories = [];
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || !path.isAbsolute(candidate)) continue;
+    try {
+      const directory = fs.realpathSync.native(candidate);
+      const stat = fs.statSync(directory);
+      const command = fs.realpathSync.native(path.join(directory, "pnpm"));
+      if (command === pnpmEntrypoint
+        && !pathIsWithin(repo, directory)
+        && stat.isDirectory()
+        && (stat.mode & 0o022) === 0
+        && (currentUid === undefined || stat.uid === 0 || stat.uid === currentUid)) {
+        directories.push(directory);
+      }
+    } catch {
+      // Try the next directory that may expose the validated entrypoint.
+    }
+  }
+  return [...new Set(directories)];
 }
 
 function gitResult(args, options) {
@@ -312,17 +344,26 @@ export function runWorkspaceBuild(options = {}) {
   const spawn = options.spawn ?? spawnSync;
   const log = options.log ?? console.log;
   const repo = canonicalRepository(options.repo ?? REPO_ROOT);
-  const pnpmEntrypoint = resolveTrustedPnpmEntrypoint(repo);
+  const resolvePnpmEntrypoint = options.resolvePnpmEntrypoint ?? resolveTrustedPnpmEntrypoint;
+  const pnpmEntrypoint = resolvePnpmEntrypoint(repo);
   const env = publicNpmEnvironment(
     options.envSource ?? process.env,
     { authenticated: false },
   );
   const nodeDirectory = path.dirname(process.execPath);
-  env.PATH = [nodeDirectory, "/usr/bin", "/bin"].join(path.delimiter);
+  env.PATH = [
+    ...new Set([
+      nodeDirectory,
+      ...trustedPnpmCommandDirectories(repo, pnpmEntrypoint),
+    ]),
+    "/usr/bin",
+    "/bin",
+  ].join(path.delimiter);
   log("$ pnpm run build");
-  const result = spawn(process.execPath, [pnpmEntrypoint, "run", "build"], {
+  const result = spawn(pnpmEntrypoint, ["run", "build"], {
     cwd: repo,
     env,
+    shell: false,
     stdio: "inherit",
   });
   if (result.status !== 0) {

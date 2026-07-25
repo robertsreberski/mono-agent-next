@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export { loadAgentConfig, validateAgentConfig } from "./config.js";
 export {
   AgentAdmissionError,

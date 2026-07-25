@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { Buffer } from "node:buffer";
 import { spawn } from "node:child_process";
 import { open, stat } from "node:fs/promises";

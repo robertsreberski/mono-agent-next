@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { describe, expect, it, vi } from "vitest";
 
 describe("runtime-pi module import", () => {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { MODULE_API_VERSION, defineChannelModule, type Channel, type ChannelModuleCreateContext, type ModuleHealth } from "@mono-agent/module-sdk";
 
 import { type OpenAiApiConfig, openAiApiConfigSchema } from "./config.js";

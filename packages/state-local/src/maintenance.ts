@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { StateLocalError } from "./errors.js";
 
 export const STATE_LOCAL_MAINTENANCE_DEFAULT_LIMIT = 1_000;

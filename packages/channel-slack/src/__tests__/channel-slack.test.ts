@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { mkdtempSync } from "node:fs";
 import { readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";

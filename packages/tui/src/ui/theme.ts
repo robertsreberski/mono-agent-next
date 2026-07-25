@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { EditorTheme, MarkdownTheme, SelectListTheme } from "@earendil-works/pi-tui";
 
 const wrap = (open: string, close: string) => (text: string): string =>

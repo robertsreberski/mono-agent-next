@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { AgentHarness } from "@earendil-works/pi-agent-core";
 import type {
   ModuleDiagnostic,

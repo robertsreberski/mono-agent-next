@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { SVGProps } from "react";
 
 export type IconName =

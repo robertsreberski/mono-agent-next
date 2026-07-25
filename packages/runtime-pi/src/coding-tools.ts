@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 
 import { createRuntimePiBashAgentTool } from "./coding-tools-bash.js";

@@ -1,6 +1,6 @@
 # @mono-agent/module-sdk
 
-Apache-2.0 typed contracts for implementing replaceable mono-agent runtimes,
+Typed contracts for implementing replaceable mono-agent runtimes,
 channels, and memory backends without importing the core host or a first-party
 implementation.
 
@@ -11,7 +11,7 @@ implementation.
 
 Category: `core`
 Tier: `core`
-Catalog responsibility: Defines Apache-licensed typed module, selected-instance tool, schema, compliance, and bounded host contracts.
+Catalog responsibility: Defines typed module, selected-instance tool, schema, compliance, and bounded host contracts.
 
 <!-- package-metadata:end -->
 

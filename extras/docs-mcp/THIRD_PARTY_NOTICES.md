@@ -11,4 +11,4 @@ artifact:
 
 The corresponding copyright and permission notices are distributed in the
 dependency packages. Their inclusion does not change `@mono-agent/docs-mcp`'s
-GPL-3.0-only license.
+MIT license.

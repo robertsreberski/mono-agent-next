@@ -3,7 +3,7 @@
   "version": "0.15.0",
   "description": "Safe launchd desired-state product for validated mono-agent runners.",
   "type": "module",
-  "license": "GPL-3.0-only",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/robertsreberski/mono-agent-next.git",

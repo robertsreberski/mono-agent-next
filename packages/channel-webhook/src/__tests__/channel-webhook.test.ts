@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { once } from "node:events";
 import { createHmac } from "node:crypto";
 import { mkdtempSync } from "node:fs";

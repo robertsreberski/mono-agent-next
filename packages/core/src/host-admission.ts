@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { createHash } from "node:crypto";
 import { waitForValueWithAbort } from "./host-lifecycle.js";
 import type { DurableFingerprint } from "./state-execution-client.js";

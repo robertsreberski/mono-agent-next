@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { join } from "node:path";
 
 import type { JsonObject } from "@mono-agent/module-sdk";

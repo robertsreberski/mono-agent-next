@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { createServer, request as httpRequest, type Server } from "node:http";
 import { chmod, mkdir, rename, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";

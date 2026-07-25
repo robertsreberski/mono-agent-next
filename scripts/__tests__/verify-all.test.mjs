@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,7 +46,6 @@ describe("verify-all", () => {
       "check:secrets",
       "check:oss-hygiene",
       "check:licenses",
-      "check:apache-provenance",
       "check:dependency-vulnerabilities",
       "check:codex-discoverability",
       "check:consumer-docs-consistency",

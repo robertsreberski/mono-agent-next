@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { RUNTIME_SESSION_UNAVAILABLE_CODE, RuntimeTurnError } from "@mono-agent/module-sdk";
 import type {
   JsonObject,

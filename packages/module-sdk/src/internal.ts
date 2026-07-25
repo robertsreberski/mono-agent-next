@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 /**
  * First-party contracts for reserved module slots.
  *

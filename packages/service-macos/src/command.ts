@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { spawn } from "node:child_process";
 export interface CommandResult {
   readonly exitCode: number; readonly stdout: string; readonly stderr: string;

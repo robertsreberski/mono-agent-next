@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { constants, type Stats } from "node:fs";

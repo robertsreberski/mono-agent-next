@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { DiscoveredOperator, OperatorInfo } from "./types.js";
 
 export type OperatorIdentityBindingField = "agent.id" | "process.pid" | "process.startedAt";

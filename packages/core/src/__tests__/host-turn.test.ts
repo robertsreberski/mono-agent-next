@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { ApprovalRequest, AskUserRequest } from "@mono-agent/module-sdk";
 import { describe, expect, it } from "vitest";
 

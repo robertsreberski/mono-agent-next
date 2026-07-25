@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { reduceOperatorFrames, initialOperatorState, type OperatorConversationState } from "./state.js";
 import {
   OPERATOR_PROTOCOL,

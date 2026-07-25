@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { boundedInteger } from "./bounded-integer.js";
 export const DEFAULT_HTTP_MAX_RESPONSE_BYTES = 1_048_576;
 export const DEFAULT_HTTP_TIMEOUT_MS = 30_000;

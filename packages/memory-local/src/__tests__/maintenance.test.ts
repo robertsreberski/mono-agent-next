@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

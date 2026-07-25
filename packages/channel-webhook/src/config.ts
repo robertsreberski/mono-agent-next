@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { isIP } from "node:net";
 
 import { envEligibleSchema } from "@mono-agent/module-sdk";

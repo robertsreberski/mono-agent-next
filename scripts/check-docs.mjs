@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 import { findDocumentationErrors } from "./lib/docs-quality.mjs";
 
 const errors = findDocumentationErrors({ root: process.cwd() });

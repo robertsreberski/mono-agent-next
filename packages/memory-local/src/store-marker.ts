@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { FileHandle } from "node:fs/promises";
 
 import { MemoryLocalError } from "./errors.js";

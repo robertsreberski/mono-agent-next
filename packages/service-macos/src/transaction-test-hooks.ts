@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export type ServiceMacosTransactionTestPoint =
   | "after-journal-prepared"
   | "after-prior-quarantined"
