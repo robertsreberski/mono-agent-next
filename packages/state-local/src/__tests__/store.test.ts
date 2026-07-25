@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedStateLocalConfig } from "../config.js";
 import { StateLocalError } from "../errors.js";
 import { ExecutionStore } from "../execution-store.js";
+import { INDEX_GROWTH_MARKER_BYTES } from "../index-log-compaction.js";
 import { stateLocalInternalAccess } from "../internal-state-access.js";
 import { acquireProcessLease } from "../secure-fs.js";
 import { StateLocalStore, type StateLocalStoreHooks } from "../store.js";
@@ -196,6 +197,34 @@ describe("StateLocalStore", () => {
     })).resolves.toMatchObject({ version: "v1" });
     expect(text((await store.read({ key: "capacity/healthy", signal }))?.value)).toBe("ok");
     await store.close();
+  });
+
+  it("keeps the store usable after a proven pre-append index byte rejection", async () => {
+    const config = await createConfig();
+    const hooks: StateLocalStoreHooks = {
+      lease: {
+        indexLimits: {
+          maximumBytes: 1_024,
+          maximumFrames: 100,
+          compactAfterReclaimableBytes: 1,
+          compactAfterObsoleteFrames: 1,
+        },
+      },
+    };
+    const store = await open(config, hooks);
+    await expect(store.write({
+      key: "capacity/oversized",
+      value: Buffer.alloc(900, 1),
+      signal,
+    })).rejects.toMatchObject({ code: "STATE_LIMIT_EXCEEDED" });
+    expect(await store.read({ key: "capacity/oversized", signal })).toBeUndefined();
+    await store.write({ key: "capacity/healthy", value: bytes("ok"), signal });
+    await store.close();
+
+    const reopened = await open(config, hooks);
+    expect(text((await reopened.read({ key: "capacity/healthy", signal }))?.value)).toBe("ok");
+    expect(await reopened.read({ key: "capacity/oversized", signal })).toBeUndefined();
+    await reopened.close();
   });
 
   it("heartbeat-poisons-and-refreshes", async () => {
@@ -435,10 +464,55 @@ describe("StateLocalStore", () => {
     await reopened.release();
   });
 
-  it("does not poison the lease when a non-shrinking compact image cannot fit", async () => {
+  it.each([
+    ["header-only", 8],
+    ["partial metadata", 11],
+  ] as const)("truncates a near-ceiling staged %s prefix", async (_name, prefixBytes) => {
     const config = await createConfig();
     await writePrivateDirectory(config.root);
-    const leasePath = join(config.root, "non-shrinking-index.sqlite");
+    const leasePath = join(config.root, `prefix-${String(prefixBytes)}-index.sqlite`);
+    const indexPath = `${leasePath}.index`;
+    const indexLimits = {
+      maximumBytes: 1_024,
+      maximumFrames: 100,
+      compactAfterReclaimableBytes: 1,
+      compactAfterObsoleteFrames: 1,
+    };
+    const retainedValue = Buffer.alloc(900, 1);
+    const pendingValue = Buffer.alloc(900, 2);
+    const lease = await acquireProcessLease(leasePath, {
+      indexLimits,
+      afterIndexCompactionBody: () => {
+        throw new Error("simulated crash after compaction body");
+      },
+    });
+    lease.writeIndex("near-ceiling", retainedValue);
+    const sourceBytes = (await stat(indexPath)).size;
+    expect(() => lease.writeIndex("near-ceiling", pendingValue))
+      .toThrow("simulated crash after compaction body");
+    await lease.release();
+    const handle = await openFile(indexPath, "r+");
+    try {
+      await handle.truncate(sourceBytes + prefixBytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+
+    const reopened = await acquireProcessLease(leasePath, { indexLimits });
+    expect(reopened.readIndex("near-ceiling", retainedValue.byteLength))
+      .toEqual(retainedValue);
+    reopened.writeIndex("near-ceiling", pendingValue);
+    expect(reopened.readIndex("near-ceiling", pendingValue.byteLength))
+      .toEqual(pendingValue);
+    await reopened.release();
+  });
+
+  it("grows a compact image within the logical ceiling without changing the inode", async () => {
+    const config = await createConfig();
+    await writePrivateDirectory(config.root);
+    const leasePath = join(config.root, "growing-index.sqlite");
+    const indexPath = `${leasePath}.index`;
     const indexLimits = {
       maximumBytes: 1_024,
       maximumFrames: 100,
@@ -446,18 +520,20 @@ describe("StateLocalStore", () => {
       compactAfterObsoleteFrames: 1,
     };
     const retainedValue = Buffer.alloc(300, 1);
-    const oversizedReplacement = Buffer.alloc(900, 2);
+    const growingReplacement = Buffer.alloc(900, 2);
     const healthyReplacement = Buffer.alloc(300, 3);
     const lease = await acquireProcessLease(leasePath, { indexLimits });
     lease.writeIndex("capacity", retainedValue);
-    let capacityError: unknown;
-    try {
-      lease.writeIndex("capacity", oversizedReplacement);
-    } catch (error) {
-      capacityError = error;
-    }
-    expect(capacityError).toMatchObject({ code: "STATE_LIMIT_EXCEEDED" });
-    expect(lease.readIndex("capacity", retainedValue.byteLength)).toEqual(retainedValue);
+    const before = await stat(indexPath);
+    lease.writeIndex("capacity", growingReplacement);
+    expect(lease.readIndex("capacity", growingReplacement.byteLength))
+      .toEqual(growingReplacement);
+    const after = await stat(indexPath);
+    expect({ device: after.dev, inode: after.ino }).toEqual({
+      device: before.dev,
+      inode: before.ino,
+    });
+    expect(after.size).toBeLessThanOrEqual(1_024);
     lease.writeIndex("capacity", healthyReplacement);
     expect(lease.readIndex("capacity", healthyReplacement.byteLength))
       .toEqual(healthyReplacement);
@@ -468,6 +544,256 @@ describe("StateLocalStore", () => {
       .toEqual(healthyReplacement);
     await reopened.release();
   });
+
+  it("grows by one byte at the logical ceiling with staging beyond that ceiling", async () => {
+    const config = await createConfig();
+    await writePrivateDirectory(config.root);
+    const leasePath = join(config.root, "growth-edge-index.sqlite");
+    const indexPath = `${leasePath}.index`;
+    const indexLimits = {
+      maximumBytes: 1_024,
+      maximumFrames: 100,
+      compactAfterReclaimableBytes: 1,
+      compactAfterObsoleteFrames: 1,
+    };
+    const retainedValue = Buffer.alloc(924, 1);
+    const growingValue = Buffer.alloc(925, 2);
+    const lease = await acquireProcessLease(leasePath, { indexLimits });
+    lease.writeIndex("edge", retainedValue);
+    const before = await stat(indexPath);
+    expect(before.size).toBe(1_023);
+    lease.writeIndex("edge", growingValue);
+    expect(lease.readIndex("edge", growingValue.byteLength)).toEqual(growingValue);
+    const after = await stat(indexPath);
+    expect({ device: after.dev, inode: after.ino, size: after.size }).toEqual({
+      device: before.dev,
+      inode: before.ino,
+      size: 1_024,
+    });
+    await lease.release();
+
+    const reopened = await acquireProcessLease(leasePath, { indexLimits });
+    expect(reopened.readIndex("edge", growingValue.byteLength)).toEqual(growingValue);
+    await reopened.release();
+  });
+
+  it.each(["body", "prepared", "copy", "rewritten"] as const)(
+    "recovers growing compaction after a crash at %s",
+    async (boundary) => {
+      const config = await createConfig();
+      await writePrivateDirectory(config.root);
+      const leasePath = join(config.root, `growth-${boundary}-index.sqlite`);
+      const indexLimits = {
+        maximumBytes: 1_024,
+        maximumFrames: 100,
+        compactAfterReclaimableBytes: 1,
+        compactAfterObsoleteFrames: 1,
+      };
+      const retainedValue = Buffer.alloc(300, 1);
+      const growingValue = Buffer.alloc(900, 2);
+      const finalValue = Buffer.alloc(850, 3);
+      let crash = true;
+      const crashAtBoundary = (): void => {
+        if (!crash) return;
+        crash = false;
+        throw new Error(`simulated growing compaction crash at ${boundary}`);
+      };
+      const boundaryHooks = boundary === "body"
+        ? { afterIndexCompactionBody: crashAtBoundary }
+        : boundary === "prepared"
+          ? { afterIndexCompactionPrepared: crashAtBoundary }
+          : boundary === "copy"
+            ? { afterIndexCompactionCopyChunk: crashAtBoundary }
+            : { afterIndexCompactionRewritten: crashAtBoundary };
+      const lease = await acquireProcessLease(leasePath, {
+        indexLimits,
+        ...boundaryHooks,
+      });
+      lease.writeIndex("growth", retainedValue);
+      expect(() => lease.writeIndex("growth", growingValue))
+        .toThrow(`simulated growing compaction crash at ${boundary}`);
+      await lease.release();
+
+      const reopened = await acquireProcessLease(leasePath, { indexLimits });
+      const recovered = boundary === "body" ? retainedValue : growingValue;
+      expect(reopened.readIndex("growth", recovered.byteLength)).toEqual(recovered);
+      reopened.writeIndex("growth", finalValue);
+      expect(reopened.readIndex("growth", finalValue.byteLength)).toEqual(finalValue);
+      await reopened.release();
+
+      const verified = await acquireProcessLease(leasePath, { indexLimits });
+      expect(verified.readIndex("growth", finalValue.byteLength)).toEqual(finalValue);
+      await verified.release();
+    },
+  );
+
+  it("repairs exact partial growth-marker prefixes and rejects malformed ones", async () => {
+    for (const [name, prefixBytes, corruptByte] of [
+      ["header", 8, undefined],
+      ["metadata", 10, undefined],
+      ["bad-metadata", 10, 8],
+      ["bad-checksum", INDEX_GROWTH_MARKER_BYTES, INDEX_GROWTH_MARKER_BYTES - 1],
+    ] as const) {
+      const config = await createConfig();
+      await writePrivateDirectory(config.root);
+      const leasePath = join(config.root, `growth-marker-${name}.sqlite`);
+      const indexPath = `${leasePath}.index`;
+      const indexLimits = {
+        maximumBytes: 1_024,
+        maximumFrames: 100,
+        compactAfterReclaimableBytes: 1,
+        compactAfterObsoleteFrames: 1,
+      };
+      const retainedValue = Buffer.alloc(300, 1);
+      const growingValue = Buffer.alloc(900, 2);
+      const lease = await acquireProcessLease(leasePath, {
+        indexLimits,
+        afterIndexCompactionBody: () => {
+          throw new Error("simulated crash after growing compaction body");
+        },
+      });
+      lease.writeIndex("growth", retainedValue);
+      const sourceBytes = (await stat(indexPath)).size;
+      expect(() => lease.writeIndex("growth", growingValue))
+        .toThrow("simulated crash after growing compaction body");
+      await lease.release();
+      const handle = await openFile(indexPath, "r+");
+      try {
+        await handle.truncate(sourceBytes + prefixBytes);
+        if (corruptByte !== undefined) {
+          const original = Buffer.alloc(1);
+          await handle.read(original, 0, 1, sourceBytes + corruptByte);
+          await handle.write(
+            Buffer.from([original[0]! ^ 0xff]),
+            0,
+            1,
+            sourceBytes + corruptByte,
+          );
+        }
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      if (corruptByte !== undefined) {
+        const corruptBytes = await readFile(indexPath);
+        await expect(acquireProcessLease(leasePath, { indexLimits }))
+          .rejects.toMatchObject({ code: "STATE_CORRUPT" });
+        expect(await readFile(indexPath)).toEqual(corruptBytes);
+        continue;
+      }
+      const reopened = await acquireProcessLease(leasePath, { indexLimits });
+      expect(reopened.readIndex("growth", retainedValue.byteLength)).toEqual(retainedValue);
+      reopened.writeIndex("growth", growingValue);
+      expect(reopened.readIndex("growth", growingValue.byteLength)).toEqual(growingValue);
+      await reopened.release();
+    }
+  });
+
+  it("does not confuse an ordinary frame sharing the growth-marker length", async () => {
+    const config = await createConfig();
+    await writePrivateDirectory(config.root);
+    const leasePath = join(config.root, "growth-marker-length-index.sqlite");
+    const value = Buffer.alloc(88, 1);
+    const lease = await acquireProcessLease(leasePath);
+    lease.writeIndex("ordinary", value);
+    await lease.release();
+
+    const reopened = await acquireProcessLease(leasePath);
+    expect(reopened.readIndex("ordinary", value.byteLength)).toEqual(value);
+    await reopened.release();
+  });
+
+  it.each(["certificate", "footer", "image"] as const)(
+    "fails closed when a committed growing compaction %s is corrupt",
+    async (target) => {
+      const config = await createConfig();
+      await writePrivateDirectory(config.root);
+      const leasePath = join(config.root, `growth-corrupt-${target}.sqlite`);
+      const indexPath = `${leasePath}.index`;
+      const indexLimits = {
+        maximumBytes: 1_024,
+        maximumFrames: 100,
+        compactAfterReclaimableBytes: 1,
+        compactAfterObsoleteFrames: 1,
+      };
+      const retainedValue = Buffer.alloc(300, 1);
+      const growingValue = Buffer.alloc(900, 2);
+      const lease = await acquireProcessLease(leasePath, {
+        indexLimits,
+        afterIndexCompactionPrepared: () => {
+          throw new Error("simulated crash after growing compaction commit");
+        },
+      });
+      lease.writeIndex("growth", retainedValue);
+      expect(() => lease.writeIndex("growth", growingValue))
+        .toThrow("simulated crash after growing compaction commit");
+      await lease.release();
+      const staged = await readFile(indexPath);
+      const corruptOffset = target === "certificate"
+        ? staged.byteLength - Buffer.byteLength("mas-commit-v2\n") - 8 - 1
+        : target === "footer"
+          ? staged.byteLength - Buffer.byteLength("mas-commit-v2\n") - 8
+          : staged.lastIndexOf(growingValue);
+      expect(corruptOffset).toBeGreaterThan(0);
+      const handle = await openFile(indexPath, "r+");
+      try {
+        await handle.write(Buffer.from([staged[corruptOffset]! ^ 0xff]), 0, 1, corruptOffset);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      const corruptBytes = await readFile(indexPath);
+
+      await expect(acquireProcessLease(leasePath, { indexLimits }))
+        .rejects.toMatchObject({ code: "STATE_CORRUPT" });
+      expect(await readFile(indexPath)).toEqual(corruptBytes);
+    },
+  );
+
+  it.each([
+    [
+      "frame",
+      {
+        maximumFrames: 2,
+        compactAfterObsoleteFrames: 1,
+      },
+      Buffer.alloc(16, 1),
+      Buffer.alloc(16, 2),
+    ],
+    [
+      "byte",
+      {
+        maximumBytes: 1_024,
+        maximumFrames: 100,
+        compactAfterReclaimableBytes: 1,
+        compactAfterObsoleteFrames: 1,
+      },
+      Buffer.alloc(800, 1),
+      Buffer.alloc(64, 2),
+    ],
+  ] as const)(
+    "rejects an unreclaimable %s ceiling before append and remains usable",
+    async (name, indexLimits, retainedValue, blockedValue) => {
+      const config = await createConfig();
+      await writePrivateDirectory(config.root);
+      const leasePath = join(config.root, `${name}-capacity-index.sqlite`);
+      const lease = await acquireProcessLease(leasePath, { indexLimits });
+      lease.writeIndex("retained", retainedValue);
+      if (name === "frame") lease.writeIndex("second", Buffer.alloc(16, 3));
+      expect(() => lease.writeIndex("blocked", blockedValue))
+        .toThrowError(expect.objectContaining({ code: "STATE_LIMIT_EXCEEDED" }));
+      expect(lease.readIndex("retained", retainedValue.byteLength)).toEqual(retainedValue);
+      const latestValue = Buffer.alloc(retainedValue.byteLength, 4);
+      lease.writeIndex("retained", latestValue);
+      expect(lease.readIndex("retained", latestValue.byteLength)).toEqual(latestValue);
+      await lease.release();
+
+      const reopened = await acquireProcessLease(leasePath, { indexLimits });
+      expect(reopened.readIndex("retained", latestValue.byteLength)).toEqual(latestValue);
+      expect(reopened.readIndex("blocked", blockedValue.byteLength)).toBeUndefined();
+      await reopened.release();
+    },
+  );
 
   it("rejects live-frame corruption before compaction can re-sign it", async () => {
     const config = await createConfig();
@@ -608,6 +934,36 @@ describe("StateLocalStore", () => {
 
     const reopened = await open(config);
     expect(text((await reopened.read({ key: "turns/one", signal }))?.value)).toBe("committed");
+    await reopened.close();
+  });
+
+  it("poisons after a committed snapshot hook reports a capacity-shaped failure", async () => {
+    const config = await createConfig();
+    let crash = true;
+    const store = await open(config, {
+      snapshot: {
+        afterRename: () => {
+          if (!crash) return;
+          crash = false;
+          throw new StateLocalError(
+            "STATE_LIMIT_EXCEEDED",
+            "simulated post-commit capacity-shaped failure",
+          );
+        },
+      },
+    });
+
+    await expect(store.write({ key: "turns/one", value: bytes("committed"), signal }))
+      .rejects.toMatchObject({ code: "STATE_LIMIT_EXCEEDED" });
+    await expect(store.read({ key: "turns/one", signal }))
+      .rejects.toMatchObject({ code: "STATE_POISONED" });
+    await expect(store.write({ key: "turns/two", value: bytes("must-not-commit"), signal }))
+      .rejects.toMatchObject({ code: "STATE_POISONED" });
+    await store.close();
+
+    const reopened = await open(config);
+    expect(text((await reopened.read({ key: "turns/one", signal }))?.value)).toBe("committed");
+    expect(await reopened.read({ key: "turns/two", signal })).toBeUndefined();
     await reopened.close();
   });
 

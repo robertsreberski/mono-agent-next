@@ -13,6 +13,20 @@ export interface IndexLogLimits {
   readonly compactAfterObsoleteFrames: number;
 }
 
+/**
+ * A capacity rejection proven to occur before descriptor-bound index mutation.
+ * Callers may retry a smaller operation without reopening the lease.
+ */
+export class StateIndexCapacityError extends StateLocalError {
+  constructor(message: string) {
+    super("STATE_LIMIT_EXCEEDED", message);
+  }
+}
+
+export function isStateIndexCapacityError(error: unknown): error is StateIndexCapacityError {
+  return error instanceof StateIndexCapacityError;
+}
+
 export function indexCompactionStagingByteLimit(
   maximumBytes: number,
   frameOverhead: number,

@@ -83,6 +83,7 @@ import {
   type ProcessLease,
   verifySecureDirectoryIdentity,
 } from "./secure-fs.js";
+import { isStateIndexCapacityError } from "./index-log-limits.js";
 import {
   emptySnapshot,
   decodePresenceRecord,
@@ -1050,12 +1051,7 @@ export class StateLocalStore implements StateStore, StateLocalInternalAccessHost
       await this.lease.verify();
       this.snapshot = draft;
     } catch (error) {
-      if (
-        error instanceof StateLocalError
-        && error.code === "STATE_LIMIT_EXCEEDED"
-      ) {
-        throw error;
-      }
+      if (isStateIndexCapacityError(error)) throw error;
       this.poisoned = new StateLocalError(
         "STATE_POISONED",
         "A local state commit did not complete safely; close and reopen before retrying.",

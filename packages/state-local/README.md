@@ -266,6 +266,7 @@ state APIs.
 | `execution-journal-runs.ts` | Run admission, event, settlement, and history operations. |
 | `run-history-tool.ts` | Turn-scoped list/search/inspect projection over safe terminal prior-run evidence. |
 | `maintenance.ts` | Strict bounded maintenance request/command contracts and result counters. |
+| `index-log-compaction.ts` | Checksummed same-inode compaction staging, growth markers, and torn-prefix validation. |
 | `index-log-limits.ts` | Fixed production index ceilings and validated low-threshold proof seams. |
 | `secure-fs.ts` | Owner/mode/link checks, no-follow reads, pinned framed index log, reserved-sidecar checks, and process lease. |
 | `snapshot.ts` | Canonical snapshot validation, serialization, keys, versions, and record copies. |

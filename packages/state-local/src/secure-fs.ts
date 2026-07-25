@@ -20,7 +20,27 @@ import { basename, dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { StateLocalError } from "./errors.js";
-import { indexCompactionStagingByteLimit, resolveIndexLogLimits, STATE_INDEX_LOG_MAX_BYTES, type IndexLogLimits } from "./index-log-limits.js";
+import {
+  decodeIndexCompactionControl,
+  encodeIndexCompactionControl,
+  encodeIndexGrowthMarker,
+  hasCommittedIndexFrameAtEnd,
+  hasIndexCommitFooterAtEnd,
+  INDEX_COMPACTION_CONTROL_BYTES,
+  INDEX_FRAME_COMMIT_MAGIC as STATE_INDEX_FRAME_COMMIT_MAGIC,
+  INDEX_FRAME_FOOTER_BYTES as STATE_INDEX_FRAME_FOOTER_BYTES,
+  INDEX_GROWTH_MARKER_BYTES,
+  indexCompactionOuterOffset,
+  inspectIncompleteIndexGrowth,
+  isProvenIncompleteIndexCompaction,
+} from "./index-log-compaction.js";
+import {
+  indexCompactionStagingByteLimit,
+  resolveIndexLogLimits,
+  STATE_INDEX_LOG_MAX_BYTES,
+  StateIndexCapacityError,
+  type IndexLogLimits,
+} from "./index-log-limits.js";
 
 export interface FileIdentity {
   readonly device: number;
@@ -92,7 +112,7 @@ export interface PinnedSecureFile {
     length: number,
     afterChunk?: (copiedBytes: number, totalBytes: number) => void,
   ): void;
-  truncateDurable(size: number): void;
+  truncateDurable(size: number, maximumBytes?: number): void;
   replace(bytes: Uint8Array, hooks?: AtomicReplaceHooks): Promise<void>;
   verify(): Promise<void>;
   close(): Promise<void>;
@@ -100,22 +120,20 @@ export interface PinnedSecureFile {
 
 const STATE_INDEX_APPLICATION_ID = 0x4d415331;
 const STATE_INDEX_LOG_HEADER = Buffer.from("mono-agent-state-index-v2\n", "utf8");
-const STATE_INDEX_FRAME_COMMIT_MAGIC = Buffer.from("mas-commit-v2\n", "utf8");
-const STATE_INDEX_COMPACTION_MAGIC = Buffer.from("mas-compact-v1\n", "utf8");
 const STATE_INDEX_FRAME_HEADER_BYTES = 8;
-const STATE_INDEX_FRAME_FOOTER_BYTES = STATE_INDEX_FRAME_COMMIT_MAGIC.byteLength + 8;
 const STATE_INDEX_FRAME_METADATA_BYTES = 7;
-const STATE_INDEX_COMPACTION_CONTROL_BYTES = 96;
 const STATE_INDEX_DIGEST_BYTES = 32;
 const STATE_INDEX_LOG_MAX_ENTRIES = 100_000;
 const STATE_INDEX_COMPACTION_FRAME_OVERHEAD =
   STATE_INDEX_FRAME_HEADER_BYTES
   + STATE_INDEX_FRAME_METADATA_BYTES
-  + STATE_INDEX_COMPACTION_CONTROL_BYTES
+  + INDEX_COMPACTION_CONTROL_BYTES
   + STATE_INDEX_DIGEST_BYTES
   + STATE_INDEX_FRAME_FOOTER_BYTES;
+const STATE_INDEX_COMPACTION_STAGING_OVERHEAD =
+  STATE_INDEX_COMPACTION_FRAME_OVERHEAD + INDEX_GROWTH_MARKER_BYTES;
 const STATE_INDEX_COMPACTION_MAX_BYTES =
-  STATE_INDEX_LOG_MAX_BYTES * 2 + STATE_INDEX_COMPACTION_FRAME_OVERHEAD;
+  STATE_INDEX_LOG_MAX_BYTES * 2 + STATE_INDEX_COMPACTION_STAGING_OVERHEAD;
 const SQLITE_RESERVED_SUFFIXES = ["-journal", "-wal", "-shm"] as const;
 
 export async function ensureSecureDirectory(path: string): Promise<SecureDirectory> {
@@ -540,9 +558,15 @@ async function openPinnedSecureFile(
       }
       fsyncSync(handle.fd);
     },
-    truncateDurable: (size) => {
+    truncateDurable: (size, maximumBytes = STATE_INDEX_LOG_MAX_BYTES) => {
       assertPinnedOpen();
-      if (!Number.isSafeInteger(size) || size < 0 || size > STATE_INDEX_LOG_MAX_BYTES) {
+      if (
+        !Number.isSafeInteger(size)
+        || !Number.isSafeInteger(maximumBytes)
+        || size < 0
+        || size > maximumBytes
+        || maximumBytes > STATE_INDEX_COMPACTION_MAX_BYTES
+      ) {
         throw new StateLocalError("STATE_CORRUPT", "Pinned truncate size is invalid.");
       }
       const info = fstatSync(handle.fd);
@@ -687,7 +711,7 @@ export async function acquireProcessLease(
   const append = (key: string, value: Uint8Array): IndexEntry => {
     assertOpen();
     if (!index.has(key) && index.size >= STATE_INDEX_LOG_MAX_ENTRIES) {
-      throw new StateLocalError("STATE_LIMIT_EXCEEDED", "Descriptor-bound state index has too many entries.");
+      throw new StateIndexCapacityError("Descriptor-bound state index has too many entries.");
     }
     const frame = encodeIndexFrame(key, value);
     const liveBytes = STATE_INDEX_LOG_HEADER.byteLength + liveFrameBytes;
@@ -732,7 +756,7 @@ export async function acquireProcessLease(
         const appendStillFits =
           frameCount < indexLimits.maximumFrames
           && indexLog.size() + frame.totalBytes <= indexLimits.maximumBytes;
-        if (error instanceof StateLocalError && error.code === "STATE_LIMIT_EXCEEDED") {
+        if (error instanceof StateIndexCapacityError) {
           if (!appendStillFits) throw error;
           // A threshold-triggered pass may have no recovery-safe compact image.
           // The ordinary pending append still fits below the durable ceiling.
@@ -747,10 +771,10 @@ export async function acquireProcessLease(
       }
     }
     if (frameCount >= indexLimits.maximumFrames) {
-      throw new StateLocalError("STATE_LIMIT_EXCEEDED", "Descriptor-bound state index has too many frames.");
+      throw new StateIndexCapacityError("Descriptor-bound state index has too many frames.");
     }
     if (indexLog.size() + frame.totalBytes > indexLimits.maximumBytes) {
-      throw new StateLocalError("STATE_LIMIT_EXCEEDED", "Descriptor-bound state index is full.");
+      throw new StateIndexCapacityError("Descriptor-bound state index is full.");
     }
     try {
       const frameOffset = indexLog.appendDurable([
@@ -991,7 +1015,7 @@ function encodeIndexFrame(key: string, value: Uint8Array): EncodedIndexFrame {
   const keyBytes = Buffer.from(key, "utf8");
   const payloadBytes = STATE_INDEX_FRAME_METADATA_BYTES + keyBytes.byteLength + bytes.byteLength;
   if (payloadBytes > 0xffff_ffff) {
-    throw new StateLocalError("STATE_LIMIT_EXCEEDED", `State index entry ${key} is too large.`);
+    throw new StateIndexCapacityError(`State index entry ${key} is too large.`);
   }
   const frameHeader = encodeFrameLengths(payloadBytes);
   const metadata = Buffer.allocUnsafe(STATE_INDEX_FRAME_METADATA_BYTES);
@@ -1119,12 +1143,10 @@ function planIndexCompaction(
     frames.push(frame);
   }
   if (
-    compactBytes > sourceBytes
-    || compactBytes > maximumBytes
+    compactBytes > maximumBytes
     || frames.length > frameCount
   ) {
-    throw new StateLocalError(
-      "STATE_LIMIT_EXCEEDED",
+    throw new StateIndexCapacityError(
       "Descriptor-bound state index has no reclaimable compaction image.",
     );
   }
@@ -1188,74 +1210,6 @@ function hashLogRange(log: PinnedSecureFile, position: number, length: number): 
   return hash.digest();
 }
 
-function encodeCompactionControl(plan: CompactIndexPlan): Buffer {
-  const control = Buffer.alloc(STATE_INDEX_COMPACTION_CONTROL_BYTES);
-  STATE_INDEX_COMPACTION_MAGIC.copy(control, 0);
-  control.writeUInt8(0, STATE_INDEX_COMPACTION_MAGIC.byteLength);
-  control.writeUInt32BE(plan.sourceBytes, 16);
-  control.writeUInt32BE(plan.compactBytes, 20);
-  control.writeUInt32BE(plan.sourceFrames, 24);
-  control.writeUInt32BE(plan.compactFrames, 28);
-  plan.sourceDigest.copy(control, 32);
-  plan.compactDigest.copy(control, 64);
-  return control;
-}
-
-interface PreparedIndexCompaction {
-  readonly compactBytes: number;
-  readonly compactDigest: Buffer;
-  readonly compactFrames: number;
-  readonly imageOffset: number;
-  readonly sourceBytes: number;
-  readonly sourceDigest: Buffer;
-  readonly sourceFrames: number;
-}
-
-function decodeCompactionControl(
-  control: Buffer,
-  outerOffset: number,
-): PreparedIndexCompaction {
-  if (
-    control.byteLength !== STATE_INDEX_COMPACTION_CONTROL_BYTES
-    || !control.subarray(0, STATE_INDEX_COMPACTION_MAGIC.byteLength)
-      .equals(STATE_INDEX_COMPACTION_MAGIC)
-    || control.readUInt8(STATE_INDEX_COMPACTION_MAGIC.byteLength) !== 0
-  ) {
-    throw new StateLocalError(
-      "STATE_CORRUPT",
-      "Descriptor-bound state index compaction control is invalid.",
-    );
-  }
-  const sourceBytes = control.readUInt32BE(16);
-  const compactBytes = control.readUInt32BE(20);
-  const sourceFrames = control.readUInt32BE(24);
-  const compactFrames = control.readUInt32BE(28);
-  if (
-    sourceBytes !== outerOffset
-    || compactBytes < STATE_INDEX_LOG_HEADER.byteLength
-    || compactBytes > sourceBytes
-    || compactFrames > sourceFrames
-  ) {
-    throw new StateLocalError(
-      "STATE_CORRUPT",
-      "Descriptor-bound state index compaction bounds are invalid.",
-    );
-  }
-  return {
-    compactBytes,
-    compactDigest: Buffer.from(control.subarray(64, 96)),
-    compactFrames,
-    imageOffset:
-      outerOffset
-      + STATE_INDEX_FRAME_HEADER_BYTES
-      + STATE_INDEX_FRAME_METADATA_BYTES
-      + STATE_INDEX_COMPACTION_CONTROL_BYTES,
-    sourceBytes,
-    sourceDigest: Buffer.from(control.subarray(32, 64)),
-    sourceFrames,
-  };
-}
-
 function compactIndexLog(
   log: PinnedSecureFile,
   index: ReadonlyMap<string, IndexEntry>,
@@ -1283,7 +1237,37 @@ function compactIndexLog(
       "Descriptor-bound state index changed while compaction was planned.",
     );
   }
-  const control = encodeCompactionControl(plan);
+  const outerOffset = indexCompactionOuterOffset(plan.sourceBytes, plan.compactBytes);
+  const stageBytes = plan.compactBytes + STATE_INDEX_COMPACTION_FRAME_OVERHEAD;
+  const stagingByteLimit = indexCompactionStagingByteLimit(
+    limits.maximumBytes,
+    STATE_INDEX_COMPACTION_STAGING_OVERHEAD,
+  );
+  if (outerOffset + stageBytes > stagingByteLimit) {
+    throw new StateIndexCapacityError(
+      "Descriptor-bound state index lacks compaction staging headroom.",
+    );
+  }
+  if (outerOffset > plan.sourceBytes) {
+    const markerOffset = log.appendDurable(
+      [encodeIndexGrowthMarker(plan, outerOffset)],
+      stagingByteLimit,
+    );
+    if (markerOffset !== plan.sourceBytes) {
+      throw new StateLocalError(
+        "STATE_CORRUPT",
+        "Descriptor-bound state index growth marker moved.",
+      );
+    }
+    log.truncateDurable(outerOffset, stagingByteLimit);
+  }
+  const control = encodeIndexCompactionControl(outerOffset === plan.sourceBytes
+    ? plan
+    : {
+      ...plan,
+      sourceBytes: outerOffset,
+      sourceDigest: hashLogRange(log, 0, outerOffset),
+    });
   const valueBytes = control.byteLength + plan.compactBytes;
   const payloadBytes = STATE_INDEX_FRAME_METADATA_BYTES + valueBytes;
   const frameHeader = encodeFrameLengths(payloadBytes);
@@ -1298,19 +1282,6 @@ function compactIndexLog(
   for (const chunk of compactIndexChunks(log, plan)) outerHash.update(chunk);
   const digest = outerHash.digest();
   const footer = encodeFrameFooter(payloadBytes);
-  const stageBytes =
-    frameHeader.byteLength
-    + payloadBytes
-    + digest.byteLength
-    + footer.byteLength;
-  const stagingByteLimit =
-    indexCompactionStagingByteLimit(limits.maximumBytes, STATE_INDEX_COMPACTION_FRAME_OVERHEAD);
-  if (plan.sourceBytes + stageBytes > stagingByteLimit) {
-    throw new StateLocalError(
-      "STATE_LIMIT_EXCEEDED",
-      "Descriptor-bound state index lacks compaction staging headroom.",
-    );
-  }
   function* stageBodyChunks(): Generator<Buffer> {
     yield frameHeader;
     yield metadata;
@@ -1318,7 +1289,12 @@ function compactIndexLog(
     yield* compactIndexChunks(log, plan);
     yield digest;
   }
-  log.appendDurable(stageBodyChunks(), stagingByteLimit);
+  if (log.appendDurable(stageBodyChunks(), stagingByteLimit) !== outerOffset) {
+    throw new StateLocalError(
+      "STATE_CORRUPT",
+      "Descriptor-bound state index compaction stage moved.",
+    );
+  }
   hooks.afterIndexCompactionBody?.(log.path);
   log.appendDurable([footer], stagingByteLimit);
   hooks.afterIndexCompactionPrepared?.(log.path);
@@ -1401,7 +1377,7 @@ function recoverPreparedIndexCompaction(
   if (
     frameOffset < STATE_INDEX_LOG_HEADER.byteLength
     || payloadBytes
-      < STATE_INDEX_FRAME_METADATA_BYTES + STATE_INDEX_COMPACTION_CONTROL_BYTES
+      < STATE_INDEX_FRAME_METADATA_BYTES + INDEX_COMPACTION_CONTROL_BYTES
   ) {
     return false;
   }
@@ -1420,7 +1396,7 @@ function recoverPreparedIndexCompaction(
   if (
     keyBytes !== 0
     || payloadBytes !== STATE_INDEX_FRAME_METADATA_BYTES + valueBytes
-    || valueBytes < STATE_INDEX_COMPACTION_CONTROL_BYTES
+    || valueBytes < INDEX_COMPACTION_CONTROL_BYTES
   ) {
     throw new StateLocalError(
       "STATE_CORRUPT",
@@ -1428,14 +1404,16 @@ function recoverPreparedIndexCompaction(
     );
   }
   const controlOffset = metadataOffset + metadata.byteLength;
-  const control = log.readAt(controlOffset, STATE_INDEX_COMPACTION_CONTROL_BYTES);
-  const prepared = decodeCompactionControl(control, frameOffset);
+  const control = log.readAt(controlOffset, INDEX_COMPACTION_CONTROL_BYTES);
+  const prepared = decodeIndexCompactionControl(control, frameOffset);
+  const imageOffset = controlOffset + control.byteLength;
   if (
-    valueBytes !== STATE_INDEX_COMPACTION_CONTROL_BYTES + prepared.compactBytes
+    valueBytes !== INDEX_COMPACTION_CONTROL_BYTES + prepared.compactBytes
     || prepared.sourceBytes + totalFrameBytes !== size
-    || prepared.sourceBytes > limits.maximumBytes
+    || prepared.sourceBytes > limits.maximumBytes + INDEX_GROWTH_MARKER_BYTES
+    || prepared.compactBytes > limits.maximumBytes
     || size > indexCompactionStagingByteLimit(
-      limits.maximumBytes, STATE_INDEX_COMPACTION_FRAME_OVERHEAD,
+      limits.maximumBytes, STATE_INDEX_COMPACTION_STAGING_OVERHEAD,
     )
   ) {
     throw new StateLocalError(
@@ -1443,7 +1421,7 @@ function recoverPreparedIndexCompaction(
       "Descriptor-bound state index compaction size is invalid.",
     );
   }
-  const digestOffset = prepared.imageOffset + prepared.compactBytes;
+  const digestOffset = imageOffset + prepared.compactBytes;
   const expectedOuterDigest = log.readAt(digestOffset, STATE_INDEX_DIGEST_BYTES);
   const outerHash = createHash("sha256");
   for (const chunk of logRangeChunks(
@@ -1460,7 +1438,7 @@ function recoverPreparedIndexCompaction(
     );
   }
   if (
-    !hashLogRange(log, prepared.imageOffset, prepared.compactBytes)
+    !hashLogRange(log, imageOffset, prepared.compactBytes)
       .equals(prepared.compactDigest)
   ) {
     throw new StateLocalError(
@@ -1471,7 +1449,7 @@ function recoverPreparedIndexCompaction(
   const compacted = loadIndexLogRange(
     log,
     limits,
-    prepared.imageOffset,
+    imageOffset,
     prepared.compactBytes,
     false,
     true,
@@ -1483,7 +1461,7 @@ function recoverPreparedIndexCompaction(
     );
   }
   log.copyRangeDurable(
-    prepared.imageOffset,
+    imageOffset,
     0,
     prepared.compactBytes,
     (copiedBytes, totalBytes) => {
@@ -1493,20 +1471,6 @@ function recoverPreparedIndexCompaction(
   afterRewrite?.(log.path);
   log.truncateDurable(prepared.compactBytes);
   return true;
-}
-
-function hasCommittedFooterAtEnd(
-  log: PinnedSecureFile,
-  frameOffset: number,
-  size: number,
-): boolean {
-  if (size - frameOffset < STATE_INDEX_FRAME_FOOTER_BYTES) return false;
-  const footer = log.readAt(
-    size - STATE_INDEX_FRAME_FOOTER_BYTES,
-    STATE_INDEX_FRAME_FOOTER_BYTES,
-  );
-  return footer.subarray(0, STATE_INDEX_FRAME_COMMIT_MAGIC.byteLength)
-    .equals(STATE_INDEX_FRAME_COMMIT_MAGIC);
 }
 
 function loadIndexLog(
@@ -1526,7 +1490,7 @@ function loadIndexLogRange(
 ): { readonly index: Map<string, IndexEntry>; readonly frameCount: number } {
   const maximumRangeBytes = repairTail && start === 0
     ? indexCompactionStagingByteLimit(
-        limits.maximumBytes, STATE_INDEX_COMPACTION_FRAME_OVERHEAD,
+        limits.maximumBytes, STATE_INDEX_COMPACTION_STAGING_OVERHEAD,
       )
     : limits.maximumBytes;
   if (
@@ -1558,12 +1522,40 @@ function loadIndexLogRange(
       log.truncateDurable(offset);
       break;
     }
+    const growth = repairTail
+      ? inspectIncompleteIndexGrowth(
+        log,
+        offset,
+        end,
+        frameCount,
+        limits.maximumBytes,
+        STATE_INDEX_COMPACTION_FRAME_OVERHEAD,
+      )
+      : undefined;
+    if (growth !== undefined) {
+      if (
+        growth.outerOffset !== 0
+        && (
+          end === growth.outerOffset
+            + growth.compactBytes
+            + STATE_INDEX_COMPACTION_FRAME_OVERHEAD
+          || hasCommittedIndexFrameAtEnd(log, growth.outerOffset, end)
+        )
+      ) {
+        throw new StateLocalError(
+          "STATE_CORRUPT",
+          "Descriptor-bound state index growth marker contradicts its committed footer.",
+        );
+      }
+      log.truncateDurable(offset);
+      break;
+    }
     const frameHeader = log.readAt(offset, STATE_INDEX_FRAME_HEADER_BYTES);
     const payloadBytes = decodeFrameLengths(frameHeader, "header");
     const maximumCompactionPayloadBytes =
       limits.maximumBytes
       + STATE_INDEX_FRAME_METADATA_BYTES
-      + STATE_INDEX_COMPACTION_CONTROL_BYTES;
+      + INDEX_COMPACTION_CONTROL_BYTES;
     if (
       payloadBytes < STATE_INDEX_FRAME_METADATA_BYTES ||
       payloadBytes > maximumCompactionPayloadBytes
@@ -1578,15 +1570,21 @@ function loadIndexLogRange(
     if (remaining < totalFrameBytes) {
       if (
         repairTail
-        && isProvenIncompleteCompaction(
+        && isProvenIncompleteIndexCompaction(
           log,
           offset,
           end,
           payloadBytes,
           frameCount,
-          limits,
+          limits.maximumBytes,
         )
       ) {
+        if (hasCommittedIndexFrameAtEnd(log, offset, end)) {
+          throw new StateLocalError(
+            "STATE_CORRUPT",
+            "Descriptor-bound state index header contradicts its committed footer.",
+          );
+        }
         log.truncateDurable(offset);
         break;
       }
@@ -1602,7 +1600,7 @@ function loadIndexLogRange(
           "Descriptor-bound state index compact image is incomplete.",
         );
       }
-      if (hasCommittedFooterAtEnd(log, offset, size)) {
+      if (hasIndexCommitFooterAtEnd(log, end)) {
         throw new StateLocalError(
           "STATE_CORRUPT",
           "Descriptor-bound state index header contradicts its committed footer.",
@@ -1692,48 +1690,6 @@ function loadIndexLogRange(
     );
   }
   return { index, frameCount };
-}
-
-function isProvenIncompleteCompaction(
-  log: PinnedSecureFile,
-  frameOffset: number,
-  end: number,
-  payloadBytes: number,
-  frameCount: number,
-  limits: IndexLogLimits,
-): boolean {
-  const metadataOffset = frameOffset + STATE_INDEX_FRAME_HEADER_BYTES;
-  const controlOffset = metadataOffset + STATE_INDEX_FRAME_METADATA_BYTES;
-  if (end - metadataOffset < STATE_INDEX_FRAME_METADATA_BYTES) return false;
-  const metadata = log.readAt(metadataOffset, STATE_INDEX_FRAME_METADATA_BYTES);
-  if (metadata.readUInt8(0) !== 3) return false;
-  if (
-    metadata.readUInt16BE(1) !== 0
-    || metadata.readUInt32BE(3) < STATE_INDEX_COMPACTION_CONTROL_BYTES
-    || payloadBytes
-      !== STATE_INDEX_FRAME_METADATA_BYTES + metadata.readUInt32BE(3)
-  ) {
-    throw new StateLocalError(
-      "STATE_CORRUPT",
-      "Descriptor-bound state index compaction prefix is invalid.",
-    );
-  }
-  if (end - controlOffset < STATE_INDEX_COMPACTION_CONTROL_BYTES) return true;
-  const prepared = decodeCompactionControl(
-    log.readAt(controlOffset, STATE_INDEX_COMPACTION_CONTROL_BYTES),
-    frameOffset,
-  );
-  if (
-    prepared.sourceFrames !== frameCount
-    || prepared.sourceBytes > limits.maximumBytes
-    || !hashLogRange(log, 0, prepared.sourceBytes).equals(prepared.sourceDigest)
-  ) {
-    throw new StateLocalError(
-      "STATE_CORRUPT",
-      "Descriptor-bound state index compaction source is invalid.",
-    );
-  }
-  return true;
 }
 
 export async function syncSecureDirectory(path: string): Promise<void> {
