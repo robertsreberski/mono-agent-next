@@ -4,7 +4,6 @@ import { defineRuntimeModule } from "@mono-agent/module-sdk";
 import {
   parseRuntimePiConfig,
   runtimePiJsonSchema,
-  type RuntimePiConfig,
 } from "./config.js";
 import { validateRuntimePiModel } from "./model.js";
 import { createRuntimePi } from "./runtime.js";

@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 import {
-  OPERATOR_IDENTIFIER_PATTERN,
   OPERATOR_LIMITS,
   OPERATOR_PROTOCOL,
   OPERATOR_REGISTRY_SCHEMA,
@@ -19,7 +18,6 @@ import {
   type OperatorFrame,
   type OperatorHealth,
   type OperatorInfo,
-  type OperatorJsonValue,
   type OperatorLiveInputRequest,
   type OperatorLiveInputResponse,
   type OperatorMessage,
@@ -35,7 +33,7 @@ import {
   type OperatorToolResultPart,
   type OperatorUsage,
 } from "./types.js";
-import { createOperatorValidators, type UnknownRecord } from "./validation.js";
+import { createOperatorValidators } from "./validation.js";
 
 export class OperatorProtocolError extends Error {
   readonly code: "INVALID_VALUE" | "FRAME_TOO_LARGE";

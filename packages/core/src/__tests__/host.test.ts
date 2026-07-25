@@ -31,7 +31,6 @@ import {
   diagnoseAgent,
   runAgentModuleCommand,
 } from "../index.js";
-import type { AgentConfig } from "../types.js";
 import {
   completed,
   createFixtureProject,

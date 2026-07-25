@@ -13,7 +13,6 @@ import { digest, isErrno } from "./internal-fs.js";
 import { readServiceInput } from "./input.js";
 import { readServiceReadiness } from "./logs.js";
 import {
-  type ServiceMacosRuntimePaths,
   type ServiceMacosTarget,
   type ServiceRunnerActivation,
   serviceTarget,

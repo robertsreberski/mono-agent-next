@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import type { ChannelAttachment } from "@mono-agent/module-sdk";
 import { cloneIntrinsicUint8Array } from "./binary.js";
 import {
-  assertOwnKeys, denseOwnDataArray as boundedOwnDataArray,
   ownDataRecord as boundedOwnDataRecord, snapshotBoundedValue,
 } from "./bounded-value.js";
 import {

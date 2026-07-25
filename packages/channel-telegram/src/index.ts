@@ -14,7 +14,6 @@ import {
   type ChannelReplyEvent,
   type ChannelReplySink,
   type ChannelSendTool,
-  type ChannelTurnResult,
   type AskUserRequest,
   type ModuleHealth,
 } from "@mono-agent/module-sdk";

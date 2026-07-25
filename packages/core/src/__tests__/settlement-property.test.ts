@@ -120,11 +120,20 @@ describe("durable settlement honesty", () => {
     // invariant is narrower: a caller told the run is definitively over must not
     // find it still running, or the requestId stays wedged behind a live
     // admission lease and the operator run listing shows a phantom active run.
+    //
+    // Asserted as one total statement rather than a guarded loop. The guarded
+    // form asserted nothing once every path reported `uncertain`, and passed
+    // vacuously — which is what `--expect.requireAssertions` caught.
+    const observed = [];
     for (const path of TERMINAL_PATHS) {
       const attempt = await runTurnUnderSettlementFailure(path);
-      if (attempt.thrown?.status === "uncertain") continue;
-      expect({ path, durable: attempt.durableStatus })
-        .toStrictEqual({ path, durable: attempt.thrown?.status });
+      observed.push({
+        path,
+        consistent: attempt.thrown?.status === "uncertain"
+          || attempt.durableStatus === attempt.thrown?.status,
+      });
     }
+
+    expect(observed).toStrictEqual(TERMINAL_PATHS.map((path) => ({ path, consistent: true })));
   }, 300_000);
 });

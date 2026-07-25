@@ -41,9 +41,7 @@ import {
   rebuildBujoIndexes,
   recordLimits,
   setMetadata,
-  vectorIntakeKey,
   writeMemoryVector,
-  type BujoMemoryRow,
 } from "./bujo-db.js";
 import {
   createMemoryLocalCommands,
@@ -73,7 +71,6 @@ import {
 } from "./records.js";
 import {
   createSecureFile,
-  inspectSecureFile,
   openPinnedSecureFile,
   openSecureRoot,
   readSecureFile,

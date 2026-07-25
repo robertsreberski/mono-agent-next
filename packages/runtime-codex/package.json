@@ -9,7 +9,13 @@
     "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
     "directory": "packages/runtime-codex"
   },
-  "keywords": ["ai", "agents", "mono-agent", "runtime", "codex"],
+  "keywords": [
+    "ai",
+    "agents",
+    "mono-agent",
+    "runtime",
+    "codex"
+  ],
   "mono-agent": {
     "packageName": "@mono-agent/runtime-codex",
     "apiVersion": 1,
@@ -17,16 +23,31 @@
     "responsibility": "Runs isolated turns through the Codex app-server JSONL protocol."
   },
   "private": false,
-  "engines": { "node": ">=22.19.0" },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "files": ["dist", "README.md", "LICENSE"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --expect.requireAssertions"
   },
-  "dependencies": { "@mono-agent/module-sdk": "workspace:0.15.0" },
-  "publishConfig": { "access": "public" }
+  "dependencies": {
+    "@mono-agent/module-sdk": "workspace:0.15.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

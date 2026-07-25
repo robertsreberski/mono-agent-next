@@ -21,7 +21,6 @@ import {
 import { parseMemoryLocalConfig } from "./config.js";
 import { auditBujoProjections } from "./consolidation.js";
 import type { MemoryEmbeddingProvider } from "./embeddings.js";
-import { MemoryLocalError } from "./errors.js";
 import {
   COPY_BUFFER_BYTES,
   MAX_TREE_BYTES,
@@ -33,7 +32,6 @@ import {
   assertTargetDirectory,
   assertTargetFile,
   cleanupFailedSnapshotTarget,
-  comparePathNames,
   createPrivateFile,
   createPrivateTargetRoot,
   currentUid,

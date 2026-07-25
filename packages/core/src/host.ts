@@ -1,46 +1,33 @@
 // SPDX-License-Identifier: MIT
 import { createHash, randomUUID } from "node:crypto";
-import type { BigIntStats, Dirent } from "node:fs";
-import { lstat, opendir } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { resolve } from "node:path";
 import {
-  AGENT_INTERACTION_LIMITS, DEFAULT_APPROVAL_TIMEOUT_MS, HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE,
+  HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE,
   MODULE_TOOL_LIMITS,
-  RUNTIME_SESSION_UNAVAILABLE_CODE, parseApprovalDecision, parseApprovalRequest, parseArtifactRef,
-  parseAskUserAnswer, parseAskUserRequest, snapshotRuntimeTurnError,
-  type ArtifactRef, type ApprovalDecision, type ApprovalRequest, type AskUserAnswer, type AskUserRequest,
-  type Channel, type ChannelAttachment, type ChannelCapabilities, type ChannelCompletionDelivery,
-  type ChannelConversationListRequest, type ChannelConversationListResult, type ChannelDeliveryResult, type ChannelHost,
+  RUNTIME_SESSION_UNAVAILABLE_CODE, snapshotRuntimeTurnError,
+  type ArtifactRef, type ApprovalRequest, type AskUserRequest,
+  type Channel, type ChannelCapabilities, type ChannelConversationListRequest, type ChannelConversationListResult, type ChannelDeliveryResult, type ChannelHost,
   type ChannelInboundRequest, type ChannelModuleDefinition, type ChannelOpenConversationRequest,
-  type ChannelOpenConversationResult, type ChannelOutboundMessage, type ChannelReplyEvent, type ChannelReplySink,
-  type ChannelReplayRequest, type ChannelReplayResult, type ChannelSendTool, type ChannelTurnResult, type ConfigProvenanceMap,
-  type JsonObject, type JsonValue, type Memory, type MemoryHost, type MemoryModuleDefinition, type MemoryRecord,
-  type MemoryRuntimeCaptureRequest, type MemoryRuntimeCaptureResult, type ModuleDiagnostic,
-  type ModuleHost, type ModuleHealth, type ModuleInstance, type ModuleLogger, type Runtime, type RuntimeLiveInputHandler,
-  type ModuleToolContribution, type ModuleToolTurnContext,
-  type RuntimeModuleDefinition,
-  type RuntimeNativeToolDescriptor, type RuntimeNativeToolEffect, type RuntimeSession,
+  type ChannelOpenConversationResult, type ChannelOutboundMessage, type ChannelReplySink,
+  type ChannelReplayRequest, type ChannelReplayResult, type ChannelSendTool, type ChannelTurnResult, type JsonObject, type JsonValue, type Memory, type MemoryHost, type MemoryModuleDefinition, type MemoryRecord,
+  type MemoryRuntimeCaptureRequest, type ModuleHost, type ModuleHealth, type ModuleInstance, type Runtime, type RuntimeLiveInputHandler,
+  type ModuleToolContribution, type RuntimeModuleDefinition,
+  type RuntimeNativeToolDescriptor, type RuntimeSession,
   type RuntimeTurnErrorSnapshot, type RuntimeToolCall,
   type RuntimeToolResult, type RuntimeTurnEvent, type RuntimeTurnResult, type TurnMessage,
 } from "@mono-agent/module-sdk";
-import type { Exporter, ReservedModuleDefinition, Sandbox, StateStore, TriggerEvent, TriggerHost, TriggerReceipt } from "@mono-agent/module-sdk/internal";
-import {
-  assertModuleToolBindingCompliance,
-  assertModuleToolContributionsCompliance,
-  snapshotSelectedModuleInstanceCompliance,
-} from "@mono-agent/module-sdk/testing";
+import type { Exporter, ReservedModuleDefinition, Sandbox, StateStore, TriggerEvent, TriggerHost } from "@mono-agent/module-sdk/internal";
 import { ensureLoadedAgentConfig, environmentFor } from "./config.js";
 import { cloneIntrinsicUint8Array } from "./binary.js";
-import { assertOwnKeys, denseOwnDataArray as boundedOwnDataArray, ownDataRecord as boundedOwnDataRecord, snapshotBoundedValue } from "./bounded-value.js";
+import { assertOwnKeys, ownDataRecord as boundedOwnDataRecord } from "./bounded-value.js";
 import { AgentAdmissionError, AgentConfigError, AgentModuleError, RunExecutionError, errorMessage } from "./errors.js";
 import { escalateMessageEffort } from "./effort.js";
-import { ConversationTails, durableFingerprint, submissionFingerprint } from "./host-admission.js";
+import { ConversationTails, submissionFingerprint } from "./host-admission.js";
 import { createAskUserTool, createMemoryRecallTool, moduleProvenance, readInstructions } from "./host-instructions.js";
 import { NULL_LOGGER, snapshotInstanceCapabilities } from "./host-module-instances.js";
-import { deliveryTriggerKind, normalizeCompletionDelivery, normalizeOutboundMessage } from "./host-outbound.js";
+import { deliveryTriggerKind, normalizeCompletionDelivery } from "./host-outbound.js";
 import {
-  boundedUtf8, inspectModuleFailure, redactBounded, redactChannelToolEvent, sanitizeModuleCommandError,
-} from "./host-redaction.js";
+  boundedUtf8, redactBounded, redactChannelToolEvent, } from "./host-redaction.js";
 import {
   assertConfiguredRoute, routeCandidates, runtimeEligibility, runtimeSessionMapKey,
   runtimeSessionRouteKey,
@@ -51,7 +38,7 @@ import { HostInteractions } from "./host-interactions.js";
 import { HostMemory } from "./host-memory.js";
 import { HostTriggers } from "./host-triggers.js";
 import { HostSessions } from "./host-sessions.js";
-import { normalizeLiveInput, normalizeSubmitInput } from "./host-submit-input.js";
+import { normalizeSubmitInput } from "./host-submit-input.js";
 import {
   assertUnambiguousToolPolicy, bindModuleTools, collectChannelTools, createdModuleToolSnapshot,
   executeTool, filterTools, moduleRuntimeTool, resolveToolCatalog, snapshotChannelSendTools,
@@ -59,18 +46,17 @@ import {
 } from "./host-tool-catalog.js";
 import {
   cacheableAssistantMessage, decodeCachedAgentResponse, encodeCachedAgentResponse,
-  renderAskUserAnswer, renderAskUserRequest, renderRecalledMemory, renderRouteIdentity,
-  snapshotMemoryRecallRecords,
+  renderRecalledMemory, renderRouteIdentity,
   textFromMessage, turnMessagesFromTranscript,
 } from "./host-transcript.js";
 import {
-  ASK_USER_TOOL_NAME, DEFAULT_INSTRUCTION_BYTES, DEFAULT_MESSAGE_BYTES, MEMORY_RECALL_TOOL_NAME,
+  ASK_USER_TOOL_NAME, DEFAULT_MESSAGE_BYTES, MEMORY_RECALL_TOOL_NAME,
   type AmbiguousToolAlias, type BoundChannelTool, type BoundModuleTool, type RunningModule,
   type SessionDisposition, type TranscriptContentDraft, type VerbatimEntry,
 } from "./host-types.js";
 import {
-  assertBoundedText, assertRouteText, encodePersistedValue, immutableClone, isJsonValue, isRecord,
-  positiveInteger, referencedEnvironmentValues, sameStringSet, toJsonObject, toJsonValue, turnBinaryData,
+  assertBoundedText, encodePersistedValue, immutableClone, isJsonValue, isRecord,
+  positiveInteger, referencedEnvironmentValues, toJsonObject, toJsonValue, turnBinaryData,
 } from "./host-values.js";
 import {
   HostDelivery,
@@ -78,8 +64,6 @@ import {
 import {
   HostHealthMonitor,
   moduleHealthSummary,
-  normalizeModuleJson,
-  normalizeModuleHealth,
   redactJson,
   type HostLifecycleState,
 } from "./host-health.js";
@@ -90,31 +74,27 @@ import {
   settlementSignal,
   isAbort,
   throwIfAborted,
-  waitForValueWithAbort,
   withTimeoutSignal,
 } from "./host-lifecycle.js";
 import {
   ActiveTurn, boundedRuntimeFailureMessage, isSafeRuntimeFallback, turnExecutionError,
 } from "./host-turn.js";
 import { connectProjectMcpTools, type ConnectedMcpTools, type CoreRuntimeTool } from "./mcp.js";
-import { decodeAuthorityText, readAuthorityFile } from "./authority-read.js";
-import { createCurrentRunFiles, type CurrentRunFiles } from "./current-run-output.js";
+import { createCurrentRunFiles } from "./current-run-output.js";
 import { moduleConfigFor } from "./module-loader.js";
-import { nativeToolAllowed, runtimeNativeToolPolicyIssue } from "./native-tool-policy.js";
-import { normalizeToolResult, type ToolResultArtifactSink } from "./tool-result-normalizer.js";
+import { runtimeNativeToolPolicyIssue } from "./native-tool-policy.js";
 import { StateExecutionClient, type DurableFingerprint, type CanonicalTranscript } from "./state-execution-client.js";
 import { assertRuntimeTurnEventBoundaryHealthy, createRuntimeTurnEventBoundary, normalizeChannelCapabilities,
-  normalizeRuntimeCapabilities, normalizeModuleDiagnostic, normalizeRuntimeModelValidation, normalizeRuntimeToolCall,
+  normalizeRuntimeCapabilities, normalizeRuntimeModelValidation, normalizeRuntimeToolCall,
   normalizeRuntimeTurnEvent, normalizeRuntimeTurnResult } from "./runtime-result-normalizer.js";
 import type { AgentHealth, AgentHost, AgentHostOptions, AgentHostStartInfo, AgentAskAnswer,
   AgentAskAnswerStatus, AgentApprovalAnswer, AgentApprovalAnswerStatus, AgentConfigView, AgentConversationReplay,
   AgentConversationSummary, AgentLiveInput, AgentLiveInputStatus, AgentModuleCommandResult, AgentModuleDiagnostics,
-  AgentResponse, AgentResponseMessage, AgentInteractionEvidence, AgentRunAttemptEvidence, AgentRunHistoryPage,
+  AgentResponse, AgentInteractionEvidence, AgentRunAttemptEvidence, AgentRunHistoryPage,
   AgentRunRecord, AgentSubmitInput, AgentTranscriptContentPart, AgentTranscriptEntry, LoadedAgentConfig,
   LoadedAgentModule, ModuleKind, RuntimeRoute } from "./types.js";
 const DEFAULT_MAX_CONCURRENT_TURNS = 4, DEFAULT_MAX_PENDING_TURNS = 64;
-const DEFAULT_DRAIN_TIMEOUT_MS = 30_000, DEFAULT_LIFECYCLE_TIMEOUT_MS = 10_000, DEFAULT_LIVE_INPUT_ACK_TIMEOUT_MS = 5_000;
-const MODULE_DIAGNOSTIC_MAX_ITEMS = 100;
+const DEFAULT_DRAIN_TIMEOUT_MS = 30_000, DEFAULT_LIFECYCLE_TIMEOUT_MS = 10_000;
 export async function createAgentHost(
   config: string | LoadedAgentConfig,
   options: AgentHostOptions = {},

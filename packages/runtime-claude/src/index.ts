@@ -2,7 +2,7 @@
 import { defineRuntimeModule } from "@mono-agent/module-sdk";
 
 import { claudeAuthCommands } from "./auth-command.js";
-import { parseRuntimeClaudeConfig, runtimeClaudeJsonSchema, type RuntimeClaudeConfig } from "./config.js";
+import { parseRuntimeClaudeConfig, runtimeClaudeJsonSchema } from "./config.js";
 import { validateClaudeModel } from "./model.js";
 import { createRuntimeClaude } from "./runtime.js";
 

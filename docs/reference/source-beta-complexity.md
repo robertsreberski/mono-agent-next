@@ -17,43 +17,43 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `a30834a36cea97fbb03727ab04f956f2c85d04bee603adf66f6f2444d7afe44c`
+Source manifest digest: `6dd426371e8dfbec5c390100d3302c3ad7633ae761aa50dcb3580234bae10106`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 311 | 95333 |
-| Tests | 154 | 74362 |
-| Repository and product tooling | 55 | 18464 |
+| Production | 311 | 95283 |
+| Tests | 154 | 74370 |
+| Repository and product tooling | 55 | 18509 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **520** | **188159** |
+| **Total executable source** | **520** | **188162** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 306.5 lines.
+Average production file size is 306.4 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 95333 | 130000 | within limit |
-| kernel-production | 16181 | 16500 | within limit |
-| durable-protocol-production | 7627 | 9500 | within limit |
+| repository-production | 95283 | 130000 | within limit |
+| kernel-production | 16160 | 16500 | within limit |
+| durable-protocol-production | 7626 | 9500 | within limit |
 
 ## Largest package ownership surfaces
 
 | Package | Production files | Production lines | Test lines |
 | --- | ---: | ---: | ---: |
-| `@mono-agent/state-local` | 27 | 14356 | 5466 |
-| `@mono-agent/core` | 39 | 12916 | 18182 |
-| `@mono-agent/runtime-pi` | 28 | 8860 | 4978 |
-| `@mono-agent/memory-local` | 19 | 7740 | 4140 |
-| `@mono-agent/web` | 28 | 7185 | 2488 |
-| `@mono-agent/service-macos` | 22 | 5771 | 2131 |
+| `@mono-agent/state-local` | 27 | 14355 | 5466 |
+| `@mono-agent/core` | 39 | 12895 | 18189 |
+| `@mono-agent/runtime-pi` | 28 | 8858 | 4978 |
+| `@mono-agent/memory-local` | 19 | 7734 | 4140 |
+| `@mono-agent/web` | 28 | 7169 | 2488 |
+| `@mono-agent/service-macos` | 22 | 5770 | 2131 |
 | `create-mono-agent` | 11 | 4477 | 1651 |
 | `@mono-agent/channel-slack` | 15 | 3762 | 2191 |
 

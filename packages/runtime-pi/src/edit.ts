@@ -11,7 +11,6 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import {
-  dirname,
   isAbsolute,
   join,
   relative,
