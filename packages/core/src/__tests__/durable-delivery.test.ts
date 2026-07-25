@@ -50,6 +50,7 @@ describe("durable proactive delivery", () => {
     const released = new Promise<void>((resolve) => {
       releaseTurn = resolve;
     });
+    let sends = 0;
     const project = await createFixtureProject([
       {
         name: runtimeName,
@@ -79,6 +80,7 @@ describe("durable proactive delivery", () => {
               conversationId: message.conversationId,
             }),
             async deliver(message: ChannelOutboundMessage) {
+              sends += 1;
               return {
                 status: "delivered" as const,
                 idempotencyKey: message.idempotencyKey,
@@ -93,7 +95,9 @@ describe("durable proactive delivery", () => {
     await project.writeConfig(minimalConfig(runtimeName, {
       channels: { notify: { $use: channelName } },
     }));
-    const host = await createAgentHost(project.configPath);
+    const host = await createAgentHost(project.configPath, {
+      lifecycleTimeoutMs: 20,
+    });
     hosts.push(host);
 
     const turn = host.submit({
@@ -102,22 +106,22 @@ describe("durable proactive delivery", () => {
       text: "turn request",
     });
     await started;
-    let deliverySettled = false;
+    let turnSettled = false;
+    void turn.then(
+      () => { turnSettled = true; },
+      () => { turnSettled = true; },
+    );
     const delivery = host.deliver(
       "notify",
       outboundMessage("local-concurrent-delivery", "delivery response"),
-    ).then((result) => {
-      deliverySettled = true;
-      return result;
+    );
+    await expect(settleWithin(delivery, 500)).resolves.toMatchObject({
+      status: "delivered",
     });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    const settledBeforeTurn = deliverySettled;
+    expect(turnSettled).toBe(false);
+    expect(sends).toBe(1);
     releaseTurn();
-    expect(settledBeforeTurn).toBe(false);
-    await expect(Promise.all([turn, delivery])).resolves.toMatchObject([
-      { status: "completed" },
-      { status: "delivered" },
-    ]);
+    await expect(turn).resolves.toMatchObject({ status: "completed" });
     const replay = await host.replay("conversation-1");
     expect(replay.messages.map((message) => ({
       id: message.id,
@@ -127,16 +131,16 @@ describe("durable proactive delivery", () => {
         .map((part) => part.text)
         .join(""),
     }))).toEqual([
+      {
+        id: expect.stringMatching(/^delivery:/u),
+        role: "assistant",
+        text: "delivery response",
+      },
       { id: undefined, role: "user", text: "turn request" },
       {
         id: expect.stringMatching(/:assistant$/u),
         role: "assistant",
         text: "turn response",
-      },
-      {
-        id: expect.stringMatching(/^delivery:/u),
-        role: "assistant",
-        text: "delivery response",
       },
     ]);
   });
@@ -574,4 +578,20 @@ function diagnostic(code: string) {
     severity: "error" as const,
     message: code,
   };
+}
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(
+          `operation did not settle within ${String(timeoutMs)}ms`,
+        )), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }

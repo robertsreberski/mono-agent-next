@@ -20,6 +20,7 @@ const RUNTIME_CAPABILITIES = [
 const CHANNEL_CAPABILITIES = [
   "attachments", "liveInput", "askUser", "proactive", "runtimeControl", "verbatim", "cancellation",
 ] as const;
+const INSTANCE_TOOL_SNAPSHOTS = new WeakMap<object, readonly ModuleToolContribution[]>();
 export interface ModuleComplianceOptions {
   readonly expectedKind?: ModuleKind;
   readonly expectedPackageName?: string;
@@ -150,6 +151,14 @@ export function assertMemoryInstanceCompliance(value: unknown): asserts value is
       fail(`${method}-capable memory instance ${method} must be a function`);
   }
 }
+export function snapshotSelectedModuleInstanceCompliance(
+  kind: "runtime" | "channel" | "memory", value: unknown,
+): readonly ModuleToolContribution[] {
+  if (kind === "runtime") assertRuntimeInstanceCompliance(value);
+  else if (kind === "channel") assertChannelInstanceCompliance(value);
+  else assertMemoryInstanceCompliance(value);
+  return INSTANCE_TOOL_SNAPSHOTS.get(value as object)!;
+}
 export function assertMonoAgentModuleExport(namespace: unknown, options: ModuleComplianceOptions = {}):
 OpenModuleDefinition {
   const imported = requireRecord(namespace, "imported module namespace");
@@ -264,10 +273,11 @@ function assertModuleInstance(value: unknown, kind: ModuleKind): Record<string, 
   if (contributionDescriptor !== undefined && !("value" in contributionDescriptor)) {
     fail(`${label}.toolContributions must be an own data property`);
   }
-  assertModuleToolContributionsCompliance(
+  const toolContributions = assertModuleToolContributionsCompliance(
     contributionDescriptor === undefined ? undefined : contributionDescriptor.value,
     `${label}.toolContributions`,
   );
+  INSTANCE_TOOL_SNAPSHOTS.set(instance, toolContributions);
   if (instance.commands !== undefined) {
     if (!Array.isArray(instance.commands)) fail(`${label} commands must be an array`);
     for (const [index, commandValue] of instance.commands.entries()) {
@@ -319,9 +329,14 @@ function assertInstanceCapabilities(
 function assertSchemaGraph(jsonSchema: Record<string, unknown>): void {
   const snapshots = new WeakMap<object, Record<string, unknown>>();
   const visited = new Set<object>();
-  const visit = (current: unknown): void => {
-    if (current === null || typeof current !== "object" || visited.has(current)) return;
+  const pending: unknown[] = [jsonSchema];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (current === null || typeof current !== "object" || visited.has(current)) continue;
     visited.add(current);
+    if (visited.size > MODULE_TOOL_LIMITS.inputSchemaItems) {
+      fail(`module schema graph exceeds ${String(MODULE_TOOL_LIMITS.inputSchemaItems)} nodes`);
+    }
     const record = snapshotSchemaNode(current, snapshots);
     if (!Array.isArray(current) && record.properties !== undefined) {
       const properties = snapshotSchemaNode(
@@ -333,8 +348,14 @@ function assertSchemaGraph(jsonSchema: Record<string, unknown>): void {
           fail(`module schema may not define reserved directive property ${name}`);
       }
     }
-    for (const child of Object.values(record)) visit(child);
-    if (Array.isArray(current) || !(MODULE_SCHEMA_SLOT_REFERENCE in record)) return;
+    const children = Object.values(record);
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push(children[index]);
+    }
+  }
+  for (const current of visited) {
+    const record = snapshots.get(current)!;
+    if (Array.isArray(current) || !(MODULE_SCHEMA_SLOT_REFERENCE in record)) continue;
     const reference = record[MODULE_SCHEMA_SLOT_REFERENCE];
     if (record.type !== "string" || reference === null || typeof reference !== "object"
       || Array.isArray(reference) || readCrossSlotReference({
@@ -342,8 +363,7 @@ function assertSchemaGraph(jsonSchema: Record<string, unknown>): void {
       }) === undefined) {
       fail("module schema has an invalid cross-slot reference annotation");
     }
-  };
-  visit(jsonSchema);
+  }
 }
 function snapshotSchemaNode(value: object, snapshots: WeakMap<object, Record<string, unknown>>):
 Record<string, unknown> {

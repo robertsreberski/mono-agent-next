@@ -7,6 +7,7 @@ import {
   RuntimeTurnError,
   type AgentInteractionHandler,
   type ApprovalDecision,
+  type MemoryRecord,
 } from "@mono-agent/module-sdk";
 
 const mcpMocks = vi.hoisted(() => ({
@@ -1385,6 +1386,67 @@ describe("agent host lifecycle", () => {
       })).resolves.toMatchObject({ status: "completed", text: "continued" });
       expect(renderedRequest).not.toContain("- undefined");
       expect(renderedRequest).not.toContain("Relevant memory");
+      await expect(host.health()).resolves.toMatchObject({ status: "degraded" });
+    } finally {
+      await host.stop();
+    }
+  });
+
+  it("fails closed on accessor-backed recalled records without reading them", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-${suffix}`;
+    const memory = `@fixture/memory-${suffix}`;
+    let renderedRequest = "";
+    let accessorReads = 0;
+    const record = {
+      id: "unsafe-memory",
+      createdAt: "2026-07-25T00:00:00.000Z",
+    } as unknown as MemoryRecord;
+    Object.defineProperty(record, "text", {
+      enumerable: true,
+      get() {
+        accessorReads += 1;
+        return "accessor-backed memory";
+      },
+    });
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create: () => runtimeInstance(async (request) => {
+            renderedRequest = JSON.stringify(request);
+            return completed("continued");
+          }),
+        },
+      },
+      {
+        name: memory,
+        kind: "memory",
+        controller: {
+          create: () => ({
+            capabilities: { capture: false, forget: false },
+            async recall() {
+              return { records: [record] };
+            },
+          }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      memory: { $use: memory },
+    }));
+    const host = await createAgentHost(project.configPath);
+
+    try {
+      await expect(host.submit({
+        requestId: "accessor-auto-recall",
+        conversationId: "accessor-auto-recall",
+        text: "continue safely",
+      })).resolves.toMatchObject({ status: "completed", text: "continued" });
+      expect(accessorReads).toBe(0);
+      expect(renderedRequest).not.toContain("Relevant memory");
+      expect(renderedRequest).not.toContain("accessor-backed memory");
       await expect(host.health()).resolves.toMatchObject({ status: "degraded" });
     } finally {
       await host.stop();

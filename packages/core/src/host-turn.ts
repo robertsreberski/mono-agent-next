@@ -9,7 +9,7 @@ import {
 } from "@mono-agent/module-sdk";
 
 import type { CurrentRunFiles } from "./current-run-output.js";
-import { waitForValueWithAbort } from "./host-lifecycle.js";
+import { throwIfAborted, waitForValueWithAbort } from "./host-lifecycle.js";
 import type {
   AgentApprovalAnswer,
   AgentApprovalAnswerStatus,
@@ -47,14 +47,18 @@ class InteractionSlot<Request extends { readonly interactionId: string }, Answer
     duplicateMessage: string,
   ): Promise<Answer> {
     if (this.#pending !== undefined) throw new Error(duplicateMessage);
+    throwIfAborted(signal);
     let pending!: PendingInteraction<Request, Answer>;
     const reply = new Promise<Answer>((resolve, reject) => {
       pending = { request, resolve, reject };
       this.#pending = pending;
     });
     try {
-      await emit(request);
-      return await waitForValueWithAbort(reply, signal);
+      const [answer] = await waitForValueWithAbort(Promise.all([
+        reply,
+        Promise.resolve().then(() => emit(request)),
+      ]), signal);
+      return answer;
     } finally {
       if (this.#pending === pending) this.#pending = undefined;
     }

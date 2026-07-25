@@ -18,7 +18,7 @@ interface DeliveryContext {
   readonly lifecycleTimeoutMs: number;
   readonly channels: ReadonlyMap<string, Channel>;
   readonly transcripts: Map<string, CanonicalTranscript>;
-  readonly conversationTails: ConversationTails;
+  readonly localHistoryTails: ConversationTails;
   normalizeMessage(
     message: ChannelOutboundMessage,
     resolveDefault?: () => string | undefined,
@@ -37,7 +37,7 @@ export class HostDelivery {
   constructor(readonly context: DeliveryContext) {}
 
   deliver(
-    channelId: string, message: ChannelOutboundMessage, signal: AbortSignal, tailOwner?: string,
+    channelId: string, message: ChannelOutboundMessage, signal: AbortSignal,
   ): Promise<ChannelDeliveryOutcome> {
     const channel = this.context.channels.get(channelId);
     const normalized = this.context.normalizeMessage(
@@ -60,7 +60,7 @@ export class HostDelivery {
             "The idempotency key is already active for a different delivery"));
     }
     const running = this.#once(channelId, channel, normalized, fingerprint,
-      AbortSignal.any([this.context.hostSignal, signal]), tailOwner);
+      AbortSignal.any([this.context.hostSignal, signal]));
     const tracked = running.finally(() => {
       if (this.#inflight.get(normalized.idempotencyKey)?.promise === tracked)
         this.#inflight.delete(normalized.idempotencyKey);
@@ -71,7 +71,7 @@ export class HostDelivery {
 
   async #once(
     channelId: string, channel: Channel, message: ChannelOutboundMessage,
-    fingerprint: DurableFingerprint, signal: AbortSignal, tailOwner?: string,
+    fingerprint: DurableFingerprint, signal: AbortSignal,
   ): Promise<ChannelDeliveryOutcome> {
     const execution = this.context.execution();
     const intent = execution === undefined ? undefined : await execution.prepareDelivery({
@@ -81,7 +81,7 @@ export class HostDelivery {
       return this.#confirm(channelId, channel, message, fingerprint, {
         status: "duplicate", idempotencyKey: message.idempotencyKey,
         ...(intent.messageId === undefined ? {} : { messageId: intent.messageId }),
-      }, intent, tailOwner);
+      }, intent, signal);
     }
     if (intent?.status === "conflict")
       return outcome("failed", message.idempotencyKey, "channel_delivery_idempotency_conflict",
@@ -117,7 +117,7 @@ export class HostDelivery {
         `The channel delivery outcome is unknown: ${this.context.redact(errorMessage(error))}`);
     }
     if (result.status === "delivered" || result.status === "duplicate")
-      return this.#confirm(channelId, channel, message, fingerprint, result, intent, tailOwner);
+      return this.#confirm(channelId, channel, message, fingerprint, result, intent, signal);
     if (intent?.status !== "send") return { result };
     try {
       const settled = await this.#settle(intent, fingerprint, message,
@@ -135,9 +135,8 @@ export class HostDelivery {
   async #confirm(
     channelId: string, channel: Channel, message: ChannelOutboundMessage,
     fingerprint: DurableFingerprint, result: ChannelDeliveryResult,
-    intent: DeliveryIntent, tailOwner?: string,
+    intent: DeliveryIntent, signal: AbortSignal,
   ): Promise<ChannelDeliveryOutcome> {
-    const signal = AbortSignal.timeout(this.context.lifecycleTimeoutMs);
     try {
       const destination = historyDestination(channel.resolveDeliveryHistory!(message, result),
         `${channelId} delivery history resolution`);
@@ -153,21 +152,22 @@ export class HostDelivery {
       });
       const execution = this.context.execution();
       if (execution === undefined) {
-        const append = (): void => this.#appendLocal(destination, entry);
-        if (tailOwner === destination) append();
-        else await this.context.conversationTails.run(destination, signal, append);
+        await this.context.localHistoryTails.run(
+          destination, signal, () => this.#appendLocal(destination, entry),
+        );
       } else {
+        const lifecycleSignal = AbortSignal.timeout(this.context.lifecycleTimeoutMs);
         if (intent?.status === "send") {
           const settled = await execution.retryDeliveryWithHistory({
             idempotencyKey: message.idempotencyKey, fingerprint,
             attempt: intent.attempt, token: intent.token,
             ...(result.messageId === undefined ? {} : { messageId: result.messageId }),
-            conversationId: destination, entry, entryFingerprint, signal,
+            conversationId: destination, entry, entryFingerprint, signal: lifecycleSignal,
           });
           if (settled.status === "conflict" || settled.conversationId !== destination
             || settled.entryId !== entry.entryId) throw new Error("channel delivery history identity conflict");
         }
-        const stored = (await this.context.loadConversation(destination, signal))?.entries
+        const stored = (await this.context.loadConversation(destination, lifecycleSignal))?.entries
           .find((candidate) => candidate.entryId === entry.entryId);
         if (!sameEntry(stored, entry)) throw new Error("channel delivery history identity conflict");
       }

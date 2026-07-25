@@ -36,6 +36,79 @@ afterEach(async () => {
 });
 
 describe("selected-module tools", () => {
+  it("takes one SDK contribution snapshot from each selected open-slot instance", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtimeName = `@fixture/runtime-module-snapshot-${suffix}`;
+    const channelName = `@fixture/channel-module-snapshot-${suffix}`;
+    const memoryName = `@fixture/memory-module-snapshot-${suffix}`;
+    const instances: object[] = [];
+    const project = await tracked([
+      {
+        name: runtimeName,
+        kind: "runtime",
+        controller: {
+          create: () => {
+            const instance = {
+              capabilities: {
+                tools: false, mcp: false, attachments: false, approvals: false,
+                structuredOutput: false, sandbox: false, sessions: false,
+              },
+              runTurn: () => completed("unused"),
+              toolContributions: [tool("RuntimeProbe", [], () => ({ ok: true }))],
+            };
+            instances.push(instance);
+            return instance;
+          },
+        },
+      },
+      {
+        name: channelName,
+        kind: "channel",
+        controller: {
+          create: () => {
+            const instance = {
+              capabilities: {
+                attachments: false, liveInput: false, askUser: false, approvals: false,
+                proactive: false, runtimeControl: false, verbatim: false, cancellation: false,
+              },
+              toolContributions: [tool("ChannelProbe", [], () => ({ ok: true }))],
+            };
+            instances.push(instance);
+            return instance;
+          },
+        },
+      },
+      {
+        name: memoryName,
+        kind: "memory",
+        controller: {
+          create: () => {
+            const instance = memory([
+              tool("MemoryProbe", [], () => ({ ok: true })),
+            ]);
+            instances.push(instance);
+            return instance;
+          },
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtimeName, {
+      channels: { probe: { $use: channelName } },
+      memory: { $use: memoryName },
+      policy: allowPolicy(),
+    }));
+    const descriptorSpy = vi.spyOn(Object, "getOwnPropertyDescriptor");
+    try {
+      await started(project);
+      expect(instances).toHaveLength(3);
+      expect(instances.map((instance) => descriptorSpy.mock.calls.filter(
+        ([target, key]) => target === instance && key === "toolContributions",
+      ).length)).toEqual([1, 1, 1]);
+    } finally {
+      descriptorSpy.mockRestore();
+    }
+  });
+
   it("snapshots, binds, executes, and revokes a selected instance per logical turn", async () => {
     const suffix = randomUUID().toLowerCase();
     const runtimeName = `@fixture/runtime-module-tool-${suffix}`;
