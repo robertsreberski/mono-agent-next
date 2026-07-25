@@ -67,6 +67,9 @@ jobs:
           pnpm run check:licenses
           pnpm run check:source-line-length
           pnpm run check:architecture
+          pnpm run check:codex-discoverability
+          pnpm run check:consumer-docs-consistency
+          pnpm run check:getting-started-version-pins
 
       - name: Check generated documentation contracts
         run: |
@@ -75,6 +78,7 @@ jobs:
           pnpm run check:source-beta-budgets
           pnpm run check:source-beta-docs
           pnpm run check:docs
+          pnpm run check:doc-snippets
 
       - name: Build and typecheck the complete v1 workspace
         run: |
