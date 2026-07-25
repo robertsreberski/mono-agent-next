@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { opendir } from "node:fs/promises";
 import { join } from "node:path";
 

@@ -2,7 +2,11 @@
 
 ## Reporting a vulnerability
 
-Do not open a public issue for an exploitable vulnerability or include live credentials in a report. Use GitHub's private security-advisory flow for this repository. Include the affected package/version, configuration, impact, and the smallest safe reproduction you can provide.
+Do not open a public issue for an exploitable vulnerability or include live
+credentials in a report. Use a private contact method listed on the
+[maintainer's GitHub profile](https://github.com/robertsreberski). Include the
+affected package/version, configuration, impact, and the smallest safe
+reproduction you can provide.
 
 ## Trust boundary
 

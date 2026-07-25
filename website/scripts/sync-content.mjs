@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Build/dev step: mirror the canonical docs (../docs) into Starlight's content
 // directory (src/content/docs). Starlight only applies its markdown features —
 // callout asides, heading links, code blocks — to files physically under

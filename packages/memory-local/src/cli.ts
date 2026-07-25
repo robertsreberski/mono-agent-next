@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { isAbsolute, resolve } from "node:path";
 
 import { MemoryLocalError } from "./errors.js";

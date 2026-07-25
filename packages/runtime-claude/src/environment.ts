@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 const OPERATIONAL_ENVIRONMENT = [
   "PATH",
   "HOME",

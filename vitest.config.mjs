@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { configDefaults, defineConfig } from "vitest/config";
 
 // Root Vitest config. The repo runs several root-level Vitest invocations

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 import { access, readFile, readdir, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";

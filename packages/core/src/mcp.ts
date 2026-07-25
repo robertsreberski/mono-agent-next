@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";

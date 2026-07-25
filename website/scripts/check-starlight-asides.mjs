@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { backup as backupSqlite, DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";

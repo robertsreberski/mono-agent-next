@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { describe, expect, expectTypeOf, it } from "vitest";
 
 import {

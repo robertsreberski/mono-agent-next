@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 import { spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -23,11 +24,6 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
     { label: "check:secrets", command: "pnpm", args: ["run", "check:secrets"] },
     { label: "check:oss-hygiene", command: "pnpm", args: ["run", "check:oss-hygiene"] },
     { label: "check:licenses", command: "pnpm", args: ["run", "check:licenses"] },
-    {
-      label: "check:apache-provenance",
-      command: "pnpm",
-      args: ["run", "check:apache-provenance"],
-    },
     {
       label: "check:dependency-vulnerabilities",
       command: "pnpm",

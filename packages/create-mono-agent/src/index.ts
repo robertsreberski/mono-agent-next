@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export { runCreateMonoAgentCli } from "./cli.js";
 export type { CreateMonoAgentCliOptions } from "./cli.js";
 export { scaffoldAgent, ScaffoldError } from "./scaffold.js";

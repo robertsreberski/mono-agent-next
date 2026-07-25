@@ -10,7 +10,7 @@ conversation state between mono-agent operator products.
 
 Category: `operator-surface`
 Tier: `core`
-Catalog responsibility: Defines the Apache-licensed operator protocol, strict client, directory, domain state, actions, and fixtures.
+Catalog responsibility: Defines the operator protocol, strict client, directory, domain state, actions, and fixtures.
 
 <!-- package-metadata:end -->
 
@@ -18,7 +18,7 @@ Operator surface.
 
 ## Responsibility
 
-This Apache-2.0 library owns the versioned HTTP plus NDJSON contract between an
+This library owns the versioned HTTP plus NDJSON contract between an
 agent's selected operator channel and independent products such as terminal or
 web renderers. It provides the only first-party wire decoder, trusted-loopback
 client, owner-private discovery reader, deterministic conversation reducer,

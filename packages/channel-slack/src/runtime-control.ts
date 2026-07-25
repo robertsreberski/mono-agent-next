@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 const MAX_RUNTIME_SELECTIONS = 1_000;
 
 export interface SlackRuntimeSelection {

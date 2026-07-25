@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import {
   MODULE_API_VERSION,
   defineChannelModule,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import {
   parseArtifactRef, parseRouteIdentity, type ArtifactRef, type JsonObject, type RouteIdentity, type RuntimeSession,
 } from "@mono-agent/module-sdk";

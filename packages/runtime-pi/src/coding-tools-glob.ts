@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { Dir, Dirent } from "node:fs";
 import { access, opendir } from "node:fs/promises";
 import { isAbsolute, matchesGlob, relative, resolve, sep } from "node:path";

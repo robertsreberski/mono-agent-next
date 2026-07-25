@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { ensureLoadedAgentConfig, environmentFor, MAX_CONTEXT_BYTES } from "./config.js";
 import {
   DEFAULT_APPROVAL_TIMEOUT_MS,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { envEligibleSchema } from "@mono-agent/module-sdk";
 
 export interface RuntimeCodexConfig {

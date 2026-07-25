@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 import { runServiceMacosCli } from "../index.js";
 const runnerScriptPath = process.argv[1];
 if (runnerScriptPath === undefined) throw new Error("service-macos executable path is unavailable.");

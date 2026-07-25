@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { OperatorProtocolError, parseTurnRequest } from "./protocol.js";
 import type { OperatorInfo, OperatorModel } from "./types.js";
 

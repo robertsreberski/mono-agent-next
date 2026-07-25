@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import {
   OPERATOR_IDENTIFIER_PATTERN,
   OPERATOR_LIMITS,

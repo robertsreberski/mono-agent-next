@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { EventEmitter } from "node:events";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";

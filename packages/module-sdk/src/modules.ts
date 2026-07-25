@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { Awaitable, ConfigPath, ConfigProvenanceMap, JsonObject, JsonSchema, JsonValue, ModuleCapability, ModuleManifest, ModuleSchema } from "./config.js";
 import type { ApprovalDecision, ApprovalRequest, ArtifactRef, AskUserAnswer, AskUserRequest, NormalizedAttachment, RouteIdentity, RuntimeNativeToolDescriptor, RuntimeNativeToolEffect } from "./interactions.js";
 export type ModuleLogFields = Readonly<Record<string, unknown>>;

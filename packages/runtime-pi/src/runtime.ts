@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { AgentHarness } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 import { RUNTIME_SESSION_UNAVAILABLE_CODE } from "@mono-agent/module-sdk";

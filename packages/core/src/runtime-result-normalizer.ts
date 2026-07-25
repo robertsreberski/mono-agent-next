@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import {
   RUNTIME_TOOL_ARTIFACT_PREVIEW_MAX_BYTES,
   parseArtifactRef,

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw abortError();
 }

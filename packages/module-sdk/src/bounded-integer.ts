@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export function boundedInteger(
   value: number, name: string, minimum: number, maximum: number,
   error: (message: string) => Error,

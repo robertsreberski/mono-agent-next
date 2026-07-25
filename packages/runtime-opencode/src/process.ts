@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 

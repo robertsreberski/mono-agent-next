@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import { createAgentHost, validateAgentConfig } from "@mono-agent/core";

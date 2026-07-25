@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -6,10 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import { packageCatalog, packageRelativePath } from "./package-catalog.mjs";
 
-export const REQUIRED_LICENSE = "GPL-3.0-only";
-export const DEFAULT_PACKAGE_LICENSE = REQUIRED_LICENSE;
-export const CANONICAL_GPL3_SHA256 = "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986";
-export const CANONICAL_APACHE2_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4";
+export const REQUIRED_LICENSE = "MIT";
+export const CANONICAL_MIT_SHA256 = "dd64c8ae63e0624cad201a3fa3465388dffaaf0079058b6871e40f4b1431e64a";
 const defaultRepoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 export async function checkLicenseConsistency(options = {}) {
@@ -25,40 +24,22 @@ export async function checkLicenseConsistency(options = {}) {
   await checkManifestLicense({
     path: join(repoRoot, "package.json"),
     label: "root package.json",
-    expectedLicense: REQUIRED_LICENSE,
     issues,
   });
-  await checkCanonicalLicense(
-    join(repoRoot, "LICENSE"),
-    "LICENSE",
-    "GPL-3.0",
-    CANONICAL_GPL3_SHA256,
-    issues,
-  );
+  await checkCanonicalLicense(join(repoRoot, "LICENSE"), "LICENSE", issues);
 
   for (const entry of publishable) {
-    const relativePath = `${packageRelativePath(entry)}/package.json`;
-    const expectedLicense = entry.license === "Apache-2.0"
-      ? "Apache-2.0"
-      : DEFAULT_PACKAGE_LICENSE;
-    if (entry.license !== undefined && entry.license !== "Apache-2.0") {
-      issues.push(`${entry.name} may not override the default ${DEFAULT_PACKAGE_LICENSE} package license`);
+    if (entry.license !== undefined) {
+      issues.push(`${entry.name} must not declare a catalog license override under the uniform MIT policy`);
     }
+    const relativePath = `${packageRelativePath(entry)}/package.json`;
     await checkManifestLicense({
       path: join(repoRoot, relativePath),
       label: `${entry.name} (${relativePath})`,
-      expectedLicense,
       issues,
     });
     const licensePath = `${packageRelativePath(entry)}/LICENSE`;
-    const apache = expectedLicense === "Apache-2.0";
-    await checkCanonicalLicense(
-      join(repoRoot, licensePath),
-      licensePath,
-      apache ? "Apache-2.0" : "GPL-3.0",
-      apache ? CANONICAL_APACHE2_SHA256 : CANONICAL_GPL3_SHA256,
-      issues,
-    );
+    await checkCanonicalLicense(join(repoRoot, licensePath), licensePath, issues);
   }
 
   return {
@@ -70,7 +51,7 @@ export async function checkLicenseConsistency(options = {}) {
 
 export function renderLicenseConsistencyReport(result) {
   if (result.issues.length === 0) {
-    return `License consistency check passed: root + ${result.packageCount} publishable packages match the declared GPL/Apache split.\n`;
+    return `License consistency check passed: root + ${result.packageCount} publishable packages match the uniform MIT policy.\n`;
   }
 
   return [
@@ -80,7 +61,7 @@ export function renderLicenseConsistencyReport(result) {
   ].join("\n");
 }
 
-async function checkManifestLicense({ path, label, expectedLicense, issues }) {
+async function checkManifestLicense({ path, label, issues }) {
   let manifest;
   try {
     manifest = JSON.parse(await readFile(path, "utf8"));
@@ -89,12 +70,12 @@ async function checkManifestLicense({ path, label, expectedLicense, issues }) {
     return;
   }
 
-  if (manifest.license !== expectedLicense) {
-    issues.push(`${label} license must be ${expectedLicense}; found ${JSON.stringify(manifest.license)}`);
+  if (manifest.license !== REQUIRED_LICENSE) {
+    issues.push(`${label} license must be ${REQUIRED_LICENSE}; found ${JSON.stringify(manifest.license)}`);
   }
 }
 
-async function checkCanonicalLicense(path, label, licenseName, expectedDigest, issues) {
+async function checkCanonicalLicense(path, label, issues) {
   let contents;
   try {
     contents = await readFile(path);
@@ -104,8 +85,10 @@ async function checkCanonicalLicense(path, label, licenseName, expectedDigest, i
   }
 
   const digest = createHash("sha256").update(contents).digest("hex");
-  if (digest !== expectedDigest) {
-    issues.push(`${label} must be the canonical ${licenseName} text (sha256 ${expectedDigest}); found ${digest}`);
+  if (digest !== CANONICAL_MIT_SHA256) {
+    issues.push(
+      `${label} must be the canonical MIT text (sha256 ${CANONICAL_MIT_SHA256}); found ${digest}`,
+    );
   }
 }
 

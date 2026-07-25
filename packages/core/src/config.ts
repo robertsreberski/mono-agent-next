@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { dirname, isAbsolute, resolve } from "node:path";
 import {
   type RuntimeModelValidation,

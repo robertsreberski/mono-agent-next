@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export { RuntimePiSessionManager } from "./session-manager.js";
 export { RuntimePiSessionUnavailableError } from "./session-storage.js";
 export type {

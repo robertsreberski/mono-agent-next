@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { isAbsolute, resolve } from "node:path";
 import { readServiceInput } from "./input.js";
 export const SERVICE_MACOS_CONFIG_VERSION = 1;

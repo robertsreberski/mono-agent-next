@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { JsonObject, JsonValue } from "@mono-agent/module-sdk";
 import type { ExportRecord } from "@mono-agent/module-sdk/internal";
 

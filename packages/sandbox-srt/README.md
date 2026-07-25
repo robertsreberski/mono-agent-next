@@ -186,7 +186,7 @@ sandboxSrtJsonSchema
 
 ## Dependency Boundary
 
-This GPL package depends on first-party reserved contracts at
+This package depends on first-party reserved contracts at
 `@mono-agent/module-sdk/internal`, Node built-ins, and the zero-dependency
 pure-JavaScript Acorn parser used for pre-evaluation import detection. It does
 not import SRT as a package, search `PATH`, resolve managed installations,

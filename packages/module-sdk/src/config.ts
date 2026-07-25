@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export const MODULE_API_VERSION = 1 as const;
 export const OPEN_MODULE_KINDS = ["runtime", "channel", "memory"] as const;
 export type Awaitable<T> = T | PromiseLike<T>;

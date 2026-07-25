@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export type SandboxSrtErrorCode =
   | "invalid_config"
   | "invalid_command"

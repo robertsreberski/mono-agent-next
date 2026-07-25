@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 const EFFORT_LEVELS = Object.freeze([
   "none",
   "minimal",

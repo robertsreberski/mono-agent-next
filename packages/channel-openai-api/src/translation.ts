@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { randomUUID } from "node:crypto";
 
 import type { ChannelAttachment, ChannelInboundRequest, JsonObject, JsonValue } from "@mono-agent/module-sdk";

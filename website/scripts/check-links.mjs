@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Post-build: validate every internal link in the generated dist/ resolves to a
 // real file. Processor-independent safety net for the docs migration — runs after
 // `astro build` and exits non-zero on any broken link (so the Vercel build fails).

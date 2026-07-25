@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { ExportRecord } from "@mono-agent/module-sdk/internal";
 
 import { parseOtlpExporterConfig } from "../config.js";

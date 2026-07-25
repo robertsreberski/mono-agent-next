@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export interface SlackDestination {
   readonly channelId: string;
   readonly threadId?: string;

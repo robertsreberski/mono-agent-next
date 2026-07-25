@@ -3,7 +3,7 @@
   "version": "0.15.0",
   "description": "Shared operator protocol, strict loopback client, discovery, and renderer-neutral state for mono-agent.",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/robertsreberski/mono-agent-next.git",

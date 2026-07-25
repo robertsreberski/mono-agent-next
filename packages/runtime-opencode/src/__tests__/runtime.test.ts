@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";

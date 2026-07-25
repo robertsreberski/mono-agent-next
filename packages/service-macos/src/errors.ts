@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export class ServiceMacosDriftError extends Error {
   readonly code = "service_macos_plan_drift";
   constructor(message: string) {

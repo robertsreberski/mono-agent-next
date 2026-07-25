@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export function parseTelegramChatId(
   value: unknown,
   label: string,

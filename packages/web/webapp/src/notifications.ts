@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { Bootstrap, Thread } from "./types";
 
 export interface NotificationPayload {

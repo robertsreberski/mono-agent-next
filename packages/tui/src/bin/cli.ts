@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { sanitizeTerminalText } from "../ui/terminal-text.js";
 
 export interface ParsedArgs {

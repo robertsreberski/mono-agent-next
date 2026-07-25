@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { dirname } from "node:path";
 
 import { validateAgentConfig } from "@mono-agent/core";

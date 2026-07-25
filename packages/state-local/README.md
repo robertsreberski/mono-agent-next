@@ -328,7 +328,7 @@ resolveStateLocalConfig
 
 ## Dependency Boundary
 
-This GPL package depends only on the first-party reserved contracts at
+This package depends only on the first-party reserved contracts at
 `@mono-agent/module-sdk/internal` and Node built-ins. It does not import the v0
 runtime, v0 persistence helpers, Core, products, channels, runtimes, exporters,
 or third-party storage libraries.

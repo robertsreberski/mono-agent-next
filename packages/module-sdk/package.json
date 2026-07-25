@@ -3,7 +3,7 @@
   "version": "0.15.0",
   "description": "Typed module contracts, schema provenance, and compliance helpers for mono-agent extensions.",
   "type": "module",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/robertsreberski/mono-agent-next.git",

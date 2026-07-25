@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { OtlpExporterError, throwIfAborted } from "./errors.js";
 
 export interface OtlpTransportRequest {

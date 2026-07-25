@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { StateLocalError } from "./errors.js";
 
 export const STATE_INDEX_LOG_MAX_BYTES = 2_147_483_647;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { Collapsible } from "@base-ui/react/collapsible";
 import {
   useAuiState,

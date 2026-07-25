@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { once } from "node:events";
 import { createConnection, isIP } from "node:net";
 

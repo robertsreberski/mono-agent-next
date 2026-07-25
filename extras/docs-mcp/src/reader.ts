@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { posix } from "node:path";
 
 import type { DocsCorpus, DocsCorpusChunk, DocsCorpusDocument, DocsCorpusHeading } from "./corpus.js";

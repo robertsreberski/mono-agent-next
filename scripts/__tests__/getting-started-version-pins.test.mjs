@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { describe, expect, it } from "vitest";
 
 import { checkGettingStartedVersionPins } from "../check-getting-started-version-pins.mjs";

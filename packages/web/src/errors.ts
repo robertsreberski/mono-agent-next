@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export class WebProductError extends Error {
   readonly code: string;
   readonly status: number;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { Terminal } from "@earendil-works/pi-tui";
 
 export class TestTerminal implements Terminal {

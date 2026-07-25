@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { Popover } from "@base-ui/react/popover";
 
 import type { Telemetry } from "../../types";

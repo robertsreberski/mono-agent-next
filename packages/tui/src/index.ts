@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export { parseArgs } from "./bin/cli.js";
 export type { ParsedArgs, ParseArgsResult } from "./bin/cli.js";
 export { MonoAgentTuiApp } from "./ui/app.js";

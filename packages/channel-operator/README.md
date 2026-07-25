@@ -157,7 +157,7 @@ parseOperatorChannelConfig
 
 ## Dependency Boundary
 
-This package depends only on `@mono-agent/module-sdk`, the Apache-2.0
+This package depends only on `@mono-agent/module-sdk`, the
 `@mono-agent/operator` wire contract, and Node built-ins. It does not import
 core, a runtime implementation, product presentation, product persistence, or
 another channel.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 const BIDI_CONTROL = /\p{Bidi_Control}/u;
 
 export interface SanitizeTerminalTextOptions {

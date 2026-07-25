@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { SlackApiClient } from "./client.js";
 import type { SlackConfig, SlackHomeButtonConfig } from "./config.js";
 import type { SlackMessageEvent } from "./socket.js";

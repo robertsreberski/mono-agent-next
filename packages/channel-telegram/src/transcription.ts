@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { ChannelAttachment } from "@mono-agent/module-sdk";
 
 import type { TelegramTranscriptionConfig } from "./config.js";

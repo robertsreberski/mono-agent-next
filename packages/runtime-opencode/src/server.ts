@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 const DENY_ALL_RULE = Object.freeze({
   permission: "*",
   pattern: "*",

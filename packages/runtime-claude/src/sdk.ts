@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { JsonValue, RuntimeUsage } from "@mono-agent/module-sdk";
 
 import { record, usage } from "./jsonl.js";

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { chmod, lstat, readFile, rename, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 

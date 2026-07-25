@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import {
   defineMemoryModule,
   HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE,

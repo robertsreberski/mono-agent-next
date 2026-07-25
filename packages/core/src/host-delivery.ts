@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { createHash } from "node:crypto";
 import type { Channel, ChannelDeliveryResult, ChannelOutboundMessage } from "@mono-agent/module-sdk";
 import { assertOwnKeys, ownDataRecord } from "./bounded-value.js";

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { constants } from "node:fs";
 import { lstat, open, readdir } from "node:fs/promises";
 import { basename, join } from "node:path";

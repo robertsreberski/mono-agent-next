@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { readServiceInput } from "./input.js";
 export interface ProtectedEnvironment {
   readonly source: string;

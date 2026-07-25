@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { OwnerPrivatePathIdentity } from "@mono-agent/module-sdk";
 
 import type { SlackSocketEvent } from "./socket.js";

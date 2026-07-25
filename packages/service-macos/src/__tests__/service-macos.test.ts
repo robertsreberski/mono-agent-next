@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import {

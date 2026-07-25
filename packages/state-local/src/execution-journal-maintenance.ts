@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import {
   EXECUTION_STATE_PREFIXES,
   admissionStateKey,

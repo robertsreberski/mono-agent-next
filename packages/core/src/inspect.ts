@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { ensureLoadedAgentConfig } from "./config.js";
 import type { AgentInspection, AgentLoadOptions, LoadedAgentConfig } from "./types.js";
 

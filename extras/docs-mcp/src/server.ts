@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 

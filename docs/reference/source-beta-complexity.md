@@ -17,44 +17,44 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `5c1853572faed8a022ec8ad6fc4c69d8967306c35e69f221047b1cfa8cf0cee5`
+Source manifest digest: `c90ab70d3fef5b9b99acbb7c947e3bd6202e97a632878edbc014cf350e8bcb8b`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 295 | 94227 |
-| Tests | 147 | 73299 |
-| Repository and product tooling | 54 | 18406 |
+| Production | 295 | 94515 |
+| Tests | 148 | 73437 |
+| Repository and product tooling | 54 | 18207 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **496** | **185932** |
+| **Total executable source** | **497** | **186159** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 319.4 lines.
+Average production file size is 320.4 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 94227 | 130000 | within limit |
-| kernel-production | 15397 | 15500 | within limit |
+| repository-production | 94515 | 130000 | within limit |
+| kernel-production | 15432 | 15500 | within limit |
 
 ## Largest package ownership surfaces
 
 | Package | Production files | Production lines | Test lines |
 | --- | ---: | ---: | ---: |
-| `@mono-agent/state-local` | 27 | 14300 | 5459 |
-| `@mono-agent/core` | 23 | 12144 | 17501 |
-| `@mono-agent/runtime-pi` | 28 | 8832 | 4966 |
-| `@mono-agent/memory-local` | 19 | 7721 | 4133 |
-| `@mono-agent/web` | 28 | 7147 | 2341 |
-| `@mono-agent/service-macos` | 22 | 5749 | 2130 |
-| `create-mono-agent` | 11 | 4466 | 1648 |
-| `@mono-agent/channel-slack` | 15 | 3747 | 2189 |
+| `@mono-agent/state-local` | 27 | 14327 | 5466 |
+| `@mono-agent/core` | 23 | 12167 | 17525 |
+| `@mono-agent/runtime-pi` | 28 | 8860 | 4978 |
+| `@mono-agent/memory-local` | 19 | 7740 | 4140 |
+| `@mono-agent/web` | 28 | 7175 | 2354 |
+| `@mono-agent/service-macos` | 22 | 5771 | 2131 |
+| `create-mono-agent` | 11 | 4477 | 1651 |
+| `@mono-agent/channel-slack` | 15 | 3762 | 2191 |
 
 The complete package table is retained in the generated report model exposed by
 `pnpm --silent run report:source-beta -- --json`.

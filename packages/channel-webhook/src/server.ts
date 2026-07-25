@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { type AddressInfo, type Socket } from "node:net";

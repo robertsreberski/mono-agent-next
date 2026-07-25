@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,11 +24,9 @@ afterEach(async () => {
 });
 
 describe("pnpm release-age policy", () => {
-  it("keeps the checked-in policy explicit and its guidance honest", async () => {
+  it("keeps the checked-in policy explicit across supported pnpm versions", async () => {
     const workspaceSource = await readFile(join(repoRoot, "pnpm-workspace.yaml"), "utf8");
     const packageJson = JSON.parse(await readFile(join(repoRoot, "package.json"), "utf8"));
-    const guidance = await readFile(join(repoRoot, "skills/pi-upstream-recon/SKILL.md"), "utf8");
-    const normalizedGuidance = guidance.replace(/\s+/gu, " ");
 
     const cli = spawnSync(process.execPath, [join(repoRoot, "scripts/pnpm-release-age-policy.mjs")], {
       cwd: repoRoot,
@@ -49,32 +48,6 @@ describe("pnpm release-age policy", () => {
         pnpmEngine: packageJson.engines.pnpm,
         workspaceSource,
       })).toEqual({ exclusions: [], issues: [], minimumReleaseAge: 0 });
-    }
-    expect(normalizedGuidance).toContain("pnpm 10 defaults `minimumReleaseAge` to 0");
-    expect(normalizedGuidance).toContain("pnpm 11 defaults it to 1440");
-    expect(normalizedGuidance).toContain("requires pnpm 10.16 or newer");
-    expect(normalizedGuidance).toContain("bare package names require 10.16");
-  });
-
-  it("keeps root-built isolated webapps on the explicit disabled policy", async () => {
-    for (const relativePath of ["packages/web/webapp/pnpm-workspace.yaml"]) {
-      const directory = dirname(join(repoRoot, relativePath));
-      const source = await readFile(join(directory, "pnpm-workspace.yaml"), "utf8");
-
-      expect(source.split(/\r?\n/u)).toContain(`# ${DISABLED_RELEASE_AGE_POLICY_COMMENT}`);
-
-      for (const [key, expected] of [
-        ["minimumReleaseAge", 0],
-        ["minimumReleaseAgeExclude", undefined],
-      ]) {
-        const probe = spawnSync(
-          "pnpm",
-          ["--dir", directory, "config", "get", key, "--location=project", "--json"],
-          { cwd: repoRoot, encoding: "utf8", env: process.env },
-        );
-        expect(probe.status, probe.stderr).toBe(0);
-        expect(parsePnpmConfigGetOutput(probe.stdout, key)).toBe(expected);
-      }
     }
   });
 
@@ -418,16 +391,12 @@ describe("pnpm release-age policy", () => {
     expect(packageJson.scripts.preinstall).toBe(expectedLifecycle);
     const ciVerifyJob = ci.split("\n  website:")[0];
     for (const workflow of [ciVerifyJob, release]) {
-      expect(workflow).toContain([
-        "      - name: Enable Corepack",
-        "        run: corepack enable",
-        "",
-        "      - name: Check pnpm release-age policy",
-        "        run: node scripts/pnpm-release-age-policy.mjs",
-      ].join("\n"));
-      const directGuard = workflow.indexOf("run: node scripts/pnpm-release-age-policy.mjs");
+      expect(workflow).toContain("uses: pnpm/action-setup@v4");
+      expect(workflow).toContain('version: "10.28.2"');
+      expect(workflow).not.toContain("corepack");
+      const directGuard = workflow.indexOf("node scripts/pnpm-release-age-policy.mjs");
       expect(directGuard).toBeGreaterThan(-1);
-      expect(directGuard).toBeLessThan(workflow.indexOf("run: pnpm "));
+      expect(directGuard).toBeLessThan(workflow.indexOf("pnpm install --frozen-lockfile"));
       expect(workflow).not.toContain("run: pnpm run check:pnpm-policy");
     }
     const websiteJob = /\n  website:(?<body>[\s\S]*?)(?=\n  [a-z][a-z0-9-]*:|\s*$)/u.exec(ci)?.groups?.body;

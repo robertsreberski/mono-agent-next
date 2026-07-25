@@ -4,7 +4,7 @@
   "description": "Authenticated HTTP webhook channel for mono-agent.",
   "type": "module",
   "sideEffects": false,
-  "license": "GPL-3.0-only",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/robertsreberski/mono-agent-next.git",

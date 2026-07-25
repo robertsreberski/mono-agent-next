@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { ServiceMacosDriftError } from "./errors.js";
 import { digest, isRecord } from "./internal-fs.js";
 import {

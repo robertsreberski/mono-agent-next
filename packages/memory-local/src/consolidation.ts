@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { randomUUID } from "node:crypto";
 import { rename, unlink } from "node:fs/promises";
 import { join } from "node:path";

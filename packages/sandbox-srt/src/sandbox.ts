@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";

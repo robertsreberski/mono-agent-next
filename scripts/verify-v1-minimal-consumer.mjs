@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";

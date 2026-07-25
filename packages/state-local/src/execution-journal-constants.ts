@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export const DEFAULT_STALE_AFTER_MS = 30 * 60_000;
 export const MIN_STALE_AFTER_MS = 1_000;
 export const MAX_STALE_AFTER_MS = 24 * 60 * 60_000;

@@ -1,5 +1,6 @@
+// SPDX-License-Identifier: MIT
 /**
- * Public, Apache-2.0 extension contracts for mono-agent modules.
+ * Public extension contracts for mono-agent modules.
  *
  * This entrypoint deliberately exposes only the three open module slots:
  * runtime, channel, and memory. First-party reserved slots live at

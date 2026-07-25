@@ -30,7 +30,7 @@ Useful repository checks:
 
 ```bash
 pnpm run check:architecture
-pnpm run check:apache-provenance
+pnpm run check:licenses
 pnpm run check:source-beta-budgets
 pnpm run check:docs
 pnpm run check:consumer-docs-consistency
@@ -85,18 +85,11 @@ repository never auto-deletes ignored or untracked directories.
 
 Only submit material that you have the right and authority to contribute. By
 intentionally submitting a contribution, you agree that it is licensed under
-the license declared by the affected package or file.
+the repository's [MIT License](./LICENSE).
 
-Contributions to `packages/module-sdk` and `packages/operator` are submitted
-under the Apache License 2.0, including its copyright and patent grants. You
-represent that you are authorized to make those grants. Contributions to other
-surfaces remain under their declared licenses unless the affected file
-explicitly states otherwise.
-
-Every tracked file in those two Apache package trees has an exact reviewed
-entry in [`licensing/apache-package-provenance.json`](./licensing/apache-package-provenance.json).
-Adding or changing one requires updating that record with the real origin and
-authority; the provenance gate rejects uncovered, stale, or untracked files.
+The root and every publishable package carry the same MIT license text. Keep
+package manifests and `LICENSE` copies aligned, and use
+`SPDX-License-Identifier: MIT` on source files covered by the SPDX gate.
 
 ## Pull requests
 

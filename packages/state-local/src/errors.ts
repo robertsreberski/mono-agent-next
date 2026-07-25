@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export type StateLocalErrorCode =
   | "STATE_ABORTED"
   | "STATE_ALREADY_OPEN"

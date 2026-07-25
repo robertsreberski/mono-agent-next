@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";

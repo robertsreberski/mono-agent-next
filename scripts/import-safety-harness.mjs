@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: MIT
 
 import { createRequire, syncBuiltinESMExports } from "node:module";
 

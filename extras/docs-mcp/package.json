@@ -3,7 +3,7 @@
   "version": "0.15.0",
   "description": "Offline search and guided reading over version-matched mono-agent v1 documentation through MCP.",
   "type": "module",
-  "license": "GPL-3.0-only",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/robertsreberski/mono-agent-next.git",

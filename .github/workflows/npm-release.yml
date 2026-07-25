@@ -35,17 +35,21 @@ jobs:
           test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
           test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "$(git rev-parse HEAD)"
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.28.2"
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22.19.0"
           registry-url: "https://registry.npmjs.org"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Enforce successor bootstrap safety
         run: node scripts/release/check-publish-guard.mjs
-
-      - name: Enable Corepack
-        run: corepack enable
 
       - name: Check pnpm release-age policy
         run: node scripts/pnpm-release-age-policy.mjs

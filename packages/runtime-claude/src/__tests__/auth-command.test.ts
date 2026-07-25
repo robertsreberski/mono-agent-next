@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import type { ModuleCommand, ModuleLogger, Runtime } from "@mono-agent/module-sdk";
 import { describe, expect, it } from "vitest";
 

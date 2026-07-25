@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export interface AgentConfigIssue {
   readonly path: string;
   readonly message: string;

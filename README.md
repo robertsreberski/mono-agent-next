@@ -235,6 +235,12 @@ Security reporting and repository-wide policy live in [SECURITY.md](./SECURITY.m
 - [Generated source-beta complexity report](./docs/reference/source-beta-complexity.md)
 - [Contribution guide](./CONTRIBUTING.md)
 
+## Contributing and license
+
+Contributions are welcome. Read the [contribution guide](./CONTRIBUTING.md) and
+follow the [Code of Conduct](./CODE_OF_CONDUCT.md). Mono-agent and all 23
+publishable packages are available under the [MIT License](./LICENSE).
+
 ## Phase boundary
 
 The current milestone ends at a buildable, tested, runnable public source tree

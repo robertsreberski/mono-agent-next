@@ -4,7 +4,7 @@
   "description": "Authenticated OpenAI-compatible HTTP channel for mono-agent.",
   "type": "module",
   "sideEffects": false,
-  "license": "GPL-3.0-only",
+  "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/robertsreberski/mono-agent-next.git", "directory": "packages/channel-openai-api" },
   "private": false,
   "engines": { "node": ">=22.19.0" },

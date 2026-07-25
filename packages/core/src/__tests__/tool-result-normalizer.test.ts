@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { createHash } from "node:crypto";
 
 import type { ArtifactRef } from "@mono-agent/module-sdk";

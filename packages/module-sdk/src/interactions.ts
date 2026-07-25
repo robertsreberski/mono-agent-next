@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export type AttachmentKind = "image" | "audio" | "file";
 /** A transport-neutral attachment whose size and bytes have already been bounded. */
 export interface NormalizedAttachment {

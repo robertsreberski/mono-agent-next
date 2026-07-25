@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { envEligibleSchema } from "@mono-agent/module-sdk";
 
 export const DEFAULT_PI_AUTH_PATH = "~/.pi/agent/auth.json";

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { execFileSync } from "node:child_process";
 import {
   mkdirSync,

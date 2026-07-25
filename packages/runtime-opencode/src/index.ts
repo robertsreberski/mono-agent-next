@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { defineRuntimeModule } from "@mono-agent/module-sdk";
 
 import { openCodeAuthCommands } from "./auth-command.js";

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 export class HttpError extends Error {
   constructor(
     readonly statusCode: number,

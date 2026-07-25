@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import type { ServiceMacosLogsConfig, ServiceMacosServiceConfig } from "./config.js";

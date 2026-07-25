@@ -3,7 +3,7 @@
   "version": "0.15.0",
   "description": "Standalone authenticated browser operator for mono-agent instances.",
   "type": "module",
-  "license": "GPL-3.0-only",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/robertsreberski/mono-agent-next.git",
