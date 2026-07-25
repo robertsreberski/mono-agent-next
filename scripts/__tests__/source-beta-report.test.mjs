@@ -162,6 +162,9 @@ describe("source-beta production budgets", () => {
     expect(classifySourcePath("website/astro.config.mjs")).toBe("production");
     expect(classifySourcePath("packages/tui/vitest.config.ts")).toBe("test");
     expect(classifySourcePath("vitest.config.mjs")).toBe("test");
+    expect(classifySourcePath("playwright.config.mjs")).toBe("test");
+    expect(classifySourcePath("tests/browser/console-render.spec.mjs")).toBe("test");
+    expect(classifySourcePath("tests/browser/fixture-server.mjs")).toBe("test");
     expect(classifySourcePath("extras/docs-mcp/scripts/generate-corpus.mjs")).toBe("tooling");
     expect(classifySourcePath("extras/docs-mcp/scripts/smoke-packed-contract.mjs"))
       .toBe("tooling");

@@ -32,3 +32,6 @@ docs/superpowers/
 AGENTS.local.md
 .claude/settings.local.json
 .githooks/
+
+# Playwright browser-lane artifacts (traces, screenshots) are per-run output.
+.playwright-results/

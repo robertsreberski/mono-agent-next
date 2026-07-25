@@ -61,6 +61,7 @@ describe("verify-all", () => {
       "check:doc-snippets",
       "check:deep-imports",
       "verify:v1-operator-products",
+      "test:browser",
       "verify:consumers",
       "release:pack",
       "release:consumer",

@@ -67,6 +67,7 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
       command: "pnpm",
       args: ["run", "verify:v1-operator-products"],
     },
+    { label: "test:browser", command: "pnpm", args: ["run", "test:browser"] },
     {
       label: "verify:consumers",
       command: "pnpm",

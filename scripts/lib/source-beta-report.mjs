@@ -1211,6 +1211,7 @@ export function classifySourcePath(path) {
   if (/(?:^|\/)(?:playwright|vitest)\.config\.(?:mjs|ts)$/u.test(path)) return "test";
   if (
     /^scripts\/(?:.*\/)?__tests__\//u.test(path)
+    || /^tests\//u.test(path)
     || /^website\/(?:scripts\/__tests__|tests)\//u.test(path)
   ) return "test";
   if (
