@@ -1110,7 +1110,7 @@ export function classifySourcePath(path) {
   if (
     path.startsWith("scripts/")
     || path.startsWith("website/scripts/")
-    || /^extras\/docs-mcp\/scripts\/(?:generate-corpus|smoke-packed)\.mjs$/u.test(path)
+    || /^extras\/docs-mcp\/scripts\/(?:generate-corpus|smoke-packed(?:-contract)?)\.mjs$/u.test(path)
   ) return "tooling";
   throw new Error(
     `Unclassified executable source file ${path}; add an explicit production, test, `
