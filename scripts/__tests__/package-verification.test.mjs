@@ -11,7 +11,7 @@ describe("publishable package verification contract", () => {
         scripts: {
           build: "tsc -p tsconfig.build.json",
           typecheck: "tsc -p tsconfig.json --noEmit",
-          test: "vitest run",
+          test: "vitest run --expect.requireAssertions",
         },
       },
     })).toEqual([]);
@@ -35,7 +35,7 @@ describe("publishable package verification contract", () => {
         scripts: {
           build: "tsc",
           typecheck: "tsc --noEmit",
-          test: "vitest run --passWithNoTests src/__tests__",
+          test: "vitest run --passWithNoTests --expect.requireAssertions src/__tests__",
         },
       },
     })).toEqual([
