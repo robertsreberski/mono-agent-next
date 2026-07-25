@@ -17,17 +17,17 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `b8224497c75b5205be3c7b3b1e70fec11f554f885cf65232ac9f2f6c1096cf4b`
+Source manifest digest: `d71f1f89d12585bdcb6ab55c74819ba5c07f3ec43e8e0fa4348ed5c72b5149fc`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
 | Production | 278 | 92395 |
-| Tests | 144 | 71252 |
+| Tests | 144 | 71402 |
 | Repository and product tooling | 52 | 18208 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **474** | **181855** |
+| **Total executable source** | **474** | **182005** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
@@ -49,7 +49,7 @@ Average production file size is 332.4 lines.
 | --- | ---: | ---: | ---: |
 | `@mono-agent/state-local` | 15 | 12475 | 4558 |
 | `@mono-agent/core` | 18 | 12130 | 16840 |
-| `@mono-agent/runtime-pi` | 28 | 8832 | 4816 |
+| `@mono-agent/runtime-pi` | 28 | 8832 | 4966 |
 | `@mono-agent/memory-local` | 19 | 7721 | 4133 |
 | `@mono-agent/web` | 28 | 7147 | 2341 |
 | `@mono-agent/service-macos` | 22 | 5749 | 2130 |
