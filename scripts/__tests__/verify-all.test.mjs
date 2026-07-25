@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { MINIMUM_NODE_VERSION } from "../node-version.mjs";
+import { MINIMUM_NODE_VERSION } from "../check/node-version.mjs";
 import {
   packageCatalog,
   packageRelativePath,
@@ -14,7 +14,7 @@ import {
   createRepoGate,
   readReleaseSmokeTag,
   runVerifyAll,
-} from "../verify-all.mjs";
+} from "../verify/all.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 

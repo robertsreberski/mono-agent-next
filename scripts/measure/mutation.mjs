@@ -17,9 +17,9 @@ import { readFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { packageCatalog, packageRelativePath } from "./lib/package-catalog.mjs";
+import { packageCatalog, packageRelativePath } from "../lib/package-catalog.mjs";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 // Stryker resolves plugins from its working directory, which is the package
 // under test. pnpm's non-hoisted layout keeps the root devDependency invisible

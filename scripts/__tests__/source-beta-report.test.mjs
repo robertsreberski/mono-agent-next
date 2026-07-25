@@ -28,7 +28,7 @@ import {
   minimumTestLines,
   renderSourceBetaConfigMarkdown,
 } from "../lib/source-beta-report.mjs";
-import { parseSourceBetaReportArgs } from "../report-source-beta.mjs";
+import { parseSourceBetaReportArgs } from "../measure/source-beta.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
@@ -149,7 +149,7 @@ describe("source-beta production budgets", () => {
     expect(parseSourceBetaReportArgs(["--json"])).toBe(true);
     expect(parseSourceBetaReportArgs(["--", "--json"])).toBe(true);
     expect(() => parseSourceBetaReportArgs(["--", "--json", "extra"])).toThrow(
-      "Usage: node --experimental-strip-types scripts/report-source-beta.mjs [--json]",
+      "Usage: node --experimental-strip-types scripts/measure/source-beta.mjs [--json]",
     );
   });
 

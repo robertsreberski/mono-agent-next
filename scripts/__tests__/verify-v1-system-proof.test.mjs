@@ -61,7 +61,7 @@ afterEach(async () => {
 describe("packed v1 proof Node and source authority", () => {
   test("reuses the validated packed consumer for the docs-mcp functional smoke", () => {
     const source = readFileSync(
-      join(process.cwd(), "scripts", "verify-v1-system.mjs"),
+      join(process.cwd(), "scripts", "verify", "v1-system.mjs"),
       "utf8",
     );
     expect(source).toContain([

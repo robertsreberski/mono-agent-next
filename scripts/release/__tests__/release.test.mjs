@@ -42,7 +42,7 @@ import {
   stagingDistTagForRelease,
 } from "../publish-release.mjs";
 import { assertPublishingAllowed } from "../check-publish-guard.mjs";
-import { SUPPORTED_NODE_ENGINE } from "../../node-version.mjs";
+import { SUPPORTED_NODE_ENGINE } from "../../check/node-version.mjs";
 
 const expectedPublishablePackages = packageCatalog.filter((entry) => entry.publishable === true);
 const expectedPublishablePackageCount = expectedPublishablePackages.length;

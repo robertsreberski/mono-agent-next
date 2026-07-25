@@ -10,7 +10,7 @@ import {
   REQUIRED_LICENSE,
   checkLicenseConsistency,
   renderLicenseConsistencyReport,
-} from "../check-license-consistency.mjs";
+} from "../check/license-consistency.mjs";
 
 const tempDirs = [];
 const catalog = [{

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 import { describe, expect, it } from "vitest";
 
-import { checkGettingStartedVersionPins } from "../check-getting-started-version-pins.mjs";
+import { checkGettingStartedVersionPins } from "../check/getting-started-version-pins.mjs";
 
 describe("check-getting-started-version-pins", () => {
   it("the shipped getting-started docs carry no drifted version pins", async () => {

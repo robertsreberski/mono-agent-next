@@ -25,7 +25,7 @@ the published site.
 - `docs/playbooks/` — update the closest existing playbook.
 - Package READMEs (nine ordered, architecture-enforced sections), generated
   package metadata/directory/graph, and root `README.md`.
-- `node scripts/check-consumer-docs-consistency.mjs` for retired-surface mentions.
+- `node scripts/check/consumer-docs-consistency.mjs` for retired-surface mentions.
 
 ## PR-range audit method
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 
 import ts from "typescript";
 
-import { collectTypeScriptDocSnippets } from "./lib/doc-snippets.mjs";
+import { collectTypeScriptDocSnippets } from "../lib/doc-snippets.mjs";
 
 const root = process.cwd();
 const collected = collectTypeScriptDocSnippets({ root });

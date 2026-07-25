@@ -15,7 +15,7 @@ import {
   parsePnpmWhyDependencyPaths,
   queryBulkAdvisories,
   runDependencyVulnerabilityCheck,
-} from "../check-dependency-vulnerabilities.mjs";
+} from "../check/dependency-vulnerabilities.mjs";
 
 const temporaryRoots = [];
 const REVIEWED_AT = "2026-07-16";

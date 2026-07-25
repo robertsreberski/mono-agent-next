@@ -12,7 +12,7 @@ import {
   JAVASCRIPT_MIT_HEADER,
   checkSpdxHeaders,
   renderSpdxHeaderReport,
-} from "../check-spdx-headers.mjs";
+} from "../check/spdx-headers.mjs";
 
 const execFileAsync = promisify(execFile);
 const tempDirs = [];

@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { packageCatalog } from "./lib/package-catalog.mjs";
+import { packageCatalog } from "../lib/package-catalog.mjs";
 
 const execFileAsync = promisify(execFile);
 const MAX_COMMAND_OUTPUT_BYTES = 64 * 1024 * 1024;
@@ -55,7 +55,7 @@ const DEFAULT_ROOT_PACKAGE_NAMES = packageCatalog
 
 export const DEFAULT_AUDIT_REGISTRY_URL = "https://registry.npmjs.org/";
 export const DEFAULT_DISPOSITIONS_PATH = fileURLToPath(
-  new URL("./dependency-vulnerability-dispositions.json", import.meta.url),
+  new URL("../check/dependency-vulnerability-dispositions.json", import.meta.url),
 );
 
 export function parsePnpmProductionInventory(source) {

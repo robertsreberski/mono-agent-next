@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { runVerifyConsumers } from "../verify-consumers.mjs";
+import { runVerifyConsumers } from "../verify/consumers.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const execFileAsync = promisify(execFile);
@@ -17,12 +17,12 @@ describe("verify-consumers", () => {
   it("is exposed as the source-consumer gate and packed smoke uses the current CLI", async () => {
     const [packageJsonText, verifier, packedSmoke] = await Promise.all([
       readFile(resolve(repoRoot, "package.json"), "utf8"),
-      readFile(resolve(repoRoot, "scripts/verify-consumers.mjs"), "utf8"),
+      readFile(resolve(repoRoot, "scripts/verify/consumers.mjs"), "utf8"),
       readFile(resolve(repoRoot, "scripts/release/fixtures/packed-consumer/smoke.mjs"), "utf8"),
     ]);
     const packageJson = JSON.parse(packageJsonText);
 
-    expect(packageJson.scripts?.["verify:consumers"]).toBe("node scripts/verify-consumers.mjs");
+    expect(packageJson.scripts?.["verify:consumers"]).toBe("node scripts/verify/consumers.mjs");
     expect(verifier).toContain('importPackage("@mono-agent/cli")');
     expect(verifier).toContain('importPackage("@mono-agent/core")');
     expect(verifier).not.toContain('importPackage("@mono-agent/agent-app")');

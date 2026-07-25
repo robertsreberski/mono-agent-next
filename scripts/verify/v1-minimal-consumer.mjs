@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const VERSION = "0.15.0";
 const EXPECTED_REPLY = "mono-agent-next-packed-e2e-ok";
 const WEBHOOK_SECRET = "packed-smoke-webhook-token";

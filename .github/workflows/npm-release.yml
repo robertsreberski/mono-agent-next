@@ -52,7 +52,7 @@ jobs:
         run: node scripts/release/check-publish-guard.mjs
 
       - name: Check pnpm release-age policy
-        run: node scripts/pnpm-release-age-policy.mjs
+        run: node scripts/check/pnpm-release-age-policy.mjs
 
       - name: Install npm with trusted-publishing support
         # Trusted publishing requires npm >=11.5.1. Keep the release runner on

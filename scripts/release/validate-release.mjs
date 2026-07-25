@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { MINIMUM_NODE_VERSION, SUPPORTED_NODE_ENGINE } from "../node-version.mjs";
+import { MINIMUM_NODE_VERSION, SUPPORTED_NODE_ENGINE } from "../check/node-version.mjs";
 
 import {
   DEPENDENCY_SECTIONS,

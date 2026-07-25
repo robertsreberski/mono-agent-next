@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 import { describe, expect, it } from "vitest";
 
-import { runCheckSecrets } from "../check-secrets.mjs";
+import { runCheckSecrets } from "../check/secrets.mjs";
 
 describe("check-secrets", () => {
   it("runs gitleaks with redacted output against the current tree", async () => {

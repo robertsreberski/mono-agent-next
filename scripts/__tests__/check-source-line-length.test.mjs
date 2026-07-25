@@ -9,7 +9,7 @@ import {
   collectSourceLineLengthFindings,
   listProductionSourcePaths,
   runCheckSourceLineLength,
-} from "../check-source-line-length.mjs";
+} from "../check/source-line-length.mjs";
 
 const AUDITED = "packages/core/src/state-execution-client.ts";
 const CLEAN = "packages/core/src/effort.ts";

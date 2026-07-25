@@ -9,15 +9,15 @@ import {
   packageByName,
   packageCatalog,
   packageRelativePath,
-} from "./lib/package-catalog.mjs";
-import { findAdapterNeutralityErrors } from "./lib/adapter-neutrality.mjs";
-import { findPackagePublicApiDocErrors } from "./lib/public-api-docs.mjs";
+} from "../lib/package-catalog.mjs";
+import { findAdapterNeutralityErrors } from "../lib/adapter-neutrality.mjs";
+import { findPackagePublicApiDocErrors } from "../lib/public-api-docs.mjs";
 import {
   findPackageDocGenerationErrors,
   findPackageReadmeStructureErrors,
   REQUIRED_PACKAGE_README_SECTIONS,
-} from "./lib/package-docs.mjs";
-import { findPackageVerificationErrors } from "./lib/package-verification.mjs";
+} from "../lib/package-docs.mjs";
+import { findPackageVerificationErrors } from "../lib/package-verification.mjs";
 
 const root = process.cwd();
 const packageScope = "@mono-agent/";

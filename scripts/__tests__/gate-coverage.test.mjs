@@ -19,6 +19,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const manifest = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
 const workflow = readFileSync(resolve(root, ".github/workflows/ci.yml"), "utf8");
 
+/** Directories under `scripts/` that hold runnable entrypoints. */
+const ENTRYPOINT_GROUPS = ["check", "generate", "measure", "verify"];
+
 /** Every `scripts/__tests__/*.test.mjs` on disk. */
 function discoveredScriptTests() {
   return readdirSync(resolve(root, "scripts/__tests__"))
@@ -78,18 +81,26 @@ describe("gate coverage", () => {
     expect(dangling).toEqual([]);
   });
 
-  it("keeps every top-level script an entrypoint and every library in lib/", () => {
-    // `scripts/` is flat and holds two kinds of file that read identically: an
-    // entrypoint some `package.json` script runs, and a module other scripts
-    // import. Two libraries sat among twenty-six entrypoints, one of them
-    // imported nineteen times, and nothing said which was which. This is the
-    // rule that says it: if nothing runs it, it belongs in `lib/`.
+  it("runs every grouped script and keeps scripts/ itself empty of them", () => {
+    // `scripts/` used to be flat, and two kinds of file read identically in
+    // it: an entrypoint some `package.json` script runs, and a module other
+    // scripts import. Now the directory says which -- `check/`, `generate/`,
+    // `verify/` and `measure/` hold entrypoints, `lib/` and `release/` hold
+    // everything else. Two assertions keep that true rather than customary.
     const invoked = Object.values(manifest.scripts).join(" ");
-    const orphans = readdirSync(resolve(root, "scripts"))
-      .filter((name) => name.endsWith(".mjs"))
-      .filter((name) => !invoked.includes(`scripts/${name}`))
+    const orphans = ENTRYPOINT_GROUPS.flatMap((group) =>
+      readdirSync(resolve(root, "scripts", group))
+        .filter((name) => name.endsWith(".mjs"))
+        .map((name) => `scripts/${group}/${name}`))
+      .filter((path) => !invoked.includes(path))
       .sort();
 
-    expect(orphans).toEqual([]);
+    // A new `.mjs` dropped at the top level belongs in a group or in `lib/`;
+    // without this, the check above simply stops seeing it.
+    const ungrouped = readdirSync(resolve(root, "scripts"))
+      .filter((name) => name.endsWith(".mjs"))
+      .sort();
+
+    expect({ orphans, ungrouped }).toEqual({ orphans: [], ungrouped: [] });
   });
 });

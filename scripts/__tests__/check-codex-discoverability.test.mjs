@@ -9,7 +9,7 @@ import {
   renderCodexDiscoverabilityReport,
   runCheckCodexDiscoverability,
   scanCodexDiscoverability,
-} from "../check-codex-discoverability.mjs";
+} from "../check/codex-discoverability.mjs";
 
 const tempDirs = [];
 

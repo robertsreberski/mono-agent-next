@@ -10,7 +10,7 @@ import {
   importSafetyNodeArguments,
   mappedEntries,
   runVerifyDeepImports,
-} from "../verify-deep-imports.mjs";
+} from "../verify/deep-imports.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const REAL_BUILT_EXPORT_TIMEOUT_MS = 30_000;

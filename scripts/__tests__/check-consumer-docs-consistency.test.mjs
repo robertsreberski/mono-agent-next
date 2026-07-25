@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   checkConsumerDocsConsistency,
   compareCodeUnits,
-} from "../check-consumer-docs-consistency.mjs";
+} from "../check/consumer-docs-consistency.mjs";
 
 const tempDirs = [];
 const monoPackage = (...nameParts) => `@mono-agent/${nameParts.join("-")}`;

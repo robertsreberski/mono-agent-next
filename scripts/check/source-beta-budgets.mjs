@@ -8,9 +8,9 @@ import {
   assertSourceBetaBudgets,
   collectSourceBetaReport,
   minimumTestLines,
-} from "./lib/source-beta-report.mjs";
+} from "../lib/source-beta-report.mjs";
 
-const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const { renderProject } = await import(
   pathToFileURL(join(root, "packages/create-mono-agent/src/templates.ts")).href
 );
