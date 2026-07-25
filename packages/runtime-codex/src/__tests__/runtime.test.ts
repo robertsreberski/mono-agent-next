@@ -26,7 +26,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { parseRuntimeCodexConfig, runtimeCodexJsonSchema } from "../config.js";
 import { codexProcessEnvironment } from "../environment.js";
-import { JsonRpcProcess, type ProcessLike, type SpawnProcess } from "../json-rpc.js";
+import { type ProcessLike, type SpawnProcess } from "../json-rpc.js";
 import { createRuntimeCodex, RuntimeCodexError } from "../runtime.js";
 
 class FakeCodexProcess extends EventEmitter implements ProcessLike {
@@ -995,6 +995,7 @@ describe("runtime-codex", () => {
           if (event.type === "text-delta") {
             return Promise.reject(new Error("consumer emit failed"));
           }
+          return undefined;
         },
         async executeTool(call) { return { callId: call.id, content: [] }; },
       })).resolves.toMatchObject({
@@ -1055,6 +1056,7 @@ describe("runtime-codex", () => {
         if (event.type === "text-delta") {
           return Promise.reject(new Error("consumer emit failed"));
         }
+        return undefined;
       },
       async executeTool(call) { return { callId: call.id, content: [] }; },
     })).resolves.toMatchObject({

@@ -217,7 +217,7 @@ export function createRuntimePiGlobAgentTool(
     toolCallId,
     params,
     signal,
-    onUpdate,
+    _onUpdate,
   ) => {
     const input = ownRecord(params, "Glob", [
       "pattern", "path", "limit", "workdir", "max_output_chars",

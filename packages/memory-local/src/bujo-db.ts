@@ -15,7 +15,6 @@ import {
   canonicalStoredMemoryTimestamp,
   canonicalJson,
   reconstructMemoryRecord,
-  validateMemoryRecord,
   type ValidatedMemoryRecord,
 } from "./records.js";
 
@@ -392,7 +391,7 @@ export function insertMemoryRows(
   records: readonly ValidatedMemoryRecord[],
   vectors: ReadonlyMap<string, readonly number[]>,
   embeddingIdentity: { readonly id: string; readonly dimensions: number } | undefined,
-  config: MemoryLocalConfig,
+  _config: MemoryLocalConfig,
   completion: MemoryCaptureCommit,
 ): { readonly inserted: number; readonly duplicates: number; readonly pendingVectors: readonly string[] } {
   database.exec("BEGIN IMMEDIATE");
@@ -887,7 +886,7 @@ export function ftsMatchExpression(value: string): string {
   return [...new Set(tokens)].slice(0, 64).map((token) => `"${token.replaceAll("\"", "\"\"")}"`).join(" OR ");
 }
 
-export function recordLimits(config: MemoryLocalConfig): {
+export function recordLimits(_config: MemoryLocalConfig): {
   readonly maxRecords: number;
   readonly maxTotalBytes: number;
   readonly maxTextBytes: number;

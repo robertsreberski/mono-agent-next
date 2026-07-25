@@ -258,7 +258,7 @@ describe("channel kernel", () => {
     const project = await tracked([
       {
         name: runtime, kind: "runtime",
-        controller: runtimeController(async (request, context) => {
+        controller: runtimeController(async (_request, context) => {
           const controller = new AbortController();
           const pending = method(context, "executeTool")(
             { id: "cancelled-call", name: "ChannelSend", input: {} },

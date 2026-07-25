@@ -11,14 +11,25 @@
     "directory": "packages/channel-telegram"
   },
   "private": false,
-  "engines": { "node": ">=22.19.0" },
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
   },
-  "files": ["dist", "README.md", "LICENSE"],
-  "keywords": ["mono-agent-module"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mono-agent-module"
+  ],
   "mono-agent": {
     "packageName": "@mono-agent/channel-telegram",
     "apiVersion": 1,
@@ -28,11 +39,13 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --expect.requireAssertions"
   },
   "dependencies": {
     "@mono-agent/module-sdk": "workspace:0.15.0",
     "undici": "8.7.0"
   },
-  "publishConfig": { "access": "public" }
+  "publishConfig": {
+    "access": "public"
+  }
 }

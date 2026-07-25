@@ -172,8 +172,25 @@ export function renderOssHygieneReport(findings) {
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * Directives that disarm a quality gate in-band. Coverage-ignore comments,
+ * Stryker suppressions, and skipped or `.only`-focused tests all let a change
+ * pass a gate without the gate having examined it. Scanned as text only: a
+ * path containing ".skip" is not a suppression.
+ */
+const qualityDirectiveRules = Object.freeze([
+  Object.freeze({
+    label: "coverage-or-mutation-suppression",
+    pattern: /\b(?:v8|c8|istanbul)\s+ignore\b|\bStryker\s+disable\b/giu,
+  }),
+  Object.freeze({
+    label: "disabled-or-focused-test",
+    pattern: /\b(?:it|test|describe)\.(?:skip|only|todo|fails)\b/giu,
+  }),
+]);
+
 function scanTextForPrivateReferences(text, file) {
-  return privateReferenceRules.flatMap((rule) =>
+  return [...privateReferenceRules, ...qualityDirectiveRules].flatMap((rule) =>
     scanPattern(text, file, rule.pattern, rule.label));
 }
 

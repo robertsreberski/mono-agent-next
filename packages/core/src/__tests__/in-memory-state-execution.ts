@@ -16,7 +16,6 @@ import type {
 import type {
   AgentInteractionEvidence,
   AgentRunAttemptEvidence,
-  AgentRunEvent,
   AgentRunRecord,
   AgentRunStatus,
   AgentRunSummary,

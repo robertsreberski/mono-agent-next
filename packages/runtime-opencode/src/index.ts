@@ -2,7 +2,7 @@
 import { defineRuntimeModule } from "@mono-agent/module-sdk";
 
 import { openCodeAuthCommands } from "./auth-command.js";
-import { parseRuntimeOpenCodeConfig, runtimeOpenCodeJsonSchema, type RuntimeOpenCodeConfig } from "./config.js";
+import { parseRuntimeOpenCodeConfig, runtimeOpenCodeJsonSchema } from "./config.js";
 import { validateRuntimeOpenCodeModel } from "./model.js";
 import { createRuntimeOpenCode } from "./runtime.js";
 
