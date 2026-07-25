@@ -114,8 +114,7 @@ dispatch:
 - `Write`: `write`;
 - `Edit`: `read` and `write`;
 - `Glob`: `read`;
-- `Grep`: `read`, `write`, `execute`, and `network` because Pi may install
-  ripgrep when it is absent;
+- `Grep`: `read` and `execute`;
 - `Bash`: `read`, `write`, `execute`, and `network`;
 - `WebFetch`: `network`;
 - `WebSearch`: `network`.
@@ -146,19 +145,21 @@ decision through its unique interaction id and exact advertised authority. The
 alias prefix is reserved; a provider ID already in that namespace is escaped
 into a disjoint domain so it cannot be confused with a generated opaque-ID
 alias.
-Read snapshots are capped at 16 MiB before materialization. Images retain Pi's
-resize behavior and are additionally capped at 4.5 MiB of encoded payload
-before the result reaches provider context or runtime recording; an oversized
-image is omitted with an explicit tool-result notice.
+Read snapshots are capped at 16 MiB before materialization. Pi's headless
+reader passes PNG, JPEG, GIF, and WebP images through without native image
+processing and omits BMP images. Images are additionally capped at 4.5 MiB of
+encoded payload before the result reaches provider context or runtime
+recording; an oversized image is omitted with an explicit tool-result notice.
 Bash accepts legacy millisecond timeouts, caps every command at 600 seconds,
 kills the process tree on cancellation, keeps the provider preview within Pi's
 2,000-line/50-KiB output bound, and kills output-flooding commands above a
-1-MiB hard capture limit without persisting unbounded full output. `Glob` wraps
-Pi Find with a cancellation-aware local traversal capped at 100,000 filesystem
-entries and 15 seconds. `Grep` retains `content`,
+1-MiB hard capture limit without persisting unbounded full output. `Glob` uses
+a cancellation-aware local traversal capped at 100,000 filesystem entries and
+15 seconds. `Grep` requires `rg` on `PATH` and retains `content`,
 `files_with_matches`, and `count` projections. Files/count projections prepend
-an explicit `PARTIAL` diagnostic when Pi reaches its match or byte limit, so a
-dense early file cannot make an incomplete projection appear exhaustive.
+an explicit `PARTIAL` diagnostic when the bounded search reaches its match or
+raw-stream or formatted-byte limit, so a dense early file cannot make an
+incomplete projection appear exhaustive.
 
 `Edit` remains deliberately narrower: it accepts only an existing,
 owner-controlled, single-link regular UTF-8 file below the workspace, rejects

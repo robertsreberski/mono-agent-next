@@ -89,6 +89,8 @@ describe("source-beta production budgets", () => {
     expect(classifySourcePath("packages/tui/vitest.config.ts")).toBe("test");
     expect(classifySourcePath("vitest.config.mjs")).toBe("test");
     expect(classifySourcePath("extras/docs-mcp/scripts/generate-corpus.mjs")).toBe("tooling");
+    expect(classifySourcePath("extras/docs-mcp/scripts/smoke-packed-contract.mjs"))
+      .toBe("tooling");
     expect(classifySourcePath("website/scripts/check-links.mjs")).toBe("tooling");
     for (const path of [
       "packages/core/src/test/hidden.ts",

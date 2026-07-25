@@ -58,6 +58,27 @@ afterEach(async () => {
 });
 
 describe("packed v1 proof Node and source authority", () => {
+  test("reuses the validated packed consumer for the docs-mcp functional smoke", () => {
+    const source = readFileSync(
+      join(process.cwd(), "scripts", "verify-v1-system.mjs"),
+      "utf8",
+    );
+    expect(source).toContain([
+      "await proveDocsMcpPackedClient(",
+      "      workspace.checkout,",
+      "      consumerDirectory,",
+      '      tarballs.get("@mono-agent/docs-mcp"),',
+      "    );",
+    ].join("\n"));
+    expect(source).toContain(
+      "MONO_AGENT_DOCS_MCP_INSTALL_ROOT: consumerDirectory,",
+    );
+    expect(source).toContain('proof.execution !== "package-bin"');
+    expect(source).toContain('proof.installation !== "preinstalled"');
+    expect(source).toContain('NPM_CONFIG_OFFLINE: "true"');
+    expect(source).toContain('npm_config_offline: "true"');
+  });
+
   test("pins the complete 28-code plus 3-JSON packed public export surface", () => {
     expect(V1_PUBLIC_EXPORT_SPECIFIERS).toHaveLength(31);
     expect(V1_PUBLIC_EXPORT_SPECIFIERS.filter((specifier) =>

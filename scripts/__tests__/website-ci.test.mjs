@@ -49,6 +49,18 @@ describe("website CI contract", () => {
     expect(verifyRuns.some((run) => run.includes("pnpm run check:source-beta-budgets"))).toBe(true);
     expect(verifyRuns.some((run) => run.includes("pnpm run scripts:test"))).toBe(true);
 
+    const minimalProof = {
+      name: "Prove packed minimal v1 consumer",
+      if: "${{ matrix.node-version == '22.19.0' }}",
+      run: "pnpm run verify:v1-minimal",
+    };
+    const minimalProofSteps = verify.steps.filter((step) =>
+      step.run === "pnpm run verify:v1-minimal");
+    expect(minimalProofSteps).toEqual([minimalProof]);
+    expect(verify.steps.indexOf(minimalProofSteps[0])).toBeLessThan(
+      verify.steps.findIndex((step) => step.run === "pnpm run verify:v1-system"),
+    );
+
     const verdict = workflow.jobs.verdict;
     expect(verdict.needs).toEqual(["verify", "website"]);
     expect(verdict.steps[0].env).toEqual({
