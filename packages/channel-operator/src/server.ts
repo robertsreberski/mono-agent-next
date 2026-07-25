@@ -10,12 +10,6 @@ import type {
   ChannelReplyEvent,
   ChannelReplySink,
   ChannelTurnResult,
-  JsonObject,
-  JsonValue,
-  RuntimeToolCall,
-  RuntimeToolResult,
-  RuntimeUsage,
-  TurnMessage,
 } from "@mono-agent/module-sdk";
 import {
   OPERATOR_LIMITS,
@@ -24,28 +18,14 @@ import {
   parseCancelRequest,
   parseAskAnswerRequest,
   parseLiveInputRequest,
-  parseOperatorHealth,
-  parseOperatorInfo,
-  parseOperatorFrame,
   parseTurnRequest,
-  serializeOperatorFrame,
   type OperatorCancelResponse,
   type OperatorAskSnapshot,
   type OperatorAskAnswerResponse,
-  type OperatorCapabilities,
-  type OperatorCompletedFrame,
-  type OperatorErrorFrame,
-  type OperatorFrame,
-  type OperatorHealth,
-  type OperatorInfo,
   type OperatorConversationList,
   type OperatorReplayResponse,
   type OperatorConfigView,
   type OperatorLiveInputResponse,
-  type OperatorMessage,
-  type OperatorModel,
-  type OperatorToolCall,
-  type OperatorToolResult,
   type OperatorUsage,
   type OperatorTurnRequest,
 } from "@mono-agent/operator";
@@ -55,13 +35,38 @@ import {
   parseOperatorChannelConfig,
   type OperatorChannelConfig,
 } from "./config.js";
+import { HttpError, StreamClosedError, StreamLimitError } from "./errors.js";
+import { OperatorFrameWriter } from "./frame-writer.js";
+import { settleWithin, untilAborted } from "./lifecycle.js";
+import {
+  asConfigObject,
+  errorFrame,
+  mergeOperatorUsage,
+  operatorHealth,
+  operatorInfo,
+  operatorToolCall,
+  operatorToolResult,
+  operatorTriggerKind,
+  operatorUsage,
+  projectActivityFrame,
+  projectCompletedFrame,
+  projectDeltaFrame,
+  resolveOperatorQuote,
+  toChannelAttachment,
+  toInboundRequest,
+  toOperatorMessage,
+  validateIdentityGrant,
+  type OperatorIdentityGrant,
+  type ResolvedOperatorQuote,
+} from "./projection.js";
+
+export { deriveOperatorCapabilities } from "./projection.js";
+export type { OperatorIdentityGrant } from "./projection.js";
 
 const SHUTDOWN_BOUND_MS = 1_000;
-const TERMINAL_FRAME_RESERVE_BYTES = 1_024;
 const CANCELLATION_MESSAGE = "The operator turn was cancelled.";
 const MAX_PENDING_ASKS = 1_000;
 const CORE_REPLAY_PAGE_LIMIT = 10_000;
-const CORE_ASSISTANT_MESSAGE_ID_MAX_BYTES = 522;
 
 export interface OperatorChannelStartInfo {
   readonly host: string;
@@ -95,15 +100,6 @@ export type OperatorDispatch = (
   reply: ChannelReplySink,
 ) => Promise<ChannelTurnResult>;
 
-export interface OperatorIdentityGrant {
-  readonly agent: { readonly id: string; readonly label: string };
-  readonly process: { readonly pid: number };
-  readonly defaults: { readonly runtime: string; readonly model: string; readonly effort?: string };
-  readonly models?: readonly OperatorModel[];
-  readonly configPath: string;
-  readonly projectRoot: string;
-}
-
 export interface CreateOperatorChannelOptions {
   readonly config: OperatorChannelConfig;
   readonly identity: OperatorIdentityGrant;
@@ -124,31 +120,8 @@ interface ActiveTurn {
   readonly turnId: string;
   readonly conversationId: string;
   readonly controller: AbortController;
-}
-
-interface ResolvedOperatorQuote {
-  readonly conversationId: string;
-  readonly messageId: string;
-  readonly role: "user" | "assistant";
-  readonly text: string;
-}
-
-class HttpError extends Error {
-  constructor(
-    readonly statusCode: number,
-    readonly code: string,
-    message: string,
-  ) {
-    super(message);
-    this.name = "OperatorHttpError";
-  }
-}
-
-class StreamClosedError extends Error {
-  constructor() {
-    super("Operator stream closed.");
-    this.name = "StreamClosedError";
-  }
+  readonly settled: Promise<void>;
+  readonly settle: () => void;
 }
 
 export function createOperatorChannel(options: CreateOperatorChannelOptions): OperatorChannel {
@@ -361,10 +334,15 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
 
     const turnId = randomUUID();
     const startedAt = new Date().toISOString();
+    let settleActive!: () => void;
     const active: ActiveTurn = {
       turnId,
       conversationId: turnRequest.conversationId,
       controller: new AbortController(),
+      settled: new Promise<void>((resolve) => {
+        settleActive = resolve;
+      }),
+      settle: () => settleActive(),
     };
     addActiveTurn(activeByConversation, active);
 
@@ -386,17 +364,23 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
         switch (event.type) {
           case "text-delta":
             text += event.delta;
-            await writer.write({ type: "delta", turnId, target: "assistant", text: event.delta, mode: "append" });
+            await writer.write(
+              projectDeltaFrame(turnId, "assistant", event.delta, "append").frame,
+            );
             break;
           case "thinking-delta":
-            await writer.write({ type: "delta", turnId, target: "thought", text: event.delta, mode: "append" });
+            await writer.write(
+              projectDeltaFrame(turnId, "thought", event.delta, "append").frame,
+            );
             break;
           case "text-replace":
             text = event.text;
-            await writer.write({ type: "delta", turnId, target: "assistant", text: event.text, mode: "replace" });
+            await writer.write(
+              projectDeltaFrame(turnId, "assistant", event.text, "replace").frame,
+            );
             break;
           case "activity":
-            await writer.write({ type: "activity", turnId, text: event.text });
+            await writer.write(projectActivityFrame(turnId, event.text));
             break;
           case "tool-call":
             await writer.write({ type: "tool_call", turnId, call: operatorToolCall(event.call) });
@@ -454,17 +438,20 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
         conversationId: turnRequest.conversationId,
         startedAt,
       });
-      const result = await options.dispatch(
-        toInboundRequest(
-          identity,
-          turnId,
-          startedAt,
-          turnRequest,
-          attachments,
-          quote,
-          active.controller.signal,
+      const result = await untilAborted(
+        options.dispatch(
+          toInboundRequest(
+            identity,
+            turnId,
+            startedAt,
+            turnRequest,
+            attachments,
+            quote,
+            active.controller.signal,
+          ),
+          reply,
         ),
-        reply,
+        active.controller.signal,
       );
       if (active.controller.signal.aborted || result.status === "cancelled") {
         await writer.write(errorFrame(turnId, "cancelled", CANCELLATION_MESSAGE, true));
@@ -478,21 +465,19 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
           false,
         ));
       } else {
-        const completed: OperatorCompletedFrame = {
-          type: "completed",
+        await writer.write(projectCompletedFrame(
           turnId,
-          finalMessage: {
-            ...(result.messageId === undefined ? {} : { id: operatorMessageId(result.messageId) }),
-            role: "assistant",
-            text: result.text ?? text,
-          },
-          finishedAt: new Date().toISOString(),
-          stopReason: "completed",
-        };
-        await writer.write(completed);
+          result.text ?? text,
+          result.messageId,
+        ));
       }
     } catch (error) {
-      if (!(error instanceof StreamClosedError) && !response.destroyed && !response.writableEnded) {
+      if (
+        !(error instanceof StreamClosedError)
+        && !(error instanceof StreamLimitError)
+        && !response.destroyed
+        && !response.writableEnded
+      ) {
         const cancelled = active.controller.signal.aborted;
         await writer.write(errorFrame(
           turnId,
@@ -505,6 +490,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
       response.off("close", abortForDisconnect);
       request.off("aborted", abortForDisconnect);
       removeActiveTurn(activeByConversation, active);
+      active.settle();
       if (active.controller.signal.aborted) pendingAsks.delete(turnRequest.conversationId);
       if (!response.destroyed && !response.writableEnded) response.end();
     }
@@ -639,7 +625,7 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
       : degradedMessage === undefined
         ? "healthy"
         : "degraded",
-    activeTurns: activeCount(activeByConversation),
+    activeTurns: [...activeByConversation.values()].reduce((count, turns) => count + turns.size, 0),
     ...(degradedMessage === undefined ? {} : { message: degradedMessage }),
   });
 
@@ -647,6 +633,8 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
     if (stopPromise !== undefined) return stopPromise;
     stopping = true;
     stopPromise = (async () => {
+      const activeSettlements = [...activeByConversation.values()].flatMap((turns) =>
+        [...turns].map((turn) => turn.settled));
       for (const turns of activeByConversation.values()) {
         for (const turn of turns) turn.controller.abort(new Error("Operator channel stopped."));
       }
@@ -665,6 +653,9 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
           nextServer.unref();
           throw new Error("Operator HTTP listener did not close within the shutdown bound.");
         }
+      }
+      if (!await settleWithin(Promise.allSettled(activeSettlements), SHUTDOWN_BOUND_MS)) {
+        throw new Error("Operator turns did not stop within the shutdown bound.");
       }
       sockets.clear();
       pendingAsks.clear();
@@ -685,434 +676,6 @@ export function createOperatorChannel(options: CreateOperatorChannelOptions): Op
     health,
     stop,
   });
-}
-
-function operatorInfo(
-  identity: OperatorIdentityGrant,
-  startedAt: string,
-  host: CreateOperatorChannelOptions["host"],
-): OperatorInfo {
-  return parseOperatorInfo({
-    protocol: OPERATOR_PROTOCOL,
-    agent: {
-      id: identity.agent.id,
-      label: identity.agent.label,
-    },
-    process: {
-      pid: identity.process.pid,
-      startedAt,
-    },
-    capabilities: operatorCapabilities(host),
-    defaults: identity.defaults,
-    ...(identity.models === undefined ? {} : { models: identity.models }),
-  });
-}
-
-async function operatorHealth(
-  degradedMessage: string | undefined,
-  readHealth: NonNullable<CreateOperatorChannelOptions["host"]>["readHealth"],
-): Promise<OperatorHealth> {
-  let hostHealth;
-  try { hostHealth = await readHealth?.(new AbortController().signal); }
-  catch { hostHealth = { status: "unhealthy" as const, summary: "Core health read failed." }; }
-  const status = degradedMessage !== undefined || hostHealth?.status === "degraded" || hostHealth?.status === "unknown"
-    ? "degraded"
-    : hostHealth?.status === "unhealthy"
-      ? "unhealthy"
-      : "healthy";
-  const channelStatus = degradedMessage === undefined ? "healthy" : "degraded";
-  return parseOperatorHealth({
-    status,
-    checkedAt: new Date().toISOString(),
-    details: [{
-      id: "channel-operator",
-      status: channelStatus,
-      ...(degradedMessage === undefined ? {} : { message: degradedMessage }),
-    }, ...(hostHealth === undefined ? [] : [{ id: "core", status: hostHealth.status === "unknown" ? "degraded" : hostHealth.status, ...(hostHealth.summary === undefined ? {} : { message: hostHealth.summary }) }])],
-  });
-}
-
-function operatorCapabilities(host: CreateOperatorChannelOptions["host"]): OperatorCapabilities {
-  return Object.freeze({
-    attachments: true,
-    liveInput: host?.offerLiveInput !== undefined,
-    askUser: host?.answerAsk !== undefined,
-    cancellation: true,
-    quotes: host?.readReplay !== undefined,
-    runtimeOverrides: true,
-    proactive: host?.openConversation !== undefined,
-    configView: host?.readConfig !== undefined,
-    replay: host?.readReplay !== undefined,
-    health: true,
-  });
-}
-
-function toInboundRequest(
-  identity: OperatorIdentityGrant,
-  turnId: string,
-  receivedAt: string,
-  request: OperatorTurnRequest,
-  attachments: readonly ChannelAttachment[],
-  quote: ResolvedOperatorQuote | undefined,
-  signal: AbortSignal,
-): ChannelInboundRequest {
-  const text = projectOperatorInput(request.input.text ?? "", quote);
-  const metadata = {
-    ...(request.metadata ?? {}),
-    ...(quote === undefined ? {} : {
-      operatorQuote: {
-        conversationId: quote.conversationId,
-        messageId: quote.messageId,
-        role: quote.role,
-      },
-    }),
-  } as JsonObject;
-  return {
-    requestId: turnId,
-    conversationId: request.conversationId,
-    sender: { id: "operator", displayName: identity.agent.label },
-    text,
-    attachments,
-    receivedAt,
-    ...(request.runtime === undefined ? {} : { runtime: request.runtime }),
-    ...(request.model === undefined ? {} : { model: request.model }),
-    ...(request.effort === undefined ? {} : { effort: request.effort }),
-    signal,
-    ...(Object.keys(metadata).length === 0 ? {} : { metadata }),
-  };
-}
-
-async function resolveOperatorQuote(
-  readReplay: NonNullable<ChannelHost["readReplay"]>,
-  request: OperatorTurnRequest,
-  signal: AbortSignal,
-): Promise<ResolvedOperatorQuote> {
-  const quote = request.input.quote!;
-  if (quote.conversationId !== request.conversationId) {
-    throw new HttpError(422, "foreign_quote", "Operator quotes must reference the active conversation.");
-  }
-  let replay: Awaited<ReturnType<typeof readReplay>>;
-  try {
-    replay = await readReplay({
-      conversationId: request.conversationId,
-      limit: CORE_REPLAY_PAGE_LIMIT,
-      signal,
-    });
-  } catch {
-    throw new HttpError(503, "replay_unavailable", "Conversation replay is temporarily unavailable.");
-  }
-  const entry = replay.entries.find((candidate) =>
-    operatorMessageId(candidate.message.id ?? candidate.turnId) === quote.messageId);
-  if (entry === undefined
-    || (entry.message.role !== "user" && entry.message.role !== "assistant")) {
-    throw new HttpError(422, "quote_not_found", "The quoted operator message does not exist in this conversation.");
-  }
-  const text = entry.message.content
-    .flatMap((part) => part.type === "text" ? [part.text] : [])
-    .join("");
-  if (text.length > OPERATOR_LIMITS.quoteCharacters) {
-    throw new HttpError(422, "quote_too_large", "The quoted operator message exceeds the quote bound.");
-  }
-  if (quote.text !== undefined && quote.text !== text) {
-    throw new HttpError(422, "quote_mismatch", "The supplied quote text does not match conversation replay.");
-  }
-  return Object.freeze({
-    conversationId: request.conversationId,
-    messageId: quote.messageId,
-    role: entry.message.role,
-    text,
-  });
-}
-
-function projectOperatorInput(text: string, quote: ResolvedOperatorQuote | undefined): string {
-  if (quote === undefined) return text;
-  const quoted = JSON.stringify({
-    conversationId: quote.conversationId,
-    messageId: quote.messageId,
-    role: quote.role,
-    text: quote.text,
-  });
-  return text.length === 0
-    ? `Quoted message (verified from conversation replay):\n${quoted}`
-    : `Quoted message (verified from conversation replay):\n${quoted}\n\nUser message:\n${text}`;
-}
-
-function validateIdentityGrant(value: OperatorIdentityGrant): OperatorIdentityGrant {
-  if (
-    typeof value !== "object" || value === null
-    || !validGrantText(value.agent?.id, 256)
-    || !validGrantText(value.agent.label, 1_024)
-    || !Number.isSafeInteger(value.process?.pid) || value.process.pid <= 0
-    || !validGrantText(value.defaults?.runtime, 256)
-    || !validGrantText(value.defaults.model, 256)
-    || (value.defaults.effort !== undefined && !validGrantText(value.defaults.effort, 256))
-    || (value.models !== undefined && !validGrantModels(value.models))
-    || !validGrantText(value.configPath, 4_096)
-    || !validGrantText(value.projectRoot, 4_096)
-  ) throw new TypeError("createOperatorChannel requires a valid operator.identity.v1 host grant.");
-  return value;
-}
-
-function validGrantModels(value: unknown): value is readonly OperatorModel[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 1_000) return false;
-  // `{ runtime, id }` is the atomic route, so the same model id served by two
-  // runtimes is two distinct entries rather than a duplicate.
-  const routes = new Set<string>();
-  return value.every((candidate) => {
-    if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return false;
-    const model = candidate as Record<string, unknown>;
-    if (Object.keys(model).some((field) =>
-      !["runtime", "id", "label", "efforts", "contextWindow"].includes(field))) return false;
-    if (!validGrantText(model.runtime, 256) || !validGrantText(model.id, 256)) return false;
-    const route = `${model.runtime}\0${model.id}`;
-    if (routes.has(route)) return false;
-    routes.add(route);
-    if (model.label !== undefined && !validGrantText(model.label, 1_024)) return false;
-    if (model.contextWindow !== undefined
-      && (!Number.isSafeInteger(model.contextWindow) || Number(model.contextWindow) < 1)) return false;
-    if (model.efforts !== undefined) {
-      if (!Array.isArray(model.efforts) || model.efforts.length > 50) return false;
-      const efforts = new Set<string>();
-      for (const effort of model.efforts) {
-        if (!validGrantText(effort, 256) || efforts.has(effort)) return false;
-        efforts.add(effort);
-      }
-    }
-    return true;
-  });
-}
-
-function validGrantText(value: unknown, maximum: number): value is string {
-  return typeof value === "string"
-    && value.length > 0
-    && value.length <= maximum
-    && value === value.trim()
-    && !/[\u0000-\u001f\u007f]/u.test(value);
-}
-
-function operatorTriggerKind(metadata: JsonObject | undefined): "cron" | "webhook" | undefined {
-  if (metadata?.source !== "operator-proactive") return undefined;
-  const kind = metadata?.triggerKind;
-  return kind === "cron" || kind === "webhook" ? kind : undefined;
-}
-
-function operatorMessageId(value: unknown): string {
-  if (
-    typeof value !== "string"
-    || value.length === 0
-    || value.includes("\0")
-    || Buffer.byteLength(value, "utf8") > CORE_ASSISTANT_MESSAGE_ID_MAX_BYTES
-  ) {
-    throw new TypeError("channel turn result messageId is invalid");
-  }
-  if (
-    value.length <= OPERATOR_LIMITS.identifierCharacters
-    && /^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/u.test(value)
-  ) {
-    return value;
-  }
-  const encoded = `message~u16:${Buffer.from(value, "utf16le").toString("base64url")}`;
-  if (encoded.length > OPERATOR_LIMITS.messageIdentifierCharacters) {
-    throw new TypeError("channel turn result messageId is invalid");
-  }
-  return encoded;
-}
-
-function toChannelAttachment(attachment: NonNullable<OperatorTurnRequest["input"]["attachments"]>[number]): ChannelAttachment {
-  if (attachment.url === undefined || !attachment.url.startsWith("data:")) throw new HttpError(422, "unsupported_attachment", "Operator attachments must use bounded inline data URLs.");
-  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=]+)$/u.exec(attachment.url);
-  if (match === null) throw new HttpError(422, "unsupported_attachment", "Operator attachment data URL is invalid.");
-  const encoded = match[2]!;
-  const data = Buffer.from(encoded, "base64");
-  if (encoded.length % 4 !== 0 || data.toString("base64") !== encoded) {
-    throw new HttpError(422, "unsupported_attachment", "Operator attachment data URL is not canonical base64.");
-  }
-  if (match[1] !== attachment.mediaType) throw new HttpError(422, "invalid_attachment", "Operator attachment media type does not match its data URL.");
-  if (data.byteLength > OPERATOR_LIMITS.requestBytes) throw new HttpError(413, "attachment_too_large", "Operator attachment exceeds the request byte bound.");
-  if (attachment.sizeBytes !== undefined && attachment.sizeBytes !== data.byteLength) {
-    throw new HttpError(422, "invalid_attachment", "Operator attachment size does not match its data URL.");
-  }
-  return { id: attachment.id, kind: match[1]!.startsWith("image/") ? "image" : match[1]!.startsWith("audio/") ? "audio" : "file", name: attachment.name, mediaType: attachment.mediaType, sizeBytes: data.byteLength, data: new Uint8Array(data) };
-}
-
-function toOperatorMessage(message: TurnMessage, createdAt: string, fallbackId?: string): OperatorMessage {
-  const text = message.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
-  const id = message.id ?? fallbackId;
-  const attachments = message.content.flatMap((part) => part.type === "attachment"
-    ? [{ id: part.attachment.id, name: part.attachment.name, mediaType: part.attachment.mediaType, sizeBytes: part.attachment.sizeBytes }]
-    : []);
-  return {
-    ...(id === undefined ? {} : { id: operatorMessageId(id) }),
-    role: message.role === "assistant" ? "assistant" : "user",
-    text,
-    ...(attachments.length === 0 ? {} : { attachments }),
-    createdAt: message.createdAt ?? createdAt,
-  };
-}
-
-function operatorUsage(usage: RuntimeUsage): OperatorUsage {
-  return {
-    inputTokens: usage.inputTokens,
-    outputTokens: usage.outputTokens,
-    ...(usage.contextWindow === undefined ? {} : { contextWindow: usage.contextWindow }),
-    ...(usage.contextUsed === undefined ? {} : { contextUsed: usage.contextUsed }),
-    compacted: usage.compaction?.compacted ?? false,
-    sessionEvicted: usage.sessionEvicted ?? false,
-  };
-}
-
-function operatorToolCall(call: RuntimeToolCall): OperatorToolCall {
-  const id = boundedToolIdentifier(call.id, "call");
-  const name = boundedToolIdentifier(call.name, "tool");
-  const candidate = {
-    type: "tool_call",
-    turnId: "projection",
-    call: { id, name, input: call.input, inputOmitted: false },
-  } as const;
-  try {
-    const frame = parseOperatorFrame(candidate);
-    if (frame.type === "tool_call") return frame.call;
-  } catch {
-    // The payload can be valid at the runtime boundary but too large or carry
-    // JSON keys that the product protocol deliberately refuses to replay.
-  }
-  return { id, name, inputOmitted: true };
-}
-
-function operatorToolResult(result: RuntimeToolResult): OperatorToolResult {
-  const callId = boundedToolIdentifier(result.callId, "call");
-  const content = result.content.map((part) => part.type === "text"
-    ? { type: "text" as const, text: part.text }
-    : part.type === "json"
-      ? { type: "json" as const, value: part.value }
-      : { type: "text" as const, text: part.type === "file"
-          ? "[file result omitted]"
-          : "[artifact result omitted]" });
-  const candidate = {
-    type: "tool_result",
-    turnId: "projection",
-    result: {
-      callId,
-      content,
-      contentOmitted: false,
-      ...(result.isError === undefined ? {} : { isError: result.isError }),
-    },
-  } as const;
-  try {
-    const frame = parseOperatorFrame(candidate);
-    if (frame.type === "tool_result") return frame.result;
-  } catch {
-    // Keep correlation and outcome visible while omitting an unsafe payload.
-  }
-  return {
-    callId,
-    contentOmitted: true,
-    ...(result.isError === undefined ? {} : { isError: result.isError }),
-  };
-}
-
-function boundedToolIdentifier(value: string, prefix: "call" | "tool"): string {
-  return value.length > 0
-    && value.trim().length > 0
-    && !value.includes("\0")
-    && Buffer.byteLength(value, "utf8") <= OPERATOR_LIMITS.toolIdentifierBytes
-    ? value
-    : `${prefix}:${createHash("sha256").update(value).digest("hex")}`;
-}
-
-function mergeOperatorUsage(
-  previous: OperatorUsage | undefined,
-  next: OperatorUsage,
-): OperatorUsage {
-  return {
-    inputTokens: next.inputTokens,
-    outputTokens: next.outputTokens,
-    ...(next.contextWindow !== undefined
-      ? { contextWindow: next.contextWindow }
-      : previous?.contextWindow === undefined
-        ? {}
-        : { contextWindow: previous.contextWindow }),
-    ...(next.contextUsed !== undefined
-      ? { contextUsed: next.contextUsed }
-      : previous?.contextUsed === undefined
-        ? {}
-        : { contextUsed: previous.contextUsed }),
-    compacted: previous?.compacted === true || next.compacted,
-    sessionEvicted: previous?.sessionEvicted === true || next.sessionEvicted,
-  };
-}
-
-function asConfigObject(value: JsonValue): Readonly<Record<string, unknown>> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Readonly<Record<string, unknown>>
-    : { value };
-}
-
-function errorFrame(
-  turnId: string,
-  code: string,
-  message: string,
-  cancelled: boolean,
-): OperatorErrorFrame {
-  return {
-    type: "error",
-    turnId,
-    error: { code, message, retryable: false },
-    cancelled,
-    finishedAt: new Date().toISOString(),
-  };
-}
-
-class OperatorFrameWriter {
-  #writtenBytes = 0;
-
-  constructor(
-    private readonly response: ServerResponse,
-    private readonly controller: AbortController,
-  ) {}
-
-  async write(frame: OperatorFrame): Promise<void> {
-    if (this.response.destroyed || this.response.writableEnded) {
-      this.controller.abort(new StreamClosedError());
-      throw new StreamClosedError();
-    }
-    const line = serializeOperatorFrame(frame);
-    const bytes = Buffer.byteLength(line, "utf8");
-    const isTerminal = frame.type === "completed" || frame.type === "error";
-    const limit = isTerminal
-      ? OPERATOR_LIMITS.streamBytes
-      : OPERATOR_LIMITS.streamBytes - TERMINAL_FRAME_RESERVE_BYTES;
-    if (this.#writtenBytes + bytes > limit) {
-      this.controller.abort(new Error("Operator stream exceeded its byte limit."));
-      throw new HttpError(500, "stream_limit", "The operator stream exceeded its byte limit.");
-    }
-    this.#writtenBytes += bytes;
-    if (this.response.write(line)) return;
-    await new Promise<void>((resolve, reject) => {
-      const cleanup = (): void => {
-        this.response.off("drain", onDrain);
-        this.response.off("close", onClose);
-        this.response.off("error", onError);
-      };
-      const onDrain = (): void => {
-        cleanup();
-        resolve();
-      };
-      const onClose = (): void => {
-        cleanup();
-        this.controller.abort(new StreamClosedError());
-        reject(new StreamClosedError());
-      };
-      const onError = (): void => {
-        cleanup();
-        this.controller.abort(new StreamClosedError());
-        reject(new StreamClosedError());
-      };
-      this.response.once("drain", onDrain);
-      this.response.once("close", onClose);
-      this.response.once("error", onError);
-    });
-  }
 }
 
 function validateRequestBoundary(
@@ -1271,12 +834,6 @@ function removeActiveTurn(active: Map<string, Set<ActiveTurn>>, turn: ActiveTurn
   if (turns?.size === 0) active.delete(turn.conversationId);
 }
 
-function activeCount(active: Map<string, Set<ActiveTurn>>): number {
-  let count = 0;
-  for (const turns of active.values()) count += turns.size;
-  return count;
-}
-
 function readBearerToken(value: string | undefined): string | undefined {
   return /^Bearer ([^\s]+)$/iu.exec(value ?? "")?.[1];
 }
@@ -1339,19 +896,4 @@ function sendJson(
     ...extraHeaders,
   });
   response.end(payload);
-}
-
-async function settleWithin(promise: Promise<unknown>, milliseconds: number): Promise<boolean> {
-  let timeout: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise.then(() => true, () => true),
-      new Promise<boolean>((resolve) => {
-        timeout = setTimeout(() => resolve(false), milliseconds);
-        timeout.unref();
-      }),
-    ]);
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout);
-  }
 }

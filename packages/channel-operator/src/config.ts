@@ -85,7 +85,7 @@ export const operatorChannelConfigSchema = Object.freeze({
 
 export function isLoopbackHost(host: string): boolean {
   const normalized = host.trim().toLowerCase();
-  if (normalized === "localhost" || normalized === "::1" || normalized === "[::1]") {
+  if (normalized === "localhost" || normalized === "::1") {
     return true;
   }
   if (normalized.startsWith("::ffff:")) {
@@ -102,6 +102,11 @@ function parseListen(value: unknown): OperatorListenConfig {
   const input = readRecord(value, "listen");
   rejectUnknownKeys(input, LISTEN_KEYS, "listen");
   const host = input.host === undefined ? DEFAULT_OPERATOR_HOST : readString(input.host, "listen.host");
+  if (host === "[::1]") {
+    throw new OperatorChannelConfigError(
+      "listen.host must use the unbracketed IPv6 loopback literal ::1, not [::1].",
+    );
+  }
   if (
     host.length > 253
     || host.includes("://")

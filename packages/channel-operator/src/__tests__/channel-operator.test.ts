@@ -94,6 +94,10 @@ describe("operator channel config", () => {
       auth: { token: TOKEN },
       listen: { host: "::1", port: 0 },
     })).toMatchObject({ listen: { host: "::1" } });
+    expect(() => parseOperatorChannelConfig({
+      auth: { token: TOKEN },
+      listen: { host: "[::1]", port: 0 },
+    })).toThrow(/unbracketed IPv6 loopback literal ::1, not \[::1\]/u);
     expect(() => parseOperatorChannelConfig({ auth: { token: TOKEN }, label: "wrong owner" })).toThrow(/unknown field.*label/u);
   });
 });
@@ -440,6 +444,56 @@ describe("operator HTTP channel", () => {
       type: "completed",
       finalMessage: { text: "still completed" },
     });
+  });
+
+  it("degrades oversized activity, replacement, and final text without losing completion", async () => {
+    const oversizedActivity = "a".repeat(OPERATOR_LIMITS.activityCharacters + 1);
+    const oversizedFrameText = "\u0001".repeat(800_000);
+    const channel = await startChannel(async (request, reply) => {
+      if (request.conversationId === "oversized-replacement") {
+        await reply.emit({ type: "activity", text: oversizedActivity });
+        await reply.emit({ type: "text-replace", text: oversizedFrameText });
+        return { status: "completed", text: "replacement survived" };
+      }
+      return { status: "completed", text: oversizedFrameText };
+    });
+
+    const replacementFrames = await readFrames(await postJson(channel.startInfo.turnsUrl, {
+      conversationId: "oversized-replacement",
+      input: { text: "run" },
+    }));
+    expect(replacementFrames.find((frame) => frame.type === "activity")).toMatchObject({
+      type: "activity",
+      text: oversizedActivity.slice(0, OPERATOR_LIMITS.activityCharacters),
+    });
+    const replacement = replacementFrames.find((frame) =>
+      frame.type === "delta" && frame.mode === "replace");
+    expect(replacement).toMatchObject({
+      type: "delta",
+      target: "assistant",
+      mode: "replace",
+    });
+    expect(replacement?.type === "delta" ? replacement.text.length : 0)
+      .toBeLessThan(oversizedFrameText.length);
+    expect(replacementFrames.at(-1)).toMatchObject({
+      type: "completed",
+      finalMessage: { text: "replacement survived" },
+      stopReason: "completed",
+    });
+    expect(replacementFrames.some((frame) => frame.type === "error")).toBe(false);
+
+    const finalFrames = await readFrames(await postJson(channel.startInfo.turnsUrl, {
+      conversationId: "oversized-final",
+      input: { text: "run" },
+    }));
+    const terminal = finalFrames.at(-1);
+    expect(terminal).toMatchObject({
+      type: "completed",
+      stopReason: "length",
+    });
+    expect(terminal?.type === "completed" ? terminal.finalMessage.text.length : 0)
+      .toBeLessThan(oversizedFrameText.length);
+    expect(finalFrames.some((frame) => frame.type === "error")).toBe(false);
   });
 
   it("fails closed for malformed, unsupported, unauthorized, and cross-origin requests", async () => {
@@ -873,6 +927,56 @@ describe("operator HTTP channel", () => {
     await expect(client.getPendingAsk("conversation-controls")).resolves.toMatchObject({ ask: { interactionId: "ask-1" } });
     await expect(client.answerAsk("conversation-controls", { interactionId: "ask-1", answers: { choice: ["yes"] } })).resolves.toEqual({ status: "accepted" });
     expect(answerAsk).toHaveBeenCalledOnce();
+  });
+
+  it("degrades health without leaking a Core health read failure", async () => {
+    const channel = await startChannel(
+      async () => ({ status: "completed", text: "unused" }),
+      {
+        async readHealth() {
+          throw new Error("secret Core health path");
+        },
+      },
+    );
+
+    expect(parseOperatorHealth(await authorizedJson(channel.startInfo.healthUrl))).toMatchObject({
+      status: "degraded",
+      details: [
+        { id: "channel-operator", status: "healthy" },
+        { id: "core", status: "degraded", message: "Core health read failed." },
+      ],
+    });
+  });
+
+  it("stop aborts an active streaming turn and removes it from health", async () => {
+    let dispatchSignal: AbortSignal | undefined;
+    let firstDelta: (() => void) | undefined;
+    const deltaEmitted = new Promise<void>((resolve) => {
+      firstDelta = resolve;
+    });
+    const channel = await startChannel(async (request, reply) => {
+      dispatchSignal = request.signal;
+      await reply.emit({ type: "text-delta", delta: "started" });
+      firstDelta?.();
+      await new Promise<never>(() => undefined);
+      return { status: "cancelled" };
+    });
+    const responsePromise = postJson(channel.startInfo.turnsUrl, {
+      conversationId: "stop-active",
+      input: { text: "wait" },
+    });
+    await deltaEmitted;
+
+    await channel.channel.stop();
+
+    expect(dispatchSignal?.aborted).toBe(true);
+    expect(channel.channel.health()).toEqual({ status: "stopped", activeTurns: 0 });
+    const response = await responsePromise;
+    const socketOutcome = await response.text().then(
+      () => "closed" as const,
+      () => "errored" as const,
+    );
+    expect(["closed", "errored"]).toContain(socketOutcome);
   });
 
   it("starts and stops idempotently and destroys open keep-alive sockets", async () => {
