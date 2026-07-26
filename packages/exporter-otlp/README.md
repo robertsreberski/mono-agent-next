@@ -21,8 +21,10 @@ Own OTLP/HTTP span serialization, a bounded in-memory queue, count and byte
 batching, request/flush/stop deadlines, checked redirects, and collector
 transport. It maps Core turn metadata to stable OpenInference/Phoenix project,
 session, model, status, and span-kind attributes. Delivery failures retain the
-active batch for a later flush; queue pressure is reported explicitly through
-accepted/rejected counts and degraded health.
+active batch only through a bounded exponential-backoff retry budget; exhausted
+or permanent failures drop that front batch and continue. Queue pressure and
+delivery loss are reported explicitly through accepted/rejected/dropped counts
+and degraded health.
 
 ## Install / Usage
 
@@ -53,7 +55,9 @@ pnpm --filter @mono-agent/exporter-otlp... run build
         "maxQueueRecords": 2048,
         "maxQueueBytes": 8388608,
         "maxBatchRecords": 128,
-        "maxBatchBytes": 1048576
+        "maxBatchBytes": 1048576,
+        "maxRetryAttempts": 5,
+        "maxRetryDelayMs": 30000
       }
     }
   }
@@ -105,17 +109,24 @@ and a node budget. This scan does not make an untrusted collector safe.
    maps each record to a deterministic instantaneous OTLP span, aliases Core's
    conversation identity to `session.id`, and uses the official transformer to
    encode an OTLP protobuf request accepted by Phoenix and standard OTLP/HTTP
-   trace collectors. Stable hashes derive trace and span IDs from canonical
-   record content plus a per-exporter enqueue sequence that stays fixed across
-   retries and distinguishes byte-identical records.
+   trace collectors. The exact encoded bytes are cached for the bounded retry
+   lifetime. Stable hashes derive trace and span IDs from canonical record
+   content plus a per-exporter enqueue sequence that stays fixed across retries
+   and distinguishes byte-identical records.
 4. The transport sends a manual-redirect POST with per-request cancellation.
    Redirect targets are reparsed; configured headers survive only same-origin
    redirects and can never cross an origin boundary. Sensitive-body export
    rejects cross-origin redirects instead of replaying the payload.
-5. A successful 2xx removes the exact front batch. Any other result retains it,
-   records a redacted health error, and stops the current pump.
-6. `flush` and `stop` have independent deadlines. Stop attempts a final flush,
-   reports failure, accounts remaining records as dropped, and always settles.
+5. A successful 2xx removes the exact front batch. Transport failures and HTTP
+   429/502/503/504 retry with capped exponential jitter; bounded `Retry-After`
+   is honored for 429/503. Other failures drop only the front batch immediately.
+   Exhausting `maxRetryAttempts` does the same, records delivery-loss counters,
+   and lets the pump continue with later records. Explicit flushes do not bypass
+   an active retry delay, and one flush caller cancelling its wait does not
+   cancel the shared delivery pump for other callers.
+6. `flush` and `stop` have independent deadlines. Stop cancels the owned pump,
+   request, and retry wait, attempts a final bounded flush, accounts any
+   remaining records as dropped, and always settles without a post-stop retry.
 
 ### Package structure
 
@@ -202,5 +213,7 @@ omission, explicit warnings, bounded credential-pattern replacement,
 project/session/OpenInference mapping, deterministic payloads, cross-origin
 credential stripping, sensitive cross-origin rejection, protocol downgrade
 rejection, timer delivery, in-flight appends, collision-free retry-stable span
-identity, canonical timestamps, version drift, visible degradation, and bounded
-request/stop deadlines.
+identity, cached retry bytes, retry classification, capped jitter and
+`Retry-After`, front-only exhaustion drops, canonical timestamps, version
+drift, independent concurrent flush cancellation, active-retry shutdown,
+visible degradation, and bounded request/flush/stop deadlines.

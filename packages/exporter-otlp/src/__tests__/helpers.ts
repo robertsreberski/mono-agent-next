@@ -54,6 +54,7 @@ export function createExporter(
   return new OtlpExporter(config, {
     transport,
     clock: () => new Date("2026-07-23T12:00:00.000Z"),
+    random: () => 0.5,
   });
 }
 

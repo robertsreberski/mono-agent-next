@@ -275,6 +275,8 @@ Kind: `exporter`. Canonical selected path: `observability.exporters.{id}`.
 | `observability.exporters.{id}.maxQueueRecords` | `integer` | no | `2048` | `maximum 100000; minimum 1` | no | no | — |
 | `observability.exporters.{id}.maxRecordBytes` | `integer` | no | `262144` | `maximum 4194304; minimum 1` | no | no | — |
 | `observability.exporters.{id}.maxRedirects` | `integer` | no | `3` | `maximum 5; minimum 0` | no | no | — |
+| `observability.exporters.{id}.maxRetryAttempts` | `integer` | no | `5` | `maximum 20; minimum 0` | no | no | — |
+| `observability.exporters.{id}.maxRetryDelayMs` | `integer` | no | `30000` | `maximum 300000; minimum 10` | no | no | — |
 | `observability.exporters.{id}.projectName` | `string` | yes | — | `maxLength 256; minLength 1; pattern "^[ -~]+$"` | no | no | — |
 | `observability.exporters.{id}.requestTimeoutMs` | `integer` | no | `10000` | `maximum 300000; minimum 1` | no | no | — |
 | `observability.exporters.{id}.stopTimeoutMs` | `integer` | no | `10000` | `maximum 300000; minimum 1` | no | no | — |

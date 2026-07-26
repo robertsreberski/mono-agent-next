@@ -9,6 +9,8 @@ export const DEFAULT_MAX_BATCH_RECORDS = 128;
 export const DEFAULT_MAX_BATCH_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_RECORD_BYTES = 256 * 1024;
 export const DEFAULT_FLUSH_INTERVAL_MS = 1_000;
+export const DEFAULT_MAX_RETRY_ATTEMPTS = 5;
+export const DEFAULT_MAX_RETRY_DELAY_MS = 30_000;
 export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 export const DEFAULT_FLUSH_TIMEOUT_MS = 15_000;
 export const DEFAULT_STOP_TIMEOUT_MS = 10_000;
@@ -20,6 +22,8 @@ const MAX_BATCH_RECORDS = 1_000;
 const MAX_BATCH_BYTES = 16 * 1024 * 1024;
 const MAX_RECORD_BYTES = 4 * 1024 * 1024;
 const MAX_INTERVAL_MS = 60_000;
+const MAX_RETRY_ATTEMPTS = 20;
+const MAX_RETRY_DELAY_MS = 5 * 60_000;
 const MAX_DEADLINE_MS = 5 * 60_000;
 const MAX_REDIRECTS = 5;
 const MAX_HEADERS = 64;
@@ -58,6 +62,8 @@ export interface OtlpExporterConfig {
   readonly maxBatchBytes: number;
   readonly maxRecordBytes: number;
   readonly flushIntervalMs: number;
+  readonly maxRetryAttempts: number;
+  readonly maxRetryDelayMs: number;
   readonly requestTimeoutMs: number;
   readonly flushTimeoutMs: number;
   readonly stopTimeoutMs: number;
@@ -85,6 +91,8 @@ const CONFIG_KEYS = new Set([
   "maxBatchBytes",
   "maxRecordBytes",
   "flushIntervalMs",
+  "maxRetryAttempts",
+  "maxRetryDelayMs",
   "requestTimeoutMs",
   "flushTimeoutMs",
   "stopTimeoutMs",
@@ -145,6 +153,20 @@ export function parseOtlpExporterConfig(value: unknown): OtlpExporterConfig {
     10,
     MAX_INTERVAL_MS,
   );
+  const maxRetryAttempts = readInteger(
+    input.maxRetryAttempts,
+    "maxRetryAttempts",
+    DEFAULT_MAX_RETRY_ATTEMPTS,
+    0,
+    MAX_RETRY_ATTEMPTS,
+  );
+  const maxRetryDelayMs = readInteger(
+    input.maxRetryDelayMs,
+    "maxRetryDelayMs",
+    DEFAULT_MAX_RETRY_DELAY_MS,
+    10,
+    MAX_RETRY_DELAY_MS,
+  );
   const requestTimeoutMs = readInteger(
     input.requestTimeoutMs,
     "requestTimeoutMs",
@@ -199,6 +221,8 @@ export function parseOtlpExporterConfig(value: unknown): OtlpExporterConfig {
     maxBatchBytes,
     maxRecordBytes,
     flushIntervalMs,
+    maxRetryAttempts,
+    maxRetryDelayMs,
     requestTimeoutMs,
     flushTimeoutMs,
     stopTimeoutMs,
@@ -263,6 +287,18 @@ export const otlpExporterConfigSchema = Object.freeze({
         minimum: 10,
         maximum: MAX_INTERVAL_MS,
         default: DEFAULT_FLUSH_INTERVAL_MS,
+      },
+      maxRetryAttempts: {
+        type: "integer",
+        minimum: 0,
+        maximum: MAX_RETRY_ATTEMPTS,
+        default: DEFAULT_MAX_RETRY_ATTEMPTS,
+      },
+      maxRetryDelayMs: {
+        type: "integer",
+        minimum: 10,
+        maximum: MAX_RETRY_DELAY_MS,
+        default: DEFAULT_MAX_RETRY_DELAY_MS,
       },
       requestTimeoutMs: {
         type: "integer",

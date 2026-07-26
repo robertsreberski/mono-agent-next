@@ -333,20 +333,177 @@ describe("OtlpExporter", () => {
     await exporter.stop({ signal, reason: "shutdown" });
   });
 
-  it("retries retained records on a later flush after a transient failure", async () => {
+  it("retries cached bytes after jittered backoff without letting flush bypass the delay", async () => {
+    vi.useFakeTimers();
+    const bodyReferences: Uint8Array[] = [];
+    const transport = new ScriptedTransport((request, index) => {
+      bodyReferences.push(request.body);
+      return index === 0
+        ? { status: 503, headers: {} }
+        : { status: 200, headers: {} };
+    });
+    const exporter = createExporter(transport, {
+      flushIntervalMs: 100,
+      maxRetryDelayMs: 100,
+      flushTimeoutMs: 1_000,
+    });
+    try {
+      await exporter.export({ records: [record("retry")], signal });
+      const firstFlush = exporter.flush(signal);
+      await settleMicrotasks();
+      const secondFlush = exporter.flush(signal);
+      expect(transport.requests).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(74);
+      expect(transport.requests).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(Promise.all([firstFlush, secondFlush])).resolves.toEqual([undefined, undefined]);
+
+      expect(transport.requests).toHaveLength(2);
+      expect(transport.requests[1]!.body).toEqual(transport.requests[0]!.body);
+      expect(bodyReferences[1]).toBe(bodyReferences[0]);
+      expect(exporter.health({ signal })).toMatchObject({
+        status: "healthy",
+        details: { queuedRecords: 0, deliveredRecords: 1, retryAttempts: 1 },
+      });
+      await exporter.stop({ signal, reason: "shutdown" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the shared pump alive when one concurrent flush caller aborts", async () => {
+    vi.useFakeTimers();
     const transport = new ScriptedTransport((_request, index) => index === 0
       ? { status: 503, headers: {} }
       : { status: 200, headers: {} });
-    const exporter = createExporter(transport);
-    await exporter.export({ records: [record("retry")], signal });
-    await expect(exporter.flush(signal)).rejects.toMatchObject({ code: "OTLP_FLUSH_FAILED" });
-    await exporter.flush(signal);
-    expect(transport.requests).toHaveLength(2);
-    expect(transport.requests[1]!.body).toEqual(transport.requests[0]!.body);
-    expect(exporter.health({ signal })).toMatchObject({
-      details: { queuedRecords: 0, deliveredRecords: 1 },
+    const exporter = createExporter(transport, {
+      flushIntervalMs: 100,
+      maxRetryDelayMs: 100,
+      flushTimeoutMs: 1_000,
     });
-    await exporter.stop({ signal, reason: "shutdown" });
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    try {
+      await exporter.export({ records: [record("independent-flush-waiters")], signal });
+      const firstFlush = expect(exporter.flush(firstController.signal)).rejects.toMatchObject({
+        code: "OTLP_ABORTED",
+      });
+      await settleMicrotasks();
+      const secondFlush = exporter.flush(secondController.signal);
+      firstController.abort(new Error("first caller stopped waiting"));
+      await firstFlush;
+
+      expect(transport.requests).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(75);
+      await expect(secondFlush).resolves.toBeUndefined();
+      expect(transport.requests).toHaveLength(2);
+      expect(exporter.health({ signal })).toMatchObject({
+        status: "healthy",
+        details: { queuedRecords: 0, deliveredRecords: 1, retryAttempts: 1 },
+      });
+      await exporter.stop({ signal, reason: "shutdown" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("caps Retry-After and retries transport failures plus the retryable HTTP status set", async () => {
+    vi.useFakeTimers();
+    const statuses = [429, 502, 503, 504] as const;
+    const transport = new ScriptedTransport((_request, index) => {
+      if (index === 0) throw new Error("collector is temporarily unreachable");
+      const status = statuses[index - 1];
+      if (status !== undefined) {
+        return {
+          status,
+          headers: status === 429 || status === 503 ? { "retry-after": "999" } : {},
+        };
+      }
+      return { status: 200, headers: {} };
+    });
+    const exporter = createExporter(transport, {
+      flushIntervalMs: 10,
+      maxRetryAttempts: 5,
+      maxRetryDelayMs: 20,
+      flushTimeoutMs: 1_000,
+    });
+    try {
+      await exporter.export({ records: [record("classified-retries")], signal });
+      const flushing = exporter.flush(signal);
+      await settleMicrotasks();
+      expect(transport.requests).toHaveLength(1);
+
+      await vi.advanceTimersByTimeAsync(7);
+      expect(transport.requests).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(19);
+      expect(transport.requests).toHaveLength(2);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(transport.requests).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(15);
+      expect(transport.requests).toHaveLength(4);
+      await vi.advanceTimersByTimeAsync(19);
+      expect(transport.requests).toHaveLength(4);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(transport.requests).toHaveLength(5);
+      await vi.advanceTimersByTimeAsync(15);
+      await expect(flushing).resolves.toBeUndefined();
+
+      expect(transport.requests).toHaveLength(6);
+      expect(transport.requests.slice(1).every((request) => {
+        return request.body.every((byte, index) => byte === transport.requests[0]!.body[index]);
+      })).toBe(true);
+      expect(exporter.health({ signal })).toMatchObject({
+        details: { deliveredRecords: 1, retryAttempts: 5, droppedRecords: 0 },
+      });
+      await exporter.stop({ signal, reason: "shutdown" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops only an exhausted front batch and continues delivering later records", async () => {
+    vi.useFakeTimers();
+    const transport = new ScriptedTransport((_request, index) => {
+      return index < 2 ? { status: 503, headers: {} } : { status: 200, headers: {} };
+    });
+    const exporter = createExporter(transport, {
+      maxBatchRecords: 1,
+      flushIntervalMs: 10,
+      maxRetryAttempts: 1,
+      maxRetryDelayMs: 10,
+      flushTimeoutMs: 1_000,
+    });
+    try {
+      await exporter.export({
+        records: [record("exhausted-front"), record("delivered-after-drop")],
+        signal,
+      });
+      const flushing = expect(exporter.flush(signal)).rejects.toMatchObject({
+        code: "OTLP_FLUSH_FAILED",
+      });
+      await settleMicrotasks();
+      expect(transport.requests).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(7);
+      await flushing;
+
+      expect(transport.requests).toHaveLength(3);
+      expect(transport.requests[1]!.body).toEqual(transport.requests[0]!.body);
+      expect(transport.requests[2]!.body).not.toEqual(transport.requests[0]!.body);
+      expect(exporter.health({ signal })).toMatchObject({
+        status: "degraded",
+        details: {
+          queuedRecords: 0,
+          deliveredRecords: 1,
+          droppedRecords: 1,
+          droppedBatches: 1,
+          retryAttempts: 1,
+        },
+      });
+      await exporter.stop({ signal, reason: "shutdown" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not surface collector-provided secret text through errors or health", async () => {
@@ -354,7 +511,7 @@ describe("OtlpExporter", () => {
     const transport = new ScriptedTransport(() => {
       throw new Error(secret);
     });
-    const exporter = createExporter(transport);
+    const exporter = createExporter(transport, { maxRetryAttempts: 0 });
     await exporter.export({ records: [record("safe-error")], signal });
 
     let failure: unknown;
@@ -366,8 +523,10 @@ describe("OtlpExporter", () => {
     expect(failure).toMatchObject({ code: "OTLP_FLUSH_FAILED" });
     expect(errorChain(failure)).not.toContain(secret);
     expect(JSON.stringify(exporter.health({ signal }))).not.toContain(secret);
-    await expect(exporter.stop({ signal, reason: "shutdown" }))
-      .rejects.toMatchObject({ code: "OTLP_FLUSH_FAILED" });
+    expect(exporter.health({ signal })).toMatchObject({
+      details: { queuedRecords: 0, droppedRecords: 1, droppedBatches: 1 },
+    });
+    await expect(exporter.stop({ signal, reason: "shutdown" })).resolves.toBeUndefined();
   });
 
   it("bounds request and stop deadlines with an abort-aware injected transport", async () => {
@@ -378,15 +537,15 @@ describe("OtlpExporter", () => {
       requestTimeoutMs: 15,
       flushTimeoutMs: 100,
       stopTimeoutMs: 30,
+      maxRetryAttempts: 0,
     });
     await exporter.export({ records: [record("timeout")], signal });
     exporter.start({ signal });
     await expect(exporter.flush(signal)).rejects.toMatchObject({ code: "OTLP_FLUSH_FAILED" });
-    await expect(exporter.stop({ signal, reason: "shutdown" }))
-      .rejects.toSatisfy((error: unknown) => {
-        return typeof error === "object" && error !== null && "code" in error &&
-          (error.code === "OTLP_FLUSH_FAILED" || error.code === "OTLP_TIMEOUT");
-      });
+    expect(exporter.health({ signal })).toMatchObject({
+      details: { queuedRecords: 0, droppedRecords: 1 },
+    });
+    await expect(exporter.stop({ signal, reason: "shutdown" })).resolves.toBeUndefined();
   });
 
   it("shares one bounded stop outcome when an injected transport ignores abort", async () => {
@@ -407,6 +566,42 @@ describe("OtlpExporter", () => {
       if (outcome.status === "rejected") {
         expect(outcome.reason).toMatchObject({ code: "OTLP_TIMEOUT" });
       }
+    }
+  });
+
+  it("cancels an active retry wait and never sends after bounded stop expiry", async () => {
+    vi.useFakeTimers();
+    const transport = new ScriptedTransport(() => ({ status: 503, headers: {} }));
+    const exporter = createExporter(transport, {
+      flushIntervalMs: 100,
+      maxRetryDelayMs: 100,
+      stopTimeoutMs: 20,
+    });
+    try {
+      await exporter.export({ records: [record("stop-during-retry")], signal });
+      exporter.start({ signal });
+      await settleMicrotasks();
+      expect(transport.requests).toHaveLength(1);
+
+      const stopping = expect(exporter.stop({ signal, reason: "shutdown" }))
+        .rejects.toMatchObject({ code: "OTLP_TIMEOUT" });
+      await vi.advanceTimersByTimeAsync(20);
+      await stopping;
+      expect(exporter.health({ signal })).toMatchObject({
+        status: "unknown",
+        details: {
+          queuedRecords: 0,
+          deliveredRecords: 0,
+          droppedRecords: 1,
+          droppedBatches: 1,
+          retryAttempts: 1,
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(200);
+      expect(transport.requests).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

@@ -69,13 +69,17 @@ describe("OtlpExporter redirects", () => {
       .toContain("sensitive-body");
     expect(exporter.health({ signal })).toMatchObject({
       status: "degraded",
-      details: { queuedRecords: 1, deliveredRecords: 0 },
+      details: {
+        queuedRecords: 0,
+        deliveredRecords: 0,
+        droppedRecords: 1,
+        droppedBatches: 1,
+      },
     });
-    await expect(exporter.stop({ signal, reason: "shutdown" }))
-      .rejects.toMatchObject({ code: "OTLP_FLUSH_FAILED" });
+    await expect(exporter.stop({ signal, reason: "shutdown" })).resolves.toBeUndefined();
   });
 
-  it("rejects protocol-downgrade redirects and leaves the failed batch queued", async () => {
+  it("rejects protocol-downgrade redirects and drops only the failed batch", async () => {
     const transport = new ScriptedTransport(() => ({
       status: 307,
       headers: { location: "http://127.0.0.1:4318/v1/traces" },
@@ -87,9 +91,13 @@ describe("OtlpExporter redirects", () => {
       .rejects.toMatchObject({ code: "OTLP_FLUSH_FAILED" });
     expect(exporter.health({ signal })).toMatchObject({
       status: "degraded",
-      details: { queuedRecords: 1, deliveredRecords: 0 },
+      details: {
+        queuedRecords: 0,
+        deliveredRecords: 0,
+        droppedRecords: 1,
+        droppedBatches: 1,
+      },
     });
-    await expect(exporter.stop({ signal, reason: "shutdown" }))
-      .rejects.toMatchObject({ code: "OTLP_FLUSH_FAILED" });
+    await expect(exporter.stop({ signal, reason: "shutdown" })).resolves.toBeUndefined();
   });
 });

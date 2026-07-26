@@ -24,28 +24,62 @@ interface QueuedRecord extends SequencedExportRecord {
   readonly wireBytes: number;
 }
 
+interface ActiveBatch {
+  readonly records: readonly QueuedRecord[];
+  readonly body: Uint8Array;
+  retryAttempts: number;
+  retryAt: number;
+}
+
+class OtlpDeliveryError extends Error {
+  readonly exporterError: OtlpExporterError;
+  readonly retryable: boolean;
+  readonly retryAfterMs: number | undefined;
+
+  constructor(
+    exporterError: OtlpExporterError,
+    retryable: boolean,
+    retryAfterMs?: number,
+  ) {
+    super(exporterError.message, { cause: exporterError });
+    this.name = "OtlpDeliveryError";
+    this.exporterError = exporterError;
+    this.retryable = retryable;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 export interface OtlpExporterOptions {
   readonly transport?: OtlpTransport;
   readonly clock?: () => Date;
+  readonly now?: () => number;
+  readonly random?: () => number;
 }
 
 export class OtlpExporter implements Exporter {
   private readonly config: OtlpExporterConfig;
   private readonly transport: OtlpTransport;
   private readonly clock: () => Date;
+  private readonly now: () => number;
+  private readonly random: () => number;
   private readonly queue: QueuedRecord[] = [];
+  private activeBatch: ActiveBatch | undefined;
   private nextEnqueueSequence = 0n;
   private queuedBytes = 0;
   private deliveredRecords = 0;
   private rejectedRecords = 0;
   private droppedRecords = 0;
+  private droppedBatches = 0;
+  private retryAttempts = 0;
   private redactedRecords = 0;
   private redactedValues = 0;
   private lastError: OtlpExporterError | undefined;
   private interval: ReturnType<typeof setInterval> | undefined;
   private pumpPromise: Promise<void> | undefined;
+  private activePumpController: AbortController | undefined;
   private stopPromise: Promise<void> | undefined;
   private activeRequestController: AbortController | undefined;
+  private activeRetryController: AbortController | undefined;
   private started = false;
   private closing = false;
   private closed = false;
@@ -54,6 +88,8 @@ export class OtlpExporter implements Exporter {
     this.config = config;
     this.transport = options.transport ?? new FetchOtlpTransport();
     this.clock = options.clock ?? (() => new Date());
+    this.now = options.now ?? Date.now;
+    this.random = options.random ?? Math.random;
   }
 
   start(context: { readonly signal: AbortSignal }): void {
@@ -145,7 +181,9 @@ export class OtlpExporter implements Exporter {
   private async stopOnce(context: ModuleStopContext): Promise<void> {
     this.closing = true;
     if (this.interval !== undefined) clearInterval(this.interval);
+    this.activePumpController?.abort(new Error("Exporter is stopping."));
     this.activeRequestController?.abort(new Error("Exporter is stopping."));
+    this.activeRetryController?.abort(new Error("Exporter is stopping."));
 
     const timeout = AbortSignal.timeout(this.config.stopTimeoutMs);
     const combined = AbortSignal.any([context.signal, timeout]);
@@ -157,9 +195,14 @@ export class OtlpExporter implements Exporter {
       failure = timeout.aborted && !context.signal.aborted
         ? new OtlpExporterError("OTLP_TIMEOUT", "OTLP shutdown flush exceeded its deadline.")
         : error;
+      this.activePumpController?.abort(new Error("Exporter shutdown flush ended."));
+      this.activeRequestController?.abort(new Error("Exporter shutdown flush ended."));
+      this.activeRetryController?.abort(new Error("Exporter shutdown flush ended."));
+      this.droppedBatches += this.countQueuedBatches();
       this.droppedRecords += this.queue.length;
       this.queue.splice(0);
       this.queuedBytes = 0;
+      this.activeBatch = undefined;
     } finally {
       this.closed = true;
       this.started = false;
@@ -235,13 +278,16 @@ export class OtlpExporter implements Exporter {
     return Object.freeze(diagnostics.map((diagnostic) => Object.freeze(diagnostic)));
   }
 
-  private kick(force = false, signal = new AbortController().signal): void {
+  private kick(force = false): void {
     if (this.pumpPromise !== undefined || this.queue.length === 0 || this.closed) return;
     if (!force && (!this.started || this.closing)) return;
-    const pump = this.runPump(signal).catch((error: unknown) => {
+    const controller = new AbortController();
+    this.activePumpController = controller;
+    const pump = this.runPump(controller.signal).catch((error: unknown) => {
       this.lastError = normalizeTransportError(error);
     });
     this.pumpPromise = pump.finally(() => {
+      if (this.activePumpController === controller) this.activePumpController = undefined;
       this.pumpPromise = undefined;
     });
   }
@@ -256,27 +302,39 @@ export class OtlpExporter implements Exporter {
         );
         return;
       }
-      const batch = this.selectBatch();
+      const batch = this.activeBatch ?? this.createActiveBatch();
+      const delayMs = Math.max(0, batch.retryAt - this.now());
+      if (delayMs > 0) {
+        try {
+          await this.waitForRetry(delayMs, signal);
+        } catch (error) {
+          this.lastError = normalizeTransportError(error);
+          return;
+        }
+      }
       try {
-        await this.sendBatch(batch, signal);
+        await this.sendBatch(batch.body, signal);
       } catch (error) {
-        this.lastError = normalizeTransportError(error);
-        return;
+        const failure = classifyDeliveryError(error);
+        this.lastError = failure.exporterError;
+        if (signal.aborted || failure.exporterError.code === "OTLP_ABORTED") return;
+        if (failure.retryable && batch.retryAttempts < this.config.maxRetryAttempts) {
+          batch.retryAttempts += 1;
+          this.retryAttempts += 1;
+          batch.retryAt = this.now() +
+            (failure.retryAfterMs ?? this.retryDelayMs(batch.retryAttempts));
+          continue;
+        }
+        this.removeActiveBatch(false);
+        continue;
       }
       if (this.closed) return;
-      for (let index = 0; index < batch.length; index += 1) {
-        const removed = this.queue.shift();
-        if (removed === undefined) {
-          throw new OtlpExporterError("OTLP_FLUSH_FAILED", "The OTLP queue changed unexpectedly.");
-        }
-        this.queuedBytes -= removed.bytes;
-      }
-      this.deliveredRecords += batch.length;
+      this.removeActiveBatch(true);
       this.lastError = undefined;
     }
   }
 
-  private selectBatch(): readonly QueuedRecord[] {
+  private createActiveBatch(): ActiveBatch {
     const selected: QueuedRecord[] = [];
     let bytes = 0;
     for (const item of this.queue) {
@@ -285,11 +343,97 @@ export class OtlpExporter implements Exporter {
       selected.push(item);
       bytes += item.wireBytes;
     }
-    return selected;
+    if (selected.length === 0) {
+      throw new OtlpExporterError("OTLP_FLUSH_FAILED", "The OTLP queue could not select a batch.");
+    }
+    const active = {
+      records: Object.freeze(selected),
+      body: serializeOtlpSpans(selected, this.config.projectName),
+      retryAttempts: 0,
+      retryAt: 0,
+    };
+    this.activeBatch = active;
+    return active;
   }
 
-  private async sendBatch(records: readonly QueuedRecord[], signal: AbortSignal): Promise<void> {
-    const body = serializeOtlpSpans(records, this.config.projectName);
+  private removeActiveBatch(delivered: boolean): void {
+    const active = this.activeBatch;
+    if (active === undefined) {
+      throw new OtlpExporterError("OTLP_FLUSH_FAILED", "The OTLP active batch is missing.");
+    }
+    for (const expected of active.records) {
+      const removed = this.queue.shift();
+      if (removed !== expected) {
+        throw new OtlpExporterError("OTLP_FLUSH_FAILED", "The OTLP queue changed unexpectedly.");
+      }
+      this.queuedBytes -= removed.bytes;
+    }
+    if (delivered) {
+      this.deliveredRecords += active.records.length;
+    } else {
+      this.droppedRecords += active.records.length;
+      this.droppedBatches += 1;
+    }
+    this.activeBatch = undefined;
+  }
+
+  private countQueuedBatches(): number {
+    let batches = 0;
+    let selectedRecords = 0;
+    let selectedBytes = 0;
+    for (const item of this.queue) {
+      if (
+        selectedRecords === 0 ||
+        selectedRecords >= this.config.maxBatchRecords ||
+        selectedBytes + item.wireBytes > this.config.maxBatchBytes
+      ) {
+        batches += 1;
+        selectedRecords = 1;
+        selectedBytes = item.wireBytes;
+      } else {
+        selectedRecords += 1;
+        selectedBytes += item.wireBytes;
+      }
+    }
+    return batches;
+  }
+
+  private retryDelayMs(retryAttempt: number): number {
+    const exponential = Math.min(
+      this.config.maxRetryDelayMs,
+      this.config.flushIntervalMs * (2 ** Math.max(0, retryAttempt - 1)),
+    );
+    const random = this.random();
+    const sample = Number.isFinite(random) ? Math.min(1, Math.max(0, random)) : 0.5;
+    return Math.max(1, Math.floor(exponential * (0.5 + sample * 0.5)));
+  }
+
+  private async waitForRetry(delayMs: number, parentSignal: AbortSignal): Promise<void> {
+    throwIfAborted(parentSignal);
+    const controller = new AbortController();
+    this.activeRetryController = controller;
+    const signal = AbortSignal.any([parentSignal, controller.signal]);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const finish = () => {
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        const timer = setTimeout(finish, delayMs);
+        const onAbort = () => {
+          clearTimeout(timer);
+          signal.removeEventListener("abort", onAbort);
+          reject(new OtlpExporterError("OTLP_ABORTED", "The OTLP retry wait was aborted."));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      });
+    } finally {
+      if (this.activeRetryController === controller) this.activeRetryController = undefined;
+    }
+  }
+
+  private async sendBatch(body: Uint8Array, signal: AbortSignal): Promise<void> {
     let url = new URL(this.config.endpoint);
     const headers: Record<string, string> = {
       ...this.config.headers,
@@ -303,9 +447,20 @@ export class OtlpExporter implements Exporter {
       const response = await this.requestOnce(url, headers, body, signal);
       if (response.status >= 200 && response.status < 300) return;
       if (!isRedirect(response.status)) {
-        throw new OtlpExporterError(
-          "OTLP_HTTP_FAILED",
-          `The OTLP collector returned HTTP ${response.status}.`,
+        const retryable = isRetryableStatus(response.status);
+        throw new OtlpDeliveryError(
+          new OtlpExporterError(
+            "OTLP_HTTP_FAILED",
+            `The OTLP collector returned HTTP ${response.status}.`,
+          ),
+          retryable,
+          response.status === 429 || response.status === 503
+            ? parseRetryAfter(
+                response.headers["retry-after"],
+                this.now(),
+                this.config.maxRetryDelayMs,
+              )
+            : undefined,
         );
       }
       if (redirects >= this.config.maxRedirects) {
@@ -364,8 +519,9 @@ export class OtlpExporter implements Exporter {
 
   private async flushInternal(signal: AbortSignal, duringStop = false): Promise<void> {
     throwIfAborted(signal);
+    const droppedBeforeFlush = this.droppedRecords;
     while (this.queue.length > 0) {
-      this.kick(true, signal);
+      this.kick(true);
       await waitForPromise(this.pumpPromise, signal);
       throwIfAborted(signal);
       if (this.queue.length > 0) {
@@ -378,6 +534,15 @@ export class OtlpExporter implements Exporter {
         );
       }
     }
+    if (this.droppedRecords > droppedBeforeFlush) {
+      throw new OtlpExporterError(
+        "OTLP_FLUSH_FAILED",
+        duringStop
+          ? "The OTLP shutdown flush exhausted delivery retries and dropped records."
+          : "The OTLP flush exhausted delivery retries and dropped records.",
+        this.lastError,
+      );
+    }
   }
 
   private healthDetails(): Readonly<Record<string, JsonValue>> {
@@ -387,6 +552,8 @@ export class OtlpExporter implements Exporter {
       deliveredRecords: this.deliveredRecords,
       rejectedRecords: this.rejectedRecords,
       droppedRecords: this.droppedRecords,
+      droppedBatches: this.droppedBatches,
+      retryAttempts: this.retryAttempts,
       redactedRecords: this.redactedRecords,
       redactedValues: this.redactedValues,
       includeSensitiveData: this.config.includeSensitiveData,
@@ -410,6 +577,34 @@ export class OtlpExporter implements Exporter {
 
 function isRedirect(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 429 || status === 502 || status === 503 || status === 504;
+}
+
+function classifyDeliveryError(error: unknown): OtlpDeliveryError {
+  if (error instanceof OtlpDeliveryError) return error;
+  const exporterError = normalizeTransportError(error);
+  return new OtlpDeliveryError(
+    exporterError,
+    exporterError.code === "OTLP_HTTP_FAILED" || exporterError.code === "OTLP_TIMEOUT",
+  );
+}
+
+function parseRetryAfter(
+  value: string | undefined,
+  now: number,
+  maximumMs: number,
+): number | undefined {
+  if (value === undefined || value.length === 0 || value.length > 128) return undefined;
+  const trimmed = value.trim();
+  if (/^\d{1,10}$/u.test(trimmed)) {
+    return Math.min(maximumMs, Number.parseInt(trimmed, 10) * 1_000);
+  }
+  const timestamp = Date.parse(trimmed);
+  if (!Number.isFinite(timestamp) || !Number.isFinite(now)) return undefined;
+  return Math.min(maximumMs, Math.max(0, timestamp - now));
 }
 
 function normalizeTransportError(error: unknown): OtlpExporterError {

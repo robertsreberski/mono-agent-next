@@ -44,6 +44,8 @@ describe("OTLP exporter config", () => {
     expect(defaults).toMatchObject({
       includeSensitiveData: false,
       contentPatternRedaction: false,
+      maxRetryAttempts: 5,
+      maxRetryDelayMs: 30_000,
     });
 
     expect(parseOtlpExporterConfig({
@@ -56,6 +58,46 @@ describe("OTLP exporter config", () => {
       projectName: "test",
       contentPatternRedaction: "yes",
     })).toThrow(/contentPatternRedaction/u);
+  });
+
+  it("bounds the retry attempt and delay policy in parsing and schema", () => {
+    expect(parseOtlpExporterConfig({
+      endpoint: "https://collector.example/v1/traces",
+      projectName: "test",
+      maxRetryAttempts: 0,
+      maxRetryDelayMs: 10,
+    })).toMatchObject({
+      maxRetryAttempts: 0,
+      maxRetryDelayMs: 10,
+    });
+    for (const overrides of [
+      { maxRetryAttempts: -1 },
+      { maxRetryAttempts: 21 },
+      { maxRetryDelayMs: 9 },
+      { maxRetryDelayMs: 300_001 },
+    ]) {
+      expect(() => parseOtlpExporterConfig({
+        endpoint: "https://collector.example/v1/traces",
+        projectName: "test",
+        ...overrides,
+      })).toThrow(/maxRetry/u);
+    }
+
+    const jsonSchema = otlpExporterConfigSchema.jsonSchema as {
+      properties: Record<string, Record<string, unknown>>;
+    };
+    expect(jsonSchema.properties.maxRetryAttempts).toEqual({
+      type: "integer",
+      minimum: 0,
+      maximum: 20,
+      default: 5,
+    });
+    expect(jsonSchema.properties.maxRetryDelayMs).toEqual({
+      type: "integer",
+      minimum: 10,
+      maximum: 300_000,
+      default: 30_000,
+    });
   });
 
   it.each([
