@@ -36,6 +36,7 @@ build this checkout through the
 pnpm --filter @mono-agent/core... run build
 ```
 
+<!-- doc-test:typescript -->
 ```ts
 import { createAgentHost } from "@mono-agent/core";
 
