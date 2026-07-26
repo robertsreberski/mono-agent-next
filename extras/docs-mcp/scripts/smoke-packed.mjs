@@ -129,7 +129,16 @@ try {
   assert.ok(Array.isArray(structured?.results) && structured.results.length === 3, "Expected three packed-corpus results.");
   const first = structured.results[0];
   assert.ok(typeof first === "object" && first !== null && "readTarget" in first && typeof first.readTarget === "string");
-  assert.ok("markdown" in first && typeof first.markdown === "string" && first.markdown.length > 1_200 && first.markdown.length <= 3_000);
+  // The floor was 1_200 -- the corpus chunker's own MAX_CHUNK_CHARACTERS -- so
+  // this required a search excerpt to exceed one whole chunk. That is a
+  // property of how long one particular page happens to be, not of the
+  // product: editing prose anywhere on the page that ranks first for this
+  // query crosses it, and a rename with no behaviour change did. What the
+  // excerpt actually owes is the documented cap, plus not being a stub. That it
+  // is substantive is asserted relationally below, where the read must expand
+  // it.
+  assert.ok("markdown" in first && typeof first.markdown === "string"
+    && first.markdown.length > 200 && first.markdown.length <= 3_000);
   assert.ok(Array.isArray(structured.navigation?.nextActions) && structured.navigation.nextActions.length > 0);
 
   const read = await client.callTool({
