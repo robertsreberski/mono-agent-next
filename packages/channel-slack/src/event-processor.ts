@@ -13,7 +13,10 @@ import type {
   SlackConfig,
   SlackConfiguredAction,
 } from "./config.js";
-import { MAX_TOTAL_SLACK_ATTACHMENT_BYTES } from "./limits.js";
+import {
+  MAX_SLACK_STATUS_TEXT_LENGTH,
+  MAX_TOTAL_SLACK_ATTACHMENT_BYTES,
+} from "./limits.js";
 import {
   homeView,
   indicateActivity,
@@ -33,6 +36,9 @@ import type {
   SlackShortcutEvent,
   SlackSocketEvent,
 } from "./socket.js";
+
+const MAX_TRACKED_TOOL_CALLS = 256;
+const MAX_TOOL_NAME_LENGTH = MAX_SLACK_STATUS_TEXT_LENGTH - " completed.".length;
 
 export interface SlackEventProcessor {
   readonly transientActivityEntries: number;
@@ -166,6 +172,7 @@ export function createSlackEventProcessor(
     const signal = AbortSignal.any([lifecycleSignal, turn.signal]);
     let replyText = "";
     let askDeliveryFailed = false;
+    const toolNames = new Map<string, string>();
     const reply: ChannelReplySink = {
       async emit(replyEvent: ChannelReplyEvent): Promise<void> {
         if (replyEvent.type === "text-delta") replyText += replyEvent.delta;
@@ -180,6 +187,17 @@ export function createSlackEventProcessor(
               statusText(replyEvent.text),
               signal,
             ));
+        } else if (replyEvent.type === "tool-call" || replyEvent.type === "tool-result") {
+          const activity = toolActivity(toolNames, replyEvent);
+          if (threadId !== undefined && client.setAssistantStatus !== undefined) {
+            await bestEffort("configured action tool activity", async () =>
+              client.setAssistantStatus!(
+                channelId,
+                threadId!,
+                statusText(activity),
+                signal,
+              ));
+          }
         } else if (replyEvent.type === "attachment") {
           await bestEffort("configured action attachment delivery", async () =>
             client.postFile({
@@ -415,6 +433,7 @@ export function createSlackEventProcessor(
     const signal = AbortSignal.any([lifecycleSignal, turn.signal]);
     let replyText = "";
     let askDeliveryFailed = false;
+    const toolNames = new Map<string, string>();
     const reply: ChannelReplySink = {
       async emit(replyEvent: ChannelReplyEvent): Promise<void> {
         if (replyEvent.type === "text-delta") replyText += replyEvent.delta;
@@ -428,6 +447,19 @@ export function createSlackEventProcessor(
             conversationId,
             event,
             statusText(replyEvent.text),
+            signal,
+            warnOutput,
+          );
+        } else if (replyEvent.type === "tool-call" || replyEvent.type === "tool-result") {
+          const activity = toolActivity(toolNames, replyEvent);
+          rememberActivity(activityLedger, conversationId, activity);
+          await indicateActivity(
+            client,
+            assistantStatusUnavailable,
+            reacted,
+            conversationId,
+            event,
+            statusText(activity),
             signal,
             warnOutput,
           );
@@ -556,6 +588,75 @@ export function createSlackEventProcessor(
     processControlEvent,
     processPrimaryEvent,
   };
+}
+
+function toolActivity(
+  toolNames: Map<string, string>,
+  event: Extract<ChannelReplyEvent, { readonly type: "tool-call" | "tool-result" }>,
+): string {
+  if (event.type === "tool-call") {
+    rememberToolName(toolNames, event.call.id, displayToolName(event.call.name));
+    return formatToolActivity(toolNames.get(event.call.id) ?? "tool", "running");
+  }
+  const name = toolNames.get(event.result.callId);
+  toolNames.delete(event.result.callId);
+  return formatToolActivity(
+    name ?? "Tool",
+    event.result.isError === true ? "failed" : "completed",
+  );
+}
+
+function rememberToolName(
+  toolNames: Map<string, string>,
+  callId: string,
+  name: string,
+): void {
+  if (!toolNames.has(callId) && toolNames.size >= MAX_TRACKED_TOOL_CALLS) {
+    const oldest = toolNames.keys().next().value as string | undefined;
+    if (oldest !== undefined) toolNames.delete(oldest);
+  }
+  toolNames.set(callId, name);
+}
+
+function displayToolName(name: string): string {
+  const normalized = name.replace(/[\s\u0000-\u001f\u007f]+/gu, " ").trim();
+  return boundedToolName(
+    normalized.length === 0 ? "tool" : normalized,
+    MAX_TOOL_NAME_LENGTH,
+    false,
+  );
+}
+
+function formatToolActivity(
+  name: string,
+  state: "running" | "completed" | "failed",
+): string {
+  const prefix = state === "running" ? "Running " : "";
+  const suffix = state === "running" ? "…" : ` ${state}.`;
+  const maximumNameLength = MAX_SLACK_STATUS_TEXT_LENGTH - prefix.length - suffix.length;
+  return `${prefix}${boundedToolName(name, maximumNameLength, state !== "running")}${suffix}`;
+}
+
+function boundedToolName(
+  name: string,
+  maximumLength: number,
+  markTruncation: boolean,
+): string {
+  if (name.length <= maximumLength) return name;
+  const marker = markTruncation ? "…" : "";
+  let end = maximumLength - marker.length;
+  if (end > 0 && isHighSurrogate(name.charCodeAt(end - 1)) && isLowSurrogate(name.charCodeAt(end))) {
+    end -= 1;
+  }
+  return `${name.slice(0, end)}${marker}`;
+}
+
+function isHighSurrogate(value: number): boolean {
+  return value >= 0xd800 && value <= 0xdbff;
+}
+
+function isLowSurrogate(value: number): boolean {
+  return value >= 0xdc00 && value <= 0xdfff;
 }
 
 function inbound(

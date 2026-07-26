@@ -16,6 +16,7 @@ import {
   type WebhookMode,
 } from "./config.js";
 import {
+  MAX_WEBHOOK_ACTIVITY_BYTES,
   MAX_WEBHOOK_TEXT_BYTES,
   MAX_WEBHOOK_TEXT_LENGTH,
 } from "./limits.js";
@@ -57,7 +58,10 @@ export interface WebhookTurnResult {
   readonly text: string;
 }
 
-export type WebhookSubmit = (request: WebhookInboundRequest) => Promise<WebhookTurnResult>;
+export type WebhookSubmit = (
+  request: WebhookInboundRequest,
+  reportActivity?: (activity: string) => void,
+) => Promise<WebhookTurnResult>;
 
 export type WebhookRequestStatus =
   | {
@@ -67,6 +71,8 @@ export type WebhookRequestStatus =
       readonly statusUrl: string;
       readonly receivedAt: string;
       readonly startedAt?: string;
+      /** Latest bounded transient progress, present only while the request is running. */
+      readonly activity?: string;
     }
   | {
       readonly status: "succeeded";
@@ -620,6 +626,13 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
     const completion = executeSubmission(
       options.submit,
       inbound,
+      (activity) => {
+        const current = statuses.get(input.requestId)?.status;
+        if (current?.status !== "running") return;
+        const normalized = normalizeActivity(activity);
+        if (normalized === undefined) return;
+        setStatus(statuses, { ...current, activity: normalized }, false);
+      },
       controller,
       input.route.maxRunMs ?? options.config.maxRunMs,
     )
@@ -737,6 +750,7 @@ function applyRoute(invocation: ParsedInvocation, route: WebhookRoute): ParsedIn
 async function executeSubmission(
   submit: WebhookSubmit,
   request: WebhookInboundRequest,
+  reportActivity: (activity: string) => void,
   controller: AbortController,
   maxRunMs: number,
 ): Promise<WebhookTurnResult> {
@@ -758,7 +772,7 @@ async function executeSubmission(
 
   try {
     const result = await Promise.race([
-      Promise.resolve().then(() => submit(request)),
+      Promise.resolve().then(() => submit(request, reportActivity)),
       abortPromise,
     ]);
     if (typeof result !== "object" || result === null || typeof result.text !== "string") {
@@ -1085,6 +1099,18 @@ function matchStatusRequestId(pathname: string, basePath: string): string | unde
   } catch {
     return undefined;
   }
+}
+
+function normalizeActivity(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.replace(/[\s\u0000-\u001f\u007f]+/gu, " ").trim();
+  if (normalized.length === 0) return undefined;
+  if (Buffer.byteLength(normalized, "utf8") <= MAX_WEBHOOK_ACTIVITY_BYTES) return normalized;
+  const suffix = "…";
+  const bytes = Buffer.from(normalized, "utf8");
+  let end = MAX_WEBHOOK_ACTIVITY_BYTES - Buffer.byteLength(suffix, "utf8");
+  while (end > 0 && (bytes[end] ?? 0) >> 6 === 0b10) end -= 1;
+  return `${bytes.subarray(0, end).toString("utf8")}${suffix}`;
 }
 
 function setStatus(

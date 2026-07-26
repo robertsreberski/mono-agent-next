@@ -111,8 +111,12 @@ The request may include `text`, `conversationId`, `runtime`, `model`, `effort`,
 `mode`, and a JSON-object `metadata`. Request runtime fields override route
 defaults. Sync mode returns the terminal result. Async mode returns `202` with a
 `requestId` and route-local `statusUrl`; polling uses the same bearer
-authentication. A host cancellation returns a `503` terminal `cancelled`
-result, while a host rejection remains a distinct failed `rejected` result.
+authentication. While async work is running, status includes the latest
+bounded transient activity. Tool calls and results update that field with only
+the tool name and completed/failed state; tool input, result content, and call
+ids are never returned. Terminal status omits transient activity. A host
+cancellation returns a `503` terminal `cancelled` result, while a host rejection
+remains a distinct failed `rejected` result.
 
 `Idempotency-Key` is optional and bounded. When present, the channel derives a
 stable request id from the selected channel instance, route, and key. Identical
@@ -168,8 +172,9 @@ belongs behind a trusted TLS reverse proxy with rate limiting.
    durable Core admission supplies the restart-safe response/conflict decision.
 7. After successful execution, optional route notification uses Core's durable
    delivery-and-history path before the invocation can report success.
-8. Sync responses settle on the same connection. Async terminal states remain in
-   bounded process memory until retention or capacity eviction.
+8. Sync responses settle on the same connection. Async running status exposes
+   only the latest bounded transient activity, and terminal states omit it but
+   remain in bounded process memory until retention or capacity eviction.
 9. `stop()` stops admission, aborts active work, drains within a fixed bound, and
    closes listener connections idempotently. If startup has not settled by that
    bound, stop rejects; a listener that binds later is closed before startup

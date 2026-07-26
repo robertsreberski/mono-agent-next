@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 import type { SlackApiClient } from "./client.js";
 import type { SlackConfig, SlackHomeButtonConfig } from "./config.js";
+import { MAX_SLACK_STATUS_TEXT_LENGTH } from "./limits.js";
 import type { SlackMessageEvent } from "./socket.js";
 
 const MAX_ACTIVITY_CONVERSATIONS = 100;
@@ -67,7 +68,8 @@ export function rememberActivity(
 
 export function statusText(value: string): string {
   const normalized = value.replace(/\s+/gu, " ").trim();
-  return (normalized.length === 0 ? "is working…" : normalized).slice(0, 100);
+  return (normalized.length === 0 ? "is working…" : normalized)
+    .slice(0, MAX_SLACK_STATUS_TEXT_LENGTH);
 }
 
 export function homeView(config: SlackConfig): {

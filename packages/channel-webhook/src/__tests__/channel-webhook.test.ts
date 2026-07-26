@@ -302,7 +302,9 @@ describe("webhook HTTP channel", () => {
 
   it("returns async acceptance and protects status polling with the same bearer", async () => {
     let finish: ((value: { text: string }) => void) | undefined;
-    const submit: WebhookSubmit = async () => new Promise((resolve) => {
+    let reportActivity: ((activity: string) => void) | undefined;
+    const submit: WebhookSubmit = async (_request, report) => new Promise((resolve) => {
+      reportActivity = report;
       finish = resolve;
     });
     const { channel, info } = await startChannel({ defaultMode: "async" }, submit, "async-key");
@@ -319,6 +321,22 @@ describe("webhook HTTP channel", () => {
 
     const unauthorized = await fetch(`${info.baseUrl}${accepted.statusUrl}`);
     expect(unauthorized.status).toBe(401);
+
+    reportActivity?.("😀".repeat(1_024));
+    const boundedActivity = channel.getStatus(accepted.requestId);
+    expect(boundedActivity).toMatchObject({ status: "running" });
+    expect(Buffer.byteLength(
+      boundedActivity?.status === "running" ? boundedActivity.activity ?? "" : "",
+      "utf8",
+    )).toBeLessThanOrEqual(1_024);
+    expect(boundedActivity?.status === "running" ? boundedActivity.activity : undefined)
+      .toMatch(/…$/u);
+
+    reportActivity?.("  Indexing\nproject files  ");
+    expect(channel.getStatus(accepted.requestId)).toMatchObject({
+      status: "running",
+      activity: "Indexing project files",
+    });
 
     finish?.({ text: "done" });
     await vi.waitFor(() => {
@@ -496,16 +514,19 @@ describe("webhook HTTP channel", () => {
     const result = await response.json() as { requestId: string; status: string; text: string };
     expect(result).toMatchObject({ status: "succeeded", text: "normalized reply" });
     expect(submit).toHaveBeenCalledOnce();
-    expect(submit).toHaveBeenCalledWith(expect.objectContaining({
-      requestId: result.requestId,
-      conversationId: "conversation-7",
-      text: "hello",
-      runtime: "pi",
-      model: "openai-codex:gpt-test",
-      effort: "high",
-      metadata: { source: "integration-test", count: 3 },
-      abortSignal: expect.any(AbortSignal),
-    }));
+    expect(submit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestId: result.requestId,
+        conversationId: "conversation-7",
+        text: "hello",
+        runtime: "pi",
+        model: "openai-codex:gpt-test",
+        effort: "high",
+        metadata: { source: "integration-test", count: 3 },
+        abortSignal: expect.any(AbortSignal),
+      }),
+      expect.any(Function),
+    );
     expect(channel.health()).toMatchObject({ status: "healthy", activeRequests: 0 });
   });
 
@@ -1111,6 +1132,115 @@ describe("mono-agent channel module", () => {
       details: { activeRequests: 0, storedRequests: 0 },
     });
     await channel.stop?.({ signal: lifecycle.signal, reason: "shutdown" });
+  });
+
+  it("projects tool lifecycle into bounded async status without exposing tool details", async () => {
+    let releaseAfterCall!: () => void;
+    let releaseAfterResult!: () => void;
+    let callReported!: () => void;
+    let resultReported!: () => void;
+    const afterCall = new Promise<void>((resolve) => { releaseAfterCall = resolve; });
+    const afterResult = new Promise<void>((resolve) => { releaseAfterResult = resolve; });
+    const callWasReported = new Promise<void>((resolve) => { callReported = resolve; });
+    const resultWasReported = new Promise<void>((resolve) => { resultReported = resolve; });
+    const lifecycle = new AbortController();
+    const longToolName = `Read\nworkspace\u0000${"🧰".repeat(512)}`;
+    const channel = await monoAgentModule.create({
+      instanceId: "tool-status",
+      config: monoAgentModule.schema.parse({
+        apiKey: "module-key",
+        defaultMode: "async",
+      }),
+      configDirectory: "/config",
+      provenance: {},
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: {
+        grantedCapabilities: new Set(),
+        getCapability<T>(): T | undefined {
+          return undefined;
+        },
+        async dispatch(_request, reply) {
+          await reply.emit({
+            type: "tool-call",
+            call: {
+              id: "private-call-id",
+              name: longToolName,
+              input: { path: "private-input-do-not-project" },
+            },
+          });
+          callReported();
+          await afterCall;
+          await reply.emit({
+            type: "tool-result",
+            result: {
+              callId: "private-call-id",
+              content: [{ type: "text", text: "private-result-do-not-project" }],
+              isError: true,
+            },
+          });
+          resultReported();
+          await afterResult;
+          return { status: "completed", text: "done" } as const;
+        },
+      },
+      signal: lifecycle.signal,
+    });
+    moduleChannels.add(channel);
+    await channel.start?.({ signal: lifecycle.signal });
+
+    try {
+      const acceptedResponse = await invoke(channel.endpoint as string, {
+        text: "module request",
+      }, "module-key");
+      expect(acceptedResponse.status).toBe(202);
+      const accepted = await acceptedResponse.json() as {
+        readonly requestId: string;
+        readonly statusUrl: string;
+      };
+      const statusUrl = `${channel.startInfo!.baseUrl}${accepted.statusUrl}`;
+      const readStatus = async (): Promise<Record<string, unknown>> => {
+        const response = await fetch(statusUrl, {
+          headers: { authorization: "Bearer module-key" },
+        });
+        expect(response.status).toBe(200);
+        return await response.json() as Record<string, unknown>;
+      };
+
+      await callWasReported;
+      const callStatus = await readStatus();
+      expect(callStatus).toMatchObject({ status: "running" });
+      const callActivity = callStatus.activity as string;
+      expect(callActivity).toMatch(/^Running Read workspace /u);
+      expect(callActivity).toMatch(/…$/u);
+      expect(Buffer.byteLength(callActivity, "utf8")).toBeLessThanOrEqual(1_024);
+      expect(JSON.stringify(callStatus)).not.toContain("private-call-id");
+      expect(JSON.stringify(callStatus)).not.toContain("private-input");
+
+      releaseAfterCall();
+      await resultWasReported;
+      const resultStatus = await readStatus();
+      expect(resultStatus).toMatchObject({ status: "running" });
+      const resultActivity = resultStatus.activity as string;
+      expect(resultActivity).toMatch(/^Read workspace /u);
+      expect(resultActivity).toMatch(/ failed\.$/u);
+      expect(Buffer.byteLength(resultActivity, "utf8")).toBeLessThanOrEqual(1_024);
+      expect(JSON.stringify(resultStatus)).not.toContain("private-result");
+
+      releaseAfterResult();
+      await vi.waitFor(async () => {
+        expect(await readStatus()).toMatchObject({
+          status: "succeeded",
+          text: "done",
+        });
+      });
+      expect(await readStatus()).not.toHaveProperty("activity");
+    } finally {
+      releaseAfterCall();
+      releaseAfterResult();
+      await channel.stop?.({ signal: lifecycle.signal, reason: "shutdown" });
+    }
   });
 
   it("returns HTTP 503 for host cancellation and preserves host rejection distinctly", async () => {

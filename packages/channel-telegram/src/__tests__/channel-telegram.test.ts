@@ -2692,11 +2692,20 @@ describe("telegram channel", () => {
     await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
   });
 
-  it("applies per-chat runtime controls, transcribes audio, and edits activity in place", async () => {
+  it("applies runtime controls and keeps bounded duplicate-safe activity edits", async () => {
     const now = new Date().toISOString();
     let poll = 0;
-    const sent = vi.fn<TelegramBotClient["sendMessage"]>(async () => ({ messageId: "status-1" }));
-    const edit = vi.fn<NonNullable<TelegramBotClient["editMessage"]>>(async () => undefined);
+    let presentedText: string | undefined;
+    const sent = vi.fn<TelegramBotClient["sendMessage"]>(async (request) => {
+      presentedText = request.text;
+      return { messageId: "status-1" };
+    });
+    const edit = vi.fn<NonNullable<TelegramBotClient["editMessage"]>>(async (request) => {
+      if (request.text === presentedText) {
+        throw new Error("Telegram rejected an unchanged activity edit.");
+      }
+      presentedText = request.text;
+    });
     const client: TelegramBotClient = {
       async poll(_offset, _timeout, signal) {
         poll += 1;
@@ -2712,9 +2721,48 @@ describe("telegram channel", () => {
       editMessage: edit,
       async sendAttachment() { return { messageId: "attachment" }; },
     };
+    const longToolName = "🧰".repeat(4_096);
     const dispatch = vi.fn<ChannelHost["dispatch"]>(async (_request, reply) => {
       await reply.emit({ type: "activity", text: "Thinking" });
       await reply.emit({ type: "activity", text: "Still thinking" });
+      await reply.emit({
+        type: "tool-call",
+        call: {
+          id: "read-1",
+          name: "Read\nworkspace\u0000",
+          input: { path: "private-input-do-not-project" },
+        },
+      });
+      await reply.emit({
+        type: "tool-call",
+        call: {
+          id: "read-2",
+          name: "Read\nworkspace\u0000",
+          input: { path: "second-private-input-do-not-project" },
+        },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: {
+          callId: "read-1",
+          content: [{ type: "text", text: "private-result-do-not-project" }],
+        },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: {
+          callId: "read-2",
+          content: [{ type: "text", text: "second-private-result-do-not-project" }],
+        },
+      });
+      await reply.emit({
+        type: "tool-call",
+        call: { id: "shell-1", name: longToolName, input: {} },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: { callId: "shell-1", content: [], isError: true },
+      });
       return { status: "completed", text: "done" };
     });
     const channel = createTelegramChannel({
@@ -2727,6 +2775,10 @@ describe("telegram channel", () => {
     });
     await channel.start?.({ signal: new AbortController().signal });
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(edit).toHaveBeenCalledTimes(5));
+    await vi.waitFor(() => expect(sent).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "done" }),
+    ));
     expect(dispatch.mock.calls[0]?.[0]).toMatchObject({
       conversationId: "telegram:42",
       model: "runtime/model-a",
@@ -2734,7 +2786,19 @@ describe("telegram channel", () => {
       text: "summarize\n\n[Transcript of voice.ogg]\nspoken words",
       attachments: [{ name: "voice.ogg" }],
     });
-    expect(edit).toHaveBeenCalledWith(expect.objectContaining({ messageId: "status-1", text: "Still thinking" }));
+    const editedActivity = edit.mock.calls.map(([request]) => request.text);
+    expect(editedActivity.slice(0, 3)).toEqual([
+      "Still thinking",
+      "Running Read workspace…",
+      "Read workspace completed.",
+    ]);
+    expect(editedActivity[3]?.length).toBeLessThanOrEqual(4_096);
+    expect(editedActivity[3]).toMatch(/^Running /u);
+    expect(editedActivity[3]).toMatch(/…$/u);
+    expect(editedActivity[4]?.length).toBeLessThanOrEqual(4_096);
+    expect(editedActivity[4]).toMatch(/ failed\.$/u);
+    expect(JSON.stringify([sent.mock.calls, edit.mock.calls])).not.toContain("private-input");
+    expect(JSON.stringify([sent.mock.calls, edit.mock.calls])).not.toContain("private-result");
     await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
   });
 

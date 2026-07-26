@@ -1332,10 +1332,34 @@ describe("slack channel", () => {
     const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({ messageId: "posted" }));
     const setAssistantStatus = vi.fn<NonNullable<SlackApiClient["setAssistantStatus"]>>(async () => undefined);
     const addReaction = vi.fn<NonNullable<SlackApiClient["addReaction"]>>(async () => undefined);
+    const longToolName = "🧰".repeat(100);
     const dispatch = vi.fn<ChannelHost["dispatch"]>(async (_request, reply) => {
       await reply.emit({ type: "activity", text: "Reading project files" });
+      await reply.emit({
+        type: "tool-call",
+        call: {
+          id: "read-1",
+          name: "Read\nworkspace\u0000",
+          input: { path: "private-input-do-not-project" },
+        },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: {
+          callId: "read-1",
+          content: [{ type: "text", text: "private-result-do-not-project" }],
+        },
+      });
+      await reply.emit({
+        type: "tool-call",
+        call: { id: "shell-1", name: longToolName, input: {} },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: { callId: "shell-1", content: [], isError: true },
+      });
       const health = await channel.health?.({ signal: new AbortController().signal });
-      expect(health).toMatchObject({ details: { transientActivityEntries: 1 } });
+      expect(health).toMatchObject({ details: { transientActivityEntries: 5 } });
       return { status: "completed", text: "done" };
     });
     const channel = createSlackChannel({
@@ -1358,6 +1382,22 @@ describe("slack channel", () => {
     });
     expect(setAssistantStatus).toHaveBeenCalledWith("C1", "1", "is thinking…", expect.any(AbortSignal));
     expect(setAssistantStatus).toHaveBeenCalledWith("C1", "1", "Reading project files", expect.any(AbortSignal));
+    const statuses = setAssistantStatus.mock.calls.map(([, , status]) => status);
+    expect(statuses.slice(0, 6)).toEqual([
+      "is thinking…",
+      "is thinking…",
+      "is thinking…",
+      "Reading project files",
+      "Running Read workspace…",
+      "Read workspace completed.",
+    ]);
+    expect(statuses[6]?.length).toBeLessThanOrEqual(100);
+    expect(statuses[6]).toMatch(/^Running /u);
+    expect(statuses[6]).toMatch(/…$/u);
+    expect(statuses[7]?.length).toBeLessThanOrEqual(100);
+    expect(statuses[7]).toMatch(/ failed\.$/u);
+    expect(JSON.stringify(setAssistantStatus.mock.calls)).not.toContain("private-input");
+    expect(JSON.stringify(setAssistantStatus.mock.calls)).not.toContain("private-result");
     expect(addReaction).not.toHaveBeenCalled();
     await vi.waitFor(async () => {
       expect(await channel.health?.({ signal: new AbortController().signal })).toMatchObject({
@@ -1477,10 +1517,21 @@ describe("slack channel", () => {
     let posted = 0;
     const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({ messageId: `posted-${++posted}` }));
     const publishHome = vi.fn<NonNullable<SlackApiClient["publishHome"]>>(async () => undefined);
-    const dispatch = vi.fn<ChannelHost["dispatch"]>(async (request) => ({
-      status: "completed",
-      text: `done:${request.text}`,
-    }));
+    const setAssistantStatus = vi.fn<NonNullable<SlackApiClient["setAssistantStatus"]>>(async () => undefined);
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async (request, reply) => {
+      await reply.emit({
+        type: "tool-call",
+        call: { id: `tool-${request.requestId}`, name: "ConfiguredAction", input: {} },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: { callId: `tool-${request.requestId}`, content: [] },
+      });
+      return {
+        status: "completed",
+        text: `done:${request.text}`,
+      };
+    });
     const channel = createSlackChannel({
       context: context(parseSlackConfig({
         ...CONFIG,
@@ -1502,7 +1553,7 @@ describe("slack channel", () => {
         },
       }), dispatch),
       socketFactory: () => socket,
-      clientFactory: () => client({ postMessage, publishHome }),
+      clientFactory: () => client({ postMessage, publishHome, setAssistantStatus }),
     });
     await channel.start?.({ signal: new AbortController().signal });
     await handler?.({
@@ -1547,6 +1598,10 @@ describe("slack channel", () => {
       text: "done:Prepare triage.",
       threadId: "posted-1",
     }));
+    expect(setAssistantStatus.mock.calls.map(([, , status]) => status)).toEqual([
+      "Running ConfiguredAction…",
+      "ConfiguredAction completed.",
+    ]);
 
     await handler?.({
       kind: "home-action",

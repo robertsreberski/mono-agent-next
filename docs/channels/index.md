@@ -28,5 +28,12 @@ Installing a package does not activate it. Core loads only literal `$use`
 selections and does not scan dependencies, a catalog, or arbitrary paths.
 WhatsApp and A2A are explicit cuts.
 
+Core keeps structured tool activity separate from assistant-authored response
+text. Telegram edits one bounded transient status message, Slack updates the
+assistant-thread status (or retains its existing eyes-reaction fallback), and
+webhook exposes the latest status only while an async request is running. These
+projections include the tool name and completed/failed state, never tool input,
+result content, or call ids; they are not durable conversation messages.
+
 The [operator channel guide](/channels/tui/) covers the endpoint shared by the
 two standalone operator products.

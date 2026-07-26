@@ -95,13 +95,15 @@ turn. AskUser renders every validated choice and token-routes threadless action
 answers back to their synthetic conversation. `/model` and `/effort` maintain
 bounded, process-local per-thread overrides. Activity uses
 `assistant.threads.setStatus` in assistant threads and falls back to one eyes
-reaction in ordinary channels. Activity entries remain a transient in-memory
-ledger and are never posted as durable chat messages. Shortcut/App Home
-envelopes pass through the same durable admission boundary before a configured
-prompt runs. A Slack reply, attachment, reaction, or Ask render failure after
-dispatch is logged without poisoning the channel; an Ask render failure also
-aborts/cancels its turn so Core cannot remain blocked. Core proactive delivery
--> durable Core/state receipt -> exact
+reaction in ordinary channels. Tool calls and results use that same transient
+status, showing only the bounded tool name and completed/failed state; tool
+input, result content, and call ids are never projected into Slack. Activity
+entries remain a transient in-memory ledger and are never posted as durable
+chat messages. Shortcut/App Home envelopes pass through the same durable
+admission boundary before a configured prompt runs. A Slack reply, attachment,
+reaction, or Ask render failure after dispatch is logged without poisoning the
+channel; an Ask render failure also aborts/cancels its turn so Core cannot
+remain blocked. Core proactive delivery -> durable Core/state receipt -> exact
 channel/thread -> fingerprint-guarded Web API send. The instance-bound
 `SlackSendMessage` contribution prepares that same outbound contract; a thread
 keeps its exact history identity, while a new top-level post resolves

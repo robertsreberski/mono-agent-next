@@ -8,6 +8,7 @@ import {
   type Channel,
   type ChannelInboundRequest,
   type ChannelModuleCreateContext,
+  type ChannelReplyEvent,
   type ChannelReplySink,
   type ModuleHealth,
   type ModuleHealthContext,
@@ -19,6 +20,7 @@ import {
   webhookConfigSchema,
   type WebhookConfig,
 } from "./config.js";
+import { MAX_WEBHOOK_ACTIVITY_BYTES } from "./limits.js";
 import {
   createWebhookChannel,
   type WebhookChannel,
@@ -32,6 +34,9 @@ import { loadWebhookRoutesFromDirectory } from "./routes.js";
 
 const PACKAGE_NAME = "@mono-agent/channel-webhook";
 const PACKAGE_VERSION = "0.15.0";
+const MAX_TRACKED_TOOL_CALLS = 256;
+const MAX_TOOL_NAME_BYTES = MAX_WEBHOOK_ACTIVITY_BYTES
+  - Buffer.byteLength(" completed.", "utf8");
 
 export interface WebhookModuleChannel extends Channel {
   readonly endpoint: string | undefined;
@@ -63,8 +68,9 @@ function createWebhookModuleChannel(
     ? undefined
     : `webhook:outbound:sha256:${createHash("sha256").update(context.config.outbound.url, "utf8").digest("hex")}`;
 
-  const submit: WebhookSubmit = async (request) => {
+  const submit: WebhookSubmit = async (request, reportActivity) => {
     let replyText = "";
+    const toolNames = new Map<string, string>();
     const reply: ChannelReplySink = {
       emit(event): void {
         switch (event.type) {
@@ -75,6 +81,12 @@ function createWebhookModuleChannel(
             replyText = event.text;
             break;
           case "activity":
+            if (event.text.length > 0) reportActivity?.(event.text);
+            break;
+          case "tool-call":
+          case "tool-result":
+            reportActivity?.(toolActivity(toolNames, event));
+            break;
           case "attachment":
             break;
         }
@@ -221,6 +233,68 @@ function createWebhookModuleChannel(
           deliver: (message, signal) => delivery.deliver(message, signal),
         }),
   };
+}
+
+function toolActivity(
+  toolNames: Map<string, string>,
+  event: Extract<ChannelReplyEvent, { readonly type: "tool-call" | "tool-result" }>,
+): string {
+  if (event.type === "tool-call") {
+    rememberToolName(toolNames, event.call.id, displayToolName(event.call.name));
+    return formatToolActivity(toolNames.get(event.call.id) ?? "tool", "running");
+  }
+  const name = toolNames.get(event.result.callId);
+  toolNames.delete(event.result.callId);
+  return formatToolActivity(
+    name ?? "Tool",
+    event.result.isError === true ? "failed" : "completed",
+  );
+}
+
+function rememberToolName(
+  toolNames: Map<string, string>,
+  callId: string,
+  name: string,
+): void {
+  if (!toolNames.has(callId) && toolNames.size >= MAX_TRACKED_TOOL_CALLS) {
+    const oldest = toolNames.keys().next().value as string | undefined;
+    if (oldest !== undefined) toolNames.delete(oldest);
+  }
+  toolNames.set(callId, name);
+}
+
+function displayToolName(name: string): string {
+  const normalized = name.replace(/[\s\u0000-\u001f\u007f]+/gu, " ").trim();
+  return boundedToolName(
+    normalized.length === 0 ? "tool" : normalized,
+    MAX_TOOL_NAME_BYTES,
+    false,
+  );
+}
+
+function formatToolActivity(
+  name: string,
+  state: "running" | "completed" | "failed",
+): string {
+  const prefix = state === "running" ? "Running " : "";
+  const suffix = state === "running" ? "…" : ` ${state}.`;
+  const maximumNameBytes = MAX_WEBHOOK_ACTIVITY_BYTES
+    - Buffer.byteLength(prefix, "utf8")
+    - Buffer.byteLength(suffix, "utf8");
+  return `${prefix}${boundedToolName(name, maximumNameBytes, state !== "running")}${suffix}`;
+}
+
+function boundedToolName(
+  name: string,
+  maximumBytes: number,
+  markTruncation: boolean,
+): string {
+  if (Buffer.byteLength(name, "utf8") <= maximumBytes) return name;
+  const marker = markTruncation ? "…" : "";
+  const bytes = Buffer.from(name, "utf8");
+  let end = maximumBytes - Buffer.byteLength(marker, "utf8");
+  while (end > 0 && (bytes[end] ?? 0) >> 6 === 0b10) end -= 1;
+  return `${bytes.subarray(0, end).toString("utf8")}${marker}`;
 }
 
 function toChannelInboundRequest(
