@@ -17,30 +17,30 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `c57dbb090af6dd588bd8163e198f03cd6cd4c1858cfcd1935ba473c085ccdb9d`
+Source manifest digest: `1e325e4953d446f23b15cae6fc5fc9952d57c7f5754665ee604087786ab65d8f`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 317 | 99963 |
-| Tests | 167 | 80221 |
+| Production | 317 | 100003 |
+| Tests | 167 | 80299 |
 | Repository and product tooling | 56 | 18852 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **540** | **199036** |
+| **Total executable source** | **540** | **199154** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 315.3 lines.
+Average production file size is 315.5 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 99963 | 130000 | within limit |
+| repository-production | 100003 | 130000 | within limit |
 | kernel-production | 16229 | 16500 | within limit |
 | durable-protocol-production | 7626 | 9500 | within limit |
 
@@ -50,7 +50,7 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 80221 | 74973 | within limit |
+| test source, at 0.75 of production | 80299 | 75003 | within limit |
 
 The current ratio is 0.803.
 
@@ -65,7 +65,7 @@ The current ratio is 0.803.
 | `@mono-agent/memory-local` | 19 | 8097 | 4767 |
 | `@mono-agent/service-macos` | 22 | 5770 | 2131 |
 | `create-mono-agent` | 12 | 5487 | 2199 |
-| `@mono-agent/channel-slack` | 17 | 4650 | 2877 |
+| `@mono-agent/channel-slack` | 17 | 4690 | 2955 |
 
 The complete package table is retained in the generated report model exposed by
 `pnpm --silent run report:source-beta -- --json`.

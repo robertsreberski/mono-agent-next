@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdtempSync } from "node:fs";
-import { readFile, readdir, rm } from "node:fs/promises";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -2382,6 +2382,84 @@ describe("slack channel", () => {
       child.kill("SIGKILL");
       await exited;
       await expect(inspect.run({}, commandContext)).resolves.toEqual({ entries: [] });
+      await maintenance.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      });
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
+        child.kill("SIGKILL");
+        await exited;
+      }
+    }
+  });
+
+  it("acquires the maintenance lease before reading or validating inbox state", async () => {
+    const dataDirectory = temporaryDirectory();
+    const seed = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async () => ({ status: "completed" }),
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => ({ async start() {}, async stop() {} }),
+      clientFactory: () => client(),
+    });
+    await seed.start?.({ signal: new AbortController().signal });
+    await seed.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+    await writeFile(join(dataDirectory, "inbox-v1.json"), "invalid state payload\n");
+
+    const child = spawn(process.execPath, [
+      "-e",
+      [
+        "const { DatabaseSync } = require('node:sqlite');",
+        "const database = new DatabaseSync(process.argv[1], { timeout: 0 });",
+        "database.exec('PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;');",
+        "process.stdout.write('locked\\n');",
+        "setInterval(() => undefined, 1_000);",
+      ].join(""),
+      join(dataDirectory, ".mono-agent-slack-inbox.lease.sqlite"),
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let childOutput = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { childOutput += chunk; });
+    child.stderr.on("data", (chunk: string) => { childOutput += chunk; });
+
+    try {
+      await vi.waitFor(() => {
+        expect(childOutput).toContain("locked");
+        expect(child.exitCode).toBeNull();
+      });
+      const maintenance = createSlackChannel({
+        context: context(
+          parseSlackConfig(CONFIG),
+          async () => ({ status: "completed" }),
+          {},
+          dataDirectory,
+        ),
+        socketFactory: () => ({ async start() {}, async stop() {} }),
+        clientFactory: () => client(),
+      });
+      const inspect = maintenance.commands?.find(
+        (command) => command.name === "channel-slack:inbox-inspect",
+      );
+      if (inspect === undefined) throw new Error("Expected Slack inbox inspect command.");
+      const commandContext = {
+        signal: new AbortController().signal,
+        logger: logger(),
+      };
+
+      await expect(inspect.run({}, commandContext))
+        .rejects.toThrow(/in use by a serving channel|stop it before maintenance/iu);
+
+      const exited = once(child, "exit");
+      child.kill("SIGKILL");
+      await exited;
+      await expect(inspect.run({}, commandContext))
+        .rejects.toThrow(/state is not valid JSON/iu);
       await maintenance.stop?.({
         signal: new AbortController().signal,
         reason: "shutdown",

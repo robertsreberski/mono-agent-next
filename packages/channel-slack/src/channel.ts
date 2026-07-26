@@ -302,33 +302,28 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
     }
     throwIfAborted(signal);
     maintenanceActive = true;
-    let probedInbox: SlackInbox | undefined;
     let maintenanceInbox: SlackInbox | undefined;
     let maintenanceLease: SlackInboxLease | undefined;
     try {
-      probedInbox = await SlackInbox.openExisting(context.dataDirectory, signal);
-      if (probedInbox === undefined) return await operation(undefined);
-      const directory = probedInbox.directory;
-      await probedInbox.close();
-      probedInbox = undefined;
+      const directory = await SlackInbox.discoverExistingDirectory(
+        context.dataDirectory,
+        signal,
+      );
+      if (directory === undefined) return await operation(undefined);
       maintenanceLease = await acquireSlackInboxLease(directory, signal);
-      maintenanceInbox = await SlackInbox.openExisting(context.dataDirectory, signal);
+      maintenanceInbox = await SlackInbox.openExisting(directory, signal);
       if (maintenanceInbox === undefined) {
         throw new Error("Slack durable inbox changed while entering maintenance.");
       }
       return await operation(maintenanceInbox);
     } finally {
       try {
-        await probedInbox?.close();
+        await maintenanceInbox?.close();
       } finally {
         try {
-          await maintenanceInbox?.close();
+          await maintenanceLease?.release();
         } finally {
-          try {
-            await maintenanceLease?.release();
-          } finally {
-            maintenanceActive = false;
-          }
+          maintenanceActive = false;
         }
       }
     }

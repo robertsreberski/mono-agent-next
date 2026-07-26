@@ -204,6 +204,41 @@ export class SlackInbox {
     }
   }
 
+  static async discoverExistingDirectory(
+    dataDirectory: string,
+    signal?: AbortSignal,
+  ): Promise<string | undefined> {
+    try {
+      const requested = resolve(dataDirectory);
+      throwIfAborted(signal);
+      const requestedInfo = await lstat(requested).catch((error: unknown) => {
+        if (hasCode(error, "ENOENT")) return undefined;
+        throw error;
+      });
+      if (requestedInfo === undefined) return undefined;
+      if (!requestedInfo.isDirectory() || requestedInfo.isSymbolicLink()) {
+        throw new SlackInboxError(
+          "unsafe-path",
+          "Slack durable inbox must be an owner-private directory.",
+        );
+      }
+      const directory = await canonicalizeParent(requested);
+      await inspectOwnerPrivateDirectory(
+        directory,
+        signal === undefined ? {} : { signal },
+      );
+      const markerExists = await pathExists(join(directory, MARKER_FILE), signal);
+      const stateExists = await pathExists(join(directory, STATE_FILE), signal);
+      return markerExists || stateExists ? directory : undefined;
+    } catch (error) {
+      if (error instanceof SlackInboxError) throw error;
+      if (error instanceof OwnerPrivatePathError) {
+        throw new SlackInboxError("unsafe-path", "Slack durable inbox path validation failed.", error);
+      }
+      throw new SlackInboxError("corrupt", "Slack durable inbox could not be discovered safely.", error);
+    }
+  }
+
   enqueue(event: SlackSocketEvent, signal?: AbortSignal): Promise<"enqueued" | "duplicate"> {
     const admitted = cloneEvent(event);
     validateEvent(admitted);
@@ -526,6 +561,16 @@ async function canonicalizeParent(target: string): Promise<string> {
   }
   const canonical = await realpath(probe);
   return join(canonical, ...missing, finalName);
+}
+
+async function pathExists(path: string, signal?: AbortSignal): Promise<boolean> {
+  throwIfAborted(signal);
+  const info = await lstat(path).catch((error: unknown) => {
+    if (hasCode(error, "ENOENT")) return undefined;
+    throw error;
+  });
+  throwIfAborted(signal);
+  return info !== undefined;
 }
 
 async function syncDirectoryPath(path: string): Promise<void> {
