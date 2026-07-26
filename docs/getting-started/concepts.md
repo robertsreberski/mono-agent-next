@@ -158,7 +158,10 @@ the bearer-token value remains only in the process environment.
 Core resolves the configured instruction file and optional skill roots relative
 to the config. `context.skills.load` supports the honest `all` mode: every
 direct `SKILL.md` under the configured roots is validated with no-follow reads
-and bounded by `maxBytes`. `disclosure: "full"` places those bodies in the
+and bounded individually by `maxBytes`; the same setting bounds the instruction
+file and combined rendered context. A size rejection reports the exact observed
+byte count as a `size` issue rather than a security-read failure. The Personal
+scaffold uses 256,000 bytes. `disclosure: "full"` places those bodies in the
 system context; `disclosure: "index"` exposes only names and descriptions plus
 Core's bounded `ReadSkill` tool, so indexed skills remain executable without
 leaking filesystem paths. Duplicate skill names fail startup. Tool-name

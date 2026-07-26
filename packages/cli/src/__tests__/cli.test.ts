@@ -8,6 +8,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import packageJson from "../../package.json" with { type: "json" };
 
 const core = vi.hoisted(() => ({
+  AgentConfigError: class AgentConfigError extends Error {
+    readonly issues: readonly unknown[];
+
+    constructor(message: string, issues: readonly unknown[]) {
+      super(message);
+      this.name = "AgentConfigError";
+      this.issues = issues;
+    }
+  },
   composeAgentConfigSchema: vi.fn(),
   createAgentHost: vi.fn(),
   diagnoseAgent: vi.fn(),
@@ -212,6 +221,28 @@ describe("runCli", () => {
     expect(output.stderr).toEqual(["mono-agent: boot failed\n"]);
     expect(signals.listenerCount("SIGINT")).toBe(baseline.SIGINT);
     expect(signals.listenerCount("SIGTERM")).toBe(baseline.SIGTERM);
+  });
+
+  it("prints nested config issues when host startup fails", async () => {
+    core.createAgentHost.mockRejectedValue(new core.AgentConfigError(
+      "Configured authority file exceeds its byte limit: /agent/skills/large/SKILL.md",
+      [{
+        path: "context.skills.roots",
+        message: "219896 bytes exceeds 96000",
+        code: "size",
+      }],
+    ));
+    const output = captureOutput();
+
+    await expect(runCli(["start", "--config", "/agent/mono-agent.config.json"], output.io))
+      .resolves.toBe(1);
+
+    expect(output.stdout).toEqual([]);
+    expect(output.stderr).toEqual([
+      "mono-agent: Configured authority file exceeds its byte limit: "
+        + "/agent/skills/large/SKILL.md\n"
+        + "- context.skills.roots: 219896 bytes exceeds 96000\n",
+    ]);
   });
 
   it("drains then stops when SIGTERM arrives before host creation resolves", async () => {

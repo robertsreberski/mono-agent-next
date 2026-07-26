@@ -80,6 +80,17 @@ describe("packed proof Node and source authority", () => {
     expect(source).toContain('npm_config_offline: "true"');
   });
 
+  test("starts the Personal scaffold with an exact 219,896-byte valid skill", () => {
+    const source = readFileSync(
+      join(process.cwd(), "scripts", "verify", "system.mjs"),
+      "utf8",
+    );
+    expect(source).toContain("const PERSONAL_SKILL_PROOF_BYTES = 219_896;");
+    expect(source).toContain('if (template === "personal") await writePersonalSkillProof(target);');
+    expect(source).toContain("parsed.personalSkillBytes !== PERSONAL_SKILL_PROOF_BYTES");
+    expect(source).toContain("host = await createAgentHost(configPath");
+  });
+
   test("pins the complete 28-code plus 3-JSON packed public export surface", () => {
     expect(PUBLIC_EXPORT_SPECIFIERS).toHaveLength(31);
     expect(PUBLIC_EXPORT_SPECIFIERS.filter((specifier) =>

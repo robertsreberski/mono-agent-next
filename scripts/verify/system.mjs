@@ -49,6 +49,7 @@ const RUN_HISTORY_QUERY = "packed-run-history-query-c63e";
 const RUN_HISTORY_CALL_ID = "packed-run-history-call";
 const RUN_HISTORY_COMPLETION = "packed RunHistory result observed";
 const PERSONAL_WEBHOOK_PROMPT = "Handle this authenticated project webhook request.";
+const PERSONAL_SKILL_PROOF_BYTES = 219_896;
 const WEBHOOK_SECRET = "packed-system-webhook-token";
 const OPERATOR_SECRET = "packed-system-operator-token-0000000000000001";
 const DELIVERY_SECRET = "packed-system-delivery-token";
@@ -541,6 +542,7 @@ async function scaffoldAndValidateTemplates(consumerDirectory, scaffoldDirectory
       throw new Error(`Packed scaffolder returned an invalid ${template} result: ${scaffold.stdout}`);
     }
     const contract = await assertTemplateContract(target, template);
+    if (template === "personal") await writePersonalSkillProof(target);
     configRecords.push(buildTemplateConfigRecord({
       template,
       configSource: contract.configSource,
@@ -561,6 +563,26 @@ async function scaffoldAndValidateTemplates(consumerDirectory, scaffoldDirectory
     assertJsonOk(validation.stdout, `${template} packed validation`);
   }
   return buildConfigSetEvidence(configRecords, { expectedTemplates: TEMPLATE_NAMES });
+}
+
+async function writePersonalSkillProof(directory) {
+  const skillDirectory = join(directory, "skills", "large-valid");
+  const prefix = [
+    "---",
+    "name: large-valid",
+    "description: Proves the Personal scaffold can load its modeled skill size.",
+    "---",
+    "# Large valid skill",
+    "",
+  ].join("\n");
+  const remainingBytes = PERSONAL_SKILL_PROOF_BYTES - Buffer.byteLength(prefix, "utf8");
+  if (remainingBytes < 0) throw new Error("Personal skill proof prefix exceeds its byte contract");
+  const source = `${prefix}${"x".repeat(remainingBytes)}`;
+  await mkdir(skillDirectory, { recursive: true });
+  await writeFile(join(skillDirectory, "SKILL.md"), source, "utf8");
+  if (Buffer.byteLength(await readFile(join(skillDirectory, "SKILL.md"))) !== PERSONAL_SKILL_PROOF_BYTES) {
+    throw new Error("Personal skill proof did not retain its exact byte contract");
+  }
 }
 
 async function assertTemplateContract(directory, template) {
@@ -738,7 +760,7 @@ function assertExactPersonalConfig(config) {
       roots: ["./skills"],
       load: "all",
       disclosure: "index",
-      maxBytes: 96_000,
+      maxBytes: 256_000,
     },
     mcp: { configPath: "./.mcp.json" },
   }, "Personal context contract");
@@ -880,6 +902,7 @@ async function proveScaffoldFirstTurns(scaffoldDirectory, providerBaseUrl, perso
             parsed.personalCron.scheduledAt,
           )
           || parsed.telegramDeliveries !== 1
+          || parsed.personalSkillBytes !== PERSONAL_SKILL_PROOF_BYTES
           || JSON.stringify(parsed.channelIds) !== JSON.stringify([
             "openai-api",
             "operator",
@@ -1074,10 +1097,16 @@ const nativeFetch = globalThis.fetch;
 let telegramDeliveries = 0;
 if (template === "personal") globalThis.fetch = telegramFixtureFetch;
 let markerPath;
+let personalSkillBytes;
 if (template === "personal") {
   const { MEMORY_LOCAL_MARKER_FILENAME } = await import("@mono-agent/memory-local");
   markerPath = join(dirname(configPath), ".mono-agent", "memory", MEMORY_LOCAL_MARKER_FILENAME);
   await assert.rejects(() => access(markerPath), (error) => error?.code === "ENOENT");
+  const skillSource = await readFile(
+    join(dirname(configPath), "skills", "large-valid", "SKILL.md"),
+  );
+  personalSkillBytes = Buffer.byteLength(skillSource);
+  assert.equal(personalSkillBytes, 219896);
 }
 
 let host;
@@ -1152,6 +1181,7 @@ try {
     channelIds,
     ...(firstRunMarker === undefined ? {} : { firstRunMarker }),
     ...(personalCron === undefined ? {} : { personalCron, telegramDeliveries }),
+    ...(personalSkillBytes === undefined ? {} : { personalSkillBytes }),
   }) + "\n");
 } finally {
   if (host !== undefined) await host.stop().catch(() => undefined);

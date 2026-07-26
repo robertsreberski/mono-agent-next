@@ -43,12 +43,13 @@ describe("authority file reads", () => {
   it("uses a max-plus-one read instead of trusting a pre-read file size", async () => {
     const root = await fixtureRoot();
     const path = join(root, "authority.json");
-    await writeFile(path, "x".repeat(65));
+    await writeFile(path, "x".repeat(96));
 
     await expect(readAuthorityFile(path, { maxBytes: 64 })).rejects.toMatchObject({
       name: "AuthorityReadError",
       code: "too_large",
       path,
+      message: "96 bytes exceeds 64",
     });
   });
 

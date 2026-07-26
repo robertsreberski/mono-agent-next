@@ -723,7 +723,7 @@ README and the exact composed schema.
       ],
       "load": "all",
       "disclosure": "index",
-      "maxBytes": 96000
+      "maxBytes": 256000
     },
     "mcp": {
       "configPath": "./.mcp.json"

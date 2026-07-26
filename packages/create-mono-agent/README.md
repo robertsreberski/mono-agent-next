@@ -64,6 +64,9 @@ referenced through `$env`, with every value blank.
 | `personal` | Pi; Telegram, webhook, OpenAI API, operator; local memory/state; cron; OTLP | Sanitized Personal Agent process with a harmless project-owned MCP, Markdown job, and authenticated directory-backed webhook fixture. Products remain separate. |
 | `multi-runtime` | Pi, native Claude SDK, and loopback webhook | Focused same-family/cross-runtime fallback example. |
 
+The Personal template sets `context.skills.maxBytes` to 256,000 bytes so its
+indexed skill loader can admit the skill sizes modeled by that template.
+
 The checked-in bootstrap schema validates the generated seed. After installing,
 `npm run schema` or `pnpm run schema` composes the complete schema from the exact
 installed modules and atomically replaces that bootstrap file.
@@ -221,6 +224,7 @@ Focused tests prove the full template/dependency matrix, names-only secret
 references, current module field shapes, deterministic bootstrap files,
 the Personal template's ordinary stdio MCP, Markdown cron, retained channel,
 authenticated directory-backed webhook, durable memory/state, and artifact-path surfaces,
+startup with a valid 219,896-byte skill,
 no-overwrite behavior, concurrent ownership, interrupted-owner recovery,
 real package-manager exit/signal handling, rollback after installer failure,
 CLI invocation routing, template selection, and delegation of non-scaffold

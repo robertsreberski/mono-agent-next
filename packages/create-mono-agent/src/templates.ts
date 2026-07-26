@@ -318,7 +318,7 @@ function personalConfig(agentId: string, displayName: string): Record<string, un
         roots: ["./skills"],
         load: "all",
         disclosure: "index",
-        maxBytes: 96_000,
+        maxBytes: 256_000,
       },
       mcp: { configPath: "./.mcp.json" },
     },
