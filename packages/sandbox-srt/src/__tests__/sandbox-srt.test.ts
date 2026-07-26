@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 import { createHash } from "node:crypto";
 import { renameSync } from "node:fs";
-import { chmod, link, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, chown, link, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -692,26 +692,38 @@ export {`,
     const fixture = await createFixture();
     const currentUid = process.getuid?.();
     if (currentUid === undefined) throw new Error("sandbox-srt filesystem tests require POSIX ownership.");
-    if (currentUid === 0) throw new Error("sandbox-srt filesystem tests require a non-root user.");
-
-    await expect(openSandboxSrt({
-      config: {
-        ...config(fixture),
-        executable: { path: "/usr/bin/true", sha256: "0".repeat(64) },
-      },
-    })).rejects.toMatchObject({
-      code: "sandbox_unavailable",
-      message: "SRT executable must be owned by the current user.",
-    });
-
     const getuid = Object.getOwnPropertyDescriptor(process, "getuid");
     if (getuid === undefined) throw new Error("sandbox-srt filesystem tests require process.getuid.");
-    Object.defineProperty(process, "getuid", { ...getuid, value: () => currentUid + 1 });
+
+    Object.defineProperty(process, "getuid", {
+      ...getuid,
+      value: () => currentUid === 0 ? 1 : currentUid,
+    });
+    try {
+      await expect(openSandboxSrt({
+        config: {
+          ...config(fixture),
+          executable: { path: "/usr/bin/true", sha256: "0".repeat(64) },
+        },
+      })).rejects.toMatchObject({
+        code: "sandbox_unavailable",
+        message: "SRT executable must be owned by the current user.",
+      });
+    } finally {
+      Object.defineProperty(process, "getuid", getuid);
+    }
+
+    if (currentUid === 0) await chown(fixture.root, 1, -1);
+    Object.defineProperty(process, "getuid", {
+      ...getuid,
+      value: () => currentUid === 0 ? 2 : currentUid + 1,
+    });
     try {
       await expect(openSandboxSrt({ config: config(fixture) }))
         .rejects.toThrow(/SRT (?:executable|settings) parent has an untrusted owner\./u);
     } finally {
       Object.defineProperty(process, "getuid", getuid);
+      if (currentUid === 0) await chown(fixture.root, currentUid, -1);
     }
   });
 

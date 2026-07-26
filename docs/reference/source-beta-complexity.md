@@ -17,17 +17,17 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `3db744db40f2c90a46b1a3209f421600ef13e4011dae8c64c9ae01c1bfa4f60f`
+Source manifest digest: `61337be6c369b114afa84e124daed9ce17762a8a8f5ccebd98a50403f87fc0c7`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
 | Production | 319 | 100899 |
-| Tests | 167 | 81775 |
+| Tests | 167 | 81787 |
 | Repository and product tooling | 56 | 19024 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **542** | **201698** |
+| **Total executable source** | **542** | **201710** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
@@ -50,9 +50,9 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 81775 | 75675 | within limit |
+| test source, at 0.75 of production | 81787 | 75675 | within limit |
 
-The current ratio is 0.810.
+The current ratio is 0.811.
 
 ## Largest package ownership surfaces
 
