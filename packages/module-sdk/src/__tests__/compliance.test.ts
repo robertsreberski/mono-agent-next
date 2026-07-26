@@ -470,29 +470,35 @@ describe("public compliance assertions", () => {
     } as const;
     const delivered = { conversationId: "chat", text: "hello", idempotencyKey: "known" };
     await assertChannelBehaviorCompliance({
-      create: () => ({
-        capabilities,
-        start() { calls.push("start"); },
-        drain() { calls.push("drain"); },
-        stop() { calls.push("stop"); },
-        health: () => ({ status: "healthy", checkedAt: new Date().toISOString() }),
-        diagnostics: () => [{ code: "fixture", severity: "info", message: "safe" }],
-        resolveDeliveryHistory: (message) => ({
-          conversationId: message.conversationId,
-        }),
-        async deliver(message) {
-          if (message.idempotencyKey === "unknown") {
-            return { status: "unknown", idempotencyKey: message.idempotencyKey };
-          }
-          const prior = receipts.get(message.idempotencyKey);
-          if (prior !== undefined && prior !== message.text) {
-            return { status: "failed", idempotencyKey: message.idempotencyKey };
-          }
-          if (prior !== undefined) return { status: "duplicate", idempotencyKey: message.idempotencyKey };
-          receipts.set(message.idempotencyKey, message.text);
-          return { status: "delivered", idempotencyKey: message.idempotencyKey };
-        },
-      }),
+      create: () => {
+        let running = false;
+        return {
+          capabilities,
+          start() { calls.push("start"); running = true; },
+          drain() { calls.push("drain"); },
+          stop() { calls.push("stop"); running = false; },
+          health: () => ({
+            status: running ? "healthy" as const : "unknown" as const,
+            checkedAt: new Date().toISOString(),
+          }),
+          diagnostics: () => [{ code: "fixture", severity: "info", message: "safe" }],
+          resolveDeliveryHistory: (message) => ({
+            conversationId: message.conversationId,
+          }),
+          async deliver(message) {
+            if (message.idempotencyKey === "unknown") {
+              return { status: "unknown", idempotencyKey: message.idempotencyKey };
+            }
+            const prior = receipts.get(message.idempotencyKey);
+            if (prior !== undefined && prior !== message.text) {
+              return { status: "failed", idempotencyKey: message.idempotencyKey };
+            }
+            if (prior !== undefined) return { status: "duplicate", idempotencyKey: message.idempotencyKey };
+            receipts.set(message.idempotencyKey, message.text);
+            return { status: "delivered", idempotencyKey: message.idempotencyKey };
+          },
+        };
+      },
       exercise: (_instance, signal) => { expect(signal.aborted).toBe(false); calls.push("exercise"); },
       delivery: {
         delivered,
@@ -501,7 +507,7 @@ describe("public compliance assertions", () => {
       },
       secrets: ["not-present"],
     });
-    expect(calls).toEqual(["start", "exercise", "drain", "stop", "stop"]);
+    expect(calls).toEqual(["start", "stop", "start", "exercise", "drain", "stop", "stop"]);
 
     await expect(assertChannelBehaviorCompliance({
       create: () => ({
@@ -525,6 +531,70 @@ describe("public compliance assertions", () => {
       exercise() {},
       secrets: [escapedSecret],
     })).rejects.toThrow("reports contain a configured secret");
+  });
+
+  it("rejects a clean stop that allows an unsettled channel start to become healthy", async () => {
+    let releaseStart = (): void => undefined;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const capabilities = {
+      attachments: false, liveInput: false, askUser: false, approvals: false,
+      proactive: false, runtimeControl: false, verbatim: false, cancellation: true,
+    } as const;
+
+    await expect(assertChannelBehaviorCompliance({
+      create: () => {
+        let running = false;
+        return {
+          capabilities,
+          async start() {
+            await startGate;
+            running = true;
+          },
+          stop() {
+            releaseStart();
+          },
+          health: () => ({
+            status: running ? "healthy" as const : "unknown" as const,
+            checkedAt: new Date().toISOString(),
+          }),
+        };
+      },
+      exercise() {},
+    })).rejects.toThrow("stop resolved while an unsettled start remained healthy");
+  });
+
+  it("accepts a bounded concurrent-stop rejection before exercising a fresh channel", async () => {
+    let created = 0;
+    const capabilities = {
+      attachments: false, liveInput: false, askUser: false, approvals: false,
+      proactive: false, runtimeControl: false, verbatim: false, cancellation: true,
+    } as const;
+
+    await expect(assertChannelBehaviorCompliance({
+      create: () => {
+        created += 1;
+        let running = false;
+        const rejectStop = created === 1;
+        return {
+          capabilities,
+          start() {
+            running = true;
+          },
+          stop() {
+            running = false;
+            if (rejectStop) throw new Error("bounded startup shutdown");
+          },
+          health: () => ({
+            status: running ? "healthy" as const : "unknown" as const,
+            checkedAt: new Date().toISOString(),
+          }),
+        };
+      },
+      exercise() {},
+    })).resolves.toBeUndefined();
+    expect(created).toBe(2);
   });
 
   it("validates model-visible channel send tools", () => {

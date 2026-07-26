@@ -123,6 +123,8 @@ apply is atomically returned to its original pending position and becomes
 primary-only. A crash or error after either lane starts is not blindly replayed:
 the processing record remains explicitly blocked and channel health becomes
 `unhealthy`, because Core or Slack side effects may be ambiguous.
+If stop overtakes the asynchronous inbox open, startup fails closed and closes
+the opened inbox instead of transitioning the channel back to healthy.
 
 The inbox is owner-private (`0700` directory, `0600` files), bounded, and fails
 closed on corruption, unsafe links/modes, queue overflow, or an uncertain

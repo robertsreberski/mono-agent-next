@@ -1489,8 +1489,63 @@ describe("mono-agent channel module", () => {
     })).toThrowError(new WebhookConfigError(
       "Webhook route notify.channel must be a non-empty bounded string without surrounding whitespace.",
     ));
+    });
   });
-});
+
+  it("does not create a listener when stop overtakes directory-backed route loading", async () => {
+    const configDirectory = mkdtempSync(join(tmpdir(), "mono-agent-webhook-stop-routes-"));
+    temporaryDirectories.push(configDirectory);
+    const routesDirectory = join(configDirectory, "webhook");
+    await mkdir(routesDirectory);
+    await writeFile(join(routesDirectory, "route.md"), [
+      "---",
+      "name: delayed",
+      "path: /hooks/delayed",
+      "---",
+      "Handle the delayed route.",
+      "",
+    ].join("\n"), "utf8");
+
+    const lifecycle = new AbortController();
+    const channel = await monoAgentModule.create({
+      instanceId: "stop-during-routes",
+      config: monoAgentModule.schema.parse({
+        apiKey: "route-stop-key",
+        routesDirectory: "./webhook",
+      }),
+      configDirectory,
+      provenance: {},
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: {
+        grantedCapabilities: new Set(),
+        getCapability<T>(): T | undefined { return undefined; },
+        async dispatch() {
+          return { status: "completed", text: "unused" } as const;
+        },
+      },
+      signal: lifecycle.signal,
+    });
+    moduleChannels.add(channel);
+
+    const [startResult, stopResult] = await Promise.allSettled([
+      channel.start!({ signal: lifecycle.signal }),
+      channel.stop!({ signal: lifecycle.signal, reason: "shutdown" }),
+    ]);
+
+    expect(stopResult.status).toBe("fulfilled");
+    expect(startResult).toMatchObject({
+      status: "rejected",
+      reason: { message: "Webhook channel stopped while starting." },
+    });
+    expect(channel.endpoint).toBeUndefined();
+    expect(channel.startInfo).toBeUndefined();
+    expect(await channel.health?.({ signal: lifecycle.signal })).toMatchObject({
+      status: "unknown",
+      summary: "Webhook channel has not started.",
+    });
+  });
 
 async function startChannel(
   configOverrides: Readonly<Record<string, unknown>>,

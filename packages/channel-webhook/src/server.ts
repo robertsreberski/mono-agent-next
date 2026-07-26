@@ -292,6 +292,16 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
         options.config.listen.host,
         () => {
           nextServer.off("error", onError);
+          if (stopping) {
+            const stoppedError = new Error("Webhook channel stopped while starting.");
+            nextServer.close((error) => {
+              reject(error ?? stoppedError);
+            });
+            nextServer.closeIdleConnections();
+            for (const socket of sockets) socket.destroy();
+            nextServer.closeAllConnections();
+            return;
+          }
           const address = nextServer.address();
           if (address === null || typeof address === "string") {
             degradedMessage = "Webhook HTTP listener returned an invalid address.";
@@ -621,8 +631,9 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       const activeAtStop = [...active.values()].map((entry) => entry.completion);
       await settleWithin(activeAtStop, SHUTDOWN_DRAIN_MS);
 
+      let startupSettled = true;
       if (startPromise !== undefined && startInfo === undefined) {
-        await settleOneWithin(startPromise, SHUTDOWN_DRAIN_MS);
+        startupSettled = await settleOneWithin(startPromise, SHUTDOWN_DRAIN_MS);
       }
 
       const currentServer = server;
@@ -641,6 +652,10 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       }
       sockets.clear();
       startInfo = undefined;
+      if (!startupSettled) {
+        currentServer?.unref();
+        throw new Error("Webhook HTTP listener startup did not settle within the shutdown bound.");
+      }
     })();
     return stopPromise;
   };

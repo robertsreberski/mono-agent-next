@@ -198,6 +198,12 @@ all-or-none.
 | `@mono-agent/module-sdk/testing` | Module test suites and loaders | Structural compliance assertions for definitions, created instances, static tool contributions, and turn bindings. |
 | `@mono-agent/module-sdk/internal` | First-party monorepo packages only | Reserved state, trigger, exporter, and sandbox definitions pending future promotion. |
 
+`assertChannelBehaviorCompliance` runs an independent immediate
+`start()`/`stop()` race whenever both lifecycle methods exist. A clean stop must
+leave the channel non-healthy; a stop rejection is accepted only when it settles
+inside the configured bound. The helper then creates a fresh instance for the
+normal start, exercise, health, drain, and idempotent-stop lane.
+
 The module definition has exactly three load-bearing fields: import-safe
 `manifest`, import-safe executable `schema`, and delayed `create(context)`.
 There is no generic plugin hook or discovery registry.
@@ -672,7 +678,8 @@ pnpm --filter @mono-agent/module-sdk test
 
 Focused tests cover immutable delayed definitions, all seven typed slots,
 structured config failures, provenance and cross-slot annotations,
-reserved-entrypoint isolation, and definition/instance compliance assertions.
+reserved-entrypoint isolation, definition/instance compliance assertions, and
+the shared channel stop-during-start lifecycle race.
 Adversarial helper tests cover exact permissions, symlink rejection,
 no-clobber atomic writes, stale replacement identities, literal-loopback URL
 policy, checked redirects, byte bounds, and whole-request timeouts.

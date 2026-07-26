@@ -45,7 +45,10 @@ export interface ChannelBehaviorComplianceOptions {
 }
 /** Reusable channel lane; adapter suites supply normalization/auth probes in `exercise`. */
 export async function assertChannelBehaviorCompliance(options: ChannelBehaviorComplianceOptions): Promise<void> {
-  const signal = AbortSignal.timeout(options.timeoutMs ?? 5_000);
+  const timeoutMs = options.timeoutMs ?? 5_000;
+  await assertChannelStopDuringStart(options, timeoutMs);
+
+  const signal = AbortSignal.timeout(timeoutMs);
   const instance = await options.create(signal);
   assertChannelInstanceCompliance(instance);
   if ((options.delivery !== undefined) !== instance.capabilities.proactive)
@@ -83,6 +86,58 @@ export async function assertChannelBehaviorCompliance(options: ChannelBehaviorCo
   } finally {
     await instance.stop?.({ signal, reason: "shutdown" });
     await instance.stop?.({ signal, reason: "shutdown" });
+  }
+}
+
+async function assertChannelStopDuringStart(
+  options: ChannelBehaviorComplianceOptions,
+  timeoutMs: number,
+): Promise<void> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  const instance = await options.create(signal);
+  assertChannelInstanceCompliance(instance);
+  if (instance.start === undefined || instance.stop === undefined) return;
+
+  const starting = Promise.resolve().then(async () => instance.start!({ signal }));
+  const stopping = Promise.resolve().then(async () => instance.stop!({ signal, reason: "shutdown" }));
+  const [, stopResult] = await channelLifecycleWithin(
+    Promise.allSettled([starting, stopping]),
+    timeoutMs,
+    "channel start and concurrent stop",
+  );
+
+  if (stopResult.status === "fulfilled") {
+    if (instance.health === undefined) {
+      fail("channel behavior requires bounded health after stop during start");
+    }
+    const health = await channelLifecycleWithin(
+      Promise.resolve(instance.health({ signal })),
+      timeoutMs,
+      "channel health after stop during start",
+    );
+    if (health.status === "healthy") {
+      fail("channel stop resolved while an unsettled start remained healthy");
+    }
+  }
+}
+
+async function channelLifecycleWithin<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  description: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          reject(new ModuleComplianceError(`${description} did not settle within ${String(timeoutMs)} ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 export function assertModuleDefinitionCompliance(value: unknown, options: ModuleComplianceOptions = {}):

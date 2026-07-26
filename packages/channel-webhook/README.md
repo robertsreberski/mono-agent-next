@@ -165,7 +165,10 @@ belongs behind a trusted TLS reverse proxy with rate limiting.
 8. Sync responses settle on the same connection. Async terminal states remain in
    bounded process memory until retention or capacity eviction.
 9. `stop()` stops admission, aborts active work, drains within a fixed bound, and
-   closes listener connections idempotently.
+   closes listener connections idempotently. If startup has not settled by that
+   bound, stop rejects; a listener that binds later is closed before startup
+   rejects, so shutdown never reports clean success while a listener can still
+   appear.
 10. Optional proactive delivery targets only the configured URL, bounds payload
    and response bytes, disables redirects, and signs the exact transmitted body.
 
