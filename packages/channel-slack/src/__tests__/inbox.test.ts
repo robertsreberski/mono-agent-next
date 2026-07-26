@@ -19,6 +19,12 @@ afterEach(async () => {
 });
 
 describe("SlackInbox", () => {
+  it("reports an absent inbox without creating maintenance state", async () => {
+    const directory = await dataDirectory();
+    await expect(SlackInbox.openExisting(directory)).resolves.toBeUndefined();
+    await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("persists pending work atomically with owner-private state and reopens it", async () => {
     const directory = await dataDirectory();
     const inbox = await SlackInbox.open(directory);
@@ -107,6 +113,41 @@ describe("SlackInbox", () => {
     await inbox.complete("E-control-2");
     expect(inbox.snapshot()).toMatchObject({ pending: 0, processing: 0, completed: 4 });
     await inbox.close();
+  });
+
+  it("atomically requeues both graceful-shutdown lanes without disturbing pending order", async () => {
+    const directory = await dataDirectory();
+    const inbox = await SlackInbox.open(directory);
+    await inbox.enqueue(event("E-primary"));
+    await inbox.enqueue(action("E-control"));
+    await inbox.enqueue(event("E-pending"));
+    await inbox.claimNextPrimary(controlEligible);
+    await inbox.claimNextControl(controlEligible);
+
+    await expect(inbox.requeueProcessingForShutdown([
+      "E-primary",
+      "E-control",
+    ])).resolves.toBe(2);
+    expect(inbox.inspectEntries()).toEqual([
+      expect.objectContaining({ envelopeId: "E-primary", status: "pending" }),
+      expect.objectContaining({ envelopeId: "E-control", status: "pending" }),
+      expect.objectContaining({ envelopeId: "E-pending", status: "pending" }),
+    ]);
+    expect(inbox.inspectEntries().every((entry) => entry.lane === undefined)).toBe(true);
+    await inbox.close();
+
+    const reopened = await SlackInbox.open(directory);
+    expect(reopened.snapshot()).toMatchObject({
+      pending: 3,
+      processing: 0,
+      failed: 0,
+    });
+    expect(reopened.snapshot().blocked).toBeUndefined();
+    await expect(reopened.claimNextPrimary(controlEligible)).resolves.toMatchObject({
+      envelopeId: "E-primary",
+    });
+    await reopened.release("E-primary");
+    await reopened.close();
   });
 
   it("refuses a second control lane and blocks restart on two stranded lanes", async () => {
