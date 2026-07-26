@@ -1,9 +1,43 @@
 // SPDX-License-Identifier: MIT
-import { chmod, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, mkdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const registryReadBoundary = vi.hoisted(() => ({
+  beforeOpen: undefined as ((path: string) => Promise<void>) | undefined,
+  afterRead: undefined as ((path: string) => Promise<void>) | undefined,
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    open: async (
+      path: Parameters<typeof actual.open>[0],
+      flags: Parameters<typeof actual.open>[1],
+      mode?: Parameters<typeof actual.open>[2],
+    ) => {
+      const sourcePath = String(path);
+      await registryReadBoundary.beforeOpen?.(sourcePath);
+      const handle = await actual.open(path, flags, mode);
+      return new Proxy(handle, {
+        get(target, property) {
+          if (property === "readFile") {
+            return async (...arguments_: Parameters<typeof target.readFile>) => {
+              const bytes = await target.readFile(...arguments_);
+              await registryReadBoundary.afterRead?.(sourcePath);
+              return bytes;
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    },
+  };
+});
 
 import {
   OPERATOR_PROTOCOL,
@@ -79,6 +113,8 @@ async function writeDescriptor(registry: string, name: string, value: unknown, m
 }
 
 afterEach(async () => {
+  registryReadBoundary.beforeOpen = undefined;
+  registryReadBoundary.afterRead = undefined;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -184,6 +220,49 @@ describe("operator directory", () => {
     const target = await writeDescriptor(registry, "target.txt", descriptor());
     await symlink(target, join(registry, "linked.json"));
     await expect(discoverOperators({ registryDirectories: [registry] })).rejects.toMatchObject({ code: "UNSAFE_REGISTRY" });
+  });
+
+  it("rejects a hard-linked registry descriptor at the discovery boundary", async () => {
+    const registry = await temporaryRegistry();
+    const path = await writeDescriptor(registry, "agent.json", descriptor());
+    await link(path, join(registry, "unlisted-hard-link"));
+
+    await expect(discoverOperators({ registryDirectories: [registry] })).rejects.toMatchObject({
+      code: "UNSAFE_REGISTRY",
+      message: `file ${path} must have exactly one hard link`,
+    });
+  });
+
+  it("rejects a registry descriptor replaced between inspection and open", async () => {
+    const registry = await temporaryRegistry();
+    const path = await writeDescriptor(registry, "agent.json", descriptor());
+    const replacement = await writeDescriptor(registry, "replacement", descriptor());
+    registryReadBoundary.beforeOpen = async (openedPath) => {
+      if (openedPath !== path) return;
+      registryReadBoundary.beforeOpen = undefined;
+      await rename(replacement, path);
+    };
+
+    await expect(discoverOperators({ registryDirectories: [registry] })).rejects.toMatchObject({
+      code: "UNSAFE_REGISTRY",
+      message: `registry entry ${path} changed while opening`,
+    });
+  });
+
+  it("rejects a registry descriptor replaced after its bytes are read", async () => {
+    const registry = await temporaryRegistry();
+    const path = await writeDescriptor(registry, "agent.json", descriptor());
+    const replacement = await writeDescriptor(registry, "replacement", descriptor());
+    registryReadBoundary.afterRead = async (openedPath) => {
+      if (openedPath !== path) return;
+      registryReadBoundary.afterRead = undefined;
+      await rename(replacement, path);
+    };
+
+    await expect(discoverOperators({ registryDirectories: [registry] })).rejects.toMatchObject({
+      code: "UNSAFE_REGISTRY",
+      message: `registry entry ${path} changed while reading`,
+    });
   });
 
   it("rejects malformed descriptors and non-loopback endpoints", async () => {
