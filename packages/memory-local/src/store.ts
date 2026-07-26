@@ -21,6 +21,8 @@ import type {
 } from "@mono-agent/module-sdk";
 
 import {
+  CAPTURE_RECEIPT_LOW_WATERMARK,
+  MAX_CAPTURE_RECEIPTS,
   assertCaptureReceiptIntegrity,
   assertReadableMemoryRows,
   auditBujoDatabase,
@@ -31,15 +33,14 @@ import {
   ensureVectorIntake,
   ftsMatchExpression,
   forgetMemoryRow,
-  getMetadata,
   insertMemoryRows,
   listMetadata,
-  parseCaptureReceipt,
   quickCheck,
   readMemoryRow,
   readMemoryRows,
   rebuildBujoIndexes,
   recordLimits,
+  reserveMemoryCapture,
   setMetadata,
   writeMemoryVector,
 } from "./bujo-db.js";
@@ -157,6 +158,11 @@ export interface MemoryLocalAudit {
   readonly intake: {
     readonly captures: number;
     readonly vectors: number;
+  };
+  readonly receipts: {
+    readonly count: number;
+    readonly capacity: number;
+    readonly lowWatermark: number;
   };
   readonly projections: MemoryLocalProjectionAudit;
 }
@@ -366,7 +372,12 @@ export class MemoryLocal implements Memory {
       validateRecordId(request.recordId);
       return await this.#enqueueWrite(async () => {
         await this.#verifyStore();
-        const forgotten = forgetMemoryRow(this.#state.database, request.recordId);
+        const forgotten = forgetMemoryRow(
+          this.#state.database,
+          request.recordId,
+          canonicalNow(this.#clock),
+          this.config.capture.receiptRetentionDays,
+        );
         checkpoint(this.#state.database);
         await this.#verifyStore();
         return forgotten;
@@ -406,9 +417,13 @@ export class MemoryLocal implements Memory {
       throwIfAborted(request.signal);
       await this.#verifyStore();
       const snapshot = auditBujoDatabase(this.#state.database);
+      const retainedAt = canonicalNow(this.#clock);
       if (request.strict === true) {
         assertReadableMemoryRows(this.#state.database, this.config, snapshot);
-        assertCaptureReceiptIntegrity(this.#state.database);
+        assertCaptureReceiptIntegrity(this.#state.database, {
+          retainedAt,
+          retentionDays: this.config.capture.receiptRetentionDays,
+        });
       }
       const projections = await auditBujoProjections(this.#state.root);
       const compatible = vectorIdentityCompatible(
@@ -423,6 +438,7 @@ export class MemoryLocal implements Memory {
         || snapshot.orphanFtsRows > 0
         || snapshot.pendingCaptureCount > 0
         || snapshot.pendingVectorCount > 0
+        || snapshot.captureReceiptCount >= MAX_CAPTURE_RECEIPTS
         || missingExpectedVectors > 0
         || !compatible
         || this.#embeddingDegraded
@@ -450,6 +466,11 @@ export class MemoryLocal implements Memory {
         intake: Object.freeze({
           captures: snapshot.pendingCaptureCount,
           vectors: snapshot.pendingVectorCount,
+        }),
+        receipts: Object.freeze({
+          count: snapshot.captureReceiptCount,
+          capacity: MAX_CAPTURE_RECEIPTS,
+          lowWatermark: CAPTURE_RECEIPT_LOW_WATERMARK,
         }),
         projections,
       });
@@ -731,6 +752,14 @@ export class MemoryLocal implements Memory {
           "Correct the provider boundary, then run bounded intake retry explicitly.",
         ));
       }
+      if (audit.receipts.count >= audit.receipts.capacity) {
+        diagnostics.push(memoryDiagnostic(
+          "memory-local.receipt-capacity",
+          "warning",
+          `Memory capture receipt capacity is exhausted (${audit.receipts.count} of ${audit.receipts.capacity}).`,
+          "A new capture prunes expired v2 receipts; shorten receiptRetentionDays only if a shorter replay guarantee is acceptable. Legacy v1 receipts are never evicted.",
+        ));
+      }
       if (!audit.projections.coherent) {
         const unsafe = audit.projections.index === "unsafe"
           || audit.projections.index === "invalid"
@@ -808,10 +837,22 @@ export class MemoryLocal implements Memory {
     throwIfAborted(signal);
     await this.#verifyStore();
     const receiptKey = captureReceiptKey(source.record.id);
-    const receipt = getMetadata(this.#state.database, receiptKey);
-    if (receipt !== undefined) {
-      const parsed = parseCaptureReceipt(receipt);
-      if (parsed.sourceHash !== source.contentHash) {
+    const intakeKey = captureIntakeKey(source.record.id);
+    const initialIntake: CaptureIntake = Object.freeze({
+      version: 1,
+      source: source.record,
+      sourceHash: source.contentHash,
+      attempts: 0,
+    });
+    const reservation = reserveMemoryCapture(this.#state.database, {
+      receiptKey,
+      intakeKey,
+      intakeValue: canonicalJson(initialIntake as never),
+      retainedAt: canonicalNow(this.#clock),
+      retentionDays: this.config.capture.receiptRetentionDays,
+    });
+    if (reservation.receipt !== undefined) {
+      if (reservation.receipt.sourceHash !== source.contentHash) {
         throw new MemoryLocalError(
           "duplicate_record",
           `Capture id ${JSON.stringify(source.record.id)} already has different completed-turn content.`,
@@ -819,33 +860,26 @@ export class MemoryLocal implements Memory {
       }
       if (
         this.#embeddings !== undefined
-        && ensureVectorIntake(this.#state.database, parsed.recordIds) > 0
+        && ensureVectorIntake(this.#state.database, reservation.receipt.recordIds) > 0
       ) {
         checkpoint(this.#state.database);
       }
       await this.#verifyStore();
       return;
     }
-    const intakeKey = captureIntakeKey(source.record.id);
-    const current = getMetadata(this.#state.database, intakeKey);
-    let intake: CaptureIntake;
-    if (current === undefined) {
-      intake = Object.freeze({
-        version: 1,
-        source: source.record,
-        sourceHash: source.contentHash,
-        attempts: 0,
-      });
-      setMetadata(this.#state.database, intakeKey, canonicalJson(intake as never));
-      checkpoint(this.#state.database);
-    } else {
-      intake = parseCaptureIntake(current, this.config);
-      if (intake.sourceHash !== source.contentHash) {
-        throw new MemoryLocalError(
-          "duplicate_record",
-          `Capture id ${JSON.stringify(source.record.id)} already has different in-flight content.`,
-        );
-      }
+    checkpoint(this.#state.database);
+    if (reservation.intakeValue === undefined) {
+      throw new MemoryLocalError(
+        "corrupt_store",
+        "Memory capture reservation returned no durable intake.",
+      );
+    }
+    const intake = parseCaptureIntake(reservation.intakeValue, this.config);
+    if (intake.sourceHash !== source.contentHash) {
+      throw new MemoryLocalError(
+        "duplicate_record",
+        `Capture id ${JSON.stringify(source.record.id)} already has different in-flight content.`,
+      );
     }
 
     let records: readonly MemoryRecord[];
@@ -888,9 +922,10 @@ export class MemoryLocal implements Memory {
         intakeKey,
         receiptKey,
         receiptValue: canonicalJson({
-          version: 1,
+          version: 2,
           sourceHash: source.contentHash,
           recordIds: validated.map(({ record }) => record.id),
+          retainedAt: canonicalNow(this.#clock),
         } as never),
         ...(this.#beforeCaptureCommit === undefined
           ? {}

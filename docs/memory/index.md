@@ -21,6 +21,7 @@ consolidation, and maintenance. Select it in the singleton `memory` slot:
         "runtime": "pi",
         "model": "openai-codex:gpt-5.4-mini"
       },
+      "receiptRetentionDays": 30,
       "timeoutMs": 360000
     },
     "embeddings": {
@@ -60,6 +61,23 @@ Capture routes each completed turn through the selected runtime and model. A
 provider, schema, embedding, or timeout failure leaves bounded durable intake
 for explicit retry. Recall uses bounded FTS candidates and can combine matching
 Ollama vectors; embedding failure degrades to FTS, never invented matches.
+
+Successful capture writes a v2 replay receipt. Exact duplicate replay skips
+the model for `capture.receiptRetentionDays`, which defaults to 30 and accepts
+1 through 3,650. Forgetting removes the record from every referencing receipt
+and restarts the full horizon for v2 receipts. After the horizon expires,
+replay can run extraction again and can recreate a previously forgotten fact;
+choose the horizon to match the required no-resurrection window. Legacy v1
+receipts remain permanent and non-evictable. Permanent no-resurrection after
+v2 expiry would require a separate, longer-lived tombstone, which this package
+does not create.
+
+Receipt storage is capped at 100,000 rows. Before any model call, capture
+transactionally evicts expired v2 receipts toward a 90,000-row low-water mark.
+If current and legacy receipts still fill the cap, capture returns
+`capacity_exceeded` without calling the model. The store stays readable and
+reopenable, and audit plus diagnostics report the bounded count without
+revealing receipt content.
 
 With `recallTool.enabled: true`, Core exposes
 `MemoryRecall({ "query": "...", "limit": 8 })` on tool-capable routes. `query`

@@ -167,10 +167,22 @@ describe("memory-local", () => {
 
   it("strictly validates bounded configuration", () => {
     expect(parseMemoryLocalConfig(undefined).capture.enabled).toBe(false);
+    expect(parseMemoryLocalConfig(undefined).capture.receiptRetentionDays).toBe(30);
     expect(parseMemoryLocalConfig(undefined).recallTool.enabled).toBe(true);
     expect(parseMemoryLocalConfig({ recallTool: { enabled: false } }).recallTool.enabled).toBe(false);
     expect(() => parseMemoryLocalConfig({ unknown: true })).toThrow(/unknown field/u);
     expect(() => parseMemoryLocalConfig({ maxBytes: 0 })).toThrow(/maxBytes/u);
+    expect(parseMemoryLocalConfig({
+      capture: { receiptRetentionDays: 1 },
+    }).capture.receiptRetentionDays).toBe(1);
+    expect(parseMemoryLocalConfig({
+      capture: { receiptRetentionDays: 3_650 },
+    }).capture.receiptRetentionDays).toBe(3_650);
+    for (const receiptRetentionDays of [0, 3_651]) {
+      expect(() => parseMemoryLocalConfig({
+        capture: { receiptRetentionDays },
+      })).toThrow(/receiptRetentionDays/u);
+    }
     expect(() => parseMemoryLocalConfig({ capture: { enabled: true } })).toThrow(/model/u);
     expect(() => parseMemoryLocalConfig({
       capture: {

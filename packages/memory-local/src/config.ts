@@ -10,6 +10,7 @@ export const DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_BYTES = 256 * 1024;
 export const DEFAULT_RUNTIME_CAPTURE_MAX_OUTPUT_TOKENS = 2_048;
 export const DEFAULT_RUNTIME_CAPTURE_MAX_RECORDS = 8;
 export const DEFAULT_RUNTIME_CAPTURE_TIMEOUT_MS = 360_000;
+export const DEFAULT_CAPTURE_RECEIPT_RETENTION_DAYS = 30;
 export const DEFAULT_EMBEDDING_TIMEOUT_MS = 30_000;
 export const DEFAULT_EMBEDDING_BREAKER_FAILURES = 3;
 export const DEFAULT_EMBEDDING_BREAKER_RESET_MS = 30_000;
@@ -24,6 +25,7 @@ export interface MemoryLocalCaptureConfig {
   readonly enabled: boolean;
   readonly model?: MemoryLocalModelRoute;
   readonly timeoutMs: number;
+  readonly receiptRetentionDays: number;
 }
 
 export interface MemoryLocalEmbeddingsConfig {
@@ -82,6 +84,12 @@ export const memoryLocalJsonSchema = Object.freeze({
           maximum: 3_600_000,
           default: DEFAULT_RUNTIME_CAPTURE_TIMEOUT_MS,
         },
+        receiptRetentionDays: {
+          type: "integer",
+          minimum: 1,
+          maximum: 3_650,
+          default: DEFAULT_CAPTURE_RECEIPT_RETENTION_DAYS,
+        },
       },
     },
     embeddings: {
@@ -124,7 +132,7 @@ export const memoryLocalJsonSchema = Object.freeze({
 } as const);
 
 const ROOT_KEYS = ["root", "maxBytes", "capture", "embeddings", "recallTool"] as const;
-const CAPTURE_KEYS = ["enabled", "model", "timeoutMs"] as const;
+const CAPTURE_KEYS = ["enabled", "model", "timeoutMs", "receiptRetentionDays"] as const;
 const MODEL_KEYS = ["runtime", "model"] as const;
 const EMBEDDING_KEYS = [
   "provider",
@@ -167,6 +175,13 @@ export function parseMemoryLocalConfig(input: unknown): MemoryLocalConfig {
         1,
         3_600_000,
         "$.capture.timeoutMs",
+      ),
+      receiptRetentionDays: boundedInteger(
+        capture.receiptRetentionDays,
+        DEFAULT_CAPTURE_RECEIPT_RETENTION_DAYS,
+        1,
+        3_650,
+        "$.capture.receiptRetentionDays",
       ),
     }),
     ...(embeddings === undefined ? {} : { embeddings }),

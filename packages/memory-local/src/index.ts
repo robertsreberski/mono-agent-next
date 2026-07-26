@@ -8,6 +8,7 @@ import { memoryLocalJsonSchema, parseMemoryLocalConfig } from "./config.js";
 import { openMemoryLocal } from "./store.js";
 
 export {
+  DEFAULT_CAPTURE_RECEIPT_RETENTION_DAYS,
   DEFAULT_EMBEDDING_BREAKER_FAILURES,
   DEFAULT_EMBEDDING_BREAKER_RESET_MS,
   DEFAULT_EMBEDDING_TIMEOUT_MS,

@@ -17,30 +17,30 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `f6f8610211d5e3b1b036dbab363fc64868a154fce4c191754c6350b14156b06f`
+Source manifest digest: `6e7ae005af14456221d1edca41cfaeb7ebe57219a645dc9b4fbd89eb8ba804fe`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 311 | 95552 |
-| Tests | 162 | 75638 |
+| Production | 311 | 95864 |
+| Tests | 163 | 76200 |
 | Repository and product tooling | 56 | 18848 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **529** | **190038** |
+| **Total executable source** | **530** | **190912** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 307.2 lines.
+Average production file size is 308.2 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 95552 | 130000 | within limit |
+| repository-production | 95864 | 130000 | within limit |
 | kernel-production | 16174 | 16500 | within limit |
 | durable-protocol-production | 7626 | 9500 | within limit |
 
@@ -50,9 +50,9 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 75638 | 71664 | within limit |
+| test source, at 0.75 of production | 76200 | 71898 | within limit |
 
-The current ratio is 0.792.
+The current ratio is 0.795.
 
 ## Largest package ownership surfaces
 
@@ -61,7 +61,7 @@ The current ratio is 0.792.
 | `@mono-agent/state-local` | 27 | 14355 | 5466 |
 | `@mono-agent/core` | 39 | 12902 | 18232 |
 | `@mono-agent/runtime-pi` | 28 | 8865 | 4978 |
-| `@mono-agent/memory-local` | 19 | 7734 | 4155 |
+| `@mono-agent/memory-local` | 19 | 8046 | 4717 |
 | `@mono-agent/web` | 28 | 7169 | 2507 |
 | `@mono-agent/service-macos` | 22 | 5770 | 2131 |
 | `create-mono-agent` | 11 | 4477 | 1651 |
@@ -78,7 +78,7 @@ The complete package table is retained in the generated report model exposed by
 | First-party dependency edges | 22 |
 | First-party dependency cycles | 0 |
 | Public code entrypoints | 28 |
-| Public named exports | 992 |
+| Public named exports | 993 |
 | Distinct scaffold config paths | 104 |
 
 The first-party package graph is acyclic.

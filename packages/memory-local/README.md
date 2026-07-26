@@ -53,6 +53,7 @@ pnpm --filter @mono-agent/memory-local... run build
         "runtime": "pi",
         "model": "openai-codex:gpt-5.4-mini"
       },
+      "receiptRetentionDays": 30,
       "timeoutMs": 360000
     },
     "embeddings": {
@@ -154,10 +155,11 @@ adoption, strict audit, and existing-store admission.
    is durable. Partial initialization is preserved for operator inspection.
 4. Completed-turn capture records a durable intake, obtains schema-constrained
    extraction, then atomically commits BuJo/FTS rows, vector-or-retry state, and
-   the replay receipt. Exact duplicate replay reconstructs missing vector
-   intake without rerunning a completed capture. Forgetting atomically removes
-   the record from every referencing receipt and retains an empty receipt as a
-   privacy tombstone, so replay cannot resurrect intentionally forgotten facts.
+   a v2 replay receipt. Exact duplicate replay reconstructs missing vector
+   intake without rerunning capture during the configured receipt-retention
+   horizon. Forgetting atomically removes the record from every referencing
+   receipt and restarts the full horizon for v2 receipts, so an immediate
+   replay cannot resurrect intentionally forgotten facts.
 5. Optional Ollama embeddings populate `sqlite-vec`; recall combines bounded
    FTS and vector candidates with stable ordering and a total `maxBytes` cap.
 6. Explicit consolidation reads canonical rows and refreshes bounded
@@ -191,7 +193,7 @@ adoption, strict audit, and existing-store admission.
 
 Maintenance is explicit: `audit({ strict: true })` gates cutover and rejects
 missing expected FTS or vector rows, malformed capture receipts, and receipts
-that reference missing canonical records;
+that reference missing canonical records during their guarantee horizon;
 `previewForget` shows the exact record and vector before deletion, `backup`
 writes a verified copy with SHA-256 evidence, `rebuild` recreates FTS/vector
 indexes, `consolidate` refreshes projection-only index/future-log files, and
@@ -205,6 +207,18 @@ to run on an AgentHost that has the configured runtime loaded and a
 only the memory module and is not that recovery path.
 Rebuild requires `confirm: true`; forget previews by default and mutates only
 with `dryRun: false, confirm: true`.
+
+`capture.receiptRetentionDays` defaults to 30 and accepts 1 through 3,650.
+After that horizon, duplicate replay can rerun extraction and recreate a
+forgotten fact. Receipts adopted in the legacy v1 shape remain non-evictable.
+Permanent no-resurrection after v2 expiry would require a separate,
+longer-lived tombstone, which this package does not create.
+Receipt storage is capped at 100,000 rows. Before calling the capture model,
+admission transactionally evicts expired v2 receipts toward a 90,000-row
+low-water mark. If protected receipts still fill the cap, capture fails with
+`capacity_exceeded` before the model is called, while audit, recall,
+maintenance, and reopen remain usable. Audit and diagnostics report the
+bounded receipt count without exposing receipt content.
 
 Non-serving module diagnostics reuse the read-only audit path. A healthy store
 is silent; incomplete FTS/vector/intake/projection state returns bounded
@@ -244,6 +258,7 @@ Every symbol exported by each public code entrypoint is listed below.
 
 ```text
 AdoptV0MemoryLocalCopyOptions
+DEFAULT_CAPTURE_RECEIPT_RETENTION_DAYS
 DEFAULT_EMBEDDING_BREAKER_FAILURES
 DEFAULT_EMBEDDING_BREAKER_RESET_MS
 DEFAULT_EMBEDDING_TIMEOUT_MS

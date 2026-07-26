@@ -21,6 +21,7 @@ import {
 import { parseMemoryLocalConfig } from "./config.js";
 import { auditBujoProjections } from "./consolidation.js";
 import type { MemoryEmbeddingProvider } from "./embeddings.js";
+import { MemoryLocalError } from "./errors.js";
 import {
   COPY_BUFFER_BYTES,
   MAX_TREE_BYTES,
@@ -520,7 +521,16 @@ async function adoptV0MemoryLocalCopyInternal(
     });
     let audit: MemoryLocalAudit;
     try {
-      audit = await memory.audit({ signal, strict: true });
+      try {
+        audit = await memory.audit({ signal, strict: true });
+      } catch (error) {
+        if (!(error instanceof MemoryLocalError) || error.code !== "maintenance_failed") {
+          throw error;
+        }
+        const degraded = await memory.audit({ signal, strict: false });
+        if (!receiptCapacityOnlyDegraded(degraded)) throw error;
+        audit = degraded;
+      }
     } finally {
       await memory.stop();
     }
@@ -947,6 +957,18 @@ function assertStrictDatabase(
   ) {
     throw migrationFailure("Adoption target fails strict memory coverage.");
   }
+}
+
+function receiptCapacityOnlyDegraded(audit: MemoryLocalAudit): boolean {
+  return audit.status === "degraded"
+    && audit.receipts.count >= audit.receipts.capacity
+    && audit.fts.missing === 0
+    && audit.fts.orphaned === 0
+    && audit.vectors.missing === 0
+    && audit.vectors.compatible
+    && audit.intake.captures === 0
+    && audit.intake.vectors === 0
+    && audit.projections.coherent;
 }
 
 function readEmbeddingIdentity(
