@@ -24,6 +24,7 @@ import type { WebhookRoute } from "./routes.js";
 
 const SHUTDOWN_DRAIN_MS = 1_000;
 const MAX_IDENTIFIER_LENGTH = 512;
+const MAX_IDEMPOTENT_ATTEMPTS = 10_000;
 
 export type WebhookJsonValue =
   | string
@@ -36,6 +37,8 @@ export type WebhookJsonObject = Readonly<{ [key: string]: WebhookJsonValue }>;
 
 export interface WebhookInboundRequest {
   readonly requestId: string;
+  /** One-based execution attempt for this Idempotency-Key authority. */
+  readonly attempt: number;
   readonly conversationId: string;
   readonly receivedAt: string;
   readonly text: string;
@@ -156,12 +159,14 @@ interface ActiveRequest {
 }
 interface IdempotentRequest {
   readonly fingerprint: string;
+  readonly attempt: number;
   readonly requestId: string;
   readonly conversationId: string;
   readonly statusUrl: string;
   readonly receivedAt: string;
   readonly mode: WebhookMode;
   readonly completion: Promise<WebhookTerminalStatus>;
+  terminalStatus?: WebhookTerminalStatus;
   terminal: boolean;
   updatedAtMs: number;
 }
@@ -451,31 +456,58 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
 
     const identity = idempotencyKey === undefined ? undefined : `${route.name}\0${idempotencyKey}`;
     pruneIdempotentRequests(idempotentRequests, options.config.retentionMs);
-    const prior = identity === undefined ? undefined : idempotentRequests.get(identity);
-    if (prior !== undefined) {
-      if (prior.fingerprint !== bodyFingerprint) {
-        sendJson(response, 409, safeErrorBody("idempotency_conflict",
-          "Idempotency-Key was already used with a different request body."));
-        return;
-      }
-      if (prior.mode === "async") {
-        sendJson(response, 202, acceptedStatus(prior));
-        return;
-      }
-      sendTerminalStatus(response, await prior.completion);
-      return;
-    }
+    let attempt = 1;
+    let retryConversationId: string | undefined;
     if (identity !== undefined) {
-      if (!reserveIdempotentCapacity(idempotentRequests, options.config.maxStoredRequests)) {
-        sendJson(response, 503, safeErrorBody("request_capacity",
-          "The idempotent request capacity is full."));
-        return;
+      while (true) {
+        const prior = idempotentRequests.get(identity);
+        if (prior === undefined) {
+          if (!reserveIdempotentCapacity(idempotentRequests, options.config.maxStoredRequests)) {
+            sendJson(response, 503, safeErrorBody("request_capacity",
+              "The idempotent request capacity is full."));
+            return;
+          }
+          break;
+        }
+        if (prior.fingerprint !== bodyFingerprint) {
+          sendJson(response, 409, safeErrorBody("idempotency_conflict",
+            "Idempotency-Key was already used with a different request body."));
+          return;
+        }
+        if (prior.mode === "async") {
+          if (prior.terminalStatus?.status !== "cancelled") {
+            sendJson(response, 202, acceptedStatus(prior));
+            return;
+          }
+        } else {
+          const priorStatus = await prior.completion;
+          if (priorStatus.status !== "cancelled") {
+            sendTerminalStatus(response, priorStatus);
+            return;
+          }
+        }
+        if (response.destroyed) {
+          return;
+        }
+        if (idempotentRequests.get(identity) !== prior) {
+          continue;
+        }
+        if (prior.attempt >= MAX_IDEMPOTENT_ATTEMPTS) {
+          sendJson(response, 503, safeErrorBody("request_retry_capacity",
+            "The idempotent request retry limit is exhausted."));
+          return;
+        }
+        attempt = prior.attempt + 1;
+        retryConversationId = prior.conversationId;
+        break;
       }
     }
     const requestId = idempotencyKey === undefined
       ? randomUUID()
-      : stableWebhookRequestId(requestIdNamespace, route.path, idempotencyKey);
-    const conversationId = invocation.conversationId ?? `webhook:${route.name}:${requestId}`;
+      : stableWebhookRequestId(requestIdNamespace, route.path, idempotencyKey, attempt);
+    const conversationId = invocation.conversationId
+      ?? retryConversationId
+      ?? `webhook:${route.name}:${requestId}`;
     const receivedAt = new Date().toISOString();
     const requestStatusUrl = `${statusBasePath(route.path)}/${encodeURIComponent(requestId)}`;
     const mode = invocation.mode ?? route.mode;
@@ -500,6 +532,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       setStatus(statuses, accepted, false);
       const execution = beginSubmission({
         requestId,
+        attempt,
         conversationId,
         receivedAt,
         statusUrl: requestStatusUrl,
@@ -520,13 +553,14 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
         setStatus(statuses, status, isTerminalStatus(status));
       });
       if (identity !== undefined) rememberIdempotentRequest(
-        idempotentRequests, identity, bodyFingerprint, mode, accepted, execution.completion);
+        idempotentRequests, identity, bodyFingerprint, attempt, mode, accepted, execution.completion);
       sendJson(response, 202, accepted);
       return;
     }
 
     const execution = beginSubmission({
       requestId,
+      attempt,
       conversationId,
       receivedAt,
       statusUrl: requestStatusUrl,
@@ -536,7 +570,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
       bodySha256: bodyFingerprint,
     });
     if (identity !== undefined) rememberIdempotentRequest(idempotentRequests, identity,
-      bodyFingerprint, mode, {
+      bodyFingerprint, attempt, mode, {
         status: "accepted", requestId, conversationId,
         statusUrl: requestStatusUrl, receivedAt,
       }, execution.completion);
@@ -556,6 +590,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
 
   const beginSubmission = (input: {
     readonly requestId: string;
+    readonly attempt: number;
     readonly conversationId: string;
     readonly receivedAt: string;
     readonly statusUrl: string;
@@ -568,6 +603,7 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
     const startedAt = new Date().toISOString();
     const inbound: WebhookInboundRequest = {
       requestId: input.requestId,
+      attempt: input.attempt,
       conversationId: input.conversationId,
       receivedAt: input.receivedAt,
       text: input.invocation.text,
@@ -611,7 +647,9 @@ export function createWebhookChannel(options: CreateWebhookChannelOptions): Webh
         };
       })
       .finally(() => {
-        active.delete(input.requestId);
+        if (active.get(input.requestId)?.controller === controller) {
+          active.delete(input.requestId);
+        }
       });
     const entry: ActiveRequest = { controller, completion };
     active.set(input.requestId, entry);
@@ -958,9 +996,17 @@ function readIdempotencyKey(
   return value;
 }
 
-function stableWebhookRequestId(namespace: string, route: string, key: string): string {
+function stableWebhookRequestId(
+  namespace: string,
+  route: string,
+  key: string,
+  attempt: number,
+): string {
+  const attemptAuthority = attempt === 1 ? "" : `\0attempt:${String(attempt)}`;
   const bytes = createHash("sha256").update(
-    `mono-agent:webhook-request:v1\0${namespace}\0${route}\0${key}`, "utf8").digest().subarray(0, 16);
+    `mono-agent:webhook-request:v1\0${namespace}\0${route}\0${key}${attemptAuthority}`,
+    "utf8",
+  ).digest().subarray(0, 16);
   bytes[6] = (bytes[6]! & 0x0f) | 0x80;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = bytes.toString("hex");
@@ -1057,17 +1103,22 @@ function rememberIdempotentRequest(
   requests: Map<string, IdempotentRequest>,
   identity: string,
   fingerprint: string,
+  attempt: number,
   mode: WebhookMode,
   accepted: Extract<WebhookRequestStatus, { readonly status: "accepted" | "running" }>,
   completion: Promise<WebhookTerminalStatus>,
 ): void {
   const entry: IdempotentRequest = {
-    fingerprint, requestId: accepted.requestId, conversationId: accepted.conversationId,
+    fingerprint, attempt, requestId: accepted.requestId, conversationId: accepted.conversationId,
     statusUrl: accepted.statusUrl, receivedAt: accepted.receivedAt, mode, completion,
     terminal: false, updatedAtMs: Date.now(),
   };
   requests.set(identity, entry);
-  void completion.then(() => { entry.terminal = true; entry.updatedAtMs = Date.now(); });
+  void completion.then((status) => {
+    entry.terminalStatus = status;
+    entry.terminal = true;
+    entry.updatedAtMs = Date.now();
+  });
 }
 
 function acceptedStatus(entry: IdempotentRequest): WebhookRequestStatus {

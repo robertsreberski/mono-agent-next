@@ -351,12 +351,17 @@ describe("webhook HTTP channel", () => {
     expect(observed?.abortSignal.aborted).toBe(true);
   });
 
-  it("aborts a sync run when the client disconnects mid-run", async () => {
-    let observed: WebhookInboundRequest | undefined;
-    const { channel, info } = await startChannel({}, async (request) => {
-      observed = request;
-      return new Promise(() => undefined);
+  it("aborts a disconnected sync run and executes the same Idempotency-Key as a new attempt", async () => {
+    const observed: WebhookInboundRequest[] = [];
+    let finishRetry!: (result: { readonly text: string }) => void;
+    const retryResult = new Promise<{ readonly text: string }>((resolve) => {
+      finishRetry = resolve;
     });
+    const submit = vi.fn<WebhookSubmit>(async (request) => {
+      observed.push(request);
+      return observed.length === 1 ? new Promise(() => undefined) : retryResult;
+    });
+    const { channel, info } = await startChannel({}, submit);
     const body = JSON.stringify({ text: "disconnect" });
     const client = httpRequest({
       hostname: info.host,
@@ -367,15 +372,58 @@ describe("webhook HTTP channel", () => {
         authorization: `Bearer ${TEST_API_KEY}`,
         "content-type": "application/json",
         "content-length": String(Buffer.byteLength(body)),
+        "idempotency-key": "disconnect-retry",
       },
     });
     client.on("error", () => undefined);
     client.end(body);
-    await vi.waitFor(() => expect(observed).toBeDefined());
+    await vi.waitFor(() => expect(observed).toHaveLength(1));
 
     client.destroy();
 
-    await vi.waitFor(() => expect(observed?.abortSignal.aborted).toBe(true));
+    await vi.waitFor(() => expect(observed[0]?.abortSignal.aborted).toBe(true));
+    const conflict = await invoke(
+      info.invokeUrl,
+      { text: "different bytes" },
+      TEST_API_KEY,
+      { "idempotency-key": "disconnect-retry" },
+    );
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({
+      error: { code: "idempotency_conflict" },
+    });
+    const retries = [
+      invoke(
+        info.invokeUrl,
+        { text: "disconnect" },
+        TEST_API_KEY,
+        { "idempotency-key": "disconnect-retry" },
+      ),
+      invoke(
+        info.invokeUrl,
+        { text: "disconnect" },
+        TEST_API_KEY,
+        { "idempotency-key": "disconnect-retry" },
+      ),
+    ];
+    await vi.waitFor(() => expect(observed).toHaveLength(2));
+    expect(channel.health().activeRequests).toBe(1);
+    expect(observed.map(({ attempt }) => attempt)).toEqual([1, 2]);
+    expect(observed[1]?.requestId).not.toBe(observed[0]?.requestId);
+    expect(observed[1]?.conversationId).toBe(observed[0]?.conversationId);
+
+    finishRetry({ text: "retried" });
+    const responses = await Promise.all(retries);
+    expect(responses.map(({ status }) => status)).toEqual([200, 200]);
+    const bodies = await Promise.all(responses.map(async (response) => response.json()));
+    expect(bodies[0]).toMatchObject({
+      status: "succeeded",
+      requestId: observed[1]?.requestId,
+      conversationId: observed[0]?.conversationId,
+      text: "retried",
+    });
+    expect(bodies[1]).toEqual(bodies[0]);
+    expect(submit).toHaveBeenCalledTimes(2);
     await vi.waitFor(() => expect(channel.health().activeRequests).toBe(0));
   });
 
@@ -1049,7 +1097,11 @@ describe("mono-agent channel module", () => {
       metadata: {
         source: "module-test",
         triggerKind: "webhook",
-        webhook: { route: "default", bodySha256: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+        webhook: {
+          route: "default",
+          bodySha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          attempt: 1,
+        },
       },
       sender: { id: "webhook", displayName: "incoming" },
     });
@@ -1355,7 +1407,11 @@ describe("mono-agent channel module", () => {
       metadata: {
         source: "pager",
         triggerKind: "webhook",
-        webhook: { route: "triage", bodySha256: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+        webhook: {
+          route: "triage",
+          bodySha256: expect.stringMatching(/^[a-f0-9]{64}$/u),
+          attempt: 1,
+        },
       },
     });
     const accepted = await invoke(triage!.invokeUrl, { text: "async by default" }, "route-key");
