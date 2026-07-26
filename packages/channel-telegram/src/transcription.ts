@@ -3,6 +3,10 @@ import type { ChannelAttachment } from "@mono-agent/module-sdk";
 
 import type { TelegramTranscriptionConfig } from "./config.js";
 import { isRecord, readBoundedJson } from "./http.js";
+import {
+  resolveTelegramHttpTransport,
+  type TelegramHttpTransportInput,
+} from "./transport.js";
 
 const MAX_TRANSCRIPTION_RESPONSE_BYTES = 1024 * 1024;
 const MAX_TRANSCRIPT_BYTES = 512 * 1024;
@@ -14,8 +18,9 @@ export type TelegramTranscriber = (
 
 export function createTelegramTranscriber(
   config: TelegramTranscriptionConfig,
-  fetchImpl: typeof fetch = fetch,
+  transportInput?: TelegramHttpTransportInput,
 ): TelegramTranscriber {
+  const transport = resolveTelegramHttpTransport(undefined, transportInput);
   return async (attachment, signal) => {
     if (attachment.sizeBytes !== attachment.data.byteLength) {
       throw new Error("Telegram transcription attachment size is invalid.");
@@ -28,7 +33,7 @@ export function createTelegramTranscriber(
     timer.unref();
     const combined = AbortSignal.any([signal, timeout.signal]);
     try {
-      const form = new FormData();
+      const form = transport.createFormData();
       form.set(
         "file",
         new Blob([Buffer.from(attachment.data)], { type: attachment.mediaType }),
@@ -36,7 +41,7 @@ export function createTelegramTranscriber(
       );
       form.set("model", config.model);
       if (config.language !== undefined) form.set("language", config.language);
-      const response = await fetchImpl(config.endpoint, {
+      const response = await transport.fetch(config.endpoint, {
         method: "POST",
         body: form,
         redirect: "error",

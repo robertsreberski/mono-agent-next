@@ -258,12 +258,12 @@ describe("project templates", () => {
     });
     expect(record(channels.telegram)).toMatchObject({
       quietHours: { start: "23:00", end: "07:00", timezone: "Europe/Rome" },
-      transport: { ipFamily: 4 },
       transcription: {
         endpoint: "http://127.0.0.1:50060/v1/audio/transcriptions",
         model: "large-v3-v20240930",
       },
     });
+    expect(record(channels.telegram)).not.toHaveProperty("transport");
     expect(record(channels.webhook)).toMatchObject({
       listen: { host: "100.64.0.10", port: 4313 },
       allowNonLoopback: true,

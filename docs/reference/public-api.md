@@ -25,7 +25,7 @@ pnpm run generate:source-beta-docs
 | `@mono-agent/runtime-claude` | 1 | 6 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-claude/README.md) |
 | `@mono-agent/runtime-codex` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-codex/README.md) |
 | `@mono-agent/runtime-opencode` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-opencode/README.md) |
-| `@mono-agent/channel-telegram` | 1 | 31 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-telegram/README.md) |
+| `@mono-agent/channel-telegram` | 1 | 36 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-telegram/README.md) |
 | `@mono-agent/channel-slack` | 1 | 36 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-slack/README.md) |
 | `@mono-agent/channel-webhook` | 1 | 44 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-webhook/README.md) |
 | `@mono-agent/channel-openai-api` | 1 | 25 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-openai-api/README.md) |
@@ -560,6 +560,8 @@ TelegramConfig
 TelegramConfigError
 TelegramDelivery
 TelegramEditMessageRequest
+TelegramHttpTransport
+TelegramHttpTransportInput
 TelegramMessageUpdate
 TelegramQuietHours
 TelegramReactionConfig
@@ -569,10 +571,13 @@ TelegramSendMessageRequest
 TelegramTranscriber
 TelegramTranscriptionConfig
 TelegramTransportConfig
+TelegramTransportDispatcher
 TelegramUpdate
 createTelegramBotApiClient
 createTelegramChannel
 createTelegramTranscriber
+createTelegramUndiciTransport
+createTelegramWebTransport
 isWithinQuietHours
 monoAgentModule
 parseTelegramConfig

@@ -60,9 +60,25 @@ switch is true:
 ```
 
 `transport.ipFamily` pins Telegram Bot API traffic to IPv4 or IPv6.
+It is optional and is not emitted by the `personal` scaffold. When selected,
+the Bot API client, multipart constructor, and dispatcher come from the same
+pinned `undici` instance. Without the pin, the client resolves the runtime
+fetch and `FormData` pair when the client is created. Tests or embedders that
+wrap `undici` can pass `createTelegramUndiciTransport(fetch)`; a raw custom
+fetch is treated as a WHATWG fetch paired with the runtime `FormData` and
+cannot be combined with `transport.ipFamily`.
 `transcription` is opt-in and calls the configured OpenAI-compatible endpoint
 without an authorization header; use a trusted endpoint. Quiet hours preserve
 delivery but request silent Telegram notifications.
+
+At channel start, the adapter replaces the bot's command menu with the fixed,
+four-command `/model`, `/effort`, `/cancel`, and `/help` set. Registration
+failure degrades health and logs a sanitized warning while polling continues,
+so a temporary menu failure does not disable message handling. The transport
+also enforces Telegram's 100-command, 32-character name, and 256-character
+description bounds before sending a registration payload. Concurrent starts
+share one registration/poller operation, while stop or drain aborts an
+in-progress registration and prevents a late poller from starting.
 
 `TelegramSendFile` accepts exactly one canonical base64 payload or one
 `output_name` safe basename from the current run's host-owned output root. Its
@@ -89,6 +105,13 @@ are split at Telegram's 4096-character message bound; activity text is bounded
 to one editable message. Multiple AskUser answers are unique, capped at 20
 values, and require at least one value before Done.
 
+The optional working reaction is terminally replaced by the configured done or
+error reaction. When that terminal reaction is disabled, or a control command
+returns without a turn, the adapter sends Telegram's empty reaction list so
+the working reaction cannot remain stuck. `clearReaction` is additive on an
+injected `TelegramBotClient`; existing string-only `setReaction` implementations
+never receive an undefined sentinel.
+
 Polling uses one ordered primary lane plus one ordered control lane so an
 AskUser answer, `/cancel`, or live-input offer can reach an active turn without
 redispatching that turn. The confirmed offset stays pinned to the earliest
@@ -98,6 +121,12 @@ settled so later updates can continue. Unsupported updates with valid Telegram
 update IDs are consumed without dispatch so they cannot wedge the poll offset.
 Repeated polls containing no new update or settled-prefix progress use bounded
 exponential backoff.
+
+Transient transport failures keep that bounded retry behavior. Bot API
+authentication, authorization, and competing-consumer failures (`401`, `403`,
+and `409`) are permanent: polling stops after the first response, health becomes
+`unhealthy`, and the sanitized summary tells the operator whether to fix the
+token, authorization, or conflicting poller/webhook.
 
 The in-memory update ledger is capped at Telegram's 100-update poll limit. If
 more than 100 updates remain unconfirmed behind a blocked earliest update,
@@ -130,6 +159,8 @@ owns tool policy, deterministic idempotency, and receipt-keyed history.
 | `config.ts` | Strict configuration and env-only secret schema. |
 | `bot.ts` | Injectable Bot API transport and bounded HTTP implementation. |
 | `http.ts` | Shared bounded HTTP response readers and record guard. |
+| `poll-error.ts` | Typed Bot API status and permanent polling-failure classification. |
+| `transport.ts` | Cohesive runtime/bundled fetch, multipart, and dispatcher factories. |
 | `delivery.ts` | Exact-destination idempotent proactive delivery. |
 | `send-tools.ts` | Strict message/file tool schemas and side-effect-free outbound preparation. |
 | `transcription.ts` | Bounded OpenAI-compatible audio transcription. |
@@ -144,6 +175,8 @@ owns tool policy, deterministic idempotency, and receipt-keyed history.
 | `monoAgentModule` | Load the selected channel through Core. |
 | `createTelegramChannel` | Inject a deterministic transport or embed the channel. |
 | `createTelegramBotApiClient` | Use the bounded first-party Bot API client. |
+| `createTelegramUndiciTransport` | Pair a bundled or wrapped `undici` fetch with its multipart and dispatcher factories. |
+| `createTelegramWebTransport` | Pair a WHATWG fetch implementation with the runtime `FormData`. |
 | `parseTelegramConfig` | Validate already resolved package configuration. |
 
 <!-- public-api-inventory:start -->
@@ -168,6 +201,8 @@ TelegramConfig
 TelegramConfigError
 TelegramDelivery
 TelegramEditMessageRequest
+TelegramHttpTransport
+TelegramHttpTransportInput
 TelegramMessageUpdate
 TelegramQuietHours
 TelegramReactionConfig
@@ -177,10 +212,13 @@ TelegramSendMessageRequest
 TelegramTranscriber
 TelegramTranscriptionConfig
 TelegramTransportConfig
+TelegramTransportDispatcher
 TelegramUpdate
 createTelegramBotApiClient
 createTelegramChannel
 createTelegramTranscriber
+createTelegramUndiciTransport
+createTelegramWebTransport
 isWithinQuietHours
 monoAgentModule
 parseTelegramConfig
@@ -191,7 +229,8 @@ telegramConfigSchema
 
 ## Dependency Boundary
 
-Depends only on `@mono-agent/module-sdk` and Node/platform HTTP primitives. It does not import Core, runtimes, products, state, or another channel.
+Depends only on `@mono-agent/module-sdk` and one pinned `undici` transport. It
+does not import Core, runtimes, products, state, or another channel.
 
 ## What This Package Does Not Own
 

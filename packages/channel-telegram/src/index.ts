@@ -29,6 +29,7 @@ import {
 import { type TelegramConfig, telegramConfigSchema } from "./config.js";
 import { TelegramDelivery } from "./delivery.js";
 import { resolveTelegramChatId, telegramConversationId } from "./destination.js";
+import { fatalTelegramPollingFailure } from "./poll-error.js";
 import {
   createTelegramSendTools,
 } from "./send-tools.js";
@@ -45,6 +46,12 @@ const MAX_TRACKED_UPDATES = 100;
 const MAX_TRACKED_TOOL_CALLS = 256;
 const MAX_TOOL_NAME_LENGTH = TELEGRAM_TEXT_LIMIT - " completed.".length;
 const MAX_POLL_BACKOFF_MS = 1_000;
+const TELEGRAM_COMMANDS = Object.freeze([
+  Object.freeze({ command: "model", description: "Show or set the model override" }),
+  Object.freeze({ command: "effort", description: "Show or set the effort override" }),
+  Object.freeze({ command: "cancel", description: "Cancel the active turn" }),
+  Object.freeze({ command: "help", description: "Show available commands" }),
+]);
 const TRANSCRIPTION_UNAVAILABLE = "[Automatic transcription unavailable; audio attachment retained.]";
 const RETRY_CONTROL_UPDATE = Symbol("retry-control-update");
 const RUN_AS_PRIMARY_UPDATE = Symbol("run-as-primary-update");
@@ -111,6 +118,8 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
   let pollLifecycle: AbortController | undefined;
   let turnLifecycle: AbortController | undefined;
   let polling: Promise<void> | undefined;
+  let startLifecycle: AbortController | undefined;
+  let starting: Promise<void> | undefined;
   let shutdownPromise: Promise<void> | undefined;
   let confirmationLifecycle: AbortController | undefined;
   let offset = 0;
@@ -121,6 +130,9 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
   let forceStopped = false;
   let active = 0;
   let lastError: string | undefined;
+  let commandRegistrationError: string | undefined;
+  let fatalPollingError: string | undefined;
+  let fatalPollingStatusCode: number | undefined;
   let primaryUpdate: TrackedTelegramUpdate | undefined;
   let controlUpdate: TrackedTelegramUpdate | undefined;
   let primaryChatId: string | undefined;
@@ -219,156 +231,171 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
       await client.answerCallback?.(update.callbackId, signal).catch(() => undefined);
       return;
     } else {
-      await react(client, context.config.reactions.working, update, "👀", signal);
-      const pendingAsk = pendingAsks.get(update.chatId);
-      if (pendingAsk !== undefined && context.host.answerAsk !== undefined) {
-        const question = pendingAsk.ask.questions.find((candidate) => !pendingAsk.done.has(candidate.id));
-        if (question !== undefined && question.allowFreeText && update.text.trim().length > 0) {
-          recordAskFreeText(pendingAsk, question.id, update.text);
-          if (await maybeAnswerAsk(context, update.chatId, pendingAsk, signal)) {
-            clearPendingAsk(update.chatId, pendingAsk);
-          }
-          return;
-        }
-      }
-      if (update.text.trim() === "/cancel" && context.host.cancel !== undefined) {
-        const cancelled = await context.host.cancel({
-          conversationId: `telegram:${update.chatId}`,
-          reason: "Telegram user requested cancellation.",
-          signal,
-        });
-        if (controlOnly && cancelled.status === "idle") throw RETRY_CONTROL_UPDATE;
-        return;
-      }
-      const command = runtimeCommand(update.text);
-      if (command !== undefined) {
-        const selection = updateRuntimeSelection(runtimeSelections.get(update.chatId), command);
-        rememberRuntimeSelection(runtimeSelections, update.chatId, selection);
-        await client.sendMessage({
-          chatId: update.chatId,
-          text: runtimeConfirmation(command, selection),
-          replyToMessageId: update.messageId,
-          signal,
-        });
-        return;
-      }
-      if (/^\/help(?:@\S+)?\s*$/u.test(update.text.trim())) {
-        await client.sendMessage({
-          chatId: update.chatId,
-          text: "Commands: /model <id|default>, /effort <level|default>, /cancel, /help",
-          replyToMessageId: update.messageId,
-          signal,
-        });
-        return;
-      }
-      if (context.host.offerLiveInput !== undefined && update.text.length > 0 && update.attachments.length === 0) {
-        const offered = await context.host.offerLiveInput({ conversationId: `telegram:${update.chatId}`, id: `telegram:${update.updateId}`, text: update.text, receivedAt: update.receivedAt, signal });
-        if (offered.status === "applied" || offered.status === "discarded") return;
-        if (controlOnly && offered.status === "unavailable") throw RETRY_CONTROL_UPDATE;
-        if (controlOnly) throw RUN_AS_PRIMARY_UPDATE;
-      }
-      const attachments: ChannelAttachment[] = [];
-      const transcriptNotes: string[] = [];
-      for (const attachment of update.attachments) {
-        const downloaded = await client.download(attachment, context.config.maxAttachmentBytes, signal);
-        attachments.push(downloaded);
-        if (attachment.transcriptionEligible === true && client.transcribe !== undefined) {
-          try {
-            transcriptNotes.push(`[Transcript of ${downloaded.name}]\n${await client.transcribe(downloaded, signal)}`);
-          } catch (error) {
-            if (signal.aborted) throw error;
-            transcriptNotes.push(`${TRANSCRIPTION_UNAVAILABLE} (${downloaded.name})`);
-            context.logger.warn("Telegram automatic transcription failed.", {
-              instanceId: context.instanceId,
-              chatId: update.chatId,
-              attachmentId: downloaded.id,
-            });
-          }
-        }
-      }
-      const normalizedText = [update.text, ...transcriptNotes].filter((part) => part.length > 0).join("\n\n");
-      let replyText = "";
-      let activityMessageId: string | undefined;
-      let lastActivityText: string | undefined;
-      const toolNames = new Map<string, string>();
-      const presentActivity = async (activity: string): Promise<void> => {
-        const text = boundedTelegramText(activity);
-        if (text === lastActivityText) return;
-        if (activityMessageId !== undefined && client.editMessage !== undefined) {
-          await client.editMessage({ chatId: update.chatId, messageId: activityMessageId, text, signal });
-        } else {
-          activityMessageId = (await client.sendMessage({
-            chatId: update.chatId,
-            text,
-            replyToMessageId: update.messageId,
-            signal,
-          })).messageId;
-        }
-        lastActivityText = text;
-      };
-      const reply: ChannelReplySink = {
-        async emit(event: ChannelReplyEvent): Promise<void> {
-          if (event.type === "text-delta") replyText += event.delta;
-          else if (event.type === "text-replace") replyText = event.text;
-          else if (event.type === "activity" && event.text.length > 0) {
-            await presentActivity(event.text);
-          } else if (event.type === "tool-call") {
-            await presentActivity(toolCallActivity(toolNames, event.call.id, event.call.name));
-          } else if (event.type === "tool-result") {
-            await presentActivity(toolResultActivity(toolNames, event.result.callId, event.result.isError === true));
-          } else if (event.type === "attachment") {
-            await client.sendAttachment({ chatId: update.chatId, attachment: event.attachment, signal });
-          } else if (event.type === "ask-user" && context.host.answerAsk !== undefined) {
-            const pending = rememberAsk(update.chatId, event.ask);
-            try {
-              for (const question of event.ask.questions) {
-                const buttons = (question.choices ?? []).slice(0, MAX_ASK_BUTTONS_PER_QUESTION).map((choice) => {
-                  const token = `ask:${randomUUID().slice(0, 12)}`;
-                  rememberCallback(token, { chatId: update.chatId, interactionId: event.ask.interactionId, questionId: question.id, value: choice.value, done: false }, pending);
-                  return { label: choice.label, data: token };
-                });
-                if (question.multiple) {
-                  const token = `ask:${randomUUID().slice(0, 12)}`;
-                  rememberCallback(token, { chatId: update.chatId, interactionId: event.ask.interactionId, questionId: question.id, done: true }, pending);
-                  buttons.push({ label: "Done", data: token });
-                }
-                await sendChunkedTelegramMessage(client, {
-                  chatId: update.chatId,
-                  replyToMessageId: update.messageId,
-                  signal,
-                }, question.prompt, buttons);
-              }
-            } catch (error) {
-              clearPendingAsk(update.chatId, pending);
-              throw error;
-            }
-          }
-        },
-      };
-      const request = inbound(
-        context.instanceId,
+      const workingReactionApplied = await react(
+        client,
+        context.config.reactions.working,
         update,
-        normalizedText,
-        attachments,
-        runtimeSelections.get(update.chatId),
+        "👀",
         signal,
       );
-      const dispatched = context.host.dispatch(request, reply);
-      if (!controlOnly && primaryUpdate?.update.updateId === update.updateId) {
-        primaryControlsReady = true;
-        scheduleUpdates(signal);
-      }
-      const result = await dispatched;
-      const final = result.text ?? replyText;
-      if (result.status === "completed" && final.length > 0) {
-        await sendChunkedTelegramMessage(client, {
-          chatId: update.chatId,
-          replyToMessageId: update.messageId,
+      let terminalReactionApplied = false;
+      try {
+        const pendingAsk = pendingAsks.get(update.chatId);
+        if (pendingAsk !== undefined && context.host.answerAsk !== undefined) {
+          const question = pendingAsk.ask.questions.find((candidate) => !pendingAsk.done.has(candidate.id));
+          if (question !== undefined && question.allowFreeText && update.text.trim().length > 0) {
+            recordAskFreeText(pendingAsk, question.id, update.text);
+            if (await maybeAnswerAsk(context, update.chatId, pendingAsk, signal)) {
+              clearPendingAsk(update.chatId, pendingAsk);
+            }
+            return;
+          }
+        }
+        if (update.text.trim() === "/cancel" && context.host.cancel !== undefined) {
+          const cancelled = await context.host.cancel({
+            conversationId: `telegram:${update.chatId}`,
+            reason: "Telegram user requested cancellation.",
+            signal,
+          });
+          if (controlOnly && cancelled.status === "idle") throw RETRY_CONTROL_UPDATE;
+          return;
+        }
+        const command = runtimeCommand(update.text);
+        if (command !== undefined) {
+          const selection = updateRuntimeSelection(runtimeSelections.get(update.chatId), command);
+          rememberRuntimeSelection(runtimeSelections, update.chatId, selection);
+          await client.sendMessage({
+            chatId: update.chatId,
+            text: runtimeConfirmation(command, selection),
+            replyToMessageId: update.messageId,
+            signal,
+          });
+          return;
+        }
+        if (/^\/help(?:@\S+)?\s*$/u.test(update.text.trim())) {
+          await client.sendMessage({
+            chatId: update.chatId,
+            text: "Commands: /model <id|default>, /effort <level|default>, /cancel, /help",
+            replyToMessageId: update.messageId,
+            signal,
+          });
+          return;
+        }
+        if (context.host.offerLiveInput !== undefined && update.text.length > 0 && update.attachments.length === 0) {
+          const offered = await context.host.offerLiveInput({ conversationId: `telegram:${update.chatId}`, id: `telegram:${update.updateId}`, text: update.text, receivedAt: update.receivedAt, signal });
+          if (offered.status === "applied" || offered.status === "discarded") return;
+          if (controlOnly && offered.status === "unavailable") throw RETRY_CONTROL_UPDATE;
+          if (controlOnly) throw RUN_AS_PRIMARY_UPDATE;
+        }
+        const attachments: ChannelAttachment[] = [];
+        const transcriptNotes: string[] = [];
+        for (const attachment of update.attachments) {
+          const downloaded = await client.download(attachment, context.config.maxAttachmentBytes, signal);
+          attachments.push(downloaded);
+          if (attachment.transcriptionEligible === true && client.transcribe !== undefined) {
+            try {
+              transcriptNotes.push(`[Transcript of ${downloaded.name}]\n${await client.transcribe(downloaded, signal)}`);
+            } catch (error) {
+              if (signal.aborted) throw error;
+              transcriptNotes.push(`${TRANSCRIPTION_UNAVAILABLE} (${downloaded.name})`);
+              context.logger.warn("Telegram automatic transcription failed.", {
+                instanceId: context.instanceId,
+                chatId: update.chatId,
+                attachmentId: downloaded.id,
+              });
+            }
+          }
+        }
+        const normalizedText = [update.text, ...transcriptNotes].filter((part) => part.length > 0).join("\n\n");
+        let replyText = "";
+        let activityMessageId: string | undefined;
+        let lastActivityText: string | undefined;
+        const toolNames = new Map<string, string>();
+        const presentActivity = async (activity: string): Promise<void> => {
+          const text = boundedTelegramText(activity);
+          if (text === lastActivityText) return;
+          if (activityMessageId !== undefined && client.editMessage !== undefined) {
+            await client.editMessage({ chatId: update.chatId, messageId: activityMessageId, text, signal });
+          } else {
+            activityMessageId = (await client.sendMessage({
+              chatId: update.chatId,
+              text,
+              replyToMessageId: update.messageId,
+              signal,
+            })).messageId;
+          }
+          lastActivityText = text;
+        };
+        const reply: ChannelReplySink = {
+          async emit(event: ChannelReplyEvent): Promise<void> {
+            if (event.type === "text-delta") replyText += event.delta;
+            else if (event.type === "text-replace") replyText = event.text;
+            else if (event.type === "activity" && event.text.length > 0) {
+              await presentActivity(event.text);
+            } else if (event.type === "tool-call") {
+              await presentActivity(toolCallActivity(toolNames, event.call.id, event.call.name));
+            } else if (event.type === "tool-result") {
+              await presentActivity(toolResultActivity(toolNames, event.result.callId, event.result.isError === true));
+            } else if (event.type === "attachment") {
+              await client.sendAttachment({ chatId: update.chatId, attachment: event.attachment, signal });
+            } else if (event.type === "ask-user" && context.host.answerAsk !== undefined) {
+              const pending = rememberAsk(update.chatId, event.ask);
+              try {
+                for (const question of event.ask.questions) {
+                  const buttons = (question.choices ?? []).slice(0, MAX_ASK_BUTTONS_PER_QUESTION).map((choice) => {
+                    const token = `ask:${randomUUID().slice(0, 12)}`;
+                    rememberCallback(token, { chatId: update.chatId, interactionId: event.ask.interactionId, questionId: question.id, value: choice.value, done: false }, pending);
+                    return { label: choice.label, data: token };
+                  });
+                  if (question.multiple) {
+                    const token = `ask:${randomUUID().slice(0, 12)}`;
+                    rememberCallback(token, { chatId: update.chatId, interactionId: event.ask.interactionId, questionId: question.id, done: true }, pending);
+                    buttons.push({ label: "Done", data: token });
+                  }
+                  await sendChunkedTelegramMessage(client, {
+                    chatId: update.chatId,
+                    replyToMessageId: update.messageId,
+                    signal,
+                  }, question.prompt, buttons);
+                }
+              } catch (error) {
+                clearPendingAsk(update.chatId, pending);
+                throw error;
+              }
+            }
+          },
+        };
+        const request = inbound(
+          context.instanceId,
+          update,
+          normalizedText,
+          attachments,
+          runtimeSelections.get(update.chatId),
           signal,
-        }, final);
-        await react(client, context.config.reactions.done, update, "👍", signal);
-      } else if (result.status === "rejected") {
-        await react(client, context.config.reactions.error, update, "👎", signal);
+        );
+        const dispatched = context.host.dispatch(request, reply);
+        if (!controlOnly && primaryUpdate?.update.updateId === update.updateId) {
+          primaryControlsReady = true;
+          scheduleUpdates(signal);
+        }
+        const result = await dispatched;
+        const final = result.text ?? replyText;
+        if (result.status === "completed") {
+          if (final.length > 0) {
+            await sendChunkedTelegramMessage(client, {
+              chatId: update.chatId,
+              replyToMessageId: update.messageId,
+              signal,
+            }, final);
+          }
+          terminalReactionApplied = await react(client, context.config.reactions.done, update, "👍", signal);
+        } else if (result.status === "rejected") {
+          terminalReactionApplied = await react(client, context.config.reactions.error, update, "👎", signal);
+        }
+      } finally {
+        if (workingReactionApplied && !terminalReactionApplied) {
+          await clearReaction(client, update, signal);
+        }
       }
     }
   };
@@ -668,8 +695,9 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
             ? Math.min(backoffMs * 2, MAX_POLL_BACKOFF_MS)
             : 100;
         }
-      } catch {
+      } catch (error) {
         if (pollSignal.aborted) break;
+        if (fatalTelegramPollingFailure(error) !== undefined) throw error;
         lastError = "Telegram polling is degraded.";
         context.logger.warn(lastError, { instanceId: context.instanceId });
         const version = pollProgressVersion;
@@ -697,13 +725,53 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
     get running() { return running; },
     async start(startContext) {
       if (running) return;
+      if (starting !== undefined) {
+        throwIfAborted(startContext.signal);
+        await starting;
+        return;
+      }
       if (stopped) throw new Error("Telegram channel cannot restart after stop.");
       throwIfAborted(startContext.signal);
       startAttempted = true;
-      pollLifecycle = new AbortController();
-      turnLifecycle = new AbortController();
-      running = true;
-      polling = poll(pollLifecycle.signal, turnLifecycle.signal).finally(() => { running = false; });
+      const lifecycle = new AbortController();
+      startLifecycle = lifecycle;
+      const startSignal = AbortSignal.any([startContext.signal, lifecycle.signal]);
+      const operation = (async (): Promise<void> => {
+        if (client.setCommands !== undefined) {
+          try {
+            await client.setCommands(TELEGRAM_COMMANDS, startSignal);
+            commandRegistrationError = undefined;
+          } catch (error) {
+            if (startSignal.aborted) throwIfAborted(startSignal);
+            commandRegistrationError = "Telegram command registration is degraded.";
+            context.logger.warn(commandRegistrationError, { instanceId: context.instanceId });
+          }
+        }
+        throwIfAborted(startSignal);
+        if (stopped) throw new Error("Telegram channel cannot start after stop.");
+        pollLifecycle = new AbortController();
+        turnLifecycle = new AbortController();
+        running = true;
+        polling = poll(pollLifecycle.signal, turnLifecycle.signal)
+          .catch((error: unknown) => {
+            if (pollLifecycle?.signal.aborted === true || stopped) return;
+            const fatal = fatalTelegramPollingFailure(error);
+            fatalPollingError = fatal?.summary ?? "Telegram polling stopped unexpectedly.";
+            fatalPollingStatusCode = fatal?.statusCode;
+            context.logger.error(fatalPollingError, {
+              instanceId: context.instanceId,
+              ...(fatalPollingStatusCode === undefined ? {} : { statusCode: fatalPollingStatusCode }),
+            });
+          })
+          .finally(() => { running = false; });
+      })();
+      starting = operation;
+      try {
+        await operation;
+      } finally {
+        if (starting === operation) starting = undefined;
+        if (startLifecycle === lifecycle) startLifecycle = undefined;
+      }
     },
     async drain(drainContext) {
       if (shutdownPromise !== undefined) {
@@ -711,6 +779,7 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
         return;
       }
       stopped = true;
+      startLifecycle?.abort(new Error("Telegram channel is draining."));
       pollLifecycle?.abort(new Error("Telegram channel is draining."));
       shutdownPromise = (async () => {
         try {
@@ -738,6 +807,7 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
     async stop() {
       stopped = true;
       forceStopped = true;
+      startLifecycle?.abort(new Error("Telegram channel stopped."));
       pollLifecycle?.abort(new Error("Telegram channel stopped."));
       turnLifecycle?.abort(new Error("Telegram channel stopped."));
       confirmationLifecycle?.abort(new Error("Telegram offset confirmation stopped."));
@@ -752,23 +822,32 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
         // A channel whose start-up poll threw was reported as "unknown", making
         // it indistinguishable from one that was never started at all — while
         // the channel was completely dead.
-        status: lastError !== undefined || deliveryDegraded
-          ? "degraded"
-          : running
-            ? "healthy"
-            : startAttempted && !stopped ? "unhealthy" : "unknown",
+        status: fatalPollingError !== undefined
+          ? "unhealthy"
+          : lastError !== undefined || commandRegistrationError !== undefined || deliveryDegraded
+            ? "degraded"
+            : running
+              ? "healthy"
+              : startAttempted && !stopped ? "unhealthy" : "unknown",
         checkedAt: new Date().toISOString(),
-        ...(lastError !== undefined
-          ? { summary: lastError }
-          : !running && startAttempted && !stopped
-            ? { summary: "Telegram polling stopped unexpectedly after start." }
-          : deliveryDegraded
-            ? { summary: deliveryReceiptCapacityExhausted
-                ? "Telegram delivery receipt capacity is exhausted."
-                : "Telegram delivery has an unresolved ambiguous outcome." }
-            : {}),
+        ...(fatalPollingError !== undefined
+          ? { summary: fatalPollingError }
+          : commandRegistrationError !== undefined
+            ? { summary: commandRegistrationError }
+            : lastError !== undefined
+              ? { summary: lastError }
+              : !running && startAttempted && !stopped
+                ? { summary: "Telegram polling stopped unexpectedly after start." }
+                : deliveryDegraded
+                  ? { summary: deliveryReceiptCapacityExhausted
+                      ? "Telegram delivery receipt capacity is exhausted."
+                      : "Telegram delivery has an unresolved ambiguous outcome." }
+                  : {}),
         details: {
           activeUpdates: active,
+          commandRegistrationFailed: commandRegistrationError !== undefined,
+          pollingFatal: fatalPollingError !== undefined,
+          ...(fatalPollingStatusCode === undefined ? {} : { pollingStatusCode: fatalPollingStatusCode }),
           deliveryReceiptCapacityExhausted,
           deliveryAmbiguousOutcome,
         },
@@ -1015,8 +1094,22 @@ async function react(
   update: Pick<TelegramMessageUpdate, "chatId" | "messageId">,
   emoji: string,
   signal: AbortSignal,
+): Promise<boolean> {
+  if (!enabled || client.setReaction === undefined) return false;
+  try {
+    await client.setReaction(update.chatId, update.messageId, emoji, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function clearReaction(
+  client: TelegramBotClient,
+  update: Pick<TelegramMessageUpdate, "chatId" | "messageId">,
+  signal: AbortSignal,
 ): Promise<void> {
-  if (enabled) await client.setReaction?.(update.chatId, update.messageId, emoji, signal).catch(() => undefined);
+  await client.clearReaction?.(update.chatId, update.messageId, signal).catch(() => undefined);
 }
 
 async function sendChunkedTelegramMessage(
@@ -1246,4 +1339,11 @@ function decodeReplyCallback(data: string): string | undefined {
 export * from "./bot.js";
 export * from "./config.js";
 export * from "./delivery.js";
+export {
+  createTelegramUndiciTransport,
+  createTelegramWebTransport,
+  type TelegramHttpTransport,
+  type TelegramHttpTransportInput,
+  type TelegramTransportDispatcher,
+} from "./transport.js";
 export * from "./transcription.js";

@@ -504,7 +504,6 @@ README and the exact composed schema.
 | `channels.telegram.reactions.working` | `personal` |
 | `channels.telegram.transcription.endpoint` | `personal` |
 | `channels.telegram.transcription.model` | `personal` |
-| `channels.telegram.transport.ipFamily` | `personal` |
 | `channels.webhook.$use` | `personal` |
 | `channels.webhook.allowNonLoopback` | `personal` |
 | `channels.webhook.apiKey.$env` | `personal` |
@@ -803,9 +802,6 @@ README and the exact composed schema.
         "start": "23:00",
         "end": "07:00",
         "timezone": "Europe/Rome"
-      },
-      "transport": {
-        "ipFamily": 4
       },
       "transcription": {
         "endpoint": "http://127.0.0.1:50060/v1/audio/transcriptions",

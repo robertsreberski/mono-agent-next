@@ -35,5 +35,27 @@ webhook exposes the latest status only while an async request is running. These
 projections include the tool name and completed/failed state, never tool input,
 result content, or call ids; they are not durable conversation messages.
 
+## Telegram lifecycle signals
+
+The Telegram adapter registers `/model`, `/effort`, `/cancel`, and `/help` as
+the bot's exact command menu each time a channel instance starts. A menu
+registration failure is visible as degraded module health while message
+polling continues.
+
+`reactions.working` is temporary. Every control return and terminal turn either
+replaces it with an enabled done/error reaction or clears it with Telegram's
+empty reaction list. Disabling `reactions.done` therefore disables the thumbs-up
+without leaving the working reaction behind.
+
+`transport.ipFamily` is an optional IPv4/IPv6 pin and is not part of the
+`personal` scaffold default. The selected dispatcher and fetch implementation
+come from the same cohesive transport as its multipart constructor. Without a
+pin, the adapter resolves the runtime fetch and `FormData` pair when the client
+is created. Concurrent starts share one command-registration and polling
+operation; stop or drain aborts registration and prevents a late poller.
+Transient polling errors retry with bounded backoff; Bot API `401`, `403`, and
+`409` responses stop polling after one failure and surface sanitized,
+actionable unhealthy status instead of retrying a permanently dead channel.
+
 The [operator channel guide](/channels/tui/) covers the endpoint shared by the
 two standalone operator products.

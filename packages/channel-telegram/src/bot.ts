@@ -1,10 +1,17 @@
 // SPDX-License-Identifier: MIT
 import type { ChannelAttachment } from "@mono-agent/module-sdk";
-import { Agent, type Dispatcher } from "undici";
 
 import type { TelegramConfig } from "./config.js";
 import { isRecord, readBoundedBytes, readBoundedJson } from "./http.js";
+import { TelegramBotApiError } from "./poll-error.js";
+import {
+  resolveTelegramHttpTransport,
+  type TelegramHttpTransportInput,
+} from "./transport.js";
 import { createTelegramTranscriber } from "./transcription.js";
+
+const MAX_TELEGRAM_BOT_COMMANDS = 100;
+const MAX_TELEGRAM_BOT_COMMAND_DESCRIPTION_CHARS = 256;
 
 export interface TelegramRemoteAttachment {
   readonly fileId: string;
@@ -78,25 +85,34 @@ export interface TelegramBotClient {
   sendAttachment(request: TelegramSendAttachmentRequest): Promise<{ readonly messageId: string }>;
   transcribe?(attachment: ChannelAttachment, signal: AbortSignal): Promise<string>;
   answerCallback?(callbackId: string, signal: AbortSignal): Promise<void>;
+  setCommands?(commands: readonly {
+    readonly command: string;
+    readonly description: string;
+  }[], signal: AbortSignal): Promise<void>;
   setReaction?(chatId: string, messageId: string, emoji: string, signal: AbortSignal): Promise<void>;
+  clearReaction?(chatId: string, messageId: string, signal: AbortSignal): Promise<void>;
   close?(): Promise<void>;
 }
 
 export type TelegramBotClientFactory = (config: TelegramConfig) => TelegramBotClient;
 
-export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: typeof fetch = fetch): TelegramBotClient {
+export function createTelegramBotApiClient(
+  config: TelegramConfig,
+  transportInput?: TelegramHttpTransportInput,
+): TelegramBotClient {
   const api = `https://api.telegram.org/bot${config.botToken}`;
   const fileApi = `https://api.telegram.org/file/bot${config.botToken}`;
+  const transport = resolveTelegramHttpTransport(config.transport?.ipFamily, transportInput);
   const dispatcher = config.transport?.ipFamily === undefined
     ? undefined
-    : new Agent({ connect: { family: config.transport.ipFamily } });
+    : transport.createDispatcher!(config.transport.ipFamily);
   const telegramFetch = (
     input: string | URL | Request,
     init: RequestInit,
-  ): Promise<Response> => fetchImpl(input, {
+  ): Promise<Response> => transport.fetch(input, {
     ...init,
-    ...(dispatcher === undefined ? {} : { dispatcher }),
-  } as RequestInit & { dispatcher?: Dispatcher });
+    ...(dispatcher === undefined ? {} : { dispatcher: dispatcher.value }),
+  } as RequestInit & { dispatcher?: unknown });
   const call = async (method: string, body: Readonly<Record<string, unknown>>, signal: AbortSignal): Promise<unknown> => {
     const response = await telegramFetch(`${api}/${method}`, {
       method: "POST",
@@ -105,8 +121,17 @@ export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: ty
       body: JSON.stringify(body),
       signal,
     });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new TelegramBotApiError(method, response.status);
+    }
     const value = await readBoundedJson(response, 2 * 1024 * 1024, "Telegram API response");
-    if (!response.ok || !isRecord(value) || value.ok !== true) throw new Error(`Telegram API ${method} failed with HTTP ${response.status}.`);
+    if (!isRecord(value) || value.ok !== true) {
+      const errorCode = isRecord(value) && Number.isSafeInteger(value.error_code)
+        ? value.error_code as number
+        : response.status;
+      throw new TelegramBotApiError(method, errorCode);
+    }
     return value.result;
   };
 
@@ -149,7 +174,7 @@ export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: ty
     },
     async sendAttachment(request) {
       const bytes = Buffer.from(request.attachment.data);
-      const form = new FormData();
+      const form = transport.createFormData();
       const photo = request.attachment.kind === "image";
       const field = photo ? "photo" : "document";
       form.set("chat_id", request.chatId);
@@ -163,12 +188,53 @@ export function createTelegramBotApiClient(config: TelegramConfig, fetchImpl: ty
       return { messageId: telegramMessageId(value.result) };
     },
     async answerCallback(callbackId, signal) { await call("answerCallbackQuery", { callback_query_id: callbackId }, signal); },
-    async setReaction(chatId, messageId, emoji, signal) { await call("setMessageReaction", { chat_id: chatId, message_id: numericMessageId(messageId), reaction: [{ type: "emoji", emoji }] }, signal); },
+    async setCommands(commands, signal) {
+      await call("setMyCommands", { commands: boundedTelegramCommands(commands) }, signal);
+    },
+    async setReaction(chatId, messageId, emoji, signal) {
+      await call("setMessageReaction", {
+        chat_id: chatId,
+        message_id: numericMessageId(messageId),
+        reaction: [{ type: "emoji", emoji }],
+      }, signal);
+    },
+    async clearReaction(chatId, messageId, signal) {
+      await call("setMessageReaction", {
+        chat_id: chatId,
+        message_id: numericMessageId(messageId),
+        reaction: [],
+      }, signal);
+    },
     ...(config.transcription === undefined
       ? {}
-      : { transcribe: createTelegramTranscriber(config.transcription, fetchImpl) }),
+      : { transcribe: createTelegramTranscriber(config.transcription, transport) }),
     async close() { await dispatcher?.close(); },
   };
+}
+
+function boundedTelegramCommands(
+  commands: readonly {
+    readonly command: string;
+    readonly description: string;
+  }[],
+): readonly { readonly command: string; readonly description: string }[] {
+  if (commands.length > MAX_TELEGRAM_BOT_COMMANDS) {
+    throw new RangeError(`Telegram command registration accepts at most ${String(MAX_TELEGRAM_BOT_COMMANDS)} commands.`);
+  }
+  return Object.freeze(commands.map((entry, index) => {
+    if (!/^[a-z0-9_]{1,32}$/u.test(entry.command)) {
+      throw new TypeError(`Telegram command ${String(index)} has an invalid name.`);
+    }
+    const descriptionChars = [...entry.description];
+    if (
+      descriptionChars.length === 0
+      || descriptionChars.length > MAX_TELEGRAM_BOT_COMMAND_DESCRIPTION_CHARS
+      || /[\u0000-\u001f\u007f]/u.test(entry.description)
+    ) {
+      throw new TypeError(`Telegram command ${String(index)} has an invalid description.`);
+    }
+    return Object.freeze({ command: entry.command, description: entry.description });
+  }));
 }
 
 function parseUpdate(value: unknown): TelegramUpdate | undefined {
