@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: MIT
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+
 import {
   isEnvEligibleSchema,
   isSecretSchema,
@@ -12,12 +15,20 @@ import {
   assertChannelInstanceCompliance,
   assertChannelModuleCompliance,
 } from "@mono-agent/module-sdk/testing";
+import {
+  MockAgent,
+  fetch as undiciFetch,
+  getGlobalDispatcher,
+  setGlobalDispatcher,
+  type RequestInit as UndiciRequestInit,
+} from "undici";
 import { describe, expect, it, vi } from "vitest";
 
 import {
   createTelegramBotApiClient,
   createTelegramChannel,
   createTelegramTranscriber,
+  createTelegramUndiciTransport,
   isWithinQuietHours,
   monoAgentModule,
   parseTelegramConfig,
@@ -64,6 +75,411 @@ describe("telegram channel", () => {
     expect(() => parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["1"], transport: { ipFamily: 5 } })).toThrow(/4 or 6/u);
     expect(() => parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["1"], quietHours: { start: "9pm", end: "07:00", timezone: "UTC" } })).toThrow(/HH:MM/u);
     expect(() => parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["1"], transcription: { endpoint: "file:///tmp/audio", model: "m" } })).toThrow(/HTTP/u);
+  });
+
+  it("uses the bundled undici dispatcher with ipFamily against a real local HTTP server", async () => {
+    let body = "";
+    let remoteFamily: string | undefined;
+    const server = createServer((request, response) => {
+      remoteFamily = request.socket.remoteFamily;
+      request.setEncoding("utf8");
+      request.on("data", (chunk: string) => { body += chunk; });
+      request.on("end", () => {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ ok: true, result: [] }));
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    const { port } = server.address() as AddressInfo;
+    const localFetch: typeof fetch = async (_input, init) => {
+      expect((init as RequestInit & { dispatcher?: unknown }).dispatcher).toBeDefined();
+      return await undiciFetch(
+        `http://127.0.0.1:${String(port)}/getUpdates`,
+        init as unknown as UndiciRequestInit,
+      ) as unknown as Response;
+    };
+    const client = createTelegramBotApiClient(
+      parseTelegramConfig({
+        botToken: TOKEN,
+        allowedChatIds: ["42"],
+        transport: { ipFamily: 4 },
+      }),
+      createTelegramUndiciTransport(localFetch),
+    );
+
+    try {
+      await expect(client.poll(17, 0, new AbortController().signal)).resolves.toEqual([]);
+      expect(JSON.parse(body)).toEqual({
+        offset: 17,
+        limit: 100,
+        timeout: 0,
+        allowed_updates: ["message", "callback_query"],
+      });
+      expect(remoteFamily).toBe("IPv4");
+    } finally {
+      await client.close?.();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => { if (error === undefined) resolve(); else reject(error); });
+      });
+    }
+  });
+
+  it("rejects a raw custom fetch with ipFamily before mixing dispatcher implementations", () => {
+    expect(() => createTelegramBotApiClient(
+      parseTelegramConfig({
+        botToken: TOKEN,
+        allowedChatIds: ["42"],
+        transport: { ipFamily: 4 },
+      }),
+      vi.fn<typeof fetch>(),
+    )).toThrow(/cohesive transport/u);
+  });
+
+  it("uses bundled multipart bodies through a wrapped bundled fetch implementation", async () => {
+    const priorDispatcher = getGlobalDispatcher();
+    const mockAgent = new MockAgent();
+    mockAgent.disableNetConnect();
+    setGlobalDispatcher(mockAgent);
+    const pool = mockAgent.get("https://api.telegram.org");
+    let headers: unknown;
+    pool.intercept({
+      path: `/bot${TOKEN}/sendDocument`,
+      method: "POST",
+    }).reply((request) => {
+      headers = request.headers;
+      return {
+        statusCode: 200,
+        data: { ok: true, result: { message_id: 33 } },
+        responseOptions: { headers: { "content-type": "application/json" } },
+      };
+    });
+    const wrappedFetch: typeof fetch = async (input, init) => await undiciFetch(
+      input as string | URL,
+      init as unknown as UndiciRequestInit,
+    ) as unknown as Response;
+    const client = createTelegramBotApiClient(
+      parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }),
+      createTelegramUndiciTransport(wrappedFetch),
+    );
+
+    try {
+      await expect(client.sendAttachment({
+        chatId: "42",
+        attachment: {
+          id: "file",
+          kind: "file",
+          name: "note.txt",
+          mediaType: "text/plain",
+          sizeBytes: 5,
+          data: new TextEncoder().encode("hello"),
+        },
+        caption: "Local proof",
+        signal: new AbortController().signal,
+      })).resolves.toEqual({ messageId: "33" });
+      expect(JSON.stringify(headers)).toMatch(/multipart\/form-data; boundary=/u);
+      mockAgent.assertNoPendingInterceptors();
+    } finally {
+      await client.close?.();
+      await mockAgent.close();
+      setGlobalDispatcher(priorDispatcher);
+    }
+  });
+
+  it("serializes the bounded command menu and an empty reaction clear", async () => {
+    const requests: { readonly method: string; readonly body: unknown }[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      requests.push({
+        method: new URL(String(input)).pathname.split("/").at(-1)!,
+        body: JSON.parse(String(init?.body)) as unknown,
+      });
+      return new Response(JSON.stringify({ ok: true, result: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const client = createTelegramBotApiClient(
+      parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }),
+      fetchImpl,
+    );
+    const commands = [
+      { command: "model", description: "Show or set the model override" },
+      { command: "effort", description: "Show or set the effort override" },
+      { command: "cancel", description: "Cancel the active turn" },
+      { command: "help", description: "Show available commands" },
+    ] as const;
+
+    await client.setCommands?.(commands, new AbortController().signal);
+    await client.clearReaction?.("42", "7", new AbortController().signal);
+    await expect(client.setCommands?.(
+      Array.from({ length: 101 }, (_, index) => ({
+        command: `command_${String(index)}`,
+        description: "Too many",
+      })),
+      new AbortController().signal,
+    )).rejects.toThrow(/at most 100/u);
+    await expect(client.setCommands?.(
+      [{ command: "INVALID", description: "Invalid name" }],
+      new AbortController().signal,
+    )).rejects.toThrow(/invalid name/u);
+    await expect(client.setCommands?.(
+      [{ command: "valid", description: "x".repeat(257) }],
+      new AbortController().signal,
+    )).rejects.toThrow(/invalid description/u);
+
+    expect(requests).toEqual([
+      { method: "setMyCommands", body: { commands } },
+      {
+        method: "setMessageReaction",
+        body: { chat_id: "42", message_id: 7, reaction: [] },
+      },
+    ]);
+  });
+
+  it("registers the fixed command menu before polling and replaces it on every instance start", async () => {
+    let releaseRegistration!: () => void;
+    const registrationGate = new Promise<void>((resolve) => { releaseRegistration = resolve; });
+    const setCommands = vi.fn<NonNullable<TelegramBotClient["setCommands"]>>(
+      async () => { await registrationGate; },
+    );
+    const poll = vi.fn<TelegramBotClient["poll"]>(async (_offset, _timeout, signal) => {
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", () => { resolve(); }, { once: true });
+      });
+      return [];
+    });
+    const client = (): TelegramBotClient => ({
+      poll,
+      async download() { throw new Error("unexpected download"); },
+      async sendMessage() { return { messageId: "sent" }; },
+      async sendAttachment() { return { messageId: "attachment" }; },
+      setCommands,
+    });
+    const config = parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] });
+    const first = createTelegramChannel({
+      context: context(config, async () => ({ status: "completed" })),
+      clientFactory: client,
+    });
+
+    const starting = Promise.resolve(first.start?.({ signal: new AbortController().signal }));
+    await vi.waitFor(() => expect(setCommands).toHaveBeenCalledOnce());
+    expect(poll).not.toHaveBeenCalled();
+    releaseRegistration();
+    await starting;
+    expect(setCommands).toHaveBeenCalledWith([
+      { command: "model", description: "Show or set the model override" },
+      { command: "effort", description: "Show or set the effort override" },
+      { command: "cancel", description: "Cancel the active turn" },
+      { command: "help", description: "Show available commands" },
+    ], expect.any(AbortSignal));
+    expect(poll).toHaveBeenCalledOnce();
+    await first.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+
+    const second = createTelegramChannel({
+      context: context(config, async () => ({ status: "completed" })),
+      clientFactory: client,
+    });
+    await second.start?.({ signal: new AbortController().signal });
+    expect(setCommands).toHaveBeenCalledTimes(2);
+    await second.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("single-flights concurrent starts through one command registration and poller", async () => {
+    let releaseRegistration!: () => void;
+    const registrationGate = new Promise<void>((resolve) => { releaseRegistration = resolve; });
+    const setCommands = vi.fn<NonNullable<TelegramBotClient["setCommands"]>>(
+      async () => { await registrationGate; },
+    );
+    const poll = vi.fn<TelegramBotClient["poll"]>(async (_offset, _timeout, signal) => {
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", () => { resolve(); }, { once: true });
+      });
+      return [];
+    });
+    const channel = createTelegramChannel({
+      context: context(
+        parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }),
+        async () => ({ status: "completed" }),
+      ),
+      clientFactory: () => ({
+        poll,
+        async download() { throw new Error("unexpected download"); },
+        async sendMessage() { return { messageId: "sent" }; },
+        async sendAttachment() { return { messageId: "attachment" }; },
+        setCommands,
+      }),
+    });
+
+    const firstStart = Promise.resolve(channel.start?.({ signal: new AbortController().signal }));
+    const secondStart = Promise.resolve(channel.start?.({ signal: new AbortController().signal }));
+    await vi.waitFor(() => expect(setCommands).toHaveBeenCalledOnce());
+    releaseRegistration();
+    await Promise.all([firstStart, secondStart]);
+
+    expect(poll).toHaveBeenCalledOnce();
+    expect(channel.running).toBe(true);
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("cannot start polling after stop wins a blocked command registration", async () => {
+    let registrationStarted!: () => void;
+    const registrationStart = new Promise<void>((resolve) => { registrationStarted = resolve; });
+    let releaseRegistration!: () => void;
+    const registrationGate = new Promise<void>((resolve) => { releaseRegistration = resolve; });
+    let registrationSignal: AbortSignal | undefined;
+    const setCommands = vi.fn<NonNullable<TelegramBotClient["setCommands"]>>(
+      async (_commands, signal) => {
+        registrationSignal = signal;
+        registrationStarted();
+        await registrationGate;
+      },
+    );
+    const poll = vi.fn<TelegramBotClient["poll"]>(async () => []);
+    const close = vi.fn(async () => undefined);
+    const channel = createTelegramChannel({
+      context: context(
+        parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }),
+        async () => ({ status: "completed" }),
+      ),
+      clientFactory: () => ({
+        poll,
+        async download() { throw new Error("unexpected download"); },
+        async sendMessage() { return { messageId: "sent" }; },
+        async sendAttachment() { return { messageId: "attachment" }; },
+        setCommands,
+        close,
+      }),
+    });
+
+    const starting = Promise.resolve(channel.start?.({ signal: new AbortController().signal }));
+    await registrationStart;
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+
+    expect(registrationSignal?.aborted).toBe(true);
+    expect(close).toHaveBeenCalledOnce();
+    expect(poll).not.toHaveBeenCalled();
+    expect(channel.running).toBe(false);
+
+    releaseRegistration();
+    await expect(starting).rejects.toThrow("Telegram channel stopped.");
+    expect(poll).not.toHaveBeenCalled();
+    expect(channel.running).toBe(false);
+  });
+
+  it("keeps polling but reports degraded health when command registration fails", async () => {
+    const warn = vi.fn<ModuleLogger["warn"]>();
+    const poll = vi.fn<TelegramBotClient["poll"]>(async (_offset, _timeout, signal) => {
+      await new Promise<void>((resolve) => {
+        if (signal.aborted) resolve();
+        else signal.addEventListener("abort", () => { resolve(); }, { once: true });
+      });
+      return [];
+    });
+    const channel = createTelegramChannel({
+      context: context(
+        parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }),
+        async () => ({ status: "completed" }),
+        {},
+        { ...logger(), warn },
+      ),
+      clientFactory: () => ({
+        poll,
+        async download() { throw new Error("unexpected download"); },
+        async sendMessage() { return { messageId: "sent" }; },
+        async sendAttachment() { return { messageId: "attachment" }; },
+        async setCommands() { throw new Error(`secret registration failure ${TOKEN}`); },
+      }),
+    });
+
+    await channel.start?.({ signal: new AbortController().signal });
+
+    expect(poll).toHaveBeenCalledOnce();
+    await expect(channel.health?.({ signal: new AbortController().signal })).resolves.toMatchObject({
+      status: "degraded",
+      summary: "Telegram command registration is degraded.",
+      details: { commandRegistrationFailed: true },
+    });
+    expect(warn).toHaveBeenCalledWith(
+      "Telegram command registration is degraded.",
+      { instanceId: "telegram" },
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(TOKEN);
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it.each([
+    [401, "Telegram polling stopped: Bot API authentication failed (HTTP 401). Check the configured bot token."],
+    [403, "Telegram polling stopped: Bot API access is forbidden (HTTP 403). Check the bot authorization and chat access."],
+    [409, "Telegram polling stopped: another poller or webhook owns this bot (HTTP 409). Stop the conflicting consumer before restarting."],
+  ] as const)("stops without retrying permanent HTTP %i polling failures", async (statusCode, summary) => {
+    vi.useFakeTimers();
+    try {
+      const requests: string[] = [];
+      const fetchImpl = vi.fn<typeof fetch>(async (input) => {
+        const method = new URL(String(input)).pathname.split("/").at(-1)!;
+        requests.push(method);
+        if (method === "setMyCommands") {
+          return new Response(JSON.stringify({ ok: true, result: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(statusCode === 403
+          ? JSON.stringify({
+              ok: false,
+              error_code: statusCode,
+              description: `unsafe remote detail ${TOKEN}`,
+            })
+          : null, {
+          status: statusCode,
+          headers: { "content-type": "application/json" },
+        });
+      });
+      const error = vi.fn<ModuleLogger["error"]>();
+      const client = createTelegramBotApiClient(
+        parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }),
+        fetchImpl,
+      );
+      const channel = createTelegramChannel({
+        context: context(
+          parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }),
+          async () => ({ status: "completed" }),
+          {},
+          { ...logger(), error },
+        ),
+        clientFactory: () => client,
+      });
+
+      await channel.start?.({ signal: new AbortController().signal });
+      await vi.waitFor(async () => {
+        await expect(channel.health?.({ signal: new AbortController().signal })).resolves.toMatchObject({
+          status: "unhealthy",
+          summary,
+          details: {
+            pollingFatal: true,
+            pollingStatusCode: statusCode,
+          },
+        });
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(requests).toEqual(["setMyCommands", "getUpdates"]);
+      expect(channel.running).toBe(false);
+      expect(error).toHaveBeenCalledOnce();
+      expect(error).toHaveBeenCalledWith(summary, {
+        instanceId: "telegram",
+        statusCode,
+      });
+      expect(JSON.stringify(error.mock.calls)).not.toContain(TOKEN);
+      expect(JSON.stringify(error.mock.calls)).not.toContain("unsafe remote detail");
+      await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("advances past unsupported raw Telegram update kinds", async () => {
@@ -2174,6 +2590,134 @@ describe("telegram channel", () => {
     await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
   });
 
+  it("clears working reactions on control and every non-reaction terminal path", async () => {
+    const now = new Date().toISOString();
+    const updates: readonly TelegramUpdate[] = [
+      { updateId: 1, kind: "message", chatId: "42", messageId: "1", senderId: "U", text: "/cancel", attachments: [], receivedAt: now },
+      { updateId: 2, kind: "message", chatId: "42", messageId: "2", senderId: "U", text: "/model runtime/model-a", attachments: [], receivedAt: now },
+      { updateId: 3, kind: "message", chatId: "42", messageId: "3", senderId: "U", text: "/effort high", attachments: [], receivedAt: now },
+      { updateId: 4, kind: "message", chatId: "42", messageId: "4", senderId: "U", text: "/help", attachments: [], receivedAt: now },
+      { updateId: 5, kind: "message", chatId: "42", messageId: "5", senderId: "U", text: "normal", attachments: [], receivedAt: now },
+      { updateId: 6, kind: "message", chatId: "42", messageId: "6", senderId: "U", text: "empty", attachments: [], receivedAt: now },
+      { updateId: 7, kind: "message", chatId: "42", messageId: "7", senderId: "U", text: "cancelled", attachments: [], receivedAt: now },
+      { updateId: 8, kind: "message", chatId: "42", messageId: "8", senderId: "U", text: "rejected", attachments: [], receivedAt: now },
+    ];
+    let firstPoll = true;
+    const setReaction = vi.fn<NonNullable<TelegramBotClient["setReaction"]>>(async () => undefined);
+    const clearReaction = vi.fn<NonNullable<TelegramBotClient["clearReaction"]>>(async () => undefined);
+    const client: TelegramBotClient = {
+      async poll(_offset, _timeout, signal) {
+        if (firstPoll) {
+          firstPoll = false;
+          return updates;
+        }
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener("abort", () => { resolve(); }, { once: true });
+        });
+        return [];
+      },
+      async download() { throw new Error("unexpected download"); },
+      async sendMessage() { return { messageId: "sent" }; },
+      async sendAttachment() { return { messageId: "attachment" }; },
+      setReaction,
+      clearReaction,
+    };
+    const cancel = vi.fn<NonNullable<ChannelHost["cancel"]>>(async () => ({ status: "accepted" }));
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async (request) => {
+      if (request.text === "normal") return { status: "completed", text: "done" };
+      if (request.text === "empty") return { status: "completed" };
+      if (request.text === "cancelled") return { status: "cancelled" };
+      return { status: "rejected" };
+    });
+    const channel = createTelegramChannel({
+      context: context(
+        parseTelegramConfig({
+          botToken: TOKEN,
+          allowedChatIds: ["42"],
+          reactions: { working: true, done: false, error: false },
+        }),
+        dispatch,
+        { cancel },
+      ),
+      clientFactory: () => client,
+    });
+
+    await channel.start?.({ signal: new AbortController().signal });
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() => expect(clearReaction).toHaveBeenCalledTimes(updates.length));
+
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(setReaction).toHaveBeenCalledTimes(updates.length);
+    for (const update of updates) {
+      expect(setReaction).toHaveBeenCalledWith(
+        "42",
+        update.kind === "message" ? update.messageId : "",
+        "👀",
+        expect.any(AbortSignal),
+      );
+      expect(clearReaction).toHaveBeenCalledWith(
+        "42",
+        update.kind === "message" ? update.messageId : "",
+        expect.any(AbortSignal),
+      );
+    }
+    expect(setReaction.mock.calls.some(([, , emoji]) => emoji === "👍" || emoji === "👎")).toBe(false);
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("keeps legacy setReaction clients string-only while reaction clearing stays additive", async () => {
+    const now = new Date().toISOString();
+    let firstPoll = true;
+    const emojis: string[] = [];
+    const client: TelegramBotClient = {
+      async poll(_offset, _timeout, signal) {
+        if (firstPoll) {
+          firstPoll = false;
+          return [{
+            updateId: 1,
+            kind: "message",
+            chatId: "42",
+            messageId: "1",
+            senderId: "U",
+            text: "empty",
+            attachments: [],
+            receivedAt: now,
+          }];
+        }
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener("abort", () => { resolve(); }, { once: true });
+        });
+        return [];
+      },
+      async download() { throw new Error("unexpected download"); },
+      async sendMessage() { return { messageId: "sent" }; },
+      async sendAttachment() { return { messageId: "attachment" }; },
+      async setReaction(_chatId, _messageId, emoji) {
+        expect(typeof emoji).toBe("string");
+        emojis.push(emoji);
+      },
+    };
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async () => ({ status: "completed" }));
+    const channel = createTelegramChannel({
+      context: context(
+        parseTelegramConfig({
+          botToken: TOKEN,
+          allowedChatIds: ["42"],
+          reactions: { working: true, done: false, error: false },
+        }),
+        dispatch,
+      ),
+      clientFactory: () => client,
+    });
+
+    await channel.start?.({ signal: new AbortController().signal });
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(emojis).toEqual(["👀"]));
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
   it("accumulates multi-select AskUser values until Done and answers free-text questions", async () => {
     const now = new Date().toISOString();
     const callbacks = new Map<string, string>();
@@ -2649,24 +3193,28 @@ describe("telegram channel", () => {
     let stage = 0;
     let callbackToken: string | undefined;
     let sentCount = 0;
+    const answerCallback = vi.fn<NonNullable<TelegramBotClient["answerCallback"]>>(async () => undefined);
     const sent = vi.fn<TelegramBotClient["sendMessage"]>(async (request) => {
       callbackToken ??= request.buttons?.[0]?.data;
       sentCount += 1;
       return { messageId: `sent-${String(sentCount)}` };
     });
     const client: TelegramBotClient = {
-      async poll(_offset, _timeout, signal) {
+      async poll(offset, _timeout, signal) {
         if (stage === 0) { stage += 1; return [{ updateId: 1, kind: "message", chatId: "42", messageId: "1", senderId: "U", text: "start", attachments: [], receivedAt: now }]; }
-        if (stage === 1 && callbackToken !== undefined) { stage += 1; return [{ updateId: 2, kind: "callback", callbackId: "callback-1", chatId: "42", messageId: "2", senderId: "U", data: callbackToken, receivedAt: now }]; }
-        if (stage === 2) { stage += 1; return [{ updateId: 3, kind: "message", chatId: "42", messageId: "3", senderId: "U", text: "/cancel", attachments: [], receivedAt: now }]; }
-        if (stage === 3) { stage += 1; return [{ updateId: 4, kind: "message", chatId: "42", messageId: "4", senderId: "U", text: "steer", attachments: [], receivedAt: now }]; }
-        await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+        if (stage === 1 && offset >= 2 && callbackToken !== undefined) { stage += 1; return [{ updateId: 2, kind: "callback", callbackId: "callback-1", chatId: "42", messageId: "2", senderId: "U", data: callbackToken, receivedAt: now }]; }
+        if (stage === 2 && offset >= 3) { stage += 1; return [{ updateId: 3, kind: "message", chatId: "42", messageId: "3", senderId: "U", text: "/cancel", attachments: [], receivedAt: now }]; }
+        if (stage === 3 && offset >= 4) { stage += 1; return [{ updateId: 4, kind: "message", chatId: "42", messageId: "4", senderId: "U", text: "steer", attachments: [], receivedAt: now }]; }
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener("abort", () => { resolve(); }, { once: true });
+        });
         return [];
       },
       async download() { throw new Error("unexpected download"); },
       sendMessage: sent,
       async sendAttachment() { return { messageId: "attachment" }; },
-      async answerCallback() {},
+      answerCallback,
     };
     const offerLiveInput = vi.fn<NonNullable<ChannelHost["offerLiveInput"]>>(async (input) => ({ status: input.text === "steer" ? "applied" : "requeue" }));
     const answerAsk = vi.fn<NonNullable<ChannelHost["answerAsk"]>>(async () => ({ status: "accepted" }));
@@ -2681,10 +3229,22 @@ describe("telegram channel", () => {
     });
     expect(channel.capabilities).toMatchObject({ liveInput: true, askUser: true, approvals: false, cancellation: true, runtimeControl: true });
     await channel.start?.({ signal: new AbortController().signal });
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(callbackToken).toBeDefined());
     await vi.waitFor(() => {
-      expect(answerAsk).toHaveBeenCalledOnce();
-      expect(cancel).toHaveBeenCalledOnce();
-      expect(offerLiveInput).toHaveBeenCalledTimes(2);
+      expect({
+        answerAsk: answerAsk.mock.calls.length,
+        answerCallback: answerCallback.mock.calls.length,
+        cancel: cancel.mock.calls.length,
+        offerLiveInput: offerLiveInput.mock.calls.length,
+        stage,
+      }).toEqual({
+        answerAsk: 1,
+        answerCallback: 1,
+        cancel: 1,
+        offerLiveInput: 2,
+        stage: 4,
+      });
     });
     expect(answerAsk).toHaveBeenCalledWith("telegram:42", expect.objectContaining({ interactionId: "ask-1", answers: { choice: ["yes"] } }), expect.any(AbortSignal));
     expect(cancel).toHaveBeenCalledWith(expect.objectContaining({ conversationId: "telegram:42" }));
@@ -2894,9 +3454,14 @@ describe("telegram channel", () => {
   });
 });
 
-function context(config: ReturnType<typeof parseTelegramConfig>, dispatch: ChannelHost["dispatch"], controls: Partial<ChannelHost> = {}): Parameters<typeof createTelegramChannel>[0]["context"] {
+function context(
+  config: ReturnType<typeof parseTelegramConfig>,
+  dispatch: ChannelHost["dispatch"],
+  controls: Partial<ChannelHost> = {},
+  moduleLogger: ModuleLogger = logger(),
+): Parameters<typeof createTelegramChannel>[0]["context"] {
   const host: ChannelHost = { grantedCapabilities: new Set(), getCapability() { return undefined; }, dispatch, ...controls };
-  return { instanceId: "telegram", config, provenance: {}, configDirectory: "/config", workspaceDirectory: "/workspace", dataDirectory: "/data", logger: logger(), host, signal: new AbortController().signal };
+  return { instanceId: "telegram", config, provenance: {}, configDirectory: "/config", workspaceDirectory: "/workspace", dataDirectory: "/data", logger: moduleLogger, host, signal: new AbortController().signal };
 }
 
 function logger(): ModuleLogger { return { debug() {}, info() {}, warn() {}, error() {} }; }

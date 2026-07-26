@@ -370,7 +370,6 @@ function personalConfig(agentId: string, displayName: string): Record<string, un
           end: "07:00",
           timezone: "Europe/Rome",
         },
-        transport: { ipFamily: 4 },
         transcription: {
           endpoint: "http://127.0.0.1:50060/v1/audio/transcriptions",
           model: "large-v3-v20240930",

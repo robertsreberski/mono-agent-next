@@ -808,7 +808,6 @@ function assertExactPersonalConfig(config) {
       defaultDestination: env("PERSONAL_AGENT_TELEGRAM_CHAT_ID"),
       reactions: { working: true, done: false, error: true },
       quietHours: { start: "23:00", end: "07:00", timezone: "Europe/Rome" },
-      transport: { ipFamily: 4 },
       transcription: {
         endpoint: "http://127.0.0.1:50060/v1/audio/transcriptions",
         model: "large-v3-v20240930",
@@ -902,6 +901,7 @@ async function proveScaffoldFirstTurns(scaffoldDirectory, providerBaseUrl, perso
             parsed.personalCron.scheduledAt,
           )
           || parsed.telegramDeliveries !== 1
+          || parsed.telegramCommandRegistrations !== 1
           || parsed.personalSkillBytes !== PERSONAL_SKILL_PROOF_BYTES
           || JSON.stringify(parsed.channelIds) !== JSON.stringify([
             "openai-api",
@@ -1095,6 +1095,7 @@ if (template === "personal") {
 }
 const nativeFetch = globalThis.fetch;
 let telegramDeliveries = 0;
+let telegramCommandRegistrations = 0;
 if (template === "personal") globalThis.fetch = telegramFixtureFetch;
 let markerPath;
 let personalSkillBytes;
@@ -1153,6 +1154,7 @@ try {
     assert.equal(new Date(cronInstant).toISOString(), cronInstant);
     assert.equal(cron.value.idempotencyKey, personalCronIdempotencyKey(cronInstant));
     assert.equal(telegramDeliveries, 1);
+    assert.equal(telegramCommandRegistrations, 1);
     personalCron = cron.value;
   }
   await host.drain();
@@ -1180,7 +1182,9 @@ try {
     reply: expectedReply,
     channelIds,
     ...(firstRunMarker === undefined ? {} : { firstRunMarker }),
-    ...(personalCron === undefined ? {} : { personalCron, telegramDeliveries }),
+    ...(personalCron === undefined
+      ? {}
+      : { personalCron, telegramCommandRegistrations, telegramDeliveries }),
     ...(personalSkillBytes === undefined ? {} : { personalSkillBytes }),
   }) + "\n");
 } finally {
@@ -1200,6 +1204,10 @@ async function telegramFixtureFetch(input, init) {
   if (method === "getUpdates") {
     await pause(25, init?.signal);
     return telegramResponse([]);
+  }
+  if (method === "setMyCommands") {
+    telegramCommandRegistrations += 1;
+    return telegramResponse(true);
   }
   if (method === "sendMessage") {
     telegramDeliveries += 1;
