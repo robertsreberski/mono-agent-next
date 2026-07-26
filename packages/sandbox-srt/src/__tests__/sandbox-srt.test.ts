@@ -629,6 +629,96 @@ export {`,
     await expect(openSandboxSrt({ config: config(absent) })).rejects.toMatchObject({ code: "sandbox_unavailable" });
   });
 
+  it("rejects a relative selected file path", async () => {
+    const fixture = await createFixture();
+    await expect(openSandboxSrt({
+      config: {
+        ...config(fixture),
+        executable: { path: "relative-srt", sha256: fixture.executableHash },
+      },
+    })).rejects.toThrow("SRT executable path must be absolute.");
+  });
+
+  it("rejects a selected file beneath an absent parent", async () => {
+    const fixture = await createFixture();
+    await expect(openSandboxSrt({
+      config: {
+        ...config(fixture),
+        executable: {
+          path: join(fixture.root, "absent-parent", "srt"),
+          sha256: fixture.executableHash,
+        },
+      },
+    })).rejects.toMatchObject({
+      code: "sandbox_unavailable",
+      message: "SRT executable parent is absent or inaccessible.",
+    });
+  });
+
+  it("rejects a selected file beneath a non-canonical parent", async () => {
+    const fixture = await createFixture();
+    const parentAlias = join(fixture.root, "parent-alias");
+    await symlink(fixture.root, parentAlias);
+    await expect(openSandboxSrt({
+      config: {
+        ...config(fixture),
+        executable: {
+          path: join(parentAlias, "srt"),
+          sha256: fixture.executableHash,
+        },
+      },
+    })).rejects.toThrow("SRT executable parent path must be canonical.");
+  });
+
+  it("rejects a selected file whose parent is not a directory", async () => {
+    const fixture = await createFixture();
+    const parentFile = join(fixture.root, "parent-file");
+    await writeFile(parentFile, "not a directory", { mode: 0o600 });
+    await expect(openSandboxSrt({
+      config: {
+        ...config(fixture),
+        executable: {
+          path: join(parentFile, "srt"),
+          sha256: fixture.executableHash,
+        },
+      },
+    })).rejects.toThrow("SRT executable parent must be a regular directory.");
+  });
+
+  it("allows a root-owned safe parent but rejects every other untrusted owner", async () => {
+    const fixture = await createFixture();
+    const currentUid = process.getuid?.();
+    if (currentUid === undefined) throw new Error("sandbox-srt filesystem tests require POSIX ownership.");
+    if (currentUid === 0) throw new Error("sandbox-srt filesystem tests require a non-root user.");
+
+    await expect(openSandboxSrt({
+      config: {
+        ...config(fixture),
+        executable: { path: "/usr/bin/true", sha256: "0".repeat(64) },
+      },
+    })).rejects.toMatchObject({
+      code: "sandbox_unavailable",
+      message: "SRT executable must be owned by the current user.",
+    });
+
+    const getuid = Object.getOwnPropertyDescriptor(process, "getuid");
+    if (getuid === undefined) throw new Error("sandbox-srt filesystem tests require process.getuid.");
+    Object.defineProperty(process, "getuid", { ...getuid, value: () => currentUid + 1 });
+    try {
+      await expect(openSandboxSrt({ config: config(fixture) }))
+        .rejects.toThrow(/SRT (?:executable|settings) parent has an untrusted owner\./u);
+    } finally {
+      Object.defineProperty(process, "getuid", getuid);
+    }
+  });
+
+  it("rejects a selected file beneath a group/world-writable parent", async () => {
+    const fixture = await createFixture();
+    await chmod(fixture.root, 0o722);
+    await expect(openSandboxSrt({ config: config(fixture) }))
+      .rejects.toThrow(/SRT (?:executable|settings) parent must not be group\/world writable\./u);
+  });
+
   it("pins filesystem identity and content before every run and reports unhealthy after mutation", async () => {
     const executableMutation = await createFixture();
     const sandbox = await openSandboxSrt({ config: config(executableMutation) });
