@@ -71,6 +71,24 @@ Compose the morning briefing.
 });
 
 describe("trigger-cron lifecycle", () => {
+  it("does not schedule explicitly disabled jobs supplied through the public factory", async () => {
+    const clock = new TestClock("1970-01-01T00:00:00.000Z");
+    const host = new RecordingHost();
+    const trigger = createCronTrigger({
+      instanceId: "cron",
+      jobs: [job({ enabled: false })],
+      host,
+      clock,
+    });
+
+    expect(trigger.jobs).toEqual([]);
+    await trigger.start?.({ signal: new AbortController().signal });
+    await clock.advanceTo("1970-01-01T00:01:00.000Z");
+    expect(host.events).toEqual([]);
+    await expect(trigger.invoke("heartbeat")).rejects.toThrow(/Unknown cron job/u);
+    await trigger.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
   it("emits one deterministic event per schedule and suppresses replay of the same instant", async () => {
     const clock = new TestClock("1970-01-01T00:00:00.000Z");
     const host = new RecordingHost();

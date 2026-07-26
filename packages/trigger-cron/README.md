@@ -51,7 +51,24 @@ Each regular `*.md` file in the directory contains strict YAML frontmatter and
 uses its Markdown body as the prompt. `notify` is either a selected proactive
 channel instance id (which uses that channel's configured default destination)
 or an object containing `channel` and the channel-owned conversation
-`destination`.
+`destination`. `enabled` defaults to `true`; set it to `false` to keep a fully
+validated job file in the directory without scheduling or exposing it through
+the maintenance command. A directory containing only disabled jobs is valid.
+
+```markdown
+---
+id: morning-briefing
+enabled: true
+expression: 30 7 * * *
+timezone: Europe/Rome
+runtime: pi
+model: openai-codex:gpt-5.6-sol
+notify:
+  channel: telegram
+  destination: telegram:42
+---
+Compose the morning briefing.
+```
 
 ## Architecture
 

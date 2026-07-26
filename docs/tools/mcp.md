@@ -61,16 +61,16 @@ retain their established external-effect authority.
 
 ## Request-context grant
 
-The Personal transcription tool needs the current request's attachment without
-accepting an arbitrary local path. This is the sole host-context exception.
-Opt in by naming the existing direct stdio transport in agent config:
+A project MCP may need the current request's attachment without accepting an
+arbitrary local path. This is the sole host-context exception. Opt in by naming
+the existing direct stdio transport in agent config:
 
 ```json
 {
   "context": {
     "mcp": {
       "configPath": "./.mcp.json",
-      "requestContextServers": ["transcribe"]
+      "requestContextServers": ["project-context"]
     }
   }
 }
@@ -81,6 +81,14 @@ each must resolve to a configured direct `type: "stdio"` transport. A missing
 name, duplicate, or HTTP transport fails config validation. This is a transport
 check, not a locality check: the configured command can proxy through SSH, a
 container, or the network and can forward or exfiltrate everything it receives.
+
+Servers written for the predecessor environment-variable contract are not
+compatible with this grant. A server that expects `MONO_AGENT_MCP_*` request
+context at process startup must be ported to read the reserved per-call
+metadata before its name is added to `requestContextServers`; there is no
+environment compatibility shim. See
+[Migrate a v0 project](/getting-started/migrate-from-v0/) for the complete
+configuration changes.
 
 For each call to a selected server, Core supplies immutable
 `_meta["com.mono-agent/request-context"]` data with `schemaVersion: 1`:

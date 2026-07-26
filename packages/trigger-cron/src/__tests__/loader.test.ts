@@ -115,6 +115,53 @@ describe("trigger-cron job loader", () => {
     });
   });
 
+  it("fully validates disabled jobs before excluding them from the loaded set", async () => {
+    const disabled = parseCronJobMarkdown("disabled.md", jobMarkdown([
+      "enabled: false",
+      'expression: "* * * * *"',
+      "runtime: pi",
+    ]));
+    expect(disabled).toMatchObject({
+      id: "disabled",
+      enabled: false,
+      runtime: "pi",
+    });
+    expect(() => parseCronJobMarkdown("invalid-disabled.md", jobMarkdown([
+      "enabled: false",
+      "expression: not-a-cron-expression",
+    ]))).toThrow(/Cron expressions must contain exactly five fields/u);
+    expect(() => parseCronJobMarkdown("invalid-enabled.md", jobMarkdown([
+      "enabled: no",
+      'expression: "* * * * *"',
+    ]))).toThrow(/enabled must be a boolean/u);
+
+    await withTempDirectory(async (root) => {
+      await writeFile(join(root, "active.md"), jobMarkdown([
+        "enabled: true",
+        'expression: "* * * * *"',
+      ]));
+      await writeFile(join(root, "disabled.md"), jobMarkdown([
+        "enabled: false",
+        'expression: "* * * * *"',
+      ]));
+
+      const jobs = await loadCronJobsFromDirectory(root);
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ id: "active", enabled: true });
+    });
+  });
+
+  it("allows a directory whose fully valid jobs are all disabled", async () => {
+    await withTempDirectory(async (root) => {
+      await writeFile(join(root, "disabled.md"), jobMarkdown([
+        "enabled: false",
+        'expression: "* * * * *"',
+      ]));
+
+      await expect(loadCronJobsFromDirectory(root)).resolves.toEqual([]);
+    });
+  });
+
   it("ignores non-Markdown entries and lowercases an uppercase extension-derived id", async () => {
     await withTempDirectory(async (root) => {
       await writeFile(join(root, "Morning-Brief.MD"), jobMarkdown(['expression: "* * * * *"']));

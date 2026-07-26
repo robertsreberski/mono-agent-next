@@ -31,6 +31,7 @@ export interface CronNotifyDestination {
 
 export interface CronJob {
   readonly id: string;
+  readonly enabled?: boolean;
   readonly expression: string;
   readonly timezone: string;
   readonly prompt: string;
@@ -48,6 +49,7 @@ export interface CronJob {
 const FRONTMATTER = /^---[ \t]*\n([\s\S]*?)\n---[ \t]*(?:\n|$)/u;
 const JOB_KEYS = new Set([
   "id",
+  "enabled",
   "expression",
   "timezone",
   "runtime",
@@ -127,7 +129,7 @@ export async function loadCronJobsFromDirectory(
       ? rejected[0]!
       : `${String(rejected.length)} cron jobs were rejected:\n${rejected.map((entry) => `- ${entry}`).join("\n")}`);
   }
-  return Object.freeze(jobs);
+  return Object.freeze(jobs.filter((job) => job.enabled !== false));
 }
 
 export function parseCronJobMarkdown(
@@ -165,6 +167,7 @@ export function parseCronJobMarkdown(
   if (!/^[a-z0-9][a-z0-9._-]{0,127}$/u.test(id)) {
     throw new TriggerCronConfigError(`${fileName} id must match ^[a-z0-9][a-z0-9._-]{0,127}$.`);
   }
+  const enabled = optionalBoolean(metadata.enabled, `${fileName} enabled`);
   const expression = readString(metadata.expression, `${fileName} expression`);
   const timezone = metadata.timezone === undefined
     ? defaultTimezone
@@ -185,6 +188,7 @@ export function parseCronJobMarkdown(
   const maxRunMs = positiveInteger(metadata.maxRunMs, DEFAULT_MAX_RUN_MS, `${fileName} maxRunMs`, 86_400_000);
   return Object.freeze({
     id,
+    ...(enabled === undefined ? {} : { enabled }),
     expression,
     timezone,
     prompt,
@@ -253,6 +257,14 @@ function parseNotify(value: unknown, fileName: string): string | CronNotifyDesti
 
 function optionalString(value: unknown, field: string): string | undefined {
   return value === undefined ? undefined : readString(value, field);
+}
+
+function optionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "boolean") {
+    throw new TriggerCronConfigError(`${field} must be a boolean.`);
+  }
+  return value;
 }
 
 function positiveInteger(value: unknown, fallback: number, field: string, maximum: number): number {
