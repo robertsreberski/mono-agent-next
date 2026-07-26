@@ -82,10 +82,12 @@ normalized `ChannelInboundRequest` -> Core -> final reply. Supported Core
 controls route `/cancel`, live steering, and bounded AskUser button/free-text
 answers. `/model` and `/effort` maintain bounded, process-local per-chat
 overrides. Activity updates edit one status message when Telegram supports it.
-Interactive replies and AskUser prompts are split at Telegram's 4096-character
-message bound; activity text is bounded to one editable message. Multiple
-AskUser answers are unique, capped at 20 values, and require at least one value
-before Done.
+Tool calls and results use that same transient message, showing only the
+bounded tool name and completed/failed state; tool input, result content, and
+call ids are never projected into chat. Interactive replies and AskUser prompts
+are split at Telegram's 4096-character message bound; activity text is bounded
+to one editable message. Multiple AskUser answers are unique, capped at 20
+values, and require at least one value before Done.
 
 Polling uses one ordered primary lane plus one ordered control lane so an
 AskUser answer, `/cancel`, or live-input offer can reach an active turn without

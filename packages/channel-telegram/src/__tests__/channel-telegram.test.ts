@@ -2715,6 +2715,29 @@ describe("telegram channel", () => {
     const dispatch = vi.fn<ChannelHost["dispatch"]>(async (_request, reply) => {
       await reply.emit({ type: "activity", text: "Thinking" });
       await reply.emit({ type: "activity", text: "Still thinking" });
+      await reply.emit({
+        type: "tool-call",
+        call: {
+          id: "read-1",
+          name: "Read\nworkspace\u0000",
+          input: { path: "private-input-do-not-project" },
+        },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: {
+          callId: "read-1",
+          content: [{ type: "text", text: "private-result-do-not-project" }],
+        },
+      });
+      await reply.emit({
+        type: "tool-call",
+        call: { id: "shell-1", name: "Shell", input: {} },
+      });
+      await reply.emit({
+        type: "tool-result",
+        result: { callId: "shell-1", content: [], isError: true },
+      });
       return { status: "completed", text: "done" };
     });
     const channel = createTelegramChannel({
@@ -2727,6 +2750,7 @@ describe("telegram channel", () => {
     });
     await channel.start?.({ signal: new AbortController().signal });
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(edit).toHaveBeenCalledTimes(5));
     expect(dispatch.mock.calls[0]?.[0]).toMatchObject({
       conversationId: "telegram:42",
       model: "runtime/model-a",
@@ -2734,7 +2758,15 @@ describe("telegram channel", () => {
       text: "summarize\n\n[Transcript of voice.ogg]\nspoken words",
       attachments: [{ name: "voice.ogg" }],
     });
-    expect(edit).toHaveBeenCalledWith(expect.objectContaining({ messageId: "status-1", text: "Still thinking" }));
+    expect(edit.mock.calls.map(([request]) => request.text)).toEqual([
+      "Still thinking",
+      "Running Read workspace…",
+      "Read workspace completed.",
+      "Running Shell…",
+      "Shell failed.",
+    ]);
+    expect(JSON.stringify([sent.mock.calls, edit.mock.calls])).not.toContain("private-input");
+    expect(JSON.stringify([sent.mock.calls, edit.mock.calls])).not.toContain("private-result");
     await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
   });
 

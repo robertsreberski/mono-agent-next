@@ -65,7 +65,7 @@ The current ratio is 0.802.
 | `@mono-agent/memory-local` | 19 | 8097 | 4767 |
 | `@mono-agent/service-macos` | 22 | 5770 | 2131 |
 | `create-mono-agent` | 12 | 5487 | 2199 |
-| `@mono-agent/channel-slack` | 15 | 3765 | 2191 |
+| `@mono-agent/channel-slack` | 15 | 3823 | 2241 |
 
 The complete package table is retained in the generated report model exposed by
 `pnpm --silent run report:source-beta -- --json`.

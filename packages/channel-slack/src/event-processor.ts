@@ -34,6 +34,8 @@ import type {
   SlackSocketEvent,
 } from "./socket.js";
 
+const MAX_TRACKED_TOOL_CALLS = 256;
+
 export interface SlackEventProcessor {
   readonly transientActivityEntries: number;
   clear(): void;
@@ -166,6 +168,7 @@ export function createSlackEventProcessor(
     const signal = AbortSignal.any([lifecycleSignal, turn.signal]);
     let replyText = "";
     let askDeliveryFailed = false;
+    const toolNames = new Map<string, string>();
     const reply: ChannelReplySink = {
       async emit(replyEvent: ChannelReplyEvent): Promise<void> {
         if (replyEvent.type === "text-delta") replyText += replyEvent.delta;
@@ -180,6 +183,17 @@ export function createSlackEventProcessor(
               statusText(replyEvent.text),
               signal,
             ));
+        } else if (replyEvent.type === "tool-call" || replyEvent.type === "tool-result") {
+          const activity = toolActivity(toolNames, replyEvent);
+          if (threadId !== undefined && client.setAssistantStatus !== undefined) {
+            await bestEffort("configured action tool activity", async () =>
+              client.setAssistantStatus!(
+                channelId,
+                threadId!,
+                statusText(activity),
+                signal,
+              ));
+          }
         } else if (replyEvent.type === "attachment") {
           await bestEffort("configured action attachment delivery", async () =>
             client.postFile({
@@ -415,6 +429,7 @@ export function createSlackEventProcessor(
     const signal = AbortSignal.any([lifecycleSignal, turn.signal]);
     let replyText = "";
     let askDeliveryFailed = false;
+    const toolNames = new Map<string, string>();
     const reply: ChannelReplySink = {
       async emit(replyEvent: ChannelReplyEvent): Promise<void> {
         if (replyEvent.type === "text-delta") replyText += replyEvent.delta;
@@ -428,6 +443,19 @@ export function createSlackEventProcessor(
             conversationId,
             event,
             statusText(replyEvent.text),
+            signal,
+            warnOutput,
+          );
+        } else if (replyEvent.type === "tool-call" || replyEvent.type === "tool-result") {
+          const activity = toolActivity(toolNames, replyEvent);
+          rememberActivity(activityLedger, conversationId, activity);
+          await indicateActivity(
+            client,
+            assistantStatusUnavailable,
+            reacted,
+            conversationId,
+            event,
+            statusText(activity),
             signal,
             warnOutput,
           );
@@ -556,6 +584,36 @@ export function createSlackEventProcessor(
     processControlEvent,
     processPrimaryEvent,
   };
+}
+
+function toolActivity(
+  toolNames: Map<string, string>,
+  event: Extract<ChannelReplyEvent, { readonly type: "tool-call" | "tool-result" }>,
+): string {
+  if (event.type === "tool-call") {
+    rememberToolName(toolNames, event.call.id, displayToolName(event.call.name));
+    return `Running ${toolNames.get(event.call.id) ?? "tool"}…`;
+  }
+  const name = toolNames.get(event.result.callId);
+  toolNames.delete(event.result.callId);
+  return `${name ?? "Tool"} ${event.result.isError === true ? "failed" : "completed"}.`;
+}
+
+function rememberToolName(
+  toolNames: Map<string, string>,
+  callId: string,
+  name: string,
+): void {
+  if (!toolNames.has(callId) && toolNames.size >= MAX_TRACKED_TOOL_CALLS) {
+    const oldest = toolNames.keys().next().value as string | undefined;
+    if (oldest !== undefined) toolNames.delete(oldest);
+  }
+  toolNames.set(callId, name);
+}
+
+function displayToolName(name: string): string {
+  const normalized = name.replace(/[\s\u0000-\u001f\u007f]+/gu, " ").trim();
+  return normalized.length === 0 ? "tool" : normalized;
 }
 
 function inbound(
