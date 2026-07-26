@@ -1133,17 +1133,17 @@ describe("mono-agent operator channel module", () => {
       },
       delivery: {
         delivered: {
-          conversationId: "trigger:cron:compliance",
+          conversationId: "operator:new-conversation",
           text: "compliance",
           idempotencyKey: "operator-compliance",
         },
         conflicting: {
-          conversationId: "trigger:cron:compliance",
+          conversationId: "operator:new-conversation",
           text: "conflicting compliance",
           idempotencyKey: "operator-compliance",
         },
         unknown: {
-          conversationId: "trigger:cron:compliance",
+          conversationId: "operator:new-conversation",
           text: "ambiguous compliance",
           idempotencyKey: "operator-compliance-unknown",
         },
@@ -1193,6 +1193,61 @@ describe("mono-agent operator channel module", () => {
     });
     expect(openConversation).toHaveBeenCalledOnce();
     expect(openConversation.mock.calls[0]?.[0]).not.toHaveProperty("initialText");
+  });
+
+  it("delivers to the exact explicit conversation without opening a replacement", async () => {
+    const config = monoAgentModule.schema.parse({ auth: { token: TOKEN } });
+    const operatorIdentity = identity("module-agent", "Module Agent");
+    const openConversation =
+      vi.fn<NonNullable<ChannelHost["openConversation"]>>(async () => ({
+        conversationId: "unrequested-replacement",
+        createdAt: new Date().toISOString(),
+      }));
+    const channel = await monoAgentModule.create({
+      instanceId: "operator",
+      config,
+      provenance: {},
+      configDirectory: "/config",
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: {
+        grantedCapabilities: new Set(["operator.identity.v1"]),
+        getCapability<T>(name: string): T | undefined {
+          return (name === "operator.identity.v1"
+            ? operatorIdentity
+            : undefined) as T | undefined;
+        },
+        async dispatch() { return { status: "completed" }; },
+        openConversation,
+      },
+      signal: new AbortController().signal,
+    });
+    moduleChannels.add(channel);
+    const message = {
+      conversationId: "existing-conversation",
+      text: "proactive",
+      idempotencyKey: "existing-destination",
+    };
+    const delivered = await channel.deliver!(
+      message,
+      new AbortController().signal,
+    );
+    expect(delivered).toEqual({
+      status: "delivered",
+      idempotencyKey: "existing-destination",
+    });
+    expect(channel.resolveDeliveryHistory?.(message, delivered)).toEqual({
+      conversationId: "existing-conversation",
+    });
+    await expect(channel.deliver!(
+      message,
+      new AbortController().signal,
+    )).resolves.toEqual({
+      status: "duplicate",
+      idempotencyKey: "existing-destination",
+    });
+    expect(openConversation).not.toHaveBeenCalled();
   });
 
   it("fingerprints Unicode metadata keys in deterministic UTF-8 byte order", async () => {
@@ -1390,7 +1445,7 @@ describe("mono-agent operator channel module", () => {
     });
     moduleChannels.add(channel);
     const message = {
-      conversationId: "trigger:cron:one",
+      conversationId: "operator:new-conversation",
       text: "proactive",
       idempotencyKey: "ambiguous-open",
     };

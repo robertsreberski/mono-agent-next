@@ -169,7 +169,10 @@ function createOperatorModuleChannel(
       resolveDefaultDeliveryConversationId() {
         return PROACTIVE_NEW_CONVERSATION_ID;
       },
-      resolveDeliveryHistory(_message, result) {
+      resolveDeliveryHistory(message, result) {
+        if (!requestsNewOperatorConversation(message.conversationId)) {
+          return { conversationId: message.conversationId };
+        }
         if (result.messageId === undefined) {
           throw new TypeError("Operator delivery history requires the opened conversation id.");
         }
@@ -216,6 +219,12 @@ function createOperatorModuleChannel(
         }
         let receipt: OperatorDeliveryReceipt;
         const execution = (async (): Promise<ChannelDeliveryResult> => {
+          if (!requestsNewOperatorConversation(message.conversationId)) {
+            return {
+              status: "delivered",
+              idempotencyKey: message.idempotencyKey,
+            };
+          }
           try {
             const opened = await context.host.openConversation!({ metadata: { ...(message.metadata ?? {}), source: "operator-proactive", idempotencyKey: message.idempotencyKey }, signal });
             return { status: "delivered", idempotencyKey: message.idempotencyKey, messageId: opened.conversationId };
@@ -234,6 +243,10 @@ function createOperatorModuleChannel(
       },
     }),
   };
+}
+
+function requestsNewOperatorConversation(conversationId: string): boolean {
+  return conversationId === "" || conversationId === PROACTIVE_NEW_CONVERSATION_ID;
 }
 
 function throwIfAborted(signal: AbortSignal, message: string): void {

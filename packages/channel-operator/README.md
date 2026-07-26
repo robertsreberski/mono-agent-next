@@ -95,7 +95,7 @@ absent or malformed.
    substitutes. Conversation listing exposes `cron`/`webhook` provenance only
    for conversations explicitly opened by operator proactive delivery; Core's
    internal trigger execution conversation remains unmarked.
-6. Client disconnect, explicit cancellation, drain, and stop abort the exact dispatch signal; an empty proactive destination is canonicalized to the stable adapter-owned `operator:new-conversation` operation before Core's durable admission, then opens a Core conversation behind Core/state restart-safe delivery authority plus a bounded fingerprint-aware live-instance guard. Conflicting keys fail, ambiguous opens remain unknown, and exhausted guard capacity fails closed.
+6. Client disconnect, explicit cancellation, drain, and stop abort the exact dispatch signal. Proactive delivery preserves every explicit destination and resolves history back to that exact conversation. Only an empty destination (canonicalized before durable admission) or the exact adapter-owned `operator:new-conversation` sentinel opens a Core conversation. New-conversation delivery remains behind Core/state restart-safe delivery authority plus a bounded fingerprint-aware live-instance guard: conflicting keys fail, ambiguous opens remain unknown, and exhausted guard capacity fails closed.
 
 ### Package structure
 
