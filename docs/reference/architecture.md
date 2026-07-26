@@ -213,8 +213,18 @@ drains before stopping on process signals.
 Templates contain exact direct dependencies, one strict config, an initial
 schema, instructions, a names-only `.env.example`, and no secret values.
 Personal also creates empty skill/cron roots and `.mcp.json`. Rendering is
-transactional, refuses existing targets and unsafe paths, and runs dependency
-installation only after an explicit `--install`.
+transactional, accepts only an absent target or an existing empty real
+directory, refuses unsafe paths, and runs dependency installation only after
+an explicit `--install`.
+
+Publication uses an owner-private, append-only v2 journal with fsynced
+`stage-created`, `park-intent`, `parked`, `published`, and `committed` phases.
+The journal records exact device and inode identities and derives deterministic
+stage and parked sibling names from one nonce. Recovery restores or reconciles
+only those exact identities, rejects legacy v1 and substituted state, and
+reports safe artifacts that could not be removed as retained recovery paths.
+An exact-inode, parent-fsynced abandonment hardlink distinguishes a completed
+synchronous failure from an operation still owned by a live process.
 
 TUI, web, service management, and docs MCP are separate from the agent-process
 template closure.

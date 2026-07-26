@@ -75,10 +75,23 @@ The target must be absent or an existing empty real directory. Symlinks,
 non-directories, non-empty targets, duplicate scaffold owners, unsafe package
 names, and unknown templates fail closed. Files are prepared in a private
 sibling staging directory and published only after the full template and any
-explicit installation succeed. A PID-owned lock keeps concurrent scaffolds
-serialized; after an interrupted owner exits, the next invocation quarantines
-its exact private stage and reclaims the stale lock without following
-substituted paths.
+explicit installation succeed. A PID-owned, append-only v2 journal keeps
+concurrent scaffolds serialized and records fsynced `stage-created`,
+`park-intent`, `parked`, `published`, and `committed` phases with exact device
+and inode identities. The stage and parked names are deterministic from the
+journal nonce, and each sibling-directory rename is followed by a parent
+directory fsync.
+
+After an interrupted owner exits, the next invocation uses only that journal
+and the recorded identities to restore the exact empty prior target or finish
+reconciling a physically published scaffold. A torn unterminated final frame
+is ignored; malformed durable frames, legacy v1 locks, substituted paths, and
+unsafe identities fail closed for manual recovery. Safe artifacts that cannot
+be removed are returned through `ScaffoldResult.retainedRecoveryPaths` and the
+CLI JSON result instead of being hidden or recursively deleted. A synchronous
+post-publication failure adds a parent-fsynced deterministic abandonment
+hardlink to the exact journal inode, so a retry in the same long-lived process
+can recover without mistaking that finished operation for a live owner.
 
 `install-skill` accepts `--target claude|codex|both` (default `both`), refuses
 existing installs unless `--force` is explicit, validates the bounded bundled
@@ -117,7 +130,8 @@ recovery.
 ```text
 create-mono-agent argv -> validate template/target -> private stage
                       -> render exact dependency/config matrix
-                      -> optional install -> publish runnable project
+                      -> optional install -> fsynced publication journal
+                      -> publish runnable project or retain exact recovery paths
 
 mono-agent init/setup -> same scaffolder
 mono-agent install-skill -> validated bundle -> private sibling stage
@@ -131,7 +145,8 @@ mono-agent other      -> @mono-agent/cli runCli
 | Module | Purpose |
 | --- | --- |
 | `src/scaffold.ts` | Transaction, no-clobber checks, optional installer, and file publication. |
-| `src/scaffold-lock.ts` | PID-owned scaffold locking, exact stale-stage quarantine, and crash recovery. |
+| `src/scaffold-lock.ts` | PID-owned scaffold locking, fsynced publication phases, and exact crash recovery. |
+| `src/scaffold-journal.ts` | Strict v2 scaffold journal codec, phase validation, and deterministic sibling paths. |
 | `src/npm-name.ts` | Shared npm package-name validation and normalization. |
 | `src/templates.ts` | Deterministic three-template config, schema, manifest, instructions, and secret-name files. |
 | `src/cli.ts` | npm-create/init routing and argument validation. |
@@ -147,7 +162,7 @@ mono-agent other      -> @mono-agent/cli runCli
 
 | Export | Use |
 | --- | --- |
-| `scaffoldAgent(options)` | Transactionally create one selected project template. |
+| `scaffoldAgent(options)` | Transactionally create one selected project template and report any safe retained recovery paths. |
 | `installComposerSkill(options)` | Transactionally install the bundled composer skill. |
 | `runCreateMonoAgentCli(argv, io?, options?)` | Exercise create/init/delegation without spawning a process. |
 | `renderProject(options)` | Render any template; defaults to `minimal`. |
