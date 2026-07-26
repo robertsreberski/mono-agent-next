@@ -11,11 +11,20 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { OPERATOR_PROTOCOL, OPERATOR_REGISTRY_SCHEMA } from "@mono-agent/operator";
+import {
+  OPERATOR_LIMITS,
+  OPERATOR_PROTOCOL,
+  OPERATOR_REGISTRY_SCHEMA,
+} from "@mono-agent/operator";
 
 import type { WebConfig } from "../config.js";
 import type { WebAgent } from "../contracts.js";
-import { startWebServer, type WebServerHandle } from "../server.js";
+import {
+  externalOriginForConnection,
+  normalizeWebHostname,
+  startWebServer,
+  type WebServerHandle,
+} from "../server.js";
 import type { WebOperatorGateway } from "../service.js";
 import { DurableWebStore } from "../store.js";
 import { cleanup, temporaryDirectory } from "./helpers.js";
@@ -160,6 +169,68 @@ describe("standalone web product", () => {
       body: JSON.stringify({ agentId: "personal" }),
     });
     expect(simple.status).toBe(415);
+
+  });
+
+  it("supports explicit no-auth mode without weakening authority, origin, or media defenses", async () => {
+    const root = await temporaryDirectory();
+    const server = await startWebServer({
+      config: config(join(root, "state"), {
+        host: "0.0.0.0",
+        auth: { mode: "none" },
+        allowInsecureHttp: true,
+      }),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(server);
+
+    const bootstrap = await fetch(`${server.url}api/v1/bootstrap`);
+    expect(bootstrap.status).toBe(200);
+    await expect(bootstrap.json()).resolves.toMatchObject({ agents: [{ id: "personal" }] });
+
+    const created = await fetch(`${server.url}api/v1/threads`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agentId: "personal" }),
+    });
+    expect(created.status).toBe(201);
+
+    const forgedAuthority = `attacker.invalid:${server.port}`;
+    expect(await getWithAuthority(server, "/api/v1/bootstrap", forgedAuthority, false)).toBe(421);
+    const loopbackLookalike = `127.attacker.example:${server.port}`;
+    expect(await getWithAuthority(server, "/api/v1/bootstrap", loopbackLookalike, false)).toBe(421);
+    expect(await mutationWithAuthority(server, loopbackLookalike)).toBe(421);
+
+    const crossOrigin = await fetch(`${server.url}api/v1/threads`, {
+      method: "POST",
+      headers: { origin: "http://attacker.invalid", "content-type": "application/json" },
+      body: JSON.stringify({ agentId: "personal" }),
+    });
+    expect(crossOrigin.status).toBe(403);
+
+    const simple = await fetch(`${server.url}api/v1/threads`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ agentId: "personal" }),
+    });
+    expect(simple.status).toBe(415);
+
+    const crossSite = await fetch(`${server.url}api/v1/threads`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "sec-fetch-site": "cross-site" },
+      body: JSON.stringify({ agentId: "personal" }),
+    });
+    expect(crossSite.status).toBe(403);
+
+    const oversized = await fetch(`${server.url}api/v1/threads`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agentId: "personal",
+        padding: "x".repeat(OPERATOR_LIMITS.requestBytes),
+      }),
+    });
+    expect(oversized.status).toBe(413);
   });
 
   it("applies guarded agent/thread patches and streams authenticated resumable revisions", async () => {
@@ -260,6 +331,16 @@ describe("standalone web product", () => {
       `console.example.test:${server.port}`,
       false,
     )).toBe(421);
+    expect(externalOriginForConnection(
+      "::ffff:127.0.0.1",
+      "console.example.test",
+      [externalOrigin],
+    )).toBe(externalOrigin);
+    expect(externalOriginForConnection(
+      "100.64.0.2",
+      "console.example.test",
+      [externalOrigin],
+    )).toBeUndefined();
   });
 
   it("serves packed assets without treating API or health paths as SPA navigation", async () => {
@@ -449,6 +530,45 @@ describe("standalone web product", () => {
       config: config(join(root, "state"), { host: "0.0.0.0" }),
       operatorGateway: immediateGateway(),
     })).rejects.toMatchObject({ code: "insecure_http_opt_in_required" });
+
+    await expect(startWebServer({
+      config: config(join(root, "no-auth-state"), { host: "0.0.0.0", auth: { mode: "none" } }),
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "insecure_http_opt_in_required" });
+    await expect(startWebServer({
+      config: config(join(root, "lookalike-state"), {
+        host: "127.attacker.example",
+        auth: { mode: "none" },
+      }),
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "insecure_http_opt_in_required" });
+    await expect(startWebServer({
+      config: config(join(root, "lookalike-token-state"), {
+        host: "127.attacker.example",
+        token: "sixteen-char-key!",
+        allowInsecureHttp: true,
+      }),
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "unsafe_non_loopback_bind" });
+
+    const noAuthServer = await startWebServer({
+      config: config(join(root, "no-auth-state"), {
+        host: "0.0.0.0",
+        auth: { mode: "none" },
+        allowInsecureHttp: true,
+      }),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(noAuthServer);
+    expect((await fetch(`${noAuthServer.url}api/v1/bootstrap`)).status).toBe(200);
+  });
+
+  it("canonicalizes valid IPv6 listener forms without confusing hostnames for loopback IPs", () => {
+    expect(normalizeWebHostname("0:0:0:0:0:0:0:1")).toBe("::1");
+    expect(normalizeWebHostname("0:0:0:0:0:0:0:0")).toBe("::");
+    expect(normalizeWebHostname("FD00:0:0:0:0:0:0:1")).toBe("fd00::1");
+    expect(normalizeWebHostname("[2001:0DB8:0:0:0:0:0:1]")).toBe("2001:db8::1");
+    expect(normalizeWebHostname("127.attacker.example")).toBe("127.attacker.example");
   });
 
   it("accepts a direct Tailscale address origin on an authenticated wildcard listener", async () => {
@@ -460,6 +580,87 @@ describe("standalone web product", () => {
     webServers.add(server);
     const tailscaleAuthority = `100.100.100.100:${server.port}`;
     expect(await mutationWithAuthority(server, tailscaleAuthority)).toBe(201);
+  });
+
+  it("accepts only exact configured direct-listener hosts on the actual listener port", async () => {
+    const root = await temporaryDirectory();
+    const server = await startWebServer({
+      config: config(join(root, "state"), {
+        host: "0.0.0.0",
+        allowInsecureHttp: true,
+        allowedHosts: ["personal.tailnet.ts.net"],
+      }),
+      operatorGateway: immediateGateway(),
+    });
+    webServers.add(server);
+
+    const authority = `personal.tailnet.ts.net:${server.port}`;
+    expect(await getWithAuthority(server, "/api/v1/bootstrap", authority, true)).toBe(200);
+    expect(await mutationWithAuthority(server, authority)).toBe(201);
+    expect(await getWithAuthority(
+      server,
+      "/api/v1/bootstrap",
+      `personal.tailnet.ts.net:${server.port + 1}`,
+      true,
+    )).toBe(421);
+    expect(await getWithAuthority(
+      server,
+      "/api/v1/bootstrap",
+      `lookalike.personal.tailnet.ts.net:${server.port}`,
+      true,
+    )).toBe(421);
+    expect(await getWithAuthority(server, "/api/v1/bootstrap", `localhost:${server.port}`, true)).toBe(200);
+  });
+
+  it("rejects malformed programmatic auth and non-canonical host allowlists before binding", async () => {
+    const root = await temporaryDirectory();
+    const base = config(join(root, "state"));
+
+    await expect(startWebServer({
+      config: {
+        ...base,
+        auth: { token: WEB_TOKEN, mode: "none" },
+      } as unknown as WebConfig,
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "invalid_config" });
+    await expect(startWebServer({
+      config: {
+        ...base,
+        listen: { host: "fe80::1%en0", port: 0 },
+      },
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "invalid_config" });
+    await expect(startWebServer({
+      config: {
+        ...base,
+        allowedHosts: ["Personal.Tailnet.TS.NET"],
+      },
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "invalid_config" });
+    await expect(startWebServer({
+      config: {
+        ...base,
+        externalOrigins: ["http://console.example.test"],
+      },
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "invalid_config" });
+    await expect(startWebServer({
+      config: {
+        ...base,
+        externalOrigins: ["not-an-origin"],
+      },
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "invalid_config" });
+    await expect(startWebServer({
+      config: {
+        ...base,
+        externalOrigins: [
+          "https://console.example.test",
+          "https://console.example.test",
+        ],
+      },
+      operatorGateway: immediateGateway(),
+    })).rejects.toMatchObject({ code: "invalid_config" });
   });
 
   it("destroys sockets on deadline and returns after an upstream ignores shutdown", async () => {
@@ -605,18 +806,21 @@ function config(
   overrides: {
     readonly host?: string;
     readonly token?: string;
+    readonly auth?: WebConfig["auth"];
     readonly allowInsecureHttp?: boolean;
     readonly agentRegistries?: readonly string[];
+    readonly allowedHosts?: readonly string[];
     readonly externalOrigins?: readonly string[];
   } = {},
 ): WebConfig {
   return {
     configVersion: 1,
     listen: { host: overrides.host ?? "127.0.0.1", port: 0 },
-    auth: { token: overrides.token ?? WEB_TOKEN },
+    auth: overrides.auth ?? { token: overrides.token ?? WEB_TOKEN },
     allowInsecureHttp: overrides.allowInsecureHttp ?? false,
     dataDirectory,
     agentRegistries: overrides.agentRegistries ?? [join(dataDirectory, "missing-registry")],
+    allowedHosts: overrides.allowedHosts ?? [],
     externalOrigins: overrides.externalOrigins ?? [],
     sourcePath: join(dataDirectory, "web.config.json"),
   };

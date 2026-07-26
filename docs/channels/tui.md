@@ -111,5 +111,5 @@ vertical.
 ## Related
 
 - [Terminal operator](/observability/tui/) — standalone pi-tui product.
-- [Web operator](/observability/web-console/) — standalone authenticated browser product.
+- [Web operator](/observability/web-console/) — standalone browser product with explicit access mode.
 - [architecture](/reference/architecture/) — dependency and product boundaries.

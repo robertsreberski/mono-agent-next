@@ -1,14 +1,14 @@
 ---
 title: "Standalone web operator"
-description: "Run the authenticated browser product with separate config and owner-private durable conversations."
+description: "Run the browser product with an explicit access mode, separate config, and owner-private durable conversations."
 sidebar:
   order: 5
 ---
 
 `@mono-agent/web` is a standalone browser operator for one or more locally
-registered agents. It has its own config, listener, process, authentication,
-and durable state. It is never selected by `mono-agent.config.json`, and
-loading agent config never starts it.
+registered agents. It has its own config, listener, process, access mode, and
+durable state. It is never selected by `mono-agent.config.json`, and loading
+agent config never starts it.
 
 The browser talks only to this product. The product discovers agents and uses
 the strict `@mono-agent/operator` client, reducer, identity binding, and action
@@ -17,7 +17,8 @@ state machine.
 
 ## Configure and run
 
-Create a strict `web.config.json`:
+Create a strict `web.config.json`. Token mode keeps the secret in an environment
+variable:
 
 ```json
 {
@@ -36,13 +37,34 @@ Create a strict `web.config.json`:
   "dataDirectory": "./.mono-agent/web",
   "agentRegistries": [
     "../example-agent/.mono-agent/trace-sources"
-  ]
+  ],
+  "allowedHosts": [],
+  "externalOrigins": []
 }
 ```
 
 Paths resolve relative to the config file. `agentRegistries` must contain at
 least one directory. Literal bearer values and unknown config fields are
 rejected.
+
+For an owner-trusted network where a bearer login is intentionally unwanted,
+select no-auth mode instead:
+
+```json
+{
+  "configVersion": 1,
+  "listen": { "host": "0.0.0.0", "port": 5050 },
+  "auth": { "mode": "none" },
+  "allowInsecureHttp": true,
+  "allowedHosts": ["mickey-home.tail8a9beb.ts.net"],
+  "dataDirectory": "./.mono-agent/web",
+  "agentRegistries": ["../example-agent/.mono-agent/trace-sources"]
+}
+```
+
+`auth` is a strict union: use exactly `{"token":{"$env":"NAME"}}` or
+`{"mode":"none"}`. Mixing the two, adding auth fallbacks, or omitting `auth`
+fails validation.
 
 Start the foreground product:
 
@@ -58,25 +80,35 @@ from every agent.
 
 <a id="security-boundary-trusted-network-no-login"></a>
 
-## Browser authentication and request boundaries
+## Browser access and request boundaries
 
-The source config holds only `auth.token.$env`. The resolved token must contain
-at least 16 characters. The browser shell prompts for it, retains it only in
-that origin's `sessionStorage`, and sends bearer authentication with every
-`/api/v1/*` request.
+In token mode, the resolved token must contain at least 16 characters. The
+browser first probes bootstrap without credentials. A `401` switches it to the
+login screen; after login it retains the token only in that origin's
+`sessionStorage` and sends bearer authentication with every `/api/v1/*`
+request.
+
+In no-auth mode, that same probe returns `200`. The browser clears any stale
+session token, omits bearer headers, and hides the lock action. This mode
+removes only the bearer check. Every client that can reach the listener and
+satisfy its request-boundary checks can read conversations and act with the
+owner's authority. Bind to a trusted interface, enforce LAN or tailnet access
+controls, and never expose it to an untrusted network.
 
 The server validates the actual listener port and accepted local authority on
 shell, health, and API requests. Mutations additionally require JSON and a
 same-authority HTTP `Origin`; incompatible `Sec-Fetch-Site` requests fail
 closed. These Host/origin checks defend browser request integrity and DNS
-rebinding, but they do not replace authentication or transport encryption.
+rebinding, but they are not authentication and do not provide transport
+encryption. No-auth mode retains these checks, the media/body bounds, and the
+static-file defenses unchanged.
 Turn and upload bodies retain the 1 MiB product cap. Structured AskUser answers
 have a dedicated 8 MiB cap so every module-sdk-valid answer remains
 representable after JSON escaping.
 
 ### Non-loopback plaintext is an explicit risk opt-in
 
-A non-loopback listener requires both a token of at least 24 characters and:
+A non-loopback listener always requires:
 
 ```json
 {
@@ -85,10 +117,36 @@ A non-loopback listener requires both a token of at least 24 characters and:
 }
 ```
 
-This remains plaintext HTTP: the bearer and conversation data are not
-transport-encrypted. `allowInsecureHttp` only acknowledges that risk. Prefer a
-loopback listener behind a correctly configured HTTPS reverse proxy or
-Tailscale Serve, and do not expose the direct HTTP port to an untrusted network.
+Token mode additionally requires a token of at least 24 characters; no-auth
+mode still requires the explicit opt-in. This remains plaintext HTTP:
+credentials, when present, and conversation data are not transport-encrypted.
+`allowInsecureHttp` only acknowledges that risk.
+
+`allowedHosts` adds exact direct-listener hostnames or IP addresses, such as a
+MagicDNS or LAN DNS name. Values contain no scheme, credentials, path, wildcard,
+or port; they are normalized to lowercase/canonical IP form and deduplicated.
+The configured listener authority remains implicitly accepted. Every request
+must use the server's actual bound port, so an entry is
+`"mickey-home.tail8a9beb.ts.net"`, not
+`"mickey-home.tail8a9beb.ts.net:5050"`.
+
+For loopback behind an HTTPS reverse proxy or Tailscale Serve, configure the
+exact externally visible origin:
+
+```json
+{
+  "listen": { "host": "127.0.0.1", "port": 5050 },
+  "externalOrigins": [
+    "https://mickey-home.tail8a9beb.ts.net:8444"
+  ]
+}
+```
+
+`externalOrigins` entries are canonical HTTPS origins. The port is part of the
+origin and must be present when it is not `443`. They are honored only when the
+TCP peer is loopback, so the field cannot turn a direct remote connection into
+a trusted proxy connection. Conversely, `allowedHosts` does not configure TLS
+or replace `externalOrigins` for a loopback proxy.
 
 ## Browser API
 
@@ -97,8 +155,8 @@ The browser-facing API is versioned separately from the agent operator wire:
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /healthz` | Unauthenticated process health after authority validation. |
-| `GET /api/v1/bootstrap` | Authenticated discovered-agent and conversation summary. |
-| `GET /api/v1/events` | Authenticated revisioned invalidation stream. |
+| `GET /api/v1/bootstrap` | Discovered-agent and conversation summary after the selected access check. |
+| `GET /api/v1/events` | Revisioned invalidation stream after the selected access check. |
 | `POST /api/v1/threads` | Create a source-bound conversation for a live agent. |
 | `GET /api/v1/threads/:id` | Read durable messages and current turn state. |
 | `PATCH /api/v1/threads/:id` | Rename, archive, or restore one conversation. |
@@ -114,15 +172,15 @@ The browser-facing API is versioned separately from the agent operator wire:
 
 The browser stream contains web thread projections, not raw operator frames.
 The embedded React/assistant-ui client is built and packed as an installable
-PWA. It keeps its bearer token in `sessionStorage`; service-worker precaching
-excludes API and health responses.
+PWA. Token mode keeps its bearer token in `sessionStorage`; no-auth mode stores
+none. Service-worker precaching excludes API and health responses.
 
 ## Durable state and turn ownership
 
 The web service, not the browser response, owns an upstream turn. Closing or
 reloading a tab stops delivery to that response but does not abort the agent
 turn. The service continues committing assistant text and its terminal state;
-the next authenticated read sees the durable result. Explicit cancellation or
+the next admitted read sees the durable result. Explicit cancellation or
 product shutdown is required to abort upstream work.
 
 `dataDirectory` is created as `0700`. Its marker, singleton lease, and

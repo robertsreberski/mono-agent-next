@@ -52,7 +52,14 @@ vi.mock("./api", async (importOriginal) => {
     ...original,
     readToken: () => "console-override-token-0123456789",
     saveToken: () => undefined,
-    api: { ...original.api, bootstrap: apiMocks.bootstrap, thread: apiMocks.thread },
+    api: {
+      ...original.api,
+      probeBootstrap: async () => {
+        throw new original.ApiError("Unauthorized.", 401, "unauthorized");
+      },
+      bootstrap: apiMocks.bootstrap,
+      thread: apiMocks.thread,
+    },
     subscribeEvents: apiMocks.subscribeEvents,
   };
 });

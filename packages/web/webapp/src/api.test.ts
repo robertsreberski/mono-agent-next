@@ -1,10 +1,22 @@
 // SPDX-License-Identifier: MIT
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
 
-import { parseEventStream } from "./api";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { api, parseEventStream, saveToken } from "./api";
 import type { WebEvent } from "./types";
 
-describe("authenticated browser event protocol", () => {
+Object.defineProperty(window, "sessionStorage", {
+  configurable: true,
+  value: memoryStorage(),
+});
+
+afterEach(() => {
+  window.sessionStorage.clear();
+  vi.restoreAllMocks();
+});
+
+describe("browser event protocol", () => {
   it("parses fragmented SSE data blocks and ignores heartbeats", async () => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
@@ -26,4 +38,48 @@ describe("authenticated browser event protocol", () => {
       threadId: "thread-1",
     }]);
   });
+
+  it("probes without credentials and sends a stored token only after authentication is required", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({
+        version: 1,
+        revision: 0,
+        agents: [],
+        threads: [],
+        newProactiveThreadIds: [],
+      }), { status: 200, headers: { "content-type": "application/json" } })
+    );
+
+    saveToken("browser-token-0123456789");
+    await api.probeBootstrap();
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).has("authorization")).toBe(false);
+
+    await api.bootstrap();
+    expect(new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get("authorization"))
+      .toBe("Bearer browser-token-0123456789");
+  });
 });
+
+function memoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear() {
+      values.clear();
+    },
+    getItem(key) {
+      return values.get(key) ?? null;
+    },
+    key(index) {
+      return [...values.keys()][index] ?? null;
+    },
+    removeItem(key) {
+      values.delete(key);
+    },
+    setItem(key, value) {
+      values.set(key, String(value));
+    },
+  };
+}

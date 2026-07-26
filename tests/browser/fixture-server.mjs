@@ -63,7 +63,10 @@ async function dispatchScriptedTurn(reply) {
   return { status: "completed", text: BROWSER_FIXTURE_REPLY };
 }
 
-export async function startBrowserFixture({ port = BROWSER_FIXTURE_PORT } = {}) {
+export async function startBrowserFixture({
+  port = BROWSER_FIXTURE_PORT,
+  auth = { token: BROWSER_FIXTURE_WEB_TOKEN },
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), "mono-agent-browser-render-"));
   const registryDirectory = join(root, "registry");
   const lifecycle = new AbortController();
@@ -143,9 +146,11 @@ export async function startBrowserFixture({ port = BROWSER_FIXTURE_PORT } = {}) 
     config: {
       configVersion: 1,
       listen: { host: "127.0.0.1", port },
-      auth: { token: BROWSER_FIXTURE_WEB_TOKEN },
+      auth,
+      allowInsecureHttp: false,
       dataDirectory: join(root, "web-data"),
       agentRegistries: [registryDirectory],
+      allowedHosts: [],
       externalOrigins: [],
       sourcePath: join(root, "web.config.json"),
     },
