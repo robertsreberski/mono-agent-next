@@ -110,7 +110,7 @@ export interface CronTrigger extends Trigger {
 
 export function createCronTrigger(options: CreateCronTriggerOptions): CronTrigger {
   const clock = options.clock ?? systemCronClock;
-  const jobs = Object.freeze([...options.jobs]);
+  const jobs = Object.freeze(options.jobs.filter((job) => job.enabled !== false));
   const jobsById = new Map(jobs.map((job) => [job.id, job]));
   if (jobsById.size !== jobs.length) throw new Error("Cron job ids must be unique.");
   const durableState = readDurableStateCapability(options.host);

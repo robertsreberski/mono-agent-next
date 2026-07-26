@@ -16,6 +16,9 @@ packages or changing a live agent.
    generated minimal template.
 3. [Read the core concepts](/getting-started/concepts/) before selecting another
    runtime, channel, durable capability, or operator product.
+4. If you have a predecessor project, follow
+   [Migrate a v0 project](/getting-started/migrate-from-v0/) before selecting
+   its MCP servers, cron jobs, or webhook routes.
 
 ## What you will prove
 
