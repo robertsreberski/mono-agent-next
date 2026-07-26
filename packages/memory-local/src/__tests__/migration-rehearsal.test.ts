@@ -777,7 +777,9 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     expect(after.ino).toBe(before.ino);
   });
 
-  it("adopts a valid legacy store at the permanent receipt cap as degraded", async () => {
+  it.each([MAX_CAPTURE_RECEIPTS, MAX_CAPTURE_RECEIPTS + 1])(
+    "adopts a valid legacy store with %d permanent receipts as degraded",
+    async (receiptCount) => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
@@ -789,7 +791,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     );
     database.exec("BEGIN IMMEDIATE");
     try {
-      for (let index = 0; index < MAX_CAPTURE_RECEIPTS; index += 1) {
+      for (let index = 0; index < receiptCount; index += 1) {
         insert.run(
           `memory-local:capture-receipt:${Buffer.from(
             `migration-cap-${String(index).padStart(6, "0")}`,
@@ -827,10 +829,12 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     })).resolves.toMatchObject({
       audit: {
         status: "degraded",
-        receipts: { count: MAX_CAPTURE_RECEIPTS },
+        receipts: { count: receiptCount },
       },
     });
-  }, 120_000);
+    },
+    120_000,
+  );
 
   it("rejects dangling capture receipts before adoption commit", async () => {
     const fixture = await readFixture();

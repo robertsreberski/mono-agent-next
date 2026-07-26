@@ -17,17 +17,17 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `6e7ae005af14456221d1edca41cfaeb7ebe57219a645dc9b4fbd89eb8ba804fe`
+Source manifest digest: `59066369ab97c18b0fa5a0a48112a22ac70d1dd25030c9034e8dce6fea0d0074`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
 | Production | 311 | 95864 |
-| Tests | 163 | 76200 |
+| Tests | 163 | 76204 |
 | Repository and product tooling | 56 | 18848 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **530** | **190912** |
+| **Total executable source** | **530** | **190916** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
@@ -50,7 +50,7 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 76200 | 71898 | within limit |
+| test source, at 0.75 of production | 76204 | 71898 | within limit |
 
 The current ratio is 0.795.
 
@@ -61,7 +61,7 @@ The current ratio is 0.795.
 | `@mono-agent/state-local` | 27 | 14355 | 5466 |
 | `@mono-agent/core` | 39 | 12902 | 18232 |
 | `@mono-agent/runtime-pi` | 28 | 8865 | 4978 |
-| `@mono-agent/memory-local` | 19 | 8046 | 4717 |
+| `@mono-agent/memory-local` | 19 | 8046 | 4721 |
 | `@mono-agent/web` | 28 | 7169 | 2507 |
 | `@mono-agent/service-macos` | 22 | 5770 | 2131 |
 | `create-mono-agent` | 11 | 4477 | 1651 |
