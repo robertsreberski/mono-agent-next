@@ -56,6 +56,37 @@ credential store. `mode: "sdk"` supports attempt-scoped live input; `mode:
 "cli"` is a bounded one-shot JSONL transport. Neither mode silently falls back
 to the other.
 
+Both modes accept Core's exact selected-sandbox executor grant. CLI mode routes
+its adapter-owned `claude` child through that grant and never falls back to
+host spawning when the sandbox fails. SDK mode replaces the Agent SDK's local
+Claude Code spawn through `spawnClaudeCodeProcess` and adapts its process
+lifecycle to the same grant. A custom SDK or CLI transport is rejected while a
+sandbox is selected because Core cannot prove its process boundary. With
+`sandbox.mode: "off"`, both modes use their documented direct host paths.
+
+When a sandbox is selected for CLI mode, `binary` must be the absolute Claude
+executable path. Put unchanged operational names such as `PATH`, `HOME`,
+`TMPDIR`, `LANG`, and `CLAUDE_CONFIG_DIR` in the sandbox environment's
+`inherit` list as needed. Allow the configured
+`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`. SDK mode must additionally
+allow its generated `CLAUDE_CODE_ENTRYPOINT` and `CLAUDE_AGENT_SDK_VERSION`
+values. An undeclared name fails before Claude starts.
+
+For selected CLI execution, Core's per-instance runtime data directory is a
+required canonical, current-user-owned `0700` root. The adapter creates each
+owner-private system-prompt artifact below it and removes the artifact after
+the attempt. With sandboxing off, that temporary artifact retains its direct
+host location under the operating system temporary directory.
+
+Restrictive SRT filesystem rules must use canonical absolute paths. Relative
+rules such as `"."` resolve from the wrapper working directory, which can
+change between runtime children. Allow read access to the canonical workspace
+and Claude runtime data roots. Ambient native authentication also requires
+access to the canonical `CLAUDE_CONFIG_DIR` or native default config root;
+grant only the read/write scope that native credentials and continuation state
+need. The CLI child needs read, not write, access to its runtime-authored
+system-prompt artifact.
+
 The selected instance exposes `claude:auth` before it starts. Its default
 `status` action reports only whether module-config or unverified ambient native
 authentication was selected; it never returns credential values or starts a
@@ -69,8 +100,10 @@ emulate interactive login.
 
 1. Core validates and resolves the strict module configuration.
 2. The runtime selects exactly one configured transport.
-3. The SDK transport dynamically loads the pinned SDK; the CLI transport spawns
-   `claude` with a direct argument array and writes the prompt on stdin.
+3. The SDK transport dynamically loads the pinned SDK and replaces its Claude
+   Code spawn through Core's executor when selected. The CLI transport starts
+   `claude` with a direct argument array through the same selected boundary and
+   writes the prompt on stdin.
 4. Provider events become normalized text, thinking, usage, and session events.
 5. Cancellation interrupts only the active query/process, and every failure
    carries typed retryability and side-effect settlement.
@@ -98,6 +131,7 @@ expose only bounded, redacted, accessor-free `Error` cause snapshots.
 | `jsonl.ts` | Shared Claude JSONL value and usage normalization. |
 | `sdk.ts` | Lazy Agent SDK adapter and live-input queue. |
 | `cli.ts` | Bounded direct-process stream-JSON adapter. |
+| `sandbox.ts` | Adapter from Core's exact sandbox executor grant to the CLI process seam. |
 | `auth-command.ts` | Non-serving, redacted authentication status and unsupported-action results. |
 | `runtime.ts` | Lifecycle, validation, session linkage, and normalization. |
 | `index.ts` | Typed module definition. |
@@ -139,8 +173,8 @@ runtime.
 ## What This Package Does Not Own
 
 It does not choose cross-runtime fallback, persist the canonical transcript,
-execute Core tools, widen permissions, infer secrets, or migrate native Claude
-sessions to another runtime.
+execute Core tools, choose sandbox policy, widen permissions, infer secrets, or
+migrate native Claude sessions to another runtime.
 
 ## Related Documentation
 

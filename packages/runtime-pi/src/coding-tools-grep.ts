@@ -22,6 +22,7 @@ import {
   displayPath,
   effectiveWorkdir,
   evidence,
+  executionBoundarySummary,
   optionalBoolean,
   optionalInteger,
   optionalString,
@@ -517,35 +518,64 @@ export function createRuntimePiGrepAgentTool(
     const limit = headLimit ?? nativeLimit ?? 100;
     const workdir = effectiveWorkdir(input, "Grep", options.workspaceDirectory);
     const maxOutputBytes = outputLimit(input, "Grep");
+    const searchPath = displayPath(path ?? ".", workdir);
+    const executionContext = context === undefined || outputMode !== "content"
+      ? 0
+      : context;
     const executionSignal = combinedSignal(options.turnSignal, signal);
     return approvedExecution(
       options,
       runtimePiGrepTool,
       toolCallId,
       [
-        "Allow this unsandboxed ripgrep search?",
-        `path: ${JSON.stringify(displayPath(path ?? ".", workdir))}`,
+        executionBoundarySummary(
+          options,
+          "Allow this ripgrep search through the selected Core sandbox?",
+          "Allow this unsandboxed ripgrep search?",
+        ),
+        `path: ${JSON.stringify(searchPath)}`,
         `glob: ${JSON.stringify(glob ?? "<none>")}`,
         `output_mode: ${outputMode}`,
         `limit: ${String(limit)}`,
         evidence("pattern", pattern),
       ].join("\n"),
       executionSignal,
-      async () => capRuntimePiAgentResult(
-        grepOutputMode(
-          await runRipgrep({
-            pattern,
-            searchPath: displayPath(path ?? ".", workdir),
-            ...(glob === undefined ? {} : { glob }),
-            ignoreCase: ignoreCase ?? false,
-            context: context === undefined || outputMode !== "content" ? 0 : context,
-            limit,
-            signal: executionSignal,
-          }),
-          outputMode,
-        ),
-        maxOutputBytes,
-      ),
+      async () => {
+        if (options.sandboxTools !== undefined) {
+          return capRuntimePiAgentResult(
+            await options.sandboxTools.execute(
+              runtimePiGrepTool.id,
+              {
+                pattern,
+                path: searchPath,
+                ...(glob === undefined ? {} : { glob }),
+                output_mode: outputMode,
+                context: executionContext,
+                ignoreCase: ignoreCase ?? false,
+                limit,
+                max_output_chars: maxOutputBytes,
+              },
+              executionSignal,
+            ),
+            maxOutputBytes,
+          );
+        }
+        return capRuntimePiAgentResult(
+          grepOutputMode(
+            await runRipgrep({
+              pattern,
+              searchPath,
+              ...(glob === undefined ? {} : { glob }),
+              ignoreCase: ignoreCase ?? false,
+              context: executionContext,
+              limit,
+              signal: executionSignal,
+            }),
+            outputMode,
+          ),
+          maxOutputBytes,
+        );
+      },
     );
   });
 }

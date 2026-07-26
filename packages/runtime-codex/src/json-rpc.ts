@@ -2,6 +2,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 
+import type {
+  SandboxProcessInput,
+  SandboxProcessOutput,
+} from "@mono-agent/module-sdk/internal";
+
 export type JsonRpcId = number | string;
 
 export interface JsonRpcMessage {
@@ -41,11 +46,18 @@ export class JsonRpcRequestError extends Error {
   }
 }
 
+export class JsonRpcProcessTerminationError extends Error {
+  constructor(message: string, options: ErrorOptions = {}) {
+    super(message, options);
+    this.name = "JsonRpcProcessTerminationError";
+  }
+}
+
 export interface ProcessLike {
   readonly pid?: number | undefined;
-  readonly stdin: NodeJS.WritableStream;
-  readonly stdout: NodeJS.ReadableStream;
-  readonly stderr: NodeJS.ReadableStream;
+  readonly stdin: SandboxProcessInput;
+  readonly stdout: SandboxProcessOutput;
+  readonly stderr: SandboxProcessOutput;
   once(event: "error", listener: (error: Error) => void): this;
   once(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
   kill(signal?: NodeJS.Signals): boolean;
@@ -87,7 +99,7 @@ export class JsonRpcProcess {
   #queuedServerRequests = 0;
   #nextId = 1;
   #stdout = "";
-  #stderr = "";
+  #stderr = Buffer.alloc(0);
   #closed = false;
   #processSettled = false;
   #closePromise: Promise<void> | undefined;
@@ -100,8 +112,11 @@ export class JsonRpcProcess {
     this.#maxStderrBytes = options.maxStderrBytes;
     const launch = options.spawnProcess ?? defaultSpawn;
     this.#child = launch(options.command, options.args, { cwd: options.cwd, env: options.env, shell: false });
-    this.#child.stdout.on("data", (chunk: Buffer | string) => this.#onStdout(chunk));
-    this.#child.stderr.on("data", (chunk: Buffer | string) => this.#onStderr(chunk));
+    this.#child.stdout.on("data", (chunk) => this.#onStdout(chunk));
+    this.#child.stderr.on("data", (chunk) => this.#onStderr(chunk));
+    this.#child.stdin.on("error", (error) => this.#fail(error));
+    this.#child.stdout.on("error", (error) => this.#fail(error));
+    this.#child.stderr.on("error", (error) => this.#fail(error));
     this.#child.once("error", (error) => {
       if (this.#child.pid === undefined) this.#settleProcess();
       this.#fail(error);
@@ -109,7 +124,8 @@ export class JsonRpcProcess {
     this.#child.once("close", (code, signal) => {
       this.#settleProcess();
       if (this.#closed) return;
-      const suffix = this.#stderr === "" ? "" : `: ${this.#stderr}`;
+      const stderr = this.#stderr.toString("utf8");
+      const suffix = stderr === "" ? "" : `: ${stderr}`;
       this.#fail(new Error(`Codex app-server exited ${signal ?? code ?? "unknown"}${suffix}`));
     });
   }
@@ -127,6 +143,10 @@ export class JsonRpcProcess {
     return () => {
       if (this.#serverRequestHandler === handler) this.#serverRequestHandler = undefined;
     };
+  }
+
+  get closed(): Promise<void> {
+    return this.#processClosed;
   }
 
   async request(method: string, params: unknown): Promise<unknown> {
@@ -166,12 +186,32 @@ export class JsonRpcProcess {
         entry.reject(new Error("Codex app-server closed"));
       }
       this.#pending.clear();
-      this.#child.stdin.end();
+      const cleanupErrors: Error[] = [];
+      try {
+        this.#child.stdin.end();
+      } catch (error) {
+        cleanupErrors.push(error instanceof Error ? error : new Error(String(error)));
+      }
       if (this.#processSettled) return;
-      this.#child.kill("SIGTERM");
+      try {
+        this.#child.kill("SIGTERM");
+      } catch (error) {
+        cleanupErrors.push(error instanceof Error ? error : new Error(String(error)));
+      }
       if (await this.#waitForClose(1_000)) return;
-      this.#child.kill("SIGKILL");
-      if (!await this.#waitForClose(1_000)) throw new Error("Codex app-server did not exit after SIGKILL");
+      try {
+        this.#child.kill("SIGKILL");
+      } catch (error) {
+        cleanupErrors.push(error instanceof Error ? error : new Error(String(error)));
+      }
+      if (!await this.#waitForClose(1_000)) {
+        throw new JsonRpcProcessTerminationError(
+          "Codex app-server did not exit after SIGKILL",
+          cleanupErrors.length === 0
+            ? {}
+            : { cause: new AggregateError(cleanupErrors, "Codex app-server cleanup operations failed") },
+        );
+      }
     })();
     return this.#closePromise;
   }
@@ -185,9 +225,9 @@ export class JsonRpcProcess {
     });
   }
 
-  #onStdout(chunk: Buffer | string): void {
+  #onStdout(chunk: Uint8Array): void {
     if (this.#closed) return;
-    this.#stdout += typeof chunk === "string" ? chunk : this.#decoder.write(chunk);
+    this.#stdout += this.#decoder.write(Buffer.from(chunk));
     if (Buffer.byteLength(this.#stdout) > this.#maxLineBytes && !this.#stdout.includes("\n")) {
       this.#fail(new Error("Codex app-server output exceeds the configured line limit"));
       return;
@@ -304,12 +344,29 @@ export class JsonRpcProcess {
     this.#serverRequestQueue = this.#serverRequestQueue.then(run, run);
   }
 
-  #onStderr(chunk: Buffer | string): void {
-    this.#stderr += typeof chunk === "string" ? chunk : chunk.toString("utf8");
-    const bytes = Buffer.byteLength(this.#stderr);
-    if (bytes > this.#maxStderrBytes) {
-      this.#stderr = Buffer.from(this.#stderr).subarray(bytes - this.#maxStderrBytes).toString("utf8");
+  #onStderr(chunk: Uint8Array): void {
+    const bytes = Buffer.from(chunk);
+    if (this.#maxStderrBytes <= 0) {
+      this.#stderr = Buffer.alloc(0);
+      return;
     }
+    if (bytes.length >= this.#maxStderrBytes) {
+      this.#stderr = Buffer.from(
+        bytes.subarray(bytes.length - this.#maxStderrBytes),
+      );
+      return;
+    }
+    const retainedBytes = Math.min(
+      this.#stderr.length,
+      this.#maxStderrBytes - bytes.length,
+    );
+    this.#stderr = Buffer.concat(
+      [
+        this.#stderr.subarray(this.#stderr.length - retainedBytes),
+        bytes,
+      ],
+      retainedBytes + bytes.length,
+    );
   }
 
   #fail(error: Error): void {
@@ -323,7 +380,7 @@ export class JsonRpcProcess {
     for (const listener of this.#listeners) {
       listener({ method: "$transport/closed", params: { message: error.message } });
     }
-    void this.close();
+    void this.close().catch(() => undefined);
   }
 
   #settleProcess(): void {

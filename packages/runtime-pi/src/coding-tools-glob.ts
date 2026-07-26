@@ -19,6 +19,7 @@ import {
   displayPath,
   effectiveWorkdir,
   evidence,
+  executionBoundarySummary,
   optionalInteger,
   optionalString,
   outputLimit,
@@ -230,6 +231,7 @@ export function createRuntimePiGlobAgentTool(
     }) ?? 100;
     const workdir = effectiveWorkdir(input, "Glob", options.workspaceDirectory);
     const maxOutputBytes = outputLimit(input, "Glob");
+    const searchPath = displayPath(path ?? ".", workdir);
     const executionSignal = combinedSignal(options.turnSignal, signal);
     const maxVisitedEntries = checkedGlobBound(
       options.glob?.maxVisitedEntries,
@@ -246,8 +248,12 @@ export function createRuntimePiGlobAgentTool(
       runtimePiGlobTool,
       toolCallId,
       [
-        "Allow this unsandboxed filesystem glob?",
-        `path: ${JSON.stringify(displayPath(path ?? ".", workdir))}`,
+        executionBoundarySummary(
+          options,
+          "Allow this filesystem glob through the selected Core sandbox?",
+          "Allow this unsandboxed filesystem glob?",
+        ),
+        `path: ${JSON.stringify(searchPath)}`,
         `limit: ${String(limit)}`,
         `traversal_entry_limit: ${String(maxVisitedEntries)}`,
         `traversal_deadline_ms: ${String(timeoutMs)}`,
@@ -255,9 +261,23 @@ export function createRuntimePiGlobAgentTool(
       ].join("\n"),
       executionSignal,
       async () => {
+        if (options.sandboxTools !== undefined) {
+          return capRuntimePiAgentResult(
+            await options.sandboxTools.execute(
+              runtimePiGlobTool.id,
+              {
+                pattern,
+                path: searchPath,
+                limit,
+                max_output_chars: maxOutputBytes,
+              },
+              executionSignal,
+            ),
+            maxOutputBytes,
+          );
+        }
         const deadlineSignal = AbortSignal.timeout(timeoutMs);
         const traversalSignal = AbortSignal.any([executionSignal, deadlineSignal]);
-        const searchPath = displayPath(path ?? ".", workdir);
         try {
           traversalSignal.throwIfAborted();
           await access(searchPath);

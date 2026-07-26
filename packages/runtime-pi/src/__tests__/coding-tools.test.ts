@@ -13,6 +13,7 @@ import { join } from "node:path";
 
 import type {
   AgentTool,
+  AgentToolResult,
 } from "@earendil-works/pi-agent-core";
 import type {
   RuntimeNativeToolDescriptor,
@@ -153,6 +154,11 @@ function fixture(
       readonly maxVisitedEntries?: number;
       readonly timeoutMs?: number;
     };
+    readonly sandboxExecute?: (
+      toolId: string,
+      params: Readonly<Record<string, unknown>>,
+      signal: AbortSignal,
+    ) => Promise<AgentToolResult<unknown>>;
   } = {},
 ): {
   readonly tools: Map<string, AgentTool>;
@@ -172,6 +178,9 @@ function fixture(
     record: (result) => results.push(result),
     onToolAttempt: attempts,
     ...(overrides.glob === undefined ? {} : { glob: overrides.glob }),
+    ...(overrides.sandboxExecute === undefined
+      ? {}
+      : { sandboxTools: { execute: overrides.sandboxExecute } }),
     webFetch: {
       resolve: async () => [PUBLIC_ADDRESS],
       request: overrides.webFetchRequest ?? (async () => ({
@@ -210,44 +219,194 @@ describe("Personal-compatible Pi coding tools", () => {
         displayName: "Read",
         effects: ["read"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       },
       {
         id: "Write",
         displayName: "Write",
         effects: ["write"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       },
       {
         id: "Glob",
         displayName: "Glob",
         effects: ["read"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       },
       {
         id: "Grep",
         displayName: "Grep",
         effects: ["read", "execute"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       },
       {
         id: "Bash",
         displayName: "Bash",
         effects: ["read", "write", "execute", "network"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       },
       {
         id: "WebFetch",
         displayName: "Web Fetch",
         effects: ["network"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       },
     ]);
+  });
+
+  it("routes all six coding tools through the selected Core sandbox executor", async () => {
+    const workspace = await temporaryRoot("runtime-pi-sandbox-routing-");
+    const execute = vi.fn(async (
+      toolId: string,
+      _params: Readonly<Record<string, unknown>>,
+    ) => ({
+      content: [{ type: "text" as const, text: `${toolId} sandboxed` }],
+      details: undefined,
+    }));
+    const selected = fixture(workspace, {
+      sandboxExecute: execute,
+      webFetchRequest: async () => {
+        throw new Error("host WebFetch must not run");
+      },
+    });
+    childProcessControl.override = () => {
+      throw new Error("host child process must not run");
+    };
+    const calls: readonly [string, Readonly<Record<string, unknown>>][] = [
+      ["Read", { file_path: "missing.txt" }],
+      ["Write", { file_path: "must-not-exist.txt", content: "blocked host write" }],
+      ["Glob", { pattern: "**/*.txt", path: "missing" }],
+      ["Grep", { pattern: "needle", path: "missing" }],
+      ["Bash", { command: "exit 99" }],
+      ["WebFetch", { url: "https://example.test/" }],
+    ];
+
+    for (const [name, params] of calls) {
+      await expect(tool(selected, name).execute(
+        `sandbox-${name}`,
+        params,
+        signal(),
+      )).resolves.toMatchObject({
+        content: [{ type: "text", text: `${name} sandboxed` }],
+      });
+    }
+
+    expect(execute.mock.calls.map(([toolId]) => toolId)).toEqual(
+      calls.map(([name]) => name),
+    );
+    expect(selected.authorize.mock.calls.map(([, , summary]) => summary))
+      .toSatisfy((summaries: unknown[]) =>
+        summaries.every((summary) =>
+          typeof summary === "string"
+          && summary.includes("selected Core sandbox")));
+    await expect(access(join(workspace, "must-not-exist.txt")))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    expect(selected.attempts).toHaveBeenCalledTimes(calls.length);
+    expect(selected.results).toHaveLength(calls.length);
+  });
+
+  it("forwards host-approved absolute paths and validated values to the filtered worker", async () => {
+    const workspace = await temporaryRoot("runtime-pi-worker-workspace-");
+    const hostHome = await temporaryRoot("runtime-pi-host-home-");
+    vi.stubEnv("HOME", hostHome);
+    const execute = vi.fn(async (
+      toolId: string,
+      _params: Readonly<Record<string, unknown>>,
+    ) => ({
+      content: [{ type: "text" as const, text: `${toolId} sandboxed` }],
+      details: undefined,
+    }));
+    const selected = fixture(workspace, { sandboxExecute: execute });
+
+    await tool(selected, "Read").execute("normalized-read", {
+      file_path: "read.txt",
+      offset: -1,
+      limit: 2,
+      workdir: "~",
+      max_output_chars: 123,
+    }, signal());
+    await tool(selected, "Write").execute("normalized-write", {
+      file_path: "write.txt",
+      content: "content",
+      workdir: "~",
+    }, signal());
+    await tool(selected, "Glob").execute("normalized-glob", {
+      pattern: "*.txt",
+      path: "glob-root",
+      limit: 4,
+      workdir: "~",
+      max_output_chars: 124,
+    }, signal());
+    await tool(selected, "Grep").execute("normalized-grep", {
+      pattern: "needle",
+      path: "grep-root",
+      glob: "*.txt",
+      output_mode: "content",
+      context: 2,
+      case_insensitive: true,
+      head_limit: 5,
+      workdir: "~",
+      max_output_chars: 125,
+    }, signal());
+    await tool(selected, "Bash").execute("normalized-bash", {
+      command: "pwd",
+      timeout: 5_000,
+      workdir: "~",
+      description: "print worker directory",
+      max_output_chars: 126,
+    }, signal());
+    await tool(selected, "WebFetch").execute("normalized-fetch", {
+      url: "https://example.test/",
+      headers: { "User-Agent": "runtime-pi-test" },
+      max_output_chars: 127,
+    }, signal());
+
+    expect(execute.mock.calls.map(([toolId, params]) => [toolId, params])).toEqual([
+      ["Read", {
+        path: join(hostHome, "read.txt"),
+        start_line: 1,
+        limit: 2,
+        max_output_chars: 123,
+      }],
+      ["Write", {
+        path: join(hostHome, "write.txt"),
+        content: "content",
+      }],
+      ["Glob", {
+        pattern: "*.txt",
+        path: join(hostHome, "glob-root"),
+        limit: 4,
+        max_output_chars: 124,
+      }],
+      ["Grep", {
+        pattern: "needle",
+        path: join(hostHome, "grep-root"),
+        glob: "*.txt",
+        output_mode: "content",
+        context: 2,
+        ignoreCase: true,
+        limit: 5,
+        max_output_chars: 125,
+      }],
+      ["Bash", {
+        command: "pwd",
+        timeout: 5,
+        workdir: hostHome,
+        description: "print worker directory",
+        max_output_chars: 126,
+      }],
+      ["WebFetch", {
+        url: "https://example.test/",
+        headers: { "User-Agent": "runtime-pi-test" },
+        max_output_chars: 127,
+      }],
+    ]);
+    expect(JSON.stringify(execute.mock.calls)).not.toContain('"~"');
   });
 
   it("bounds image payloads before they reach the model or runtime result", () => {

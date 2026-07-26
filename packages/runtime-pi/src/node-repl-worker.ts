@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: MIT
 import { Buffer } from "node:buffer";
 import { start } from "node:repl";
+import { createInterface } from "node:readline";
 import { PassThrough } from "node:stream";
 
 const MAX_OUTPUT_BYTES = 256 * 1024;
+const MAX_REQUEST_LINE_BYTES = 1024 * 1024;
+const NODE_REPL_CONTROL_PREFIX = "\u001eMONO_AGENT_NODE_REPL_V1:";
+const protocolWrite = process.stdout.write.bind(process.stdout);
 const input = new PassThrough();
 const output = new PassThrough();
 const server = start({
@@ -42,7 +46,7 @@ let active: ActiveEvaluation | undefined;
 
 function send(message: WorkerResult): void {
   try {
-    process.send?.(message);
+    protocolWrite(`${NODE_REPL_CONTROL_PREFIX}${JSON.stringify(message)}\n`);
   } catch {
     process.exit(1);
   }
@@ -136,8 +140,7 @@ server.displayPrompt = () => {
   finish(false, active.output.trimEnd() || "Node REPL evaluation failed.");
 };
 
-process.on("message", (message: unknown) => {
-  if (!isWorkerRequest(message)) return;
+function evaluate(message: WorkerRequest): void {
   if (active !== undefined) {
     send({
       type: "result",
@@ -184,17 +187,41 @@ process.on("message", (message: unknown) => {
       [active.output.trimEnd(), errorText(error)].filter(Boolean).join("\n"),
     );
   }
-});
+}
 
-process.on("disconnect", () => {
+function workerRequest(line: string): WorkerRequest {
+  if (Buffer.byteLength(line, "utf8") > MAX_REQUEST_LINE_BYTES) {
+    throw new Error("Node REPL request exceeds its bounded line limit.");
+  }
+  const value = JSON.parse(line) as unknown;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Node REPL request must be an object.");
+  }
+  const keys = Object.keys(value).sort();
+  if (
+    keys.length !== 3
+    || keys[0] !== "code"
+    || keys[1] !== "id"
+    || keys[2] !== "type"
+    || Reflect.get(value, "type") !== "evaluate"
+    || typeof Reflect.get(value, "id") !== "string"
+    || typeof Reflect.get(value, "code") !== "string"
+  ) {
+    throw new Error("Node REPL request is invalid.");
+  }
+  return value as WorkerRequest;
+}
+
+const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
+lines.on("line", (line) => {
+  try {
+    evaluate(workerRequest(line));
+  } catch {
+    process.exit(1);
+  }
+});
+lines.once("close", () => {
   server.close();
   process.exit(0);
 });
-
-function isWorkerRequest(value: unknown): value is WorkerRequest {
-  return value !== null
-    && typeof value === "object"
-    && Reflect.get(value, "type") === "evaluate"
-    && typeof Reflect.get(value, "id") === "string"
-    && typeof Reflect.get(value, "code") === "string";
-}
+process.stdin.once("error", () => process.exit(1));

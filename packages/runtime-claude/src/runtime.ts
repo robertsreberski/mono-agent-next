@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
+import { isAbsolute } from "node:path";
+
 import {
   RUNTIME_SESSION_UNAVAILABLE_CODE,
   RuntimeTurnError,
 } from "@mono-agent/module-sdk";
+import type { SandboxExecutor } from "@mono-agent/module-sdk/internal";
 import type {
   JsonObject,
   ModuleDiagnostic,
@@ -22,7 +25,12 @@ import type {
   TurnMessage,
 } from "@mono-agent/module-sdk";
 
-import { createClaudeCliTransport, type SpawnProcess } from "./cli.js";
+import {
+  ClaudeCliProcessTerminationError,
+  createClaudeCliTransport,
+  prepareClaudeSandboxDataDirectory,
+  type SpawnProcess,
+} from "./cli.js";
 import type { RuntimeClaudeConfig } from "./config.js";
 import {
   claudeRuntimeCapabilities,
@@ -30,6 +38,10 @@ import {
   validateClaudeModel,
 } from "./model.js";
 import { createClaudeSdkTransport } from "./sdk.js";
+import {
+  claudeSandboxSpawn,
+  claudeSdkSandboxSpawn,
+} from "./sandbox.js";
 import {
   ClaudeSessionUnavailableError,
   claudeEnvironment,
@@ -117,9 +129,12 @@ export interface CreateRuntimeClaudeOptions {
   readonly config: RuntimeClaudeConfig;
   readonly instanceId: string;
   readonly workspaceDirectory: string;
+  readonly dataDirectory?: string;
   readonly sdkTransport?: ClaudeTransport;
   readonly cliTransport?: ClaudeTransport;
   readonly spawnProcess?: SpawnProcess;
+  readonly sandboxExecutor?: SandboxExecutor;
+  readonly terminationGraceMs?: number;
 }
 
 function diagnostic(code: string, severity: ModuleDiagnostic["severity"], message: string): ModuleDiagnostic {
@@ -235,22 +250,110 @@ function assertSessionLinkage(
 export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtime {
   let state: RuntimeState = "created";
   let stopPromise: Promise<void> | undefined;
+  let terminationFailure: ClaudeCliProcessTerminationError | undefined;
   const active = new Set<ActiveTurn>();
+  const sandboxDataDirectory = options.sandboxExecutor !== undefined
+    && options.config.mode === "cli"
+    ? options.dataDirectory
+    : undefined;
+  if (
+    options.sandboxExecutor !== undefined
+    && options.config.mode === "cli"
+    && !isAbsolute(options.config.binary)
+  ) {
+    throw new TypeError(
+      "runtime-claude config.binary must be an absolute path when a Core sandbox is selected",
+    );
+  }
+  if (
+    options.sandboxExecutor !== undefined
+    && options.config.mode === "cli"
+    && options.dataDirectory === undefined
+  ) {
+    throw new TypeError(
+      "runtime-claude requires dataDirectory when a Core sandbox is selected",
+    );
+  }
+  if (
+    options.sandboxExecutor !== undefined
+    && options.config.mode === "cli"
+    && options.cliTransport !== undefined
+  ) {
+    throw new TypeError(
+      "runtime-claude cannot use a custom CLI transport with a selected sandbox",
+    );
+  }
+  if (
+    options.sandboxExecutor !== undefined
+    && options.config.mode === "sdk"
+    && options.sdkTransport !== undefined
+  ) {
+    throw new TypeError(
+      "runtime-claude cannot use a custom SDK transport with a selected sandbox",
+    );
+  }
   const transport = options.config.mode === "sdk"
-    ? options.sdkTransport ?? createClaudeSdkTransport()
+    ? options.sdkTransport ?? createClaudeSdkTransport({
+        ...(options.sandboxExecutor === undefined
+          ? {}
+          : {
+              spawnClaudeCodeProcess:
+                claudeSdkSandboxSpawn(options.sandboxExecutor),
+            }),
+      })
     : options.cliTransport ?? createClaudeCliTransport({
         binary: options.config.binary,
         timeoutMs: options.config.timeoutMs,
         maxLineBytes: options.config.maxLineBytes,
         maxStderrBytes: options.config.maxStderrBytes,
-        ...(options.spawnProcess === undefined ? {} : { spawnProcess: options.spawnProcess }),
+        ...(options.terminationGraceMs === undefined
+          ? {}
+          : { terminationGraceMs: options.terminationGraceMs }),
+        ...(sandboxDataDirectory === undefined
+          ? {}
+          : { dataDirectory: sandboxDataDirectory }),
+        ...(options.sandboxExecutor !== undefined
+          ? { spawnProcess: claudeSandboxSpawn(options.sandboxExecutor) }
+          : options.spawnProcess === undefined
+            ? {}
+            : { spawnProcess: options.spawnProcess }),
       });
 
+  const captureTerminationFailure = (error: unknown): boolean => {
+    if (!(error instanceof ClaudeCliProcessTerminationError)) return false;
+    terminationFailure ??= error;
+    if (state !== "stopped") state = "draining";
+    for (const turn of active) {
+      if (!turn.abortController.signal.aborted) {
+        turn.abortController.abort(error);
+      }
+    }
+    return true;
+  };
+
+  const lifecycleTerminationError = (): RuntimeClaudeError =>
+    new RuntimeClaudeError(
+      "PROCESS_TERMINATION_FAILED",
+      redact(terminationFailure, options.config.auth?.token),
+      {
+        retryability: "not-retryable",
+        sideEffects: "unknown",
+        cause: terminationFailure,
+      },
+    );
+
   return {
-    capabilities: claudeRuntimeCapabilities(options.config),
+    capabilities: claudeRuntimeCapabilities(
+      options.config,
+      options.sandboxExecutor !== undefined,
+    ),
 
     async start(_context: ModuleStartContext) {
+      if (terminationFailure !== undefined) throw lifecycleTerminationError();
       if (state === "stopped") throw new RuntimeClaudeError("RUNTIME_NOT_RUNNING", "runtime-claude cannot restart after stop", { retryability: "not-retryable" });
+      if (sandboxDataDirectory !== undefined) {
+        await prepareClaudeSandboxDataDirectory(sandboxDataDirectory);
+      }
       state = "running";
     },
 
@@ -269,9 +372,25 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
           );
         }
         await Promise.allSettled(turns.map(async (turn) => {
-          await Promise.allSettled([interruptTurn(turn), turn.settled]);
-          await interruptTurn(turn).catch(() => undefined);
+          const first = await Promise.allSettled([
+            interruptTurn(turn),
+            turn.settled,
+          ]);
+          for (const result of first) {
+            if (result.status === "rejected") {
+              captureTerminationFailure(result.reason);
+            }
+          }
+          try {
+            await interruptTurn(turn);
+          } catch (error) {
+            captureTerminationFailure(error);
+          }
         }));
+        if (terminationFailure !== undefined) {
+          state = "draining";
+          throw lifecycleTerminationError();
+        }
         state = "stopped";
       })();
       return stopPromise;
@@ -279,22 +398,49 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
 
     health(_context: ModuleHealthContext): ModuleHealth {
       return {
-        status: state === "running" ? "healthy" : state === "draining" ? "degraded" : "unknown",
+        status: terminationFailure !== undefined
+          ? "unhealthy"
+          : state === "running"
+            ? "healthy"
+            : state === "draining"
+              ? "degraded"
+              : "unknown",
         checkedAt: new Date().toISOString(),
         summary: `runtime-claude is ${state}`,
-        details: { state, mode: options.config.mode, activeTurns: active.size },
+        details: {
+          state,
+          mode: options.config.mode,
+          activeTurns: active.size,
+          ...(terminationFailure === undefined
+            ? {}
+            : { quarantineCode: "PROCESS_TERMINATION_FAILED" }),
+        },
       };
     },
 
     diagnostics(_context: ModuleDiagnosticsContext): readonly ModuleDiagnostic[] {
-      return [diagnostic("runtime-claude.lifecycle", "info", `Runtime state: ${state}; transport: ${options.config.mode}`)];
+      return [diagnostic(
+        "runtime-claude.lifecycle",
+        terminationFailure === undefined ? "info" : "error",
+        `Runtime state: ${state}; transport: ${options.config.mode}`
+        + (terminationFailure === undefined ? "" : "; process termination failed"),
+      )];
     },
 
     preflightModel({ model, signal }) {
       if (signal.aborted) {
         throw signal.reason ?? new DOMException("Aborted", "AbortError");
       }
-      return validateClaudeModel({ model, config: options.config });
+      const validation = validateClaudeModel({ model, config: options.config });
+      return validation.capabilities === undefined
+        ? validation
+        : {
+            ...validation,
+            capabilities: claudeRuntimeCapabilities(
+              options.config,
+              options.sandboxExecutor !== undefined,
+            ),
+          };
     },
 
     async runTurn(request: RuntimeTurnRequest, context: RuntimeTurnContext): Promise<RuntimeTurnResult> {
@@ -325,7 +471,10 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
           ...(request.options?.maxTurns === undefined ? {} : { maxTurns: request.options.maxTurns }),
           ...(request.options?.responseSchema === undefined ? {} : { responseSchema: request.options.responseSchema }),
           cwd: options.workspaceDirectory,
-          env: claudeEnvironment(options.config.auth),
+          env: claudeEnvironment(
+            options.config.auth,
+            options.sandboxExecutor === undefined ? process.env : {},
+          ),
           signal: turnSignal,
         }, {
           async text(delta) { await context.emit({ type: "text-delta", delta }); },
@@ -348,7 +497,9 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
             control = value;
             currentTurn.control = value;
             if (turnSignal.aborted) {
-              void interruptTurn(currentTurn).catch(() => undefined);
+              void interruptTurn(currentTurn).catch((error: unknown) => {
+                captureTerminationFailure(error);
+              });
             }
             if (
               !turnSignal.aborted
@@ -396,6 +547,10 @@ export function createRuntimeClaude(options: CreateRuntimeClaudeOptions): Runtim
           } as JsonObject,
         };
       } catch (error) {
+        if (error instanceof ClaudeCliProcessTerminationError) {
+          captureTerminationFailure(error);
+          throw lifecycleTerminationError();
+        }
         if (turnSignal.aborted) {
           return {
             status: "cancelled",

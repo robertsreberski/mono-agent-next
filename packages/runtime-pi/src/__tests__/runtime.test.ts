@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 import { createServer, type Server } from "node:http";
+import { EventEmitter } from "node:events";
 import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 
 import {
   createModels,
@@ -21,6 +23,11 @@ import type {
   RuntimeTurnEvent,
   RuntimeTurnRequest,
 } from "@mono-agent/module-sdk";
+import type {
+  SandboxExecutor,
+  SandboxProcess,
+  SandboxSpawnCommand,
+} from "@mono-agent/module-sdk/internal";
 import {
   AGENT_INTERACTION_LIMITS,
   RUNTIME_SESSION_UNAVAILABLE_CODE,
@@ -38,6 +45,80 @@ import {
 const abortSignal = () => new AbortController().signal;
 const roots: string[] = [];
 const servers: Server[] = [];
+
+function sandboxExecutorFixture(): {
+  readonly execute: ReturnType<typeof vi.fn<SandboxExecutor["execute"]>>;
+  readonly executor: SandboxExecutor;
+  readonly spawnCommands: SandboxSpawnCommand[];
+} {
+  const spawnCommands: SandboxSpawnCommand[] = [];
+  const execute = vi.fn<SandboxExecutor["execute"]>(async (command) => {
+    const request = JSON.parse(new TextDecoder().decode(command.stdin)) as {
+      readonly toolId: string;
+    };
+    return {
+      exitCode: 0,
+      stdout: new TextEncoder().encode(JSON.stringify({
+        ok: true,
+        result: {
+          content: [{ type: "text", text: `${request.toolId} sandboxed` }],
+        },
+      })),
+      stderr: new Uint8Array(),
+      timedOut: false,
+    };
+  });
+  const executor: SandboxExecutor = {
+    execute,
+    spawn(command) {
+      spawnCommands.push(command);
+      const events = new EventEmitter();
+      const stdin = new PassThrough();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      let buffered = "";
+      let closed = false;
+      stdin.on("data", (chunk: Buffer) => {
+        buffered += chunk.toString("utf8");
+        for (;;) {
+          const newline = buffered.indexOf("\n");
+          if (newline < 0) break;
+          const line = buffered.slice(0, newline);
+          buffered = buffered.slice(newline + 1);
+          const request = JSON.parse(line) as { readonly id: string };
+          queueMicrotask(() => stdout.write(`\u001eMONO_AGENT_NODE_REPL_V1:${JSON.stringify({
+            type: "result",
+            id: request.id,
+            ok: true,
+            text: "NodeRepl sandboxed",
+          })}\n`));
+        }
+      });
+      const process: SandboxProcess = {
+        pid: undefined,
+        stdin,
+        stdout,
+        stderr,
+        once(event, listener) {
+          events.once(event, listener);
+          return this;
+        },
+        kill(signal = "SIGTERM") {
+          if (closed) return false;
+          closed = true;
+          queueMicrotask(() => {
+            stdout.end();
+            stderr.end();
+            events.emit("close", null, signal);
+          });
+          return true;
+        },
+      };
+      return process;
+    },
+  };
+  return { execute, executor, spawnCommands };
+}
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -551,6 +632,195 @@ describe("Pi-native runtime module", () => {
     await stop(runtime);
   });
 
+  it("routes NodeRepl, Edit, and WebSearch only through the selected Core sandbox", async () => {
+    const root = await mkdtemp(join(tmpdir(), "runtime-pi-selected-sandbox-"));
+    roots.push(root);
+    const target = join(root, "editable.txt");
+    await writeFile(target, "host content remains", "utf8");
+    const fetchAttempt = vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error("host WebSearch must not run"),
+    );
+    const faux = fauxProvider({
+      provider: "faux",
+      models: [{ id: "faux-model", input: ["text"] }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("NodeRepl", {
+        code: "process.version",
+      }, { id: "sandbox-repl" })]),
+      fauxAssistantMessage([fauxToolCall("Edit", {
+        file_path: "editable.txt",
+        old_string: "host",
+        new_string: "changed",
+        replace_all: false,
+      }, { id: "sandbox-edit" })]),
+      fauxAssistantMessage([fauxToolCall("WebSearch", {
+        query: "sandbox boundary",
+        limit: 2,
+      }, { id: "sandbox-search" })]),
+      fauxAssistantMessage([fauxText("sandbox tools complete")]),
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const sandbox = sandboxExecutorFixture();
+    const runtime = createRuntimePi({
+      config: parseRuntimePiConfig({}),
+      instanceId: "selected-sandbox-runtime",
+      configDirectory: root,
+      workspaceDirectory: root,
+      models,
+      sandboxExecutor: sandbox.executor,
+    });
+    const requestApproval = vi.fn<NonNullable<RuntimeTurnContext["requestApproval"]>>(
+      async (approval) => ({
+        interactionId: approval.interactionId,
+        decision: "allow_once",
+        decidedAt: new Date().toISOString(),
+      }),
+    );
+    const { context, events } = turnContext(undefined, { requestApproval });
+    await start(runtime);
+
+    expect(runtime.capabilities.sandbox).toBe(true);
+    await expect(runtime.preflightModel?.({
+      model: "faux:faux-model",
+      signal: abortSignal(),
+    })).resolves.toMatchObject({
+      supported: true,
+      capabilities: { sandbox: true },
+    });
+    await expect(runtime.runTurn(
+      request("use selected sandbox tools"),
+      context,
+    )).resolves.toMatchObject({
+      status: "completed",
+      message: { content: [{ type: "text", text: "sandbox tools complete" }] },
+    });
+
+    expect(sandbox.spawnCommands).toHaveLength(1);
+    expect(sandbox.spawnCommands[0]).toMatchObject({
+      command: process.execPath,
+      workingDirectory: root,
+    });
+    expect(sandbox.execute.mock.calls.map(([command]) => {
+      const request = JSON.parse(new TextDecoder().decode(command.stdin)) as {
+        readonly toolId: string;
+      };
+      return request.toolId;
+    })).toEqual(["Edit", "WebSearch"]);
+    expect(await readFile(target, "utf8")).toBe("host content remains");
+    expect(fetchAttempt).not.toHaveBeenCalled();
+    expect(requestApproval.mock.calls.map(([approval]) => approval.toolId))
+      .toEqual(["NodeRepl", "Edit", "WebSearch"]);
+    expect(requestApproval.mock.calls.map(([approval]) => approval.summary))
+      .toSatisfy((summaries: string[]) =>
+        summaries.every((summary) => summary.includes("selected Core sandbox")));
+    expect(events).toContainEqual({
+      type: "tool-result",
+      result: {
+        callId: "sandbox-repl",
+        content: [{ type: "text", text: "NodeRepl sandboxed" }],
+      },
+    });
+    expect(events).toContainEqual({
+      type: "tool-result",
+      result: {
+        callId: "sandbox-edit",
+        content: [{ type: "text", text: "Edit sandboxed" }],
+      },
+    });
+    expect(events).toContainEqual({
+      type: "tool-result",
+      result: {
+        callId: "sandbox-search",
+        content: [{ type: "text", text: "WebSearch sandboxed" }],
+      },
+    });
+    await stop(runtime);
+  });
+
+  it("quarantines an unreaped selected NodeRepl instead of masking cancellation", async () => {
+    const faux = fauxProvider({
+      provider: "faux",
+      models: [{ id: "faux-model", input: ["text"] }],
+    });
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("NodeRepl", {
+        code: "new Promise(() => undefined)",
+      }, { id: "stubborn-repl" })]),
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const cancellation = new AbortController();
+    const events = new EventEmitter();
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const kill = vi.fn((_signal: NodeJS.Signals | number = "SIGTERM") => true);
+    stdin.once("data", () => {
+      cancellation.abort(new Error("cancel stubborn selected REPL"));
+    });
+    const selectedProcess: SandboxProcess = {
+      pid: 424_244,
+      stdin,
+      stdout,
+      stderr,
+      once(event, listener) {
+        events.once(event, listener);
+        return this;
+      },
+      kill,
+    };
+    const sandboxExecutor: SandboxExecutor = {
+      async execute() {
+        throw new Error("one-shot sandbox execution is not expected");
+      },
+      spawn() {
+        return selectedProcess;
+      },
+    };
+    const runtime = createRuntimePi({
+      config: parseRuntimePiConfig({}),
+      instanceId: "stubborn-selected-repl-runtime",
+      configDirectory: process.cwd(),
+      workspaceDirectory: process.cwd(),
+      models,
+      sandboxExecutor,
+      nodeReplTerminationGraceMs: 5,
+    });
+    await start(runtime);
+
+    await expect(runtime.runTurn(request("run stubborn NodeRepl", {
+      signal: cancellation.signal,
+    }), turnContext().context)).rejects.toMatchObject({
+      code: "PROCESS_TERMINATION_FAILED",
+      committedSideEffects: true,
+      retryable: false,
+    });
+    expect(kill.mock.calls.map(([signal]) => signal))
+      .toEqual(["SIGTERM", "SIGKILL"]);
+    expect(await runtime.health?.({ signal: abortSignal() })).toMatchObject({
+      status: "unhealthy",
+      details: {
+        state: "draining",
+        activeTurns: 0,
+        activeNodeRepls: 1,
+        quarantineCode: "PROCESS_TERMINATION_FAILED",
+      },
+    });
+    await expect(runtime.runTurn(
+      request("must not restart after quarantine"),
+      turnContext().context,
+    )).rejects.toMatchObject({ code: "PROCESS_TERMINATION_FAILED" });
+    await expect(stop(runtime))
+      .rejects.toMatchObject({ code: "PROCESS_TERMINATION_FAILED" });
+    expect(kill).toHaveBeenCalledTimes(2);
+
+    stdout.end();
+    stderr.end();
+    events.emit("close", null, "SIGKILL");
+  });
+
   it("executes approved Bash for composite Pi call ids without changing result identity", async () => {
     const root = await mkdtemp(join(tmpdir(), "runtime-pi-composite-bash-"));
     roots.push(root);
@@ -1012,55 +1282,55 @@ describe("Pi-native runtime module", () => {
         displayName: "Node REPL",
         effects: ["read", "write", "execute", "network"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Read",
         displayName: "Read",
         effects: ["read"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Write",
         displayName: "Write",
         effects: ["write"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Edit",
         displayName: "Edit",
         effects: ["read", "write"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Glob",
         displayName: "Glob",
         effects: ["read"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Grep",
         displayName: "Grep",
         effects: ["read", "execute"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Bash",
         displayName: "Bash",
         effects: ["read", "write", "execute", "network"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "WebFetch",
         displayName: "Web Fetch",
         effects: ["network"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "WebSearch",
         displayName: "Web Search",
         effects: ["network"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }],
     });
     const aborted = new AbortController();

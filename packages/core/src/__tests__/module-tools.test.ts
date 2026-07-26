@@ -433,6 +433,7 @@ describe("selected-module tools", () => {
       {
         name: runtimeName,
         kind: "runtime",
+        capabilities: ["sandbox.execute.v1"],
         controller: runtimeController(() => {
           runtimeCalls += 1;
           return completed("ok");
@@ -458,6 +459,9 @@ describe("selected-module tools", () => {
               stderr: new Uint8Array(),
               timedOut: false,
             }),
+            spawn() {
+              throw new Error("sandbox spawn is not expected for module-tool routing");
+            },
           }),
         },
       },

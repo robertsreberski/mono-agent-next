@@ -81,9 +81,12 @@ export function isClaudeSessionUnavailable(
     || rawMessage.startsWith(`${prefix} in project directory for `);
 }
 
-export function claudeEnvironment(auth: { method: "oauth-token" | "api-key"; token: string } | undefined): NodeJS.ProcessEnv {
-  if (auth === undefined) return claudeProcessEnvironment();
+export function claudeEnvironment(
+  auth: { method: "oauth-token" | "api-key"; token: string } | undefined,
+  ambient: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  if (auth === undefined) return claudeProcessEnvironment({}, ambient);
   return claudeProcessEnvironment(auth.method === "oauth-token"
     ? { CLAUDE_CODE_OAUTH_TOKEN: auth.token }
-    : { ANTHROPIC_API_KEY: auth.token });
+    : { ANTHROPIC_API_KEY: auth.token }, ambient);
 }

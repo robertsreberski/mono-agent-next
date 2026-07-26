@@ -9,6 +9,7 @@ import {
   approvedExecution,
   combinedSignal,
   evidence,
+  executionBoundarySummary,
   outputLimit,
   ownRecord,
   renamedTool,
@@ -113,21 +114,35 @@ export function createRuntimePiWebFetchAgentTool(
       runtimePiWebFetchTool,
       toolCallId,
       [
-        "Allow this DNS-pinned public HTTPS request?",
+        executionBoundarySummary(
+          options,
+          "Allow this DNS-pinned public HTTPS request through the selected Core sandbox?",
+          "Allow this DNS-pinned public HTTPS request?",
+        ),
         evidence("url", url),
         `header_names: ${JSON.stringify(Object.keys(headers).map((name) => name.toLowerCase()).sort())}`,
       ].join("\n"),
       executionSignal,
-      async () => ({
-        content: [{
-          type: "text",
-          text: await fetchPublicWeb(fetchInput, {
-            ...options.webFetch,
-            signal: executionSignal,
-          }),
-        }],
-        details: undefined,
-      }),
+      async () => options.sandboxTools === undefined
+        ? {
+            content: [{
+              type: "text" as const,
+              text: await fetchPublicWeb(fetchInput, {
+                ...options.webFetch,
+                signal: executionSignal,
+              }),
+            }],
+            details: undefined,
+          }
+        : options.sandboxTools.execute(
+            runtimePiWebFetchTool.id,
+            {
+              url,
+              headers,
+              max_output_chars: maxOutputBytes,
+            },
+            executionSignal,
+          ),
     );
   });
 }

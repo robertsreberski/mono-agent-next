@@ -15,10 +15,23 @@ describe("runtime-pi module import", () => {
       packageName: "@mono-agent/runtime-pi",
       apiVersion: 1,
       kind: "runtime",
-      capabilities: [],
+      capabilities: ["sandbox.execute.v1"],
     });
     expect(validation).toEqual({
       supported: true,
+      capabilities: {
+        tools: true,
+        mcp: true,
+        attachments: false,
+        approvals: true,
+        structuredOutput: true,
+        sandbox: true,
+        sessions: true,
+        maxTurns: true,
+        maxOutputTokens: true,
+        artifactResults: true,
+        liveInput: true,
+      },
       // The catalog descriptor is read from Pi's generated model list on the
       // pure path: no credentials, no network, no created instance.
       model: {
@@ -31,55 +44,55 @@ describe("runtime-pi module import", () => {
         displayName: "Node REPL",
         effects: ["read", "write", "execute", "network"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Read",
         displayName: "Read",
         effects: ["read"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Write",
         displayName: "Write",
         effects: ["write"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Edit",
         displayName: "Edit",
         effects: ["read", "write"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Glob",
         displayName: "Glob",
         effects: ["read"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Grep",
         displayName: "Grep",
         effects: ["read", "execute"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "Bash",
         displayName: "Bash",
         effects: ["read", "write", "execute", "network"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "WebFetch",
         displayName: "Web Fetch",
         effects: ["network"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }, {
         id: "WebSearch",
         displayName: "Web Search",
         effects: ["network"],
         approval: "core-callback",
-        sandbox: "unsupported",
+        sandbox: "core-executor",
       }],
     });
     expect(validation).not.toBeInstanceOf(Promise);

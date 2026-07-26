@@ -1,6 +1,20 @@
 // SPDX-License-Identifier: MIT
 import { EventEmitter } from "node:events";
-import { existsSync, readFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createInterface } from "node:readline";
 import { PassThrough, Writable } from "node:stream";
 
 import type {
@@ -9,14 +23,31 @@ import type {
   RuntimeTurnEvent,
 } from "@mono-agent/module-sdk";
 import { RUNTIME_SESSION_UNAVAILABLE_CODE } from "@mono-agent/module-sdk";
-import { describe, expect, it, vi } from "vitest";
+import type {
+  SandboxExecutor,
+  SandboxProcess,
+  SandboxProcessInput,
+  SandboxProcessOutput,
+} from "@mono-agent/module-sdk/internal";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createClaudeCliTransport, type ProcessLike, type SpawnProcess } from "../cli.js";
 import { parseRuntimeClaudeConfig, runtimeClaudeJsonSchema } from "../config.js";
 import { claudeProcessEnvironment } from "../environment.js";
 import { createRuntimeClaude, RuntimeClaudeError } from "../runtime.js";
+import { claudeSdkSandboxSpawn } from "../sandbox.js";
 import { createClaudeSdkTransport } from "../sdk.js";
 import type { ClaudeTransport, ClaudeTransportControl } from "../transport.js";
+
+const roots: string[] = [];
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  for (const root of roots.splice(0)) {
+    chmodSync(root, 0o700);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 class FakeClaudeProcess extends EventEmitter implements ProcessLike {
   readonly stdout = new PassThrough();
@@ -35,6 +66,165 @@ class FakeClaudeProcess extends EventEmitter implements ProcessLike {
   }
 
   kill(_signal?: NodeJS.Signals): boolean { return true; }
+}
+
+class FakeClaudeFailureProcess extends EventEmitter implements ProcessLike {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  readonly stdin = new Writable({
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+
+  constructor(message: string) {
+    super();
+    queueMicrotask(() => {
+      this.stderr.emit("data", new TextEncoder().encode(message));
+      this.stdout.end();
+      this.stderr.end();
+      this.emit("close", 1, null);
+    });
+  }
+
+  kill(_signal?: NodeJS.Signals): boolean { return true; }
+}
+
+class MinimalSandboxInput implements SandboxProcessInput {
+  value = "";
+  ended = false;
+  readonly #errorListeners: Array<(error: Error) => void> = [];
+
+  write(
+    chunk: string | Uint8Array,
+    callback?: (error?: Error | null) => void,
+  ): boolean;
+  write(
+    chunk: string,
+    encoding: BufferEncoding,
+    callback?: (error?: Error | null) => void,
+  ): boolean;
+  write(
+    chunk: string | Uint8Array,
+    encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+    callback?: (error?: Error | null) => void,
+  ): boolean {
+    this.value += typeof chunk === "string"
+      ? chunk
+      : Buffer.from(chunk).toString("utf8");
+    const done = typeof encodingOrCallback === "function"
+      ? encodingOrCallback
+      : callback;
+    queueMicrotask(() => done?.());
+    return true;
+  }
+
+  end(callback?: () => void): this;
+  end(chunk: string | Uint8Array, callback?: () => void): this;
+  end(chunk: string, encoding: BufferEncoding, callback?: () => void): this;
+  end(
+    chunkOrCallback?: string | Uint8Array | (() => void),
+    encodingOrCallback?: BufferEncoding | (() => void),
+    callback?: () => void,
+  ): this {
+    if (typeof chunkOrCallback === "string") this.value += chunkOrCallback;
+    else if (chunkOrCallback instanceof Uint8Array) {
+      this.value += Buffer.from(chunkOrCallback).toString("utf8");
+    }
+    this.ended = true;
+    const done = typeof chunkOrCallback === "function"
+      ? chunkOrCallback
+      : typeof encodingOrCallback === "function"
+        ? encodingOrCallback
+        : callback;
+    queueMicrotask(() => done?.());
+    return this;
+  }
+
+  on(event: "drain", listener: () => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(
+    event: "drain" | "error",
+    listener: (() => void) | ((error: Error) => void),
+  ): this {
+    if (event === "error") {
+      this.#errorListeners.push(listener as (error: Error) => void);
+    }
+    return this;
+  }
+}
+
+class MinimalSandboxOutput implements SandboxProcessOutput {
+  readonly #dataListeners: Array<(chunk: Uint8Array) => void> = [];
+  readonly #errorListeners: Array<(error: Error) => void> = [];
+
+  on(event: "data", listener: (chunk: Uint8Array) => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(
+    event: "data" | "error",
+    listener: ((chunk: Uint8Array) => void) | ((error: Error) => void),
+  ): this {
+    if (event === "data") {
+      this.#dataListeners.push(listener as (chunk: Uint8Array) => void);
+    } else {
+      this.#errorListeners.push(listener as (error: Error) => void);
+    }
+    return this;
+  }
+
+  emitData(chunk: Uint8Array): void {
+    for (const listener of this.#dataListeners) listener(chunk);
+  }
+}
+
+class MinimalSdkSandboxProcess implements SandboxProcess {
+  readonly pid = 4_321;
+  readonly stdin = new MinimalSandboxInput();
+  readonly stdout = new MinimalSandboxOutput();
+  readonly stderr = new MinimalSandboxOutput();
+  readonly signals: NodeJS.Signals[] = [];
+  readonly #errorListeners: Array<(error: Error) => void> = [];
+  readonly #closeListeners: Array<(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ) => void> = [];
+
+  once(event: "error", listener: (error: Error) => void): this;
+  once(
+    event: "close",
+    listener: (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ) => void,
+  ): this;
+  once(
+    event: "error" | "close",
+    listener: ((error: Error) => void) | ((
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ) => void),
+  ): this {
+    if (event === "error") {
+      this.#errorListeners.push(listener as (error: Error) => void);
+    } else {
+      this.#closeListeners.push(listener as (
+        code: number | null,
+        signal: NodeJS.Signals | null,
+      ) => void);
+    }
+    return this;
+  }
+
+  kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+    this.signals.push(signal);
+    return true;
+  }
+
+  close(code: number | null, signal: NodeJS.Signals | null): void {
+    for (const listener of this.#closeListeners.splice(0)) {
+      listener(code, signal);
+    }
+  }
 }
 
 function transportRequest() {
@@ -77,8 +267,26 @@ describe("runtime-claude transports", () => {
     const iterator = messages() as AsyncGenerator<unknown> & { interrupt(): Promise<void>; close(): void };
     iterator.interrupt = async () => undefined;
     iterator.close = () => undefined;
-    const query = vi.fn(async () => iterator);
-    const transport = createClaudeSdkTransport({ query });
+    const replacementSpawn = claudeSdkSandboxSpawn({
+      async execute() {
+        throw new Error("not reached");
+      },
+      spawn() {
+        throw new Error("not reached");
+      },
+    });
+    let observedSpawn: unknown;
+    const query = vi.fn(async (input: {
+      readonly prompt: AsyncIterable<unknown>;
+      readonly options: Record<string, unknown>;
+    }) => {
+      observedSpawn = input.options.spawnClaudeCodeProcess;
+      return iterator;
+    });
+    const transport = createClaudeSdkTransport({
+      query,
+      spawnClaudeCodeProcess: replacementSpawn,
+    });
     const text: string[] = [];
     const thinking: string[] = [];
     let control: ClaudeTransportControl | undefined;
@@ -94,6 +302,83 @@ describe("runtime-claude transports", () => {
     expect(thinking).toEqual(["hmm"]);
     expect(control?.sendInput).toBeTypeOf("function");
     expect(query).toHaveBeenCalledOnce();
+    expect(observedSpawn).toBe(replacementSpawn);
+  });
+
+  it("adapts a minimal sandbox facade to the SDK's Node stream seam", async () => {
+    const child = new MinimalSdkSandboxProcess();
+    const sandboxSpawn = vi.fn<SandboxExecutor["spawn"]>(
+      () => child,
+    );
+    const executor: SandboxExecutor = {
+      async execute() {
+        throw new Error("one-shot execution is not expected");
+      },
+      spawn: sandboxSpawn,
+    };
+    const replacementSpawn = claudeSdkSandboxSpawn(executor);
+    const controller = new AbortController();
+    const spawned = replacementSpawn({
+      command: process.execPath,
+      args: ["claude-native-entry"],
+      cwd: process.cwd(),
+      env: {
+        ANTHROPIC_API_KEY: "selected-sandbox-token",
+        CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
+        CLAUDE_AGENT_SDK_VERSION: "0.3.206",
+      },
+      signal: controller.signal,
+    });
+
+    expect(sandboxSpawn).toHaveBeenCalledWith({
+      command: process.execPath,
+      arguments: ["claude-native-entry"],
+      workingDirectory: process.cwd(),
+      environment: {
+        ANTHROPIC_API_KEY: "selected-sandbox-token",
+        CLAUDE_CODE_ENTRYPOINT: "sdk-ts",
+        CLAUDE_AGENT_SDK_VERSION: "0.3.206",
+      },
+    });
+    expect(spawned.killed).toBe(false);
+    await new Promise<void>((resolve, reject) => {
+      spawned.stdin.write("minimal request\n", (error) => {
+        if (error == null) resolve();
+        else reject(error);
+      });
+    });
+    await new Promise<void>((resolve) => spawned.stdin.end(resolve));
+    expect(child.stdin.value).toBe("minimal request\n");
+    expect(child.stdin.ended).toBe(true);
+    expect(spawned.stdin.writableEnded).toBe(true);
+
+    const lines: string[] = [];
+    const lineReader = createInterface({ input: spawned.stdout });
+    const reading = (async () => {
+      for await (const line of lineReader) lines.push(line);
+    })();
+    child.stdout.emitData(
+      new TextEncoder().encode('{"type":"minimal-facade"}\n'),
+    );
+    controller.abort();
+    expect(child.signals).toEqual(["SIGTERM"]);
+    expect(spawned.killed).toBe(true);
+
+    const exited = new Promise<readonly [number | null, NodeJS.Signals | null]>((resolve) => {
+      spawned.once("exit", (code, signal) => resolve([code, signal]));
+    });
+    child.close(0, null);
+    await expect(exited).resolves.toEqual([0, null]);
+    await reading;
+    expect(lines).toEqual(['{"type":"minimal-facade"}']);
+    expect(spawned.exitCode).toBe(0);
+    expect(() => replacementSpawn({
+      command: "node",
+      args: [],
+      cwd: process.cwd(),
+      env: {},
+      signal: new AbortController().signal,
+    })).toThrow("SDK sandbox command must be an absolute path");
   });
 
   it("runs the CLI with exact containment argv, direct stdin, and bounded fake JSONL", async () => {
@@ -169,6 +454,207 @@ describe("runtime-claude transports", () => {
     expect(launch).toHaveBeenCalledOnce();
   });
 
+  it("decodes plain Uint8Array CLI stderr without numeric byte coercion", async () => {
+    const transport = createClaudeCliTransport({
+      binary: "claude",
+      timeoutMs: 1_000,
+      maxLineBytes: 16_384,
+      maxStderrBytes: 4_096,
+      spawnProcess: () => new FakeClaudeFailureProcess("provider boom"),
+    });
+
+    await expect(transport.run(transportRequest(), {
+      text() {}, thinking() {}, session() {}, usage() {}, control() {},
+    })).rejects.toThrow("provider boom");
+  });
+
+  it("routes the CLI child through the selected Core sandbox without host-spawn fallback", async () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "selected-sandbox-token");
+    const dataDirectory = temporaryRoot("mono-agent-claude-sandbox-data-");
+    let child: FakeClaudeProcess | undefined;
+    let systemPromptPath: string | undefined;
+    const sandboxSpawn = vi.fn<SandboxExecutor["spawn"]>(
+      (command) => {
+        const index = command.arguments.indexOf("--system-prompt-file");
+        systemPromptPath = command.arguments[index + 1];
+        expect(index).toBeGreaterThan(-1);
+        expect(systemPromptPath?.startsWith(`${dataDirectory}/`)).toBe(true);
+        expect(readFileSync(systemPromptPath as string, "utf8")).toBe(
+          "private system instructions",
+        );
+        expect(statSync(systemPromptPath as string).mode & 0o777).toBe(0o600);
+        child = new FakeClaudeProcess([
+          {
+            type: "stream_event",
+            session_id: "sandbox-session",
+            event: {
+              type: "content_block_delta",
+              delta: { type: "text_delta", text: "sandboxed" },
+            },
+          },
+          {
+            type: "result",
+            subtype: "success",
+            session_id: "sandbox-session",
+            result: "sandboxed",
+          },
+        ]);
+        return child as unknown as ReturnType<SandboxExecutor["spawn"]>;
+      },
+    );
+    const sandboxExecutor: SandboxExecutor = {
+      async execute() {
+        throw new Error("one-shot sandbox execution is not expected");
+      },
+      spawn: sandboxSpawn,
+    };
+    const hostSpawn = vi.fn<SpawnProcess>(() => {
+      throw new Error("host spawn must not run");
+    });
+    const runtime = createRuntimeClaude({
+      config: parseRuntimeClaudeConfig({
+        mode: "cli",
+        binary: process.execPath,
+        auth: { method: "api-key", token: "selected-sandbox-token" },
+        timeoutMs: 1_000,
+      }),
+      instanceId: "claude-sandbox-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory,
+      spawnProcess: hostSpawn,
+      sandboxExecutor,
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+
+    await expect(runtime.runTurn({
+      turnId: "sandbox-turn",
+      conversationId: "sandbox-conversation",
+      model: "claude-opus-4-8",
+      messages: [
+        {
+          role: "system",
+          content: [{ type: "text", text: "private system instructions" }],
+        },
+        { role: "user", content: [{ type: "text", text: "hello" }] },
+      ],
+      tools: [],
+      signal: new AbortController().signal,
+    }, {
+      emit() {},
+      async executeTool(call) {
+        return { callId: call.id, content: [] };
+      },
+    })).resolves.toMatchObject({
+      status: "completed",
+      message: { content: [{ type: "text", text: "sandboxed" }] },
+    });
+
+    expect(runtime.capabilities.sandbox).toBe(true);
+    expect(hostSpawn).not.toHaveBeenCalled();
+    expect(child?.prompt).toBe("USER:\nhello");
+    expect(sandboxSpawn).toHaveBeenCalledWith(expect.objectContaining({
+      command: process.execPath,
+      workingDirectory: process.cwd(),
+      arguments: expect.arrayContaining(["--output-format", "stream-json"]),
+    }));
+    expect(sandboxSpawn.mock.calls[0]?.[0].environment).toEqual({
+      ANTHROPIC_API_KEY: "selected-sandbox-token",
+    });
+    expect(systemPromptPath).toBeDefined();
+    expect(existsSync(systemPromptPath as string)).toBe(false);
+    expect(readdirSync(dataDirectory)).toEqual([]);
+    await runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+  });
+
+  it("rejects unsafe selected-sandbox data roots before any process spawn", async () => {
+    const unsafe = temporaryRoot("mono-agent-claude-unsafe-data-");
+    chmodSync(unsafe, 0o755);
+    const parent = temporaryRoot("mono-agent-claude-linked-data-");
+    const target = join(parent, "target");
+    const linked = join(parent, "linked");
+    mkdtempSync(`${target}-`);
+    const actualTarget = readdirSync(parent)
+      .map((name) => join(parent, name))
+      .find((path) => path.startsWith(target));
+    if (actualTarget === undefined) throw new Error("linked target is absent");
+    symlinkSync(actualTarget, linked);
+    const sandboxSpawn = vi.fn<SandboxExecutor["spawn"]>(() => {
+      throw new Error("sandbox spawn must not run");
+    });
+    const hostSpawn = vi.fn<SpawnProcess>(() => {
+      throw new Error("host spawn must not run");
+    });
+    const executor: SandboxExecutor = {
+      async execute() {
+        throw new Error("sandbox execute must not run");
+      },
+      spawn: sandboxSpawn,
+    };
+    const create = (dataDirectory: string) => createRuntimeClaude({
+      config: parseRuntimeClaudeConfig({
+        mode: "cli",
+        binary: process.execPath,
+      }),
+      instanceId: "claude-unsafe-data-root",
+      workspaceDirectory: process.cwd(),
+      dataDirectory,
+      spawnProcess: hostSpawn,
+      sandboxExecutor: executor,
+    });
+
+    await expect(create(unsafe).start?.({
+      signal: new AbortController().signal,
+    })).rejects.toThrow(/mode 0700/u);
+    await expect(create(linked).start?.({
+      signal: new AbortController().signal,
+    })).rejects.toThrow(/canonical directory/u);
+    expect(sandboxSpawn).not.toHaveBeenCalled();
+    expect(hostSpawn).not.toHaveBeenCalled();
+  });
+
+  it("rejects a PATH-resolved CLI binary before a selected sandbox can run", () => {
+    const executor: SandboxExecutor = {
+      async execute() {
+        throw new Error("not reached");
+      },
+      spawn() {
+        throw new Error("not reached");
+      },
+    };
+    expect(() => createRuntimeClaude({
+      config: parseRuntimeClaudeConfig({ mode: "cli" }),
+      instanceId: "claude-sandbox-relative-binary",
+      workspaceDirectory: process.cwd(),
+      sandboxExecutor: executor,
+    })).toThrow("config.binary must be an absolute path when a Core sandbox is selected");
+  });
+
+  it("rejects a custom SDK transport that could bypass a selected sandbox", () => {
+    const executor: SandboxExecutor = {
+      async execute() {
+        throw new Error("not reached");
+      },
+      spawn() {
+        throw new Error("not reached");
+      },
+    };
+    const sdkTransport: ClaudeTransport = {
+      async run() {
+        throw new Error("not reached");
+      },
+    };
+    expect(() => createRuntimeClaude({
+      config: parseRuntimeClaudeConfig({ mode: "sdk" }),
+      instanceId: "claude-custom-sdk-sandbox",
+      workspaceDirectory: process.cwd(),
+      sandboxExecutor: executor,
+      sdkTransport,
+    })).toThrow("cannot use a custom SDK transport with a selected sandbox");
+  });
+
   it("passes only operational and explicitly configured environment values", () => {
     const environment = claudeProcessEnvironment({ ANTHROPIC_API_KEY: "configured" }, {
       PATH: "/usr/bin:/bin",
@@ -186,12 +672,14 @@ describe("runtime-claude transports", () => {
   });
 
   it("removes the private system-prompt file when process launch fails", async () => {
+    const dataDirectory = temporaryRoot("mono-agent-claude-prompt-failure-");
     let systemPromptPath: string | undefined;
     const transport = createClaudeCliTransport({
       binary: "claude",
       timeoutMs: 1_000,
       maxLineBytes: 16_384,
       maxStderrBytes: 4_096,
+      dataDirectory,
       spawnProcess(_command, args) {
         systemPromptPath = args[args.indexOf("--system-prompt-file") + 1];
         throw new Error("launch failed");
@@ -201,7 +689,9 @@ describe("runtime-claude transports", () => {
       text() {}, thinking() {}, session() {}, usage() {}, control() {},
     })).rejects.toThrow("launch failed");
     expect(systemPromptPath).toBeDefined();
+    expect(systemPromptPath?.startsWith(`${dataDirectory}/`)).toBe(true);
     expect(existsSync(systemPromptPath as string)).toBe(false);
+    expect(readdirSync(dataDirectory)).toEqual([]);
   });
 
   it("binds SDK live input to the exact active runtime attempt", async () => {
@@ -529,3 +1019,10 @@ describe("runtime-claude transports", () => {
     })).toThrow("runtime-claude config.auth.token must be a non-empty trimmed string");
   });
 });
+
+function temporaryRoot(prefix: string): string {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  roots.push(root);
+  expect(lstatSync(root).isSymbolicLink()).toBe(false);
+  return root;
+}

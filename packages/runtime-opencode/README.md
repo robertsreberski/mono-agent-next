@@ -57,12 +57,40 @@ OpenCode's native auth store; provide required provider credentials explicitly
 through `environment`.
 
 The runtime starts `opencode serve --hostname 127.0.0.1 --port 0 --pure` with a
-direct argument array and never invokes a shell. It discovers the actual port
-from bounded startup output and authenticates every request with a random,
-process-owned Basic-auth password. A random dedicated agent, inline deny-all
-configuration, exact session permissions, and per-prompt
+direct argument array and never invokes a shell. With a selected Core sandbox,
+the version probe and long-lived server both use the granted executor. With
+`sandbox.mode: "off"`, they use the direct host process path. A selected
+sandbox failure never falls back to that host path. The runtime discovers the
+actual port from bounded startup output and authenticates every request with a
+random, process-owned Basic-auth password. A random dedicated agent, inline
+deny-all configuration, exact session permissions, and per-prompt
 `"tools":{"*":false}` provide independent containment layers. `pure` remains a
 compatibility field and only accepts `true`.
+
+Selected-sandbox config must set `binary` to the absolute OpenCode executable
+path. Its sandbox environment must allow the runtime-generated `HOME`,
+`XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_CACHE_HOME`, `XDG_STATE_HOME`,
+`OPENCODE_CONFIG_CONTENT`, `OPENCODE_PERMISSION`,
+`OPENCODE_DISABLE_DEFAULT_PLUGINS`, `OPENCODE_DISABLE_EXTERNAL_SKILLS`,
+`OPENCODE_DISABLE_LSP_DOWNLOAD`, `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT`,
+`OPENCODE_DISABLE_AUTOUPDATE`, `OPENCODE_PURE`,
+`OPENCODE_SERVER_USERNAME`, and `OPENCODE_SERVER_PASSWORD` values, plus every
+configured provider credential name. Put unchanged operational names such as
+`PATH`, `TMPDIR`, and `LANG` in `inherit` as needed.
+
+For selected execution, Core's per-instance runtime data directory is a
+required canonical, current-user-owned `0700` root. The runtime creates its
+private isolation directory and all generated `HOME`/XDG directories below
+that root, then removes them during bounded shutdown. With sandboxing off, the
+same isolation remains temporary direct-host state under the operating system
+temporary directory.
+
+Restrictive SRT filesystem rules must use canonical absolute paths. Relative
+rules such as `"."` resolve from the wrapper working directory, which differs
+between runtime children. Allow read access to the canonical workspace and
+OpenCode runtime data roots, and allow the runtime data root to be written for
+the isolated home/XDG state. This runtime intentionally does not use an
+ambient OpenCode config or auth root.
 
 The selected instance exposes `opencode:auth` before it starts. Its default
 `status` action reports only the count of configured provider-environment
@@ -110,6 +138,7 @@ failures expose only bounded, redacted, accessor-free `Error` cause snapshots.
 | `auth-command.ts` | Non-serving, redacted authentication status and unsupported-action results. |
 | `environment.ts` | Isolated HOME/XDG and process-owned deny/auth settings. |
 | `process.ts` | Bounded direct-process startup, version, and shutdown handling. |
+| `sandbox.ts` | Adapter from Core's exact sandbox executor grant to the owned process seam. |
 | `server.ts` | Authenticated HTTP/SSE protocol and deny-all assertions. |
 | `version.ts` | Shared strict and lenient version parsing and comparison. |
 | `runtime.ts` | Session serialization, quarantine, and event normalization. |
@@ -150,7 +179,7 @@ runtime.
 ## What This Package Does Not Own
 
 It does not choose fallback, execute Core or OpenCode-native tools, bypass
-OpenCode permissions, claim a Core sandbox, persist canonical history, or
+OpenCode permissions, choose sandbox policy, persist canonical history, or
 migrate private OpenCode sessions to another runtime.
 
 ## Related Documentation

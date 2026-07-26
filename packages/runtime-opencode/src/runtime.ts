@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import {
   RUNTIME_SESSION_UNAVAILABLE_CODE,
@@ -27,6 +27,7 @@ import type {
   RuntimeUsage,
   TurnMessage,
 } from "@mono-agent/module-sdk";
+import type { SandboxExecutor } from "@mono-agent/module-sdk/internal";
 
 import {
   OPEN_CODE_SECURE_SERVER_VERSION,
@@ -49,6 +50,7 @@ import {
   type OpenCodeServerProcess,
   type SpawnProcess,
 } from "./process.js";
+import { openCodeSandboxSpawn } from "./sandbox.js";
 import {
   OpenCodeServerClient,
   OpenCodeServerHttpError,
@@ -164,7 +166,9 @@ export interface CreateRuntimeOpenCodeOptions {
   readonly config: RuntimeOpenCodeConfig;
   readonly instanceId: string;
   readonly workspaceDirectory: string;
+  readonly dataDirectory?: string;
   readonly spawnProcess?: SpawnProcess;
+  readonly sandboxExecutor?: SandboxExecutor;
   readonly fetch?: typeof globalThis.fetch;
   readonly terminationGraceMs?: number;
   readonly removeIsolation?: (root: string) => Promise<void>;
@@ -358,23 +362,115 @@ async function waitBounded(
   }
 }
 
-async function createIsolation(): Promise<Isolation> {
-  const root = await mkdtemp(join(tmpdir(), "mono-agent-opencode-"));
-  await chmod(root, 0o700);
-  const directories: OpenCodeIsolatedDirectories = {
-    home: join(root, "home"),
-    config: join(root, "config"),
-    data: join(root, "data"),
-    cache: join(root, "cache"),
-    state: join(root, "state"),
-  };
-  await Promise.all(
-    Object.values(directories).map((directory) => mkdir(directory, {
-      recursive: true,
-      mode: 0o700,
-    })),
-  );
-  return { root, directories };
+function assertOwnedDirectory(
+  info: Awaited<ReturnType<typeof lstat>>,
+  path: string,
+  exactPrivate: boolean,
+): void {
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`${path} must be a canonical directory`);
+  }
+  if (typeof process.getuid !== "function" || info.uid !== process.getuid()) {
+    throw new Error(`${path} must be owned by the current user`);
+  }
+  const mode = Number(info.mode) & 0o777;
+  if (exactPrivate ? mode !== 0o700 : (mode & 0o022) !== 0) {
+    throw new Error(exactPrivate
+      ? `${path} must have mode 0700`
+      : `${path} must not be group/world writable`);
+  }
+}
+
+async function prepareSandboxDataDirectory(
+  authoredPath: string | undefined,
+): Promise<string> {
+  if (authoredPath === undefined) {
+    throw new Error(
+      "runtime-opencode requires a data directory when a Core sandbox is selected",
+    );
+  }
+  if (!isAbsolute(authoredPath) || resolve(authoredPath) !== authoredPath) {
+    throw new Error(
+      "runtime-opencode sandbox data directory must be an absolute canonical path",
+    );
+  }
+  const root = authoredPath;
+  const missing: string[] = [];
+  let cursor = root;
+  let info = await lstat(cursor).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined;
+    throw error;
+  });
+  while (info === undefined) {
+    missing.unshift(cursor);
+    const parent = dirname(cursor);
+    if (parent === cursor) {
+      throw new Error(
+        "runtime-opencode sandbox data directory has no existing parent",
+      );
+    }
+    cursor = parent;
+    info = await lstat(cursor).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+  }
+  assertOwnedDirectory(info, cursor, missing.length === 0);
+  if (await realpath(cursor) !== cursor) {
+    throw new Error(
+      "runtime-opencode sandbox data directory ancestors must be canonical",
+    );
+  }
+  for (const path of missing) {
+    await mkdir(path, { mode: 0o700 });
+    const created = await lstat(path);
+    assertOwnedDirectory(created, path, true);
+    if (await realpath(path) !== path) {
+      throw new Error(
+        "runtime-opencode sandbox data directory creation crossed a symbolic link",
+      );
+    }
+  }
+  assertOwnedDirectory(await lstat(root), root, true);
+  return root;
+}
+
+async function createIsolation(dataDirectory?: string): Promise<Isolation> {
+  const base = dataDirectory === undefined
+    ? tmpdir()
+    : await prepareSandboxDataDirectory(dataDirectory);
+  const prefix = dataDirectory === undefined
+    ? "mono-agent-opencode-"
+    : "isolation-";
+  const root = await mkdtemp(join(base, prefix));
+  try {
+    await chmod(root, 0o700);
+    if (
+      dataDirectory !== undefined
+      && dirname(await realpath(root)) !== base
+    ) {
+      throw new Error(
+        "runtime-opencode isolation escaped the sandbox data directory",
+      );
+    }
+    const directories: OpenCodeIsolatedDirectories = {
+      home: join(root, "home"),
+      config: join(root, "config"),
+      data: join(root, "data"),
+      cache: join(root, "cache"),
+      state: join(root, "state"),
+    };
+    await Promise.all(
+      Object.values(directories).map(async (directory) => {
+        await mkdir(directory, { mode: 0o700 });
+        await chmod(directory, 0o700);
+      }),
+    );
+    return { root, directories };
+  } catch (error) {
+    await rm(root, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function nativeToolViolation(): RuntimeOpenCodeError {
@@ -875,6 +971,14 @@ async function drainActiveOperations(
 }
 
 export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Runtime {
+  if (
+    options.sandboxExecutor !== undefined
+    && !isAbsolute(options.config.binary)
+  ) {
+    throw new TypeError(
+      "runtime-opencode config.binary must be an absolute path when a Core sandbox is selected",
+    );
+  }
   let state: RuntimeState = "created";
   let version: string | undefined;
   let server: OpenCodeServerProcess | undefined;
@@ -886,8 +990,36 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
   let quarantineFailure: RuntimeOpenCodeError | undefined;
   const active = new Set<ActiveOperation>();
   const sessionTails = new Map<string, Promise<void>>();
+  const spawnProcess = options.sandboxExecutor === undefined
+    ? options.spawnProcess
+    : openCodeSandboxSpawn(options.sandboxExecutor);
   const removeIsolation = options.removeIsolation
     ?? ((root: string) => rm(root, { recursive: true, force: true }));
+  const isolationCleanupPromises = new WeakMap<Isolation, Promise<void>>();
+
+  const cleanupIsolation = (owned: Isolation): Promise<void> => {
+    let cleanup = isolationCleanupPromises.get(owned);
+    if (cleanup !== undefined) return cleanup;
+    cleanup = (async () => {
+      await removeIsolation(owned.root);
+      if (isolation === owned) isolation = undefined;
+    })();
+    isolationCleanupPromises.set(owned, cleanup);
+    void cleanup.catch(() => {
+      if (isolationCleanupPromises.get(owned) === cleanup) {
+        isolationCleanupPromises.delete(owned);
+      }
+    });
+    return cleanup;
+  };
+
+  const cleanupIsolationAfterClose = (
+    closed: Promise<unknown> | undefined,
+    owned: Isolation | undefined,
+  ): void => {
+    if (closed === undefined || owned === undefined) return;
+    void closed.then(async () => cleanupIsolation(owned)).catch(() => undefined);
+  };
 
   const configuredSecrets = Object.values(options.config.environment);
   const secrets = (): readonly string[] => [
@@ -926,11 +1058,16 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
 
   const beginServerClose = (): void => {
     const owned = server;
+    const ownedIsolation = isolation;
     if (owned === undefined) return;
     void owned.close().catch((error: unknown) => {
       terminationFailure ??= error instanceof OpenCodeProcessTerminationError
         ? error
         : new OpenCodeProcessTerminationError(redact(error, secrets()));
+      cleanupIsolationAfterClose(
+        owned.closed ?? terminationFailure.closed,
+        ownedIsolation,
+      );
       state = "draining";
     });
   };
@@ -956,13 +1093,16 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
     timeoutMs: options.config.timeoutMs,
     maxLineBytes: options.config.maxLineBytes,
     maxStderrBytes: options.config.maxStderrBytes,
-    ...(options.spawnProcess === undefined ? {} : {
-      spawnProcess: options.spawnProcess,
+    ...(spawnProcess === undefined ? {} : {
+      spawnProcess,
     }),
   });
 
   return {
-    capabilities: runtimeOpenCodeCapabilities,
+    capabilities: Object.freeze({
+      ...runtimeOpenCodeCapabilities,
+      sandbox: options.sandboxExecutor !== undefined,
+    }),
 
     async start(context: ModuleStartContext) {
       if (state !== "created") {
@@ -986,8 +1126,15 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
       let localServer: OpenCodeServerProcess | undefined;
       let localIsolation: Isolation | undefined;
       try {
+        const sandboxDataDirectory = options.sandboxExecutor === undefined
+          ? undefined
+          : await prepareSandboxDataDirectory(options.dataDirectory);
+        localIsolation = await createIsolation(sandboxDataDirectory);
+        isolation = localIsolation;
         const versionEnvironment = openCodeProcessEnvironment(
           options.config.environment,
+          options.sandboxExecutor === undefined ? process.env : {},
+          { directories: localIsolation.directories },
         );
         const output = await capturePlainText({
           ...processOptions(signal, versionEnvironment),
@@ -1009,14 +1156,12 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
         }
         if (signal.aborted) throw abortReason(signal);
 
-        localIsolation = await createIsolation();
-        isolation = localIsolation;
         serverPassword = randomBytes(32).toString("base64url");
         agentName = `${OPEN_CODE_TOOL_FREE_AGENT}-${randomBytes(8).toString("hex")}`;
         const username = "opencode";
         const environment = openCodeProcessEnvironment(
           options.config.environment,
-          process.env,
+          options.sandboxExecutor === undefined ? process.env : {},
           {
             directories: localIsolation.directories,
             agentName,
@@ -1078,6 +1223,20 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
             },
           ));
         });
+        void localServer.terminationFailed.then((error) => {
+          if (localServer?.isClosing() || state === "stopped") return;
+          terminationFailure ??= error;
+          cleanupIsolationAfterClose(localServer?.closed, localIsolation);
+          quarantine(new RuntimeOpenCodeError(
+            "PROCESS_TERMINATION_FAILED",
+            redact(error, secrets()),
+            {
+              retryability: "not-retryable",
+              sideEffects: "unknown",
+              cause: safeCause(error, secrets()),
+            },
+          ));
+        });
       } catch (error) {
         let isolationCleanupFailed = false;
         if (error instanceof OpenCodeProcessTerminationError) {
@@ -1095,11 +1254,15 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
         }
         if (localIsolation !== undefined && terminationFailure === undefined) {
           try {
-            await removeIsolation(localIsolation.root);
-            if (isolation === localIsolation) isolation = undefined;
+            await cleanupIsolation(localIsolation);
           } catch {
             isolationCleanupFailed = true;
           }
+        } else if (terminationFailure !== undefined) {
+          cleanupIsolationAfterClose(
+            localServer?.closed ?? terminationFailure.closed,
+            localIsolation,
+          );
         }
         server = undefined;
         client = undefined;
@@ -1160,9 +1323,10 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
         shutdownFailure = error;
       }
 
-      if (server !== undefined) {
+      const ownedServer = server;
+      if (ownedServer !== undefined) {
         try {
-          await server.close();
+          await ownedServer.close();
         } catch (error) {
           terminationFailure ??= error instanceof OpenCodeProcessTerminationError
             ? error
@@ -1172,8 +1336,7 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
       let isolationFailure: RuntimeOpenCodeError | undefined;
       if (terminationFailure === undefined && isolation !== undefined) {
         try {
-          await removeIsolation(isolation.root);
-          isolation = undefined;
+          await cleanupIsolation(isolation);
         } catch (error) {
           isolationFailure = new RuntimeOpenCodeError(
             "ISOLATION_CLEANUP_FAILED",
@@ -1185,6 +1348,11 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
             },
           );
         }
+      } else if (terminationFailure !== undefined) {
+        cleanupIsolationAfterClose(
+          ownedServer?.closed ?? terminationFailure.closed,
+          isolation,
+        );
       }
       if (terminationFailure !== undefined) {
         state = "draining";
@@ -1258,10 +1426,19 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
 
     preflightModel(request) {
       request.signal.throwIfAborted();
-      return validateRuntimeOpenCodeModel({
+      const validation = validateRuntimeOpenCodeModel({
         model: request.model,
         config: options.config,
       });
+      return validation.capabilities === undefined
+        ? validation
+        : {
+            ...validation,
+            capabilities: Object.freeze({
+              ...validation.capabilities,
+              sandbox: options.sandboxExecutor !== undefined,
+            }),
+          };
     },
 
     async runTurn(

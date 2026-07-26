@@ -29,6 +29,7 @@ export function isClaudeModelIdentifier(model: string): boolean {
 
 export function claudeRuntimeCapabilities(
   config: Pick<RuntimeClaudeConfig, "mode">,
+  sandbox = true,
 ): RuntimeCapabilities {
   return {
     tools: false,
@@ -36,7 +37,7 @@ export function claudeRuntimeCapabilities(
     attachments: false,
     approvals: false,
     structuredOutput: true,
-    sandbox: false,
+    sandbox,
     sessions: true,
     maxTurns: true,
     maxOutputTokens: false,

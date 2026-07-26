@@ -2,11 +2,16 @@
 import { spawn } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 
+import type {
+  SandboxProcessInput,
+  SandboxProcessOutput,
+} from "@mono-agent/module-sdk/internal";
+
 export interface ProcessLike {
   readonly pid?: number | undefined;
-  readonly stdin: NodeJS.WritableStream;
-  readonly stdout: NodeJS.ReadableStream;
-  readonly stderr: NodeJS.ReadableStream;
+  readonly stdin: SandboxProcessInput;
+  readonly stdout: SandboxProcessOutput;
+  readonly stderr: SandboxProcessOutput;
   once(event: "error", listener: (error: Error) => void): this;
   once(event: "close", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
   kill(signal?: NodeJS.Signals): boolean;
@@ -39,15 +44,23 @@ export interface OpenCodeServerExit {
 export interface OpenCodeServerProcess {
   readonly url: URL;
   readonly closed: Promise<OpenCodeServerExit>;
+  readonly terminationFailed: Promise<OpenCodeProcessTerminationError>;
   readonly stderr: () => { readonly text: string; readonly truncated: boolean };
   readonly isClosing: () => boolean;
   close(): Promise<void>;
 }
 
 export class OpenCodeProcessTerminationError extends Error {
-  constructor(message: string) {
-    super(message);
+  readonly closed: Promise<unknown> | undefined;
+
+  constructor(
+    message: string,
+    options: ErrorOptions & { readonly closed?: Promise<unknown> } = {},
+  ) {
+    const { closed, ...errorOptions } = options;
+    super(message, errorOptions);
     this.name = "OpenCodeProcessTerminationError";
+    this.closed = closed;
   }
 }
 
@@ -64,6 +77,21 @@ const SERVER_LISTEN_PREFIX = "opencode server listening on ";
 
 function abortReason(signal: AbortSignal): unknown {
   return signal.reason ?? new DOMException("Aborted", "AbortError");
+}
+
+function appendBoundedTail(
+  current: Buffer,
+  chunk: Uint8Array,
+  maxBytes: number,
+): Buffer {
+  if (maxBytes <= 0) return Buffer.alloc(0);
+  const bytes = Buffer.from(chunk);
+  if (bytes.length >= maxBytes) {
+    return Buffer.from(bytes.subarray(bytes.length - maxBytes));
+  }
+  const retainedBytes = Math.min(current.length, maxBytes - bytes.length);
+  const retained = current.subarray(current.length - retainedBytes);
+  return Buffer.concat([retained, bytes], retainedBytes + bytes.length);
 }
 
 function waitFor<T>(promise: Promise<T>, timeoutMs: number): Promise<boolean> {
@@ -105,11 +133,18 @@ export async function startOpenCodeServerProcess(
   let closing = false;
   let closed = false;
   let readySettled = false;
-  let closePromise: Promise<void> | undefined;
+  let terminationPromise: Promise<void> | undefined;
   let processError: Error | undefined;
+  let terminationCause: unknown;
   let resolveExit!: (exit: OpenCodeServerExit) => void;
   const closedPromise = new Promise<OpenCodeServerExit>((resolve) => {
     resolveExit = resolve;
+  });
+  let resolveTerminationFailed!: (
+    error: OpenCodeProcessTerminationError,
+  ) => void;
+  const terminationFailed = new Promise<OpenCodeProcessTerminationError>((resolve) => {
+    resolveTerminationFailed = resolve;
   });
 
   const stderrSnapshot = (): { readonly text: string; readonly truncated: boolean } => ({
@@ -123,9 +158,8 @@ export async function startOpenCodeServerProcess(
       // The close event or bounded escalation remains authoritative.
     }
   };
-  const close = (): Promise<void> => {
-    closePromise ??= (async () => {
-      closing = true;
+  const terminate = (): Promise<void> => {
+    terminationPromise ??= (async () => {
       try {
         child.stdin.end();
       } catch {
@@ -135,9 +169,21 @@ export async function startOpenCodeServerProcess(
       if (await waitFor(closedPromise, terminationGraceMs)) return;
       kill("SIGKILL");
       if (await waitFor(closedPromise, terminationGraceMs)) return;
-      throw new OpenCodeProcessTerminationError("OpenCode server did not exit after SIGKILL");
+      throw new OpenCodeProcessTerminationError(
+        "OpenCode server did not exit after SIGKILL",
+        {
+          closed: closedPromise,
+          ...(terminationCause === undefined
+            ? {}
+            : { cause: terminationCause }),
+        },
+      );
     })();
-    return closePromise;
+    return terminationPromise;
+  };
+  const close = (): Promise<void> => {
+    closing = true;
+    return terminate();
   };
 
   const ready = new Promise<OpenCodeServerProcess>((resolveReady, rejectReady) => {
@@ -149,6 +195,7 @@ export async function startOpenCodeServerProcess(
     const failReady = (error: unknown): void => {
       if (readySettled) return;
       readySettled = true;
+      terminationCause ??= error;
       cleanupReady();
       void close().then(
         () => rejectReady(error),
@@ -163,6 +210,7 @@ export async function startOpenCodeServerProcess(
       resolveReady({
         url,
         closed: closedPromise,
+        terminationFailed,
         stderr: stderrSnapshot,
         isClosing: () => closing,
         close,
@@ -198,21 +246,38 @@ export async function startOpenCodeServerProcess(
       acceptReady(url);
     };
     const onAbort = (): void => failReady(abortReason(options.signal));
+    const onStdioError = (error: Error): void => {
+      if (closed) return;
+      processError ??= error;
+      if (!readySettled) {
+        failReady(error);
+        return;
+      }
+      terminationCause ??= error;
+      void terminate().catch((error: unknown) => {
+        if (closing) return;
+        resolveTerminationFailed(
+          error instanceof OpenCodeProcessTerminationError
+            ? error
+            : new OpenCodeProcessTerminationError(String(error)),
+        );
+      });
+    };
     timer = setTimeout(() => {
       failReady(new Error(`OpenCode server startup timed out after ${options.timeoutMs}ms`));
     }, options.timeoutMs);
     timer.unref?.();
     options.signal.addEventListener("abort", onAbort, { once: true });
 
-    child.stdout.on("data", (chunk: Buffer | string) => {
+    child.stdout.on("data", (chunk) => {
       if (readySettled) return;
-      const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+      const bytes = Buffer.from(chunk);
       startupBytes += bytes.length;
       if (startupBytes > startupOutputLimit) {
         failReady(new Error("OpenCode server startup output exceeds the configured total limit"));
         return;
       }
-      stdout += typeof chunk === "string" ? chunk : decoder.write(chunk);
+      stdout += decoder.write(bytes);
       if (Buffer.byteLength(stdout, "utf8") > options.maxLineBytes && !stdout.includes("\n")) {
         failReady(new Error("OpenCode server startup output exceeds the configured line limit"));
         return;
@@ -225,8 +290,8 @@ export async function startOpenCodeServerProcess(
         if (readySettled) return;
       }
     });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
+    child.stderr.on("data", (chunk) => {
+      const bytes = Buffer.from(chunk);
       const remaining = options.maxStderrBytes - stderrBytes;
       if (remaining > 0) {
         const selected = bytes.subarray(0, Math.min(remaining, bytes.length));
@@ -235,8 +300,20 @@ export async function startOpenCodeServerProcess(
       }
       if (bytes.length > remaining) stderrTruncated = true;
     });
+    child.stdin.on("error", onStdioError);
+    child.stdout.on("error", onStdioError);
+    child.stderr.on("error", onStdioError);
     child.once("error", (error) => {
       processError = error;
+      if (readySettled) {
+        if (child.pid === undefined && !closed) {
+          closed = true;
+          resolveExit({ code: null, signal: null, error });
+          return;
+        }
+        onStdioError(error);
+        return;
+      }
       if (child.pid === undefined && !closed) {
         closed = true;
         resolveExit({ code: null, signal: null, error });
@@ -285,13 +362,18 @@ export async function capturePlainText(
     shell: false,
   });
   return new Promise<string>((resolve, reject) => {
-    let output = "";
-    let stderr = "";
+    const outputChunks: Buffer[] = [];
+    let outputBytes = 0;
+    let stderr: Buffer = Buffer.alloc(0);
     let settled = false;
     let closed = false;
     let failure: { readonly error: unknown } | undefined;
     let terminateTimer: NodeJS.Timeout | undefined;
     let forceTimer: NodeJS.Timeout | undefined;
+    let resolveClosed!: () => void;
+    const closedPromise = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
     const finish = (error?: unknown): void => {
       if (settled) return;
       settled = true;
@@ -322,7 +404,13 @@ export async function capturePlainText(
         if (closed || settled) return;
         kill("SIGKILL");
         forceTimer = setTimeout(() => {
-          finish(new OpenCodeProcessTerminationError("OpenCode version process did not exit after SIGKILL"));
+          finish(new OpenCodeProcessTerminationError(
+            "OpenCode version process did not exit after SIGKILL",
+            {
+              closed: closedPromise,
+              ...(failure === undefined ? {} : { cause: failure.error }),
+            },
+          ));
         }, TERMINATION_GRACE_MS);
         forceTimer.unref?.();
       }, TERMINATION_GRACE_MS);
@@ -335,36 +423,39 @@ export async function capturePlainText(
     );
     timer.unref?.();
     options.signal.addEventListener("abort", abort, { once: true });
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      output += String(chunk);
-      if (Buffer.byteLength(output) > 16_384) {
+    child.stdout.on("data", (chunk) => {
+      const bytes = Buffer.from(chunk);
+      outputBytes += bytes.length;
+      if (outputBytes > 16_384) {
         terminate(new Error("OpenCode version output is too large"));
+        return;
       }
+      outputChunks.push(bytes);
     });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr += String(chunk);
-      const bytes = Buffer.byteLength(stderr);
-      if (bytes > options.maxStderrBytes) {
-        stderr = Buffer.from(stderr).subarray(bytes - options.maxStderrBytes).toString("utf8");
-      }
+    child.stderr.on("data", (chunk) => {
+      stderr = appendBoundedTail(stderr, chunk, options.maxStderrBytes);
     });
-    child.stdin.once("error", (error: Error) => terminate(error));
+    child.stdin.on("error", (error) => terminate(error));
+    child.stdout.on("error", (error) => terminate(error));
+    child.stderr.on("error", (error) => terminate(error));
     child.once("error", (error) => {
       if (child.pid === undefined) finish(error);
       else terminate(error);
     });
     child.once("close", (code) => {
       closed = true;
+      resolveClosed();
       if (failure !== undefined) {
         finish(failure.error);
         return;
       }
       if (code === 0) {
         finish();
-        resolve(output.trim());
+        resolve(Buffer.concat(outputChunks, outputBytes).toString("utf8").trim());
       } else {
+        const stderrText = stderr.toString("utf8").trim();
         finish(new Error(
-          `OpenCode version check failed${stderr === "" ? "" : `: ${stderr.trim()}`}`,
+          `OpenCode version check failed${stderrText === "" ? "" : `: ${stderrText}`}`,
         ));
       }
     });

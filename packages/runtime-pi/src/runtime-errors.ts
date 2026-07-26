@@ -10,6 +10,7 @@ export class RuntimePiError extends RuntimeTurnError {
   declare readonly code:
     | "RUNTIME_NOT_RUNNING"
     | "MODEL_INVALID"
+    | "PROCESS_TERMINATION_FAILED"
     | "PROVIDER_FAILED"
     | "SESSION_INVALID"
     | typeof RUNTIME_SESSION_UNAVAILABLE_CODE

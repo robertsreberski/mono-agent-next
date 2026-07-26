@@ -3,7 +3,7 @@ import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
 import { TextDecoder } from "node:util";
 
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type {
   ImageContent,
   TextContent,
@@ -40,6 +40,7 @@ import {
   type NodeReplController,
 } from "./node-repl.js";
 import { RuntimePiError } from "./runtime-errors.js";
+import type { RuntimePiSandboxTools } from "./sandbox-tools.js";
 import {
   jsonValue,
   runtimeToolResultToPiContent,
@@ -149,12 +150,14 @@ function boundedUtf8Prefix(
   return { text: "", bytes: 0, totalBytes: encoded.byteLength };
 }
 
-function nodeReplApprovalSummary(code: string): string {
+function nodeReplApprovalSummary(code: string, sandboxed: boolean): string {
   const preview = boundedUtf8Prefix(code, NODE_REPL_APPROVAL_PREVIEW_MAX_BYTES);
   const digest = createHash("sha256").update(code, "utf8").digest("hex");
   const state = preview.bytes < preview.totalBytes ? "truncated" : "complete";
   return [
-    "Allow Node REPL to evaluate this JavaScript with unsandboxed access to the inherited process environment, filesystem, subprocess execution, and network?",
+    sandboxed
+      ? "Allow Node REPL to evaluate this JavaScript through the selected Core sandbox?"
+      : "Allow Node REPL to evaluate this JavaScript with unsandboxed access to the inherited process environment, filesystem, subprocess execution, and network?",
     `Code evidence: ${String(preview.totalBytes)} UTF-8 bytes; sha256:${digest}.`,
     `Escaped preview (${String(preview.bytes)}/${String(preview.totalBytes)} bytes, ${state}): ${JSON.stringify(preview.text)}`,
   ].join("\n");
@@ -170,9 +173,11 @@ function stringEvidence(label: string, value: string): string {
   ].join("\n");
 }
 
-function editApprovalSummary(input: LiteralEditInput): string {
+function editApprovalSummary(input: LiteralEditInput, sandboxed: boolean): string {
   return [
-    "Allow runtime-pi to atomically replace literal text in this unsandboxed workspace file?",
+    sandboxed
+      ? "Allow runtime-pi to atomically replace literal text through the selected Core sandbox?"
+      : "Allow runtime-pi to atomically replace literal text in this unsandboxed workspace file?",
     `file_path: ${JSON.stringify(input.filePath)}`,
     `replace_all: ${String(input.replaceAll)}`,
     stringEvidence("file_path", input.filePath),
@@ -181,9 +186,11 @@ function editApprovalSummary(input: LiteralEditInput): string {
   ].join("\n");
 }
 
-function webSearchApprovalSummary(input: WebSearchInput): string {
+function webSearchApprovalSummary(input: WebSearchInput, sandboxed: boolean): string {
   return [
-    "Allow runtime-pi to send this search query to the configured HTTPS search endpoint?",
+    sandboxed
+      ? "Allow runtime-pi to send this search query through the selected Core sandbox?"
+      : "Allow runtime-pi to send this search query to the configured HTTPS search endpoint?",
     `query: ${JSON.stringify(input.query)}`,
     `limit: ${String(input.limit)}`,
     stringEvidence("query", input.query),
@@ -269,12 +276,38 @@ function nativeTextResult(
   };
 }
 
+function nativeAgentResult(
+  toolCallId: string,
+  result: AgentToolResult<unknown>,
+  results: Map<string, RuntimeToolResult>,
+): AgentToolResult<{ readonly runtimeResult: RuntimeToolResult }> {
+  const runtimeResult: RuntimeToolResult = {
+    callId: toolCallId,
+    content: result.content.length === 0
+      ? [{ type: "text", text: "" }]
+      : result.content.map((part) =>
+          part.type === "text"
+            ? { type: "text" as const, text: part.text }
+            : {
+                type: "file" as const,
+                mediaType: part.mimeType,
+                data: part.data,
+              }),
+  };
+  results.set(toolCallId, runtimeResult);
+  return {
+    content: result.content,
+    details: { runtimeResult },
+  };
+}
+
 export function nodeReplTool(
   context: RuntimeTurnContext,
   controller: NodeReplController,
   results: Map<string, RuntimeToolResult>,
   turnSignal: AbortSignal,
   onToolAttempt: () => void,
+  sandboxed = false,
 ): AgentTool {
   if (context.requestApproval === undefined) {
     throw new RuntimePiError(
@@ -318,7 +351,7 @@ export function nodeReplTool(
         context,
         runtimePiNodeReplTool,
         toolCallId,
-        nodeReplApprovalSummary(code),
+        nodeReplApprovalSummary(code, sandboxed),
         approvalSignal,
       );
       onToolAttempt();
@@ -334,6 +367,7 @@ export function editTool(
   results: Map<string, RuntimeToolResult>,
   turnSignal: AbortSignal,
   onToolAttempt: () => void,
+  sandboxTools?: RuntimePiSandboxTools,
 ): AgentTool {
   return {
     name: runtimePiEditTool.id,
@@ -385,10 +419,23 @@ export function editTool(
         context,
         runtimePiEditTool,
         toolCallId,
-        editApprovalSummary(input),
+        editApprovalSummary(input, sandboxTools !== undefined),
         approvalSignal,
       );
       onToolAttempt();
+      if (sandboxTools !== undefined) {
+        const result = await sandboxTools.execute(
+          runtimePiEditTool.id,
+          {
+            file_path: input.filePath,
+            old_string: input.oldString,
+            new_string: input.newString,
+            replace_all: input.replaceAll,
+          },
+          approvalSignal,
+        );
+        return nativeAgentResult(toolCallId, result, results);
+      }
       const edited = await editLiteralFile(
         workspaceDirectory,
         input,
@@ -412,6 +459,7 @@ export function webSearchTool(
   results: Map<string, RuntimeToolResult>,
   turnSignal: AbortSignal,
   onToolAttempt: () => void,
+  sandboxTools?: RuntimePiSandboxTools,
 ): AgentTool {
   return {
     name: runtimePiWebSearchTool.id,
@@ -451,10 +499,18 @@ export function webSearchTool(
         context,
         runtimePiWebSearchTool,
         toolCallId,
-        webSearchApprovalSummary(input),
+        webSearchApprovalSummary(input, sandboxTools !== undefined),
         approvalSignal,
       );
       onToolAttempt();
+      if (sandboxTools !== undefined) {
+        const result = await sandboxTools.execute(
+          runtimePiWebSearchTool.id,
+          { query: input.query, limit: input.limit },
+          approvalSignal,
+        );
+        return nativeAgentResult(toolCallId, result, results);
+      }
       const searchResults = await searchWeb(input, { signal: approvalSignal });
       return nativeTextResult(
         toolCallId,

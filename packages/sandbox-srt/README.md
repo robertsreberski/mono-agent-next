@@ -32,8 +32,10 @@ relative, absolute, `file:`, and bare-package imports fail closed, and dynamic
 import syntax is rejected before entrypoint evaluation. Linux can additionally
 execute a reviewed single-file native descriptor through `/proc/self/fd`;
 unsupported platform or executable shapes—including non-Node interpreter
-scripts—fail closed. Output, input, arguments, environment, duration,
-cancellation, and shutdown are bounded.
+scripts—fail closed. One-shot commands bound output, input, arguments,
+environment, duration, cancellation, and shutdown. Long-lived protocol
+children use aggregate input/output bounds and lifecycle termination without a
+fixed wall-clock limit.
 Health re-proves both selected files and reports the integrity state, active
 command count, and selected digests without exposing command data.
 
@@ -69,7 +71,7 @@ shasum -a 256 /absolute/private/path/to/settings.json
     "limits": {
       "defaultTimeoutMs": 120000,
       "maxTimeoutMs": 600000,
-      "maxOutputBytes": 4194304
+      "maxOutputBytes": 5242880
     },
     "environment": {
       "inherit": ["PATH"],
@@ -89,6 +91,22 @@ ambient names and explicitly allowlisted per-command values. `NODE_OPTIONS`,
 inherit or allow them, and per-command values fail before process creation.
 This prevents Node or the native dynamic loader from executing preload code
 outside SRT enforcement.
+
+The example environment is only a minimal policy shape. A selected CLI runtime
+must configure its `binary` as an absolute path, put unchanged ambient
+operational names under `inherit`, and put runtime-authored or runtime-generated
+names under `allow`. Runtime package documentation identifies those names.
+The sandbox does not resolve a bare `claude`, `codex`, or `opencode` command.
+
+Restrictive filesystem settings must also use canonical absolute paths.
+Relative entries such as `"."` resolve against the wrapper's per-command
+working directory, which varies between workspace tools, runtime probes, and
+long-lived protocol children. A stable policy therefore names the canonical
+workspace, each selected runtime's per-instance data root, and any native
+Claude or Codex config root needed for ambient authentication. Codex and
+OpenCode require write access to their runtime data roots; workspace and
+native-config writes remain explicit, least-authority policy decisions. See
+[Sandbox behavior](../../docs/tools/sandbox.md) for the runtime-specific map.
 
 Provisioning must bundle the reviewed SRT JavaScript transitive closure into
 the one configured entrypoint before computing its digest. The raw upstream
@@ -129,10 +147,10 @@ arbitrary settings file allows or denies any particular destination.
 
 1. Core validates the reserved sandbox config and creates one selected module instance.
 2. The module opens and hashes the canonical executable and settings paths with no-follow descriptors, pinning their filesystem fingerprints.
-3. Each request validates an absolute command, canonical working directory, argument/input/environment bounds, allowlisted non-preloader environment, timeout, and cancellation.
+3. Each request validates an absolute command, canonical working directory, argument/input/environment bounds, and allowlisted non-preloader environment. One-shot execution also validates timeout and cancellation.
 4. Immediately before launch, both selected files are reopened with no-follow descriptors, rehashed positionally, and compared with the pinned fingerprints while those descriptors remain open.
 5. Node passes those descriptors into the child. A self-contained ESM bundle is loaded from `/proc/self/fd` on Linux or `/dev/fd` on macOS; its loader parses the exact descriptor-bound source with Acorn before evaluation, rejects dynamic imports, permits only static `node:` built-ins, and rejects every other external module edge. Linux native executables launch directly through `/proc/self/fd`. The settings argument is descriptor-backed on both platforms.
-6. The module collects a combined bounded stdout/stderr budget; overflow, abort, timeout, and stop terminate the whole process group. Later runs and health independently re-prove the selected paths, but a post-run pathname check is not treated as the execution-race defense.
+6. One-shot execution collects a combined bounded stdout/stderr budget; overflow, abort, timeout, and stop terminate the whole process group. Streaming execution returns bounded stdin/stdout/stderr process facades for runtime protocols; overflow, explicit kill, and stop terminate the group with escalation. Later runs and health independently re-prove the selected paths, but a post-run pathname check is not treated as the execution-race defense.
 
 ### Package structure
 
@@ -142,6 +160,7 @@ arbitrary settings file allows or denies any particular destination.
 | `security.ts` | Canonical no-follow file resolution, POSIX safety checks, positional hashing, fingerprints, and retained descriptor bindings. |
 | `bound-launch.ts` | Descriptor-bound native and self-contained Node launch vectors and loader validation. |
 | `sandbox.ts` | Command validation, bounded I/O, timeout, cancellation, health, and stop. |
+| `streaming-process.ts` | Bounded stdin/stdout/stderr facade and fail-closed long-lived child lifecycle. |
 | `status-command.ts` | Strict read-only integrity and settings-authority status reporting. |
 | `errors.ts` | Stable fail-closed sandbox error codes. |
 | `index.ts` | The typed reserved `monoAgentModule` definition and public exports. |
@@ -219,6 +238,7 @@ pnpm --filter @mono-agent/sandbox-srt test
 
 The focused suite uses a deterministic fake SRT executable to prove exact
 argument vectors, environment isolation, bounded input/output/timeout/cancel,
+streaming process startup, protocol I/O, overflow, kill, and stop escalation,
 per-command timeout and environment limits, in-flight stop escalation,
 settings/executable digest and identity drift, missing and unsafe modes,
 symlink and hard-link rejection, canonical working directories, pinned

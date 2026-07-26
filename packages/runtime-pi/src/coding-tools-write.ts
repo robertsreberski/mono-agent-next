@@ -15,6 +15,7 @@ import {
   displayPath,
   effectiveWorkdir,
   evidence,
+  executionBoundarySummary,
   ownRecord,
   PATH_MAX_BYTES,
   renamedTool,
@@ -67,18 +68,28 @@ export function createRuntimePiWriteAgentTool(
       runtimePiWriteTool,
       toolCallId,
       [
-        "Allow this unsandboxed file creation or complete overwrite?",
+        executionBoundarySummary(
+          options,
+          "Allow this file creation or complete overwrite through the selected Core sandbox?",
+          "Allow this unsandboxed file creation or complete overwrite?",
+        ),
         `path: ${JSON.stringify(absolutePath)}`,
         evidence("content", content),
       ].join("\n"),
       executionSignal,
-      () => tool.execute(
-        toolCallId,
-        { path: absolutePath, content },
-        executionSignal,
-        onUpdate as AgentToolUpdateCallback<unknown> | undefined,
-        { env: writeExecutionEnv },
-      ),
+      () => options.sandboxTools === undefined
+        ? tool.execute(
+            toolCallId,
+            { path: absolutePath, content },
+            executionSignal,
+            onUpdate as AgentToolUpdateCallback<unknown> | undefined,
+            { env: writeExecutionEnv },
+          )
+        : options.sandboxTools.execute(
+            runtimePiWriteTool.id,
+            { path: absolutePath, content },
+            executionSignal,
+          ),
     );
   });
 }

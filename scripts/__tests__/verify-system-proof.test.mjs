@@ -91,6 +91,26 @@ describe("packed proof Node and source authority", () => {
     expect(source).toContain("host = await createAgentHost(configPath");
   });
 
+  test("labels the packed sandbox fixture as routing proof, not operating-system enforcement", () => {
+    const source = readFileSync(
+      join(process.cwd(), "scripts", "verify", "system.mjs"),
+      "utf8",
+    );
+    expect(source).toContain([
+      "const SANDBOX_FIXTURE_AUTHORITY =",
+      '  "transparent fixture proves Core-to-Pi-to-sandbox-srt routing only; it does not prove operating-system enforcement";',
+    ].join("\n"));
+    expect(source).toContain("proofAuthority: SANDBOX_FIXTURE_AUTHORITY,");
+    expect(source).toContain(
+      "Real SRT enforcement needs a separate\n  // focused proof with a provisioned upstream runtime.",
+    );
+    expect(source).toContain("appendFileSync(");
+    expect(source).toContain(
+      '"selected sandbox wrapper must own exactly one invocation marker"',
+    );
+    expect(source).toContain("parsed.sandboxWrapperInvocations !== 1");
+  });
+
   test("pins the complete 28-code plus 3-JSON packed public export surface", () => {
     expect(PUBLIC_EXPORT_SPECIFIERS).toHaveLength(31);
     expect(PUBLIC_EXPORT_SPECIFIERS.filter((specifier) =>

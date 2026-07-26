@@ -556,12 +556,18 @@ RESERVED_MODULE_KINDS
 ReservedModuleDefinition
 ReservedModuleKind
 ReservedModuleManifest
+SANDBOX_EXECUTE_CAPABILITY
 Sandbox
 SandboxCommand
+SandboxExecutor
 SandboxHost
 SandboxModuleCreateContext
 SandboxModuleDefinition
+SandboxProcess
+SandboxProcessInput
+SandboxProcessOutput
 SandboxResult
+SandboxSpawnCommand
 StateCompareAndSwapRequest
 StateCompareAndSwapResult
 StateDeleteArtifactRequest
@@ -602,6 +608,7 @@ TriggerHost
 TriggerModuleCreateContext
 TriggerModuleDefinition
 TriggerReceipt
+grantedSandboxExecutor
 ```
 
 **`@mono-agent/module-sdk/secure-fs`**

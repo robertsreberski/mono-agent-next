@@ -16,7 +16,6 @@ import {
 } from "@earendil-works/pi-ai";
 import type {
   JsonValue,
-  RuntimeCapabilities,
   RuntimeToolResultPart,
   RuntimeUsage,
   TurnContentPart,
@@ -287,20 +286,4 @@ export function thinkingLevel(
   }
   const level = clampThinkingLevel(model, requested as ThinkingLevel) as ThinkingLevel;
   return { level, clamped: level !== requested };
-}
-
-export function exactCapabilities(attachments: boolean): RuntimeCapabilities {
-  return {
-    tools: true,
-    mcp: true,
-    attachments,
-    approvals: true,
-    structuredOutput: true,
-    sandbox: false,
-    sessions: true,
-    maxTurns: true,
-    maxOutputTokens: true,
-    artifactResults: true,
-    liveInput: true,
-  };
 }

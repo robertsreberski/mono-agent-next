@@ -30,6 +30,7 @@ export function runtimeEligibility(
   tools: readonly CoreRuntimeTool[],
   required: readonly string[],
   config: LoadedAgentConfig,
+  sandboxExecutorGranted: boolean,
   hasInteractionHandler: boolean,
 ): string | undefined {
   if (tools.length > 0 && !capabilities.tools) return "tools unsupported";
@@ -45,7 +46,7 @@ export function runtimeEligibility(
     && tools.some((tool) => tool.source.kind === "module" && toolEffects(tool).length > 0)) {
     return "effectful selected-module tools cannot execute under the active sandbox";
   }
-  if (sandboxActive && !capabilities.sandbox) {
+  if (sandboxActive && (!sandboxExecutorGranted || !capabilities.sandbox)) {
     return "sandbox unsupported";
   }
   for (const capability of required) {
