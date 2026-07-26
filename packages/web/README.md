@@ -22,7 +22,8 @@ Catalog responsibility: Runs the standalone browser product with explicit token 
 - Discover owner-private operator registry entries through `@mono-agent/operator`.
 - Enforce the selected token or no-auth access mode while always rejecting
   invalid authorities and cross-origin or browser-simple mutations.
-- Persist conversations and messages through atomic owner-private state commits.
+- Persist conversations and messages through crash-safe owner-private state
+  commits and bounded active-turn journals.
 - Discover explicitly provenance-marked external `cron`/`webhook` proactive
   conversations, import their replay once, persist them durably, and retain
   dismissal tombstones so deleted notices do not reappear. Conversation ids
@@ -165,6 +166,7 @@ browser stream contains web-owned thread snapshots, not raw operator frames.
 | --- | --- |
 | `config.ts` | Strict product config, access-mode/host validation, environment secret resolution, and JSON Schema. |
 | `operator-gateway.ts` | Thin binding to the shared directory, client, reducer, and action policy. |
+| `active-turn-journal.ts` | Bounded owner-private streamed-turn deltas, fsync, and torn-tail-safe recovery. |
 | `store.ts` | Versioned state, exclusive process lease, atomic commits, and restart recovery. |
 | `service.ts` | Conversation/turn process lifecycle and exact cancellation. |
 | `server.ts` | Access-gated HTTP API, authority/origin/media-type enforcement, link-free descriptor-first static asset reads, streaming, and shutdown. |
@@ -173,18 +175,35 @@ browser stream contains web-owned thread snapshots, not raw operator frames.
 
 ### Durable-state contract
 
-`dataDirectory` is created as `0700`; its marker, lease, and `state.json` are
-`0600`, current-user-owned, single-link regular files. Existing permissive,
-linked, corrupt, or wrong-owner paths fail closed and are never repaired or
-overwritten. Each mutation writes and fsyncs a same-directory exclusive temp
-file, atomically renames it to `state.json`, then fsyncs the directory. A crash
-therefore exposes either the previous complete state or the next complete
-state. The singleton lease uses an OS-released exclusive SQLite transaction, so
-a crash cannot leave a PID file that another process races to unlink. If rename
-succeeds but directory durability cannot be proven, the open store is poisoned
-against reads and writes until close/reopen, preventing a stale in-memory
-snapshot from overwriting the visible commit. Turns left `running` by an
-unclean stop become explicitly `interrupted` on the next exclusive open.
+`dataDirectory` and its `.active-turns` child are created as `0700`; the marker,
+lease, `state.json`, and active-turn journals are `0600`, current-user-owned,
+single-link regular files. Existing permissive, linked, corrupt, or wrong-owner
+paths fail closed and are never repaired or overwritten.
+
+Turn start, terminal settlement, and every mutation unrelated to an assistant
+stream frame are canonical commits: the store writes and fsyncs an exclusive
+same-directory temporary file, atomically renames it to `state.json`, fsyncs
+the directory, and removes superseded journals durably. A streamed assistant
+frame instead builds a targeted copy-on-write state and appends a compact text,
+activity, AskUser, and telemetry delta to that turn's journal. The journal is
+fsynced before the in-memory revision advances, so streaming does not serialize
+and rewrite the full conversation history for every frame.
+
+On exclusive open, complete newline-terminated records are replayed in global
+revision order before any still-running turns become `interrupted`. A final
+unterminated tail is ignored as a torn write. A malformed complete header or
+record fails closed and preserves the bytes for inspection. Admission is
+bounded to 32 active turns; each journal is limited to 16 MiB and 131,072
+records, with a 64 MiB encoded total across all active journals. Capacity
+failures happen before append and do not poison the store, allowing terminal
+settlement to canonicalize the last accepted state.
+
+The singleton lease uses an OS-released exclusive SQLite transaction, so a
+crash cannot leave a PID file that another process races to unlink. If a
+canonical rename or journal write succeeds but its durability cannot be
+proven, the open store is poisoned against reads and writes until close/reopen,
+preventing an uncertain in-memory snapshot from overwriting visible durable
+state.
 
 State schema version 3 adds revisioned invalidation, pinned agents, archived
 threads, explicit trigger provenance, and structured activity to the version 2
@@ -195,16 +214,19 @@ non-negative integer counters only. Compaction and provider-session eviction
 flags are sticky within the turn so a later usage snapshot cannot erase an
 earlier event.
 
-State has no automatic retention or bulk purge. Deleting an
-ordinary thread atomically removes its local messages. Deleting an imported
-proactive thread removes its messages and keeps only an owner-private tombstone
-so the same agent conversation is not re-imported on the next discovery poll.
-For backup, stop
-the process and copy `state.json` plus `.mono-agent-web-state`; preserve modes.
-For restore, stop the process, restore those exact regular files into an empty
-`0700` data directory, enforce `0600`, and start. Corrupt or unknown-version
-state is preserved for inspection. There is deliberately no remote reset or
-delete-all endpoint.
+State has no automatic retention or bulk purge. Deleting an ordinary thread
+atomically removes its local messages. Deleting an imported proactive thread
+removes its messages and keeps only an owner-private tombstone so the same
+agent conversation is not re-imported on the next discovery poll. For a
+coherent clean backup, stop the process and copy `state.json` plus
+`.mono-agent-web-state`; a clean stop terminalizes active turns, so
+`.active-turns` is empty. A state-only copy taken while the product is running
+can omit accepted stream frames. For crash-state preservation, keep the process
+stopped and copy `state.json`, the marker, and the complete `.active-turns`
+directory together, preserving `0700`/`0600` modes. Restore those artifacts
+into an empty `0700` data directory and start; recovery replays complete
+journal records. Corrupt or unknown-version state is preserved for inspection.
+There is deliberately no remote reset or delete-all endpoint.
 
 ## Public API
 

@@ -4,8 +4,10 @@ import { chmod, lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 
 import {
+  OPERATOR_LIMITS,
   parseAskSnapshot,
   parseOperatorFrame,
   parseTurnRequest,
@@ -14,6 +16,15 @@ import {
   type OperatorUsage,
 } from "@mono-agent/operator";
 
+import {
+  ACTIVE_TURN_JOURNAL_LIMITS,
+  ActiveTurnJournalDirectory,
+  JournalCommitUncertainError,
+  journalName,
+  type ActiveTurnJournalHeader,
+  type ActiveTurnJournalLimits,
+  type RawActiveTurnJournal,
+} from "./active-turn-journal.js";
 import type {
   PatchWebThreadInput,
   StartWebTurnInput,
@@ -41,6 +52,12 @@ export interface DurableWebStoreOptions {
   readonly clock?: () => Date;
   /** Deterministic durability-fault seam used by focused crash-safety tests. */
   readonly afterStateRename?: () => void | Promise<void>;
+  /** Deterministic crash seam after canonical state durability and before journal reset. */
+  readonly beforeJournalReset?: () => void | Promise<void>;
+  /** Deterministic durability-fault seam after a journal record write and before fsync. */
+  readonly afterJournalRecordWrite?: () => void | Promise<void>;
+  /** Deterministic lower journal limits used by focused capacity tests. */
+  readonly activeTurnJournalLimits?: Partial<ActiveTurnJournalLimits>;
 }
 
 class StateCommitUncertainError extends Error {
@@ -57,6 +74,8 @@ export class DurableWebStore {
   private readonly clock: () => Date;
   private readonly lease: DatabaseSync;
   private readonly afterStateRename: (() => void | Promise<void>) | undefined;
+  private readonly beforeJournalReset: (() => void | Promise<void>) | undefined;
+  private readonly activeTurns: ActiveTurnJournalDirectory;
   private operation = Promise.resolve();
   private closed = false;
   private poisoned: WebProductError | undefined;
@@ -65,14 +84,17 @@ export class DurableWebStore {
     directory: string,
     state: StoredWebState,
     lease: DatabaseSync,
+    activeTurns: ActiveTurnJournalDirectory,
     options: DurableWebStoreOptions,
   ) {
     this.directory = directory;
     this.statePath = join(directory, STATE_FILE);
     this.lease = lease;
+    this.activeTurns = activeTurns;
     this.state = state;
     this.clock = options.clock ?? (() => new Date());
     this.afterStateRename = options.afterStateRename;
+    this.beforeJournalReset = options.beforeJournalReset;
   }
 
   static async open(directory: string, options: DurableWebStoreOptions = {}): Promise<DurableWebStore> {
@@ -82,9 +104,14 @@ export class DurableWebStore {
     await prepareLeaseDatabase(root);
     const lease = acquireLease(root);
     try {
+      const activeTurns = await ActiveTurnJournalDirectory.open(
+        root,
+        resolveJournalLimits(options.activeTurnJournalLimits),
+        options.afterJournalRecordWrite,
+      );
       const state = await loadState(root);
-      const store = new DurableWebStore(root, state, lease, options);
-      await store.recoverInterruptedTurns();
+      const store = new DurableWebStore(root, state, lease, activeTurns, options);
+      await store.recoverActiveTurns();
       return store;
     } catch (error) {
       releaseLease(lease);
@@ -210,6 +237,16 @@ export class DurableWebStore {
       const turnInput: StartWebTurnInput = typeof input === "string" ? { text: input } : input;
       const thread = requiredThread(draft, threadId);
       if (thread.status === "running") throw new WebProductError("turn_active", "This conversation already has an active turn.", 409);
+      if (
+        draft.threads.filter((candidate) => candidate.status === "running").length
+        >= this.activeTurns.limits.maxActiveTurns
+      ) {
+        throw new WebProductError(
+          "capacity_exceeded",
+          "The web console already has the maximum number of active turns.",
+          409,
+        );
+      }
       const now = this.clock().toISOString();
       const turnId = randomUUID();
       const hasEarlierUserMessage = draft.messages.some((message) =>
@@ -254,11 +291,44 @@ export class DurableWebStore {
     usage?: OperatorUsage,
     activities?: readonly OperatorActivity[],
   ): Promise<WebMessage> {
-    return this.mutate((draft) => {
-      const thread = requiredThread(draft, threadId);
-      const message = requiredAssistant(draft, threadId, turnId);
-      if (message.status !== "running") throw new WebProductError("turn_not_active", "The turn is no longer active.", 409);
+    if (this.closed) return Promise.reject(new WebProductError("store_closed", "Web state is closed.", 409));
+    const result = this.operation.then(async () => {
+      if (this.poisoned !== undefined) throw this.poisoned;
+      const previous = this.state;
+      const threadIndex = previous.threads.findIndex((candidate) =>
+        candidate.id === threadId && candidate.deletedAt === undefined
+      );
+      if (threadIndex < 0) throw new WebProductError("thread_not_found", "Conversation not found.", 404);
+      const messageIndex = previous.messages.findIndex((candidate) =>
+        candidate.threadId === threadId && candidate.turnId === turnId && candidate.role === "assistant"
+      );
+      if (messageIndex < 0) throw new WebProductError("turn_not_found", "Turn not found.", 404);
+      const oldThread = previous.threads[threadIndex]!;
+      const oldMessage = previous.messages[messageIndex]!;
+      if (
+        oldThread.status !== "running"
+        || oldThread.activeTurnId !== turnId
+        || oldMessage.status !== "running"
+      ) {
+        throw new WebProductError("turn_not_active", "The turn is no longer active.", 409);
+      }
+
       const updatedAt = this.clock().toISOString();
+      if (
+        operatorMessageId !== undefined
+        && (
+          operatorMessageId.length === 0
+          || operatorMessageId.length > OPERATOR_LIMITS.messageIdentifierCharacters
+        )
+      ) {
+        throw new WebProductError(
+          "invalid_operator_message",
+          "The operator assistant message id is invalid.",
+          502,
+        );
+      }
+      const thread = clone(oldThread);
+      const message = clone(oldMessage);
       Object.assign(message, { text, updatedAt });
       if (operatorMessageId !== undefined) Object.assign(message, { operatorMessageId });
       if (usage !== undefined) {
@@ -269,9 +339,57 @@ export class DurableWebStore {
       }
       Object.assign(thread, { updatedAt });
       delete (thread as { pendingAsk?: unknown }).pendingAsk;
-      if (pendingAsk !== undefined) Object.assign(thread, { pendingAsk });
-      return message;
+      if (pendingAsk !== undefined) Object.assign(thread, { pendingAsk: clone(pendingAsk) });
+
+      const nextRevision = previous.revision + 1;
+      const draft: MutableState = {
+        schemaVersion: 3,
+        revision: nextRevision,
+        pinnedAgentIds: [...previous.pinnedAgentIds],
+        threads: [...previous.threads],
+        messages: [...previous.messages],
+      };
+      draft.threads[threadIndex] = thread;
+      draft.messages[messageIndex] = message;
+      validateAssistantUpdate(thread, message, nextRevision);
+
+      const header: ActiveTurnJournalHeader = {
+        kind: "mono-agent-web-active-turn",
+        version: 1,
+        threadId,
+        turnId,
+        assistantMessageId: message.id,
+        baseRevision: previous.revision,
+      };
+      const record: ActiveTurnJournalRecord = {
+        kind: "assistant-delta",
+        fromRevision: previous.revision,
+        revision: nextRevision,
+        updatedAt,
+        text: text.startsWith(oldMessage.text)
+          ? { kind: "append", value: text.slice(oldMessage.text.length) }
+          : { kind: "replace", value: text },
+        ...(isDeepStrictEqual(oldThread.pendingAsk, pendingAsk)
+          ? {}
+          : { pendingAsk: pendingAsk === undefined ? null : clone(pendingAsk) }),
+        ...(operatorMessageId === undefined ? {} : { operatorMessageId }),
+        ...(usage === undefined ? {} : { telemetry: message.telemetry! }),
+        ...(activities === undefined
+          ? {}
+          : { activities: activityPatch(oldMessage.activities ?? [], message.activities ?? []) }),
+      };
+      try {
+        await this.activeTurns.append(header, record);
+      } catch (error) {
+        if (error instanceof WebProductError && error.code === "capacity_exceeded") throw error;
+        this.poisoned = journalPoison(error);
+        throw this.poisoned;
+      }
+      this.state = freezeCowState(draft);
+      return clone(message);
     });
+    this.operation = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   clearPendingAsk(threadId: string): Promise<WebThread> {
@@ -348,8 +466,81 @@ export class DurableWebStore {
     releaseLease(this.lease);
   }
 
-  private async recoverInterruptedTurns(): Promise<void> {
-    if (!this.state.threads.some((thread) => thread.status === "running")) return;
+  private async recoverActiveTurns(): Promise<void> {
+    const rawJournals = await this.activeTurns.readAll();
+    const recovered = clone(this.state) as MutableState;
+    const records: Array<{
+      readonly header: ActiveTurnJournalHeader;
+      readonly record: ActiveTurnJournalRecord;
+    }> = [];
+    const headers: ActiveTurnJournalHeader[] = [];
+    const identities = new Set<string>();
+    const recordRevisions = new Set<number>();
+    for (const raw of rawJournals) {
+      const parsed = parseActiveTurnJournal(raw, this.activeTurns.limits);
+      if (parsed.header === undefined) continue;
+      const identity = JSON.stringify([parsed.header.threadId, parsed.header.turnId]);
+      if (identities.has(identity)) invalidState();
+      identities.add(identity);
+      headers.push(parsed.header);
+      this.activeTurns.register(
+        raw.name,
+        parsed.header,
+        raw.content.byteLength,
+        parsed.records.length,
+      );
+      for (const record of parsed.records) {
+        if (recordRevisions.has(record.revision)) invalidState();
+        recordRevisions.add(record.revision);
+      }
+      if (parsed.header.baseRevision < this.state.revision) {
+        if (parsed.records.some((record) => record.revision > this.state.revision)) {
+          invalidState();
+        }
+        continue;
+      }
+      for (const record of parsed.records) records.push({ header: parsed.header, record });
+    }
+    records.sort((left, right) => left.record.revision - right.record.revision);
+    const canonicalRevision = recovered.revision;
+    for (const entry of records) {
+      if (entry.record.revision <= canonicalRevision) continue;
+      if (
+        entry.record.fromRevision !== recovered.revision
+        || entry.record.revision !== recovered.revision + 1
+      ) {
+        invalidState();
+      }
+      applyJournalRecord(recovered, entry.header, entry.record);
+    }
+    for (const header of headers) {
+      if (header.baseRevision > recovered.revision) invalidState();
+      const thread = recovered.threads.find((candidate) => candidate.id === header.threadId);
+      const message = recovered.messages.find((candidate) =>
+        candidate.id === header.assistantMessageId
+        && candidate.threadId === header.threadId
+        && candidate.turnId === header.turnId
+        && candidate.role === "assistant"
+      );
+      if (thread === undefined || message === undefined) invalidState();
+      if (
+        header.baseRevision >= canonicalRevision
+        && (
+          thread.status !== "running"
+          || thread.activeTurnId !== header.turnId
+          || message.status !== "running"
+        )
+      ) {
+        invalidState();
+      }
+    }
+    if (recovered.revision !== this.state.revision) {
+      this.state = freezeCowState(recovered);
+    }
+    if (!this.state.threads.some((thread) => thread.status === "running")) {
+      if (rawJournals.length > 0) await this.activeTurns.clear();
+      return;
+    }
     await this.mutate((draft) => {
       const now = this.clock().toISOString();
       for (const thread of draft.threads) {
@@ -388,6 +579,13 @@ export class DurableWebStore {
         throw error;
       }
       this.state = freezeState(draft);
+      try {
+        await this.beforeJournalReset?.();
+        await this.activeTurns.clear();
+      } catch (error) {
+        this.poisoned = journalPoison(error);
+        throw this.poisoned;
+      }
       return clone(value);
     });
     this.operation = result.then(() => undefined, () => undefined);
@@ -406,6 +604,295 @@ type MutableState = {
   threads: WebThread[];
   messages: WebMessage[];
 };
+
+interface ActiveTurnJournalRecord {
+  readonly kind: "assistant-delta";
+  readonly fromRevision: number;
+  readonly revision: number;
+  readonly updatedAt: string;
+  readonly text: JournalPatch<string>;
+  readonly pendingAsk?: WebThread["pendingAsk"] | null;
+  readonly operatorMessageId?: string;
+  readonly telemetry?: WebTurnTelemetry;
+  readonly activities?: JournalPatch<readonly OperatorActivity[]>;
+}
+
+interface JournalPatch<T> {
+  readonly kind: "append" | "replace";
+  readonly value: T;
+}
+
+function parseActiveTurnJournal(
+  raw: RawActiveTurnJournal,
+  limits: ActiveTurnJournalLimits,
+): {
+  readonly header?: ActiveTurnJournalHeader;
+  readonly records: readonly ActiveTurnJournalRecord[];
+} {
+  const completeEnd = raw.content.lastIndexOf(0x0a);
+  if (completeEnd < 0) return { records: [] };
+  let complete: string;
+  try {
+    complete = new TextDecoder("utf-8", { fatal: true }).decode(
+      raw.content.subarray(0, completeEnd + 1),
+    );
+  } catch {
+    invalidState();
+  }
+  const lines = complete.slice(0, -1).split("\n");
+  if (lines.length === 0 || lines[0] === "") invalidState();
+  const header = parseJournalHeader(parseJournalJson(lines[0]!));
+  if (journalName(header) !== raw.name) invalidState();
+  if (lines.length - 1 > limits.maxRecords) {
+    throw new WebProductError(
+      "capacity_exceeded",
+      "An active-turn journal contains too many records.",
+      409,
+    );
+  }
+  const records = lines.slice(1).map((line) => {
+    if (line === "") invalidState();
+    return parseJournalRecord(parseJournalJson(line));
+  });
+  if (records[0] !== undefined && records[0].fromRevision !== header.baseRevision) {
+    invalidState();
+  }
+  for (let index = 1; index < records.length; index += 1) {
+    if (records[index]!.revision <= records[index - 1]!.revision) invalidState();
+  }
+  return { header, records };
+}
+
+function parseJournalJson(line: string): unknown {
+  try {
+    return JSON.parse(line) as unknown;
+  } catch {
+    invalidState();
+  }
+}
+
+function parseJournalHeader(raw: unknown): ActiveTurnJournalHeader {
+  const value = recordValue(raw);
+  if (
+    value === undefined
+    || Object.keys(value).some((field) => ![
+      "kind", "version", "threadId", "turnId", "assistantMessageId", "baseRevision",
+    ].includes(field))
+    || value.kind !== "mono-agent-web-active-turn"
+    || value.version !== 1
+    || !isString(value.threadId)
+    || !isString(value.turnId)
+    || !isString(value.assistantMessageId)
+    || !isCount(value.baseRevision)
+  ) {
+    invalidState();
+  }
+  return value as unknown as ActiveTurnJournalHeader;
+}
+
+function parseJournalRecord(raw: unknown): ActiveTurnJournalRecord {
+  const value = recordValue(raw);
+  if (
+    value === undefined
+    || Object.keys(value).some((field) => ![
+      "kind", "fromRevision", "revision", "updatedAt", "text", "pendingAsk",
+      "operatorMessageId", "telemetry", "activities",
+    ].includes(field))
+    || value.kind !== "assistant-delta"
+    || !isCount(value.fromRevision)
+    || !isCount(value.revision)
+    || Number(value.revision) !== Number(value.fromRevision) + 1
+    || !isTimestamp(value.updatedAt)
+    || !isStringPatch(value.text)
+    || (
+      value.operatorMessageId !== undefined
+      && (
+        typeof value.operatorMessageId !== "string"
+        || value.operatorMessageId.length === 0
+        || value.operatorMessageId.length > OPERATOR_LIMITS.messageIdentifierCharacters
+      )
+    )
+    || (value.telemetry !== undefined && !isTelemetry(value.telemetry))
+    || (value.activities !== undefined && !isActivityPatch(value.activities))
+  ) {
+    invalidState();
+  }
+  if (value.pendingAsk !== undefined && value.pendingAsk !== null) {
+    try {
+      parseAskSnapshot({ ask: value.pendingAsk });
+    } catch {
+      invalidState();
+    }
+  }
+  return clone(value as unknown as ActiveTurnJournalRecord);
+}
+
+function isStringPatch(raw: unknown): raw is JournalPatch<string> {
+  const value = recordValue(raw);
+  return value !== undefined
+    && !Object.keys(value).some((field) => !["kind", "value"].includes(field))
+    && (value.kind === "append" || value.kind === "replace")
+    && typeof value.value === "string";
+}
+
+function isActivityPatch(
+  raw: unknown,
+): raw is JournalPatch<readonly OperatorActivity[]> {
+  const value = recordValue(raw);
+  if (
+    value === undefined
+    || Object.keys(value).some((field) => !["kind", "value"].includes(field))
+    || (value.kind !== "append" && value.kind !== "replace")
+    || !Array.isArray(value.value)
+  ) {
+    return false;
+  }
+  for (const activity of value.value) {
+    const activityRecord = recordValue(activity);
+    if (activityRecord === undefined) return false;
+    try {
+      const parsed = parseOperatorFrame({
+        ...activityRecord,
+        turnId: "stored-web-journal-activity",
+      });
+      if (!["activity", "tool_call", "tool_result", "compaction"].includes(parsed.type)) {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function applyJournalRecord(
+  draft: MutableState,
+  header: ActiveTurnJournalHeader,
+  record: ActiveTurnJournalRecord,
+): void {
+  const threadIndex = draft.threads.findIndex((thread) => thread.id === header.threadId);
+  const messageIndex = draft.messages.findIndex((message) =>
+    message.id === header.assistantMessageId
+    && message.threadId === header.threadId
+    && message.turnId === header.turnId
+    && message.role === "assistant"
+  );
+  if (threadIndex < 0 || messageIndex < 0) invalidState();
+  const oldThread = draft.threads[threadIndex]!;
+  const oldMessage = draft.messages[messageIndex]!;
+  if (
+    oldThread.status !== "running"
+    || oldThread.activeTurnId !== header.turnId
+    || oldMessage.status !== "running"
+  ) {
+    invalidState();
+  }
+  const thread = clone(oldThread);
+  const message = clone(oldMessage);
+  Object.assign(message, {
+    text: applyStringPatch(message.text, record.text),
+    updatedAt: record.updatedAt,
+  });
+  if (record.operatorMessageId !== undefined) {
+    Object.assign(message, { operatorMessageId: record.operatorMessageId });
+  }
+  if (record.telemetry !== undefined) {
+    Object.assign(message, { telemetry: clone(record.telemetry) });
+  }
+  if (record.activities !== undefined) {
+    Object.assign(message, {
+      activities: applyActivityPatch(message.activities ?? [], record.activities),
+    });
+  }
+  Object.assign(thread, { updatedAt: record.updatedAt });
+  if (Object.hasOwn(record, "pendingAsk")) {
+    delete (thread as { pendingAsk?: unknown }).pendingAsk;
+    if (record.pendingAsk !== null && record.pendingAsk !== undefined) {
+      Object.assign(thread, { pendingAsk: clone(record.pendingAsk) });
+    }
+  }
+  draft.threads[threadIndex] = thread;
+  draft.messages[messageIndex] = message;
+  draft.revision = record.revision;
+  validateAssistantUpdate(thread, message, record.revision);
+}
+
+function validateAssistantUpdate(
+  thread: WebThread,
+  message: WebMessage,
+  revision: number,
+): void {
+  if (
+    thread.status !== "running"
+    || thread.activeTurnId === undefined
+    || message.status !== "running"
+    || message.threadId !== thread.id
+    || message.turnId !== thread.activeTurnId
+    || message.role !== "assistant"
+  ) {
+    invalidState();
+  }
+  validateState({
+    schemaVersion: 3,
+    revision,
+    pinnedAgentIds: [],
+    threads: [clone(thread)],
+    messages: [clone(message)],
+  });
+}
+
+function activityPatch(
+  previous: readonly OperatorActivity[],
+  next: readonly OperatorActivity[],
+): JournalPatch<readonly OperatorActivity[]> {
+  const appends = next.length >= previous.length
+    && previous.every((activity, index) => isDeepStrictEqual(activity, next[index]));
+  return appends
+    ? { kind: "append", value: clone(next.slice(previous.length)) }
+    : { kind: "replace", value: clone(next) };
+}
+
+function applyStringPatch(previous: string, patch: JournalPatch<string>): string {
+  return patch.kind === "append" ? `${previous}${patch.value}` : patch.value;
+}
+
+function applyActivityPatch(
+  previous: readonly OperatorActivity[],
+  patch: JournalPatch<readonly OperatorActivity[]>,
+): readonly OperatorActivity[] {
+  return patch.kind === "append"
+    ? clone([...previous, ...patch.value])
+    : clone(patch.value);
+}
+
+function resolveJournalLimits(
+  override: Partial<ActiveTurnJournalLimits> | undefined,
+): ActiveTurnJournalLimits {
+  const resolved = {
+    maxActiveTurns: override?.maxActiveTurns ?? ACTIVE_TURN_JOURNAL_LIMITS.maxActiveTurns,
+    maxBytes: override?.maxBytes ?? ACTIVE_TURN_JOURNAL_LIMITS.maxBytes,
+    maxTotalBytes: override?.maxTotalBytes ?? ACTIVE_TURN_JOURNAL_LIMITS.maxTotalBytes,
+    maxRecords: override?.maxRecords ?? ACTIVE_TURN_JOURNAL_LIMITS.maxRecords,
+  };
+  for (const [key, value] of Object.entries(resolved)) {
+    const ceiling = ACTIVE_TURN_JOURNAL_LIMITS[key as keyof ActiveTurnJournalLimits];
+    if (!Number.isSafeInteger(value) || value < 1 || value > ceiling) {
+      throw new RangeError(`activeTurnJournalLimits.${key} must be an integer from 1 through ${ceiling}.`);
+    }
+  }
+  return Object.freeze(resolved);
+}
+
+function journalPoison(error: unknown): WebProductError {
+  const reason = error instanceof JournalCommitUncertainError
+    ? "journal durability became uncertain"
+    : "journal state could not be safely accessed";
+  return new WebProductError(
+    "state_store_poisoned",
+    `Web active-turn ${reason}; close and reopen before any further access.`,
+    503,
+  );
+}
 
 interface LegacyStoredWebStateV1 {
   readonly schemaVersion: 1;
@@ -803,6 +1290,16 @@ function freezeState(state: MutableState): StoredWebState {
     pinnedAgentIds: Object.freeze(clone(state.pinnedAgentIds)),
     threads: Object.freeze(clone(state.threads)),
     messages: Object.freeze(clone(state.messages)),
+  });
+}
+
+function freezeCowState(state: MutableState): StoredWebState {
+  return Object.freeze({
+    schemaVersion: 3,
+    revision: state.revision,
+    pinnedAgentIds: Object.freeze(state.pinnedAgentIds),
+    threads: Object.freeze(state.threads),
+    messages: Object.freeze(state.messages),
   });
 }
 
