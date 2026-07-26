@@ -1,2 +1,3 @@
 // SPDX-License-Identifier: MIT
 export const MAX_TOTAL_SLACK_ATTACHMENT_BYTES = 50_000_000;
+export const MAX_SLACK_STATUS_TEXT_LENGTH = 100;

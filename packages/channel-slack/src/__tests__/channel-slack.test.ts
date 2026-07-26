@@ -1332,6 +1332,7 @@ describe("slack channel", () => {
     const postMessage = vi.fn<SlackApiClient["postMessage"]>(async () => ({ messageId: "posted" }));
     const setAssistantStatus = vi.fn<NonNullable<SlackApiClient["setAssistantStatus"]>>(async () => undefined);
     const addReaction = vi.fn<NonNullable<SlackApiClient["addReaction"]>>(async () => undefined);
+    const longToolName = "🧰".repeat(100);
     const dispatch = vi.fn<ChannelHost["dispatch"]>(async (_request, reply) => {
       await reply.emit({ type: "activity", text: "Reading project files" });
       await reply.emit({
@@ -1351,7 +1352,7 @@ describe("slack channel", () => {
       });
       await reply.emit({
         type: "tool-call",
-        call: { id: "shell-1", name: "Shell", input: {} },
+        call: { id: "shell-1", name: longToolName, input: {} },
       });
       await reply.emit({
         type: "tool-result",
@@ -1381,16 +1382,20 @@ describe("slack channel", () => {
     });
     expect(setAssistantStatus).toHaveBeenCalledWith("C1", "1", "is thinking…", expect.any(AbortSignal));
     expect(setAssistantStatus).toHaveBeenCalledWith("C1", "1", "Reading project files", expect.any(AbortSignal));
-    expect(setAssistantStatus.mock.calls.map(([, , status]) => status)).toEqual([
+    const statuses = setAssistantStatus.mock.calls.map(([, , status]) => status);
+    expect(statuses.slice(0, 6)).toEqual([
       "is thinking…",
       "is thinking…",
       "is thinking…",
       "Reading project files",
       "Running Read workspace…",
       "Read workspace completed.",
-      "Running Shell…",
-      "Shell failed.",
     ]);
+    expect(statuses[6]?.length).toBeLessThanOrEqual(100);
+    expect(statuses[6]).toMatch(/^Running /u);
+    expect(statuses[6]).toMatch(/…$/u);
+    expect(statuses[7]?.length).toBeLessThanOrEqual(100);
+    expect(statuses[7]).toMatch(/ failed\.$/u);
     expect(JSON.stringify(setAssistantStatus.mock.calls)).not.toContain("private-input");
     expect(JSON.stringify(setAssistantStatus.mock.calls)).not.toContain("private-result");
     expect(addReaction).not.toHaveBeenCalled();

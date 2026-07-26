@@ -1144,6 +1144,7 @@ describe("mono-agent channel module", () => {
     const callWasReported = new Promise<void>((resolve) => { callReported = resolve; });
     const resultWasReported = new Promise<void>((resolve) => { resultReported = resolve; });
     const lifecycle = new AbortController();
+    const longToolName = `Read\nworkspace\u0000${"🧰".repeat(512)}`;
     const channel = await monoAgentModule.create({
       instanceId: "tool-status",
       config: monoAgentModule.schema.parse({
@@ -1165,7 +1166,7 @@ describe("mono-agent channel module", () => {
             type: "tool-call",
             call: {
               id: "private-call-id",
-              name: "Read\nworkspace\u0000",
+              name: longToolName,
               input: { path: "private-input-do-not-project" },
             },
           });
@@ -1209,20 +1210,22 @@ describe("mono-agent channel module", () => {
 
       await callWasReported;
       const callStatus = await readStatus();
-      expect(callStatus).toMatchObject({
-        status: "running",
-        activity: "Running Read workspace…",
-      });
+      expect(callStatus).toMatchObject({ status: "running" });
+      const callActivity = callStatus.activity as string;
+      expect(callActivity).toMatch(/^Running Read workspace /u);
+      expect(callActivity).toMatch(/…$/u);
+      expect(Buffer.byteLength(callActivity, "utf8")).toBeLessThanOrEqual(1_024);
       expect(JSON.stringify(callStatus)).not.toContain("private-call-id");
       expect(JSON.stringify(callStatus)).not.toContain("private-input");
 
       releaseAfterCall();
       await resultWasReported;
       const resultStatus = await readStatus();
-      expect(resultStatus).toMatchObject({
-        status: "running",
-        activity: "Read workspace failed.",
-      });
+      expect(resultStatus).toMatchObject({ status: "running" });
+      const resultActivity = resultStatus.activity as string;
+      expect(resultActivity).toMatch(/^Read workspace /u);
+      expect(resultActivity).toMatch(/ failed\.$/u);
+      expect(Buffer.byteLength(resultActivity, "utf8")).toBeLessThanOrEqual(1_024);
       expect(JSON.stringify(resultStatus)).not.toContain("private-result");
 
       releaseAfterResult();

@@ -16,6 +16,7 @@ import {
   type WebhookMode,
 } from "./config.js";
 import {
+  MAX_WEBHOOK_ACTIVITY_BYTES,
   MAX_WEBHOOK_TEXT_BYTES,
   MAX_WEBHOOK_TEXT_LENGTH,
 } from "./limits.js";
@@ -25,7 +26,6 @@ import type { WebhookRoute } from "./routes.js";
 const SHUTDOWN_DRAIN_MS = 1_000;
 const MAX_IDENTIFIER_LENGTH = 512;
 const MAX_IDEMPOTENT_ATTEMPTS = 10_000;
-const MAX_ACTIVITY_BYTES = 1_024;
 
 export type WebhookJsonValue =
   | string
@@ -1105,10 +1105,10 @@ function normalizeActivity(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const normalized = value.replace(/[\s\u0000-\u001f\u007f]+/gu, " ").trim();
   if (normalized.length === 0) return undefined;
-  if (Buffer.byteLength(normalized, "utf8") <= MAX_ACTIVITY_BYTES) return normalized;
+  if (Buffer.byteLength(normalized, "utf8") <= MAX_WEBHOOK_ACTIVITY_BYTES) return normalized;
   const suffix = "…";
   const bytes = Buffer.from(normalized, "utf8");
-  let end = MAX_ACTIVITY_BYTES - Buffer.byteLength(suffix, "utf8");
+  let end = MAX_WEBHOOK_ACTIVITY_BYTES - Buffer.byteLength(suffix, "utf8");
   while (end > 0 && (bytes[end] ?? 0) >> 6 === 0b10) end -= 1;
   return `${bytes.subarray(0, end).toString("utf8")}${suffix}`;
 }

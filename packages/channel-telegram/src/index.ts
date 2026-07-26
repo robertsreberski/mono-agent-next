@@ -43,6 +43,7 @@ const MAX_CALLBACK_ANSWERS = 10_000;
 const MAX_RUNTIME_SELECTIONS = 1_000;
 const MAX_TRACKED_UPDATES = 100;
 const MAX_TRACKED_TOOL_CALLS = 256;
+const MAX_TOOL_NAME_LENGTH = TELEGRAM_TEXT_LIMIT - " completed.".length;
 const MAX_POLL_BACKOFF_MS = 1_000;
 const TRANSCRIPTION_UNAVAILABLE = "[Automatic transcription unavailable; audio attachment retained.]";
 const RETRY_CONTROL_UPDATE = Symbol("retry-control-update");
@@ -288,9 +289,11 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
       const normalizedText = [update.text, ...transcriptNotes].filter((part) => part.length > 0).join("\n\n");
       let replyText = "";
       let activityMessageId: string | undefined;
+      let lastActivityText: string | undefined;
       const toolNames = new Map<string, string>();
       const presentActivity = async (activity: string): Promise<void> => {
         const text = boundedTelegramText(activity);
+        if (text === lastActivityText) return;
         if (activityMessageId !== undefined && client.editMessage !== undefined) {
           await client.editMessage({ chatId: update.chatId, messageId: activityMessageId, text, signal });
         } else {
@@ -301,6 +304,7 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
             signal,
           })).messageId;
         }
+        lastActivityText = text;
       };
       const reply: ChannelReplySink = {
         async emit(event: ChannelReplyEvent): Promise<void> {
@@ -1063,7 +1067,7 @@ function toolCallActivity(
   name: string,
 ): string {
   rememberToolName(toolNames, callId, displayToolName(name));
-  return `Running ${toolNames.get(callId) ?? "tool"}…`;
+  return formatToolActivity(toolNames.get(callId) ?? "tool", "running");
 }
 
 function toolResultActivity(
@@ -1073,7 +1077,7 @@ function toolResultActivity(
 ): string {
   const name = toolNames.get(callId);
   toolNames.delete(callId);
-  return `${name ?? "Tool"} ${failed ? "failed" : "completed"}.`;
+  return formatToolActivity(name ?? "Tool", failed ? "failed" : "completed");
 }
 
 function rememberToolName(
@@ -1090,7 +1094,35 @@ function rememberToolName(
 
 function displayToolName(name: string): string {
   const normalized = name.replace(/[\s\u0000-\u001f\u007f]+/gu, " ").trim();
-  return normalized.length === 0 ? "tool" : normalized;
+  return boundedToolName(
+    normalized.length === 0 ? "tool" : normalized,
+    MAX_TOOL_NAME_LENGTH,
+    false,
+  );
+}
+
+function formatToolActivity(
+  name: string,
+  state: "running" | "completed" | "failed",
+): string {
+  const prefix = state === "running" ? "Running " : "";
+  const suffix = state === "running" ? "…" : ` ${state}.`;
+  const maximumNameLength = TELEGRAM_TEXT_LIMIT - prefix.length - suffix.length;
+  return `${prefix}${boundedToolName(name, maximumNameLength, state !== "running")}${suffix}`;
+}
+
+function boundedToolName(
+  name: string,
+  maximumLength: number,
+  markTruncation: boolean,
+): string {
+  if (name.length <= maximumLength) return name;
+  const marker = markTruncation ? "…" : "";
+  let end = maximumLength - marker.length;
+  if (end > 0 && isHighSurrogate(name.charCodeAt(end - 1)) && isLowSurrogate(name.charCodeAt(end))) {
+    end -= 1;
+  }
+  return `${name.slice(0, end)}${marker}`;
 }
 
 function isHighSurrogate(value: number): boolean {

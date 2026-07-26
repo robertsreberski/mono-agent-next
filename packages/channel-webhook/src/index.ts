@@ -20,6 +20,7 @@ import {
   webhookConfigSchema,
   type WebhookConfig,
 } from "./config.js";
+import { MAX_WEBHOOK_ACTIVITY_BYTES } from "./limits.js";
 import {
   createWebhookChannel,
   type WebhookChannel,
@@ -34,6 +35,8 @@ import { loadWebhookRoutesFromDirectory } from "./routes.js";
 const PACKAGE_NAME = "@mono-agent/channel-webhook";
 const PACKAGE_VERSION = "0.15.0";
 const MAX_TRACKED_TOOL_CALLS = 256;
+const MAX_TOOL_NAME_BYTES = MAX_WEBHOOK_ACTIVITY_BYTES
+  - Buffer.byteLength(" completed.", "utf8");
 
 export interface WebhookModuleChannel extends Channel {
   readonly endpoint: string | undefined;
@@ -238,11 +241,14 @@ function toolActivity(
 ): string {
   if (event.type === "tool-call") {
     rememberToolName(toolNames, event.call.id, displayToolName(event.call.name));
-    return `Running ${toolNames.get(event.call.id) ?? "tool"}…`;
+    return formatToolActivity(toolNames.get(event.call.id) ?? "tool", "running");
   }
   const name = toolNames.get(event.result.callId);
   toolNames.delete(event.result.callId);
-  return `${name ?? "Tool"} ${event.result.isError === true ? "failed" : "completed"}.`;
+  return formatToolActivity(
+    name ?? "Tool",
+    event.result.isError === true ? "failed" : "completed",
+  );
 }
 
 function rememberToolName(
@@ -259,7 +265,36 @@ function rememberToolName(
 
 function displayToolName(name: string): string {
   const normalized = name.replace(/[\s\u0000-\u001f\u007f]+/gu, " ").trim();
-  return normalized.length === 0 ? "tool" : normalized;
+  return boundedToolName(
+    normalized.length === 0 ? "tool" : normalized,
+    MAX_TOOL_NAME_BYTES,
+    false,
+  );
+}
+
+function formatToolActivity(
+  name: string,
+  state: "running" | "completed" | "failed",
+): string {
+  const prefix = state === "running" ? "Running " : "";
+  const suffix = state === "running" ? "…" : ` ${state}.`;
+  const maximumNameBytes = MAX_WEBHOOK_ACTIVITY_BYTES
+    - Buffer.byteLength(prefix, "utf8")
+    - Buffer.byteLength(suffix, "utf8");
+  return `${prefix}${boundedToolName(name, maximumNameBytes, state !== "running")}${suffix}`;
+}
+
+function boundedToolName(
+  name: string,
+  maximumBytes: number,
+  markTruncation: boolean,
+): string {
+  if (Buffer.byteLength(name, "utf8") <= maximumBytes) return name;
+  const marker = markTruncation ? "…" : "";
+  const bytes = Buffer.from(name, "utf8");
+  let end = maximumBytes - Buffer.byteLength(marker, "utf8");
+  while (end > 0 && (bytes[end] ?? 0) >> 6 === 0b10) end -= 1;
+  return `${bytes.subarray(0, end).toString("utf8")}${marker}`;
 }
 
 function toChannelInboundRequest(

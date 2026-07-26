@@ -17,30 +17,30 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `a48df174eae4fdbd3be2748f96a1b31f15b06ee51fdb22c2efaa4b5e4482f6fd`
+Source manifest digest: `a9d037632b60dbf7d8cd943dc28a7b6402fd38a62557b5970dbf873dc8c18984`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 315 | 98900 |
-| Tests | 167 | 79341 |
+| Production | 315 | 99182 |
+| Tests | 167 | 79590 |
 | Repository and product tooling | 56 | 18852 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **538** | **197093** |
+| **Total executable source** | **538** | **197624** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 314.0 lines.
+Average production file size is 314.9 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 98900 | 130000 | within limit |
+| repository-production | 99182 | 130000 | within limit |
 | kernel-production | 16229 | 16500 | within limit |
 | durable-protocol-production | 7626 | 9500 | within limit |
 
@@ -50,7 +50,7 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 79341 | 74175 | within limit |
+| test source, at 0.75 of production | 79590 | 74387 | within limit |
 
 The current ratio is 0.802.
 
@@ -65,7 +65,7 @@ The current ratio is 0.802.
 | `@mono-agent/memory-local` | 19 | 8097 | 4767 |
 | `@mono-agent/service-macos` | 22 | 5770 | 2131 |
 | `create-mono-agent` | 12 | 5487 | 2199 |
-| `@mono-agent/channel-slack` | 15 | 3823 | 2241 |
+| `@mono-agent/channel-slack` | 15 | 3869 | 2246 |
 
 The complete package table is retained in the generated report model exposed by
 `pnpm --silent run report:source-beta -- --json`.
