@@ -97,7 +97,9 @@ Telegram polling -> exact chat allowlist -> bounded attachment download ->
 normalized `ChannelInboundRequest` -> Core -> final reply. Supported Core
 controls route `/cancel`, live steering, and bounded AskUser button/free-text
 answers. `/model` and `/effort` maintain bounded, process-local per-chat
-overrides. Activity updates edit one status message when Telegram supports it.
+overrides. A non-default `/model` value is checked against Core before Telegram
+confirms or stores it; rejection leaves the prior override unchanged. Activity
+updates edit one status message when Telegram supports it.
 Tool calls and results use that same transient message, showing only the
 bounded tool name and completed/failed state; tool input, result content, and
 call ids are never projected into chat. Interactive replies and AskUser prompts

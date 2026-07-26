@@ -2,6 +2,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 
+import {
+  HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+  type RuntimeRouteValidationGrant,
+} from "@mono-agent/module-sdk";
+
 import { createAgentHost } from "../host.js";
 import {
   completed,
@@ -69,6 +74,114 @@ describe("complete agent plane", () => {
     await expect(createAgentHost(project.configPath)).rejects.toThrow(/malformed protocol/u);
     expect(stateStarts).toBe(0);
     expect(runtimeCreates).toBe(0);
+  });
+
+  it("grants only declared modules the immutable provider-neutral route validator", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtimeName = `@fixture/runtime-route-validation-${suffix}`;
+    const channelName = `@fixture/channel-route-validation-${suffix}`;
+    const undeclaredChannelName = `@fixture/channel-route-validation-undeclared-${suffix}`;
+    let grant: RuntimeRouteValidationGrant | undefined;
+    let unrelated: unknown;
+    let undeclaredRouteValidation: unknown;
+    const project = await createFixtureProject([
+      {
+        name: runtimeName,
+        kind: "runtime",
+        controller: runtimeController(() => completed("unused")),
+      },
+      {
+        name: channelName,
+        kind: "channel",
+        capabilities: [HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION],
+        controller: {
+          create(context: unknown) {
+            const host = (context as {
+              readonly host: {
+                getCapability<T>(name: string): T | undefined;
+              };
+            }).host;
+            grant = host.getCapability<RuntimeRouteValidationGrant>(
+              HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+            );
+            unrelated = host.getCapability("routing.catalog.v1");
+            return {
+              capabilities: {
+                attachments: false,
+                liveInput: false,
+                askUser: false,
+                approvals: false,
+                proactive: false,
+                runtimeControl: true,
+                verbatim: true,
+                cancellation: false,
+              },
+            };
+          },
+        },
+      },
+      {
+        name: undeclaredChannelName,
+        kind: "channel",
+        controller: {
+          create(context: unknown) {
+            const host = (context as {
+              readonly host: {
+                getCapability<T>(name: string): T | undefined;
+              };
+            }).host;
+            undeclaredRouteValidation = host.getCapability(
+              HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+            );
+            return {
+              capabilities: {
+                attachments: false,
+                liveInput: false,
+                askUser: false,
+                approvals: false,
+                proactive: false,
+                runtimeControl: false,
+                verbatim: true,
+                cancellation: false,
+              },
+            };
+          },
+        },
+      },
+    ]);
+    projects.push(project);
+    await project.writeConfig(minimalConfig(runtimeName, {
+      channels: {
+        "route-probe": { $use: channelName },
+        "undeclared-route-probe": { $use: undeclaredChannelName },
+      },
+      routing: {
+        primary: { runtime: "main", model: "fixture:model" },
+        fallbacks: [{ runtime: "main", model: "fixture:fallback" }],
+      },
+    }));
+
+    const host = await createAgentHost(project.configPath);
+    expect(grant).toBeDefined();
+    expect(Object.isFrozen(grant)).toBe(true);
+    expect(grant?.validate()).toEqual({
+      configured: true,
+      runtime: "main",
+      model: "fixture:model",
+    });
+    expect(grant?.validate(undefined, "fixture:fallback")).toEqual({
+      configured: true,
+      runtime: "main",
+      model: "fixture:fallback",
+    });
+    expect(grant?.validate("missing", undefined)).toEqual({
+      configured: false,
+      runtime: "missing",
+      model: "fixture:model",
+    });
+    expect(unrelated).toBeUndefined();
+    expect(undeclaredRouteValidation).toBeUndefined();
+    await host.stop();
   });
 
   it("publishes the exact started operator identity through owner-private state discovery", async () => {

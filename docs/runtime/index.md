@@ -42,6 +42,14 @@ choices only from strictly validated configured routes. A v0-style
 runtime-qualified value such as `"pi:openai-codex:gpt-5.5"` is rejected the same
 way.
 
+Authored webhook route frontmatter is validated against these configured routes
+during channel start, after route loading and before the HTTP listener binds.
+Cron job frontmatter is validated while the trigger module is created, before a
+schedule is armed. When one field is omitted, Core resolves it through the
+primary route. Telegram applies the same validation before confirming or
+storing a non-default `/model` update, so an invalid command preserves the
+chat's previous selection.
+
 ## Effort keywords
 
 `routing.effort` selects the effort every turn runs at. On top of that, three

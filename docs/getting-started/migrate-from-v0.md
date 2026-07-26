@@ -86,6 +86,9 @@ Compose the morning briefing.
 `enabled` defaults to `true`. An explicitly disabled job is still fully parsed
 and validated, but it is not scheduled and cannot be invoked through
 `trigger-cron:invoke`. A directory whose jobs are all disabled is valid.
+Each enabled runtime/model pair must resolve to a configured Core route before
+the scheduler starts. If one field is omitted, Core supplies that field from
+the primary route.
 
 `conversationId` is not cron frontmatter. Core derives the execution
 conversation as `trigger:<trigger instance id>:<event id>` from the admitted
@@ -140,10 +143,14 @@ own bounded `conversationId`.
 Like cron, the directory loader validates every route file and aggregates all
 rejections before failing. Unlike cron, a configured webhook routes directory
 must contain at least one enabled route before its listener starts.
+During channel start, after route loading and before the listener binds, each
+enabled runtime/model pair must resolve to a configured Core route. If one field
+is omitted, Core supplies that field from the primary route.
 
 ## Validation boundary
 
 Strict unknown-key validation is intentional. Remove retired keys rather than
 keeping them beside their replacements. Both directory loaders report every
-invalid Markdown file in one pass, so a single module-creation attempt exposes
-the full cron or webhook rewrite set instead of requiring one restart per file.
+invalid Markdown file in one pass, so one cron module-creation attempt or
+webhook channel-start attempt exposes the full rewrite set instead of requiring
+one restart per file.

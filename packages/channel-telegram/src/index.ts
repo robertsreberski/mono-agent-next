@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import {
   AGENT_INTERACTION_LIMITS,
   ASK_USER_MAX_ANSWER_BYTES,
+  HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
   MODULE_API_VERSION,
   defineChannelModule,
   parseAskUserAnswer,
@@ -16,6 +17,7 @@ import {
   type ChannelSendTool,
   type AskUserRequest,
   type ModuleHealth,
+  type RuntimeRouteValidationGrant,
 } from "@mono-agent/module-sdk";
 
 import {
@@ -104,7 +106,7 @@ export const monoAgentModule = defineChannelModule({
     apiVersion: MODULE_API_VERSION,
     kind: "channel",
     responsibility: "Maps Telegram Bot API updates and deliveries onto normalized channel turns.",
-    capabilities: [],
+    capabilities: [HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION],
   },
   schema: telegramConfigSchema,
   create(context) { return createTelegramChannel({ context }); },
@@ -112,6 +114,9 @@ export const monoAgentModule = defineChannelModule({
 
 export function createTelegramChannel(options: CreateTelegramChannelOptions): TelegramChannel {
   const { context } = options;
+  const routeValidation = context.host.getCapability<RuntimeRouteValidationGrant>(
+    HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+  );
   const client = (options.clientFactory ?? ((config) => createTelegramBotApiClient(config)))(context.config);
   const delivery = new TelegramDelivery(context.config, client);
   const sendTools = createTelegramSendTools(context.config);
@@ -262,6 +267,33 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
         }
         const command = runtimeCommand(update.text);
         if (command !== undefined) {
+          if (
+            command.field === "model"
+            && command.value !== undefined
+            && command.value !== "default"
+          ) {
+            if (routeValidation === undefined) {
+              await client.sendMessage({
+                chatId: update.chatId,
+                text: "model selection is unavailable because configured-route validation is unavailable.",
+                replyToMessageId: update.messageId,
+                signal,
+              });
+              return;
+            }
+            const validation = routeValidation.validate(undefined, command.value);
+            if (!validation.configured) {
+              await client.sendMessage({
+                chatId: update.chatId,
+                text: `model ${JSON.stringify(command.value)} is not configured for runtime ${
+                  JSON.stringify(validation.runtime)
+                }.`,
+                replyToMessageId: update.messageId,
+                signal,
+              });
+              return;
+            }
+          }
           const selection = updateRuntimeSelection(runtimeSelections.get(update.chatId), command);
           rememberRuntimeSelection(runtimeSelections, update.chatId, selection);
           await client.sendMessage({
@@ -710,7 +742,7 @@ export function createTelegramChannel(options: CreateTelegramChannelOptions): Te
   };
 
   return {
-    capabilities: Object.freeze({ attachments: true, liveInput: context.host.offerLiveInput !== undefined, askUser: context.host.answerAsk !== undefined, approvals: false, proactive: true, runtimeControl: true, verbatim: true, cancellation: context.host.cancel !== undefined }),
+    capabilities: Object.freeze({ attachments: true, liveInput: context.host.offerLiveInput !== undefined, askUser: context.host.answerAsk !== undefined, approvals: false, proactive: true, runtimeControl: routeValidation !== undefined, verbatim: true, cancellation: context.host.cancel !== undefined }),
     sendTools,
     resolveDefaultDeliveryConversationId() {
       return context.config.defaultDestination === undefined

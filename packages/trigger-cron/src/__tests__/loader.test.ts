@@ -4,8 +4,12 @@ import { mkdtemp, mkdir, rm, symlink, truncate, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import {
+  HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+  type RuntimeRouteValidationGrant,
+} from "@mono-agent/module-sdk";
 import type { TriggerHost } from "@mono-agent/module-sdk/internal";
 
 import {
@@ -257,6 +261,87 @@ describe("trigger-cron config and module wiring", () => {
         source: join(jobsDirectory, "wired-job.md"),
         prompt: "Run through the module definition.",
       });
+      expect(monoAgentModule.manifest.capabilities).toEqual([
+        "cron.durable-state.v1",
+        HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+      ]);
+    });
+  });
+
+  it("validates partial route defaults and rejects invalid jobs before scheduling", async () => {
+    await withTempDirectory(async (root) => {
+      const jobsDirectory = join(root, "jobs");
+      await mkdir(jobsDirectory);
+      await writeFile(join(jobsDirectory, "model-only.md"), jobMarkdown([
+        'expression: "* * * * *"',
+        "model: provider:secondary",
+      ]));
+      await writeFile(join(jobsDirectory, "runtime-only.md"), jobMarkdown([
+        'expression: "* * * * *"',
+        "runtime: pi",
+      ]));
+      const validate = vi.fn<RuntimeRouteValidationGrant["validate"]>(
+        (runtime = "pi", model = "provider:primary") => ({
+          configured: runtime === "pi"
+            && (model === "provider:primary" || model === "provider:secondary"),
+          runtime,
+          model,
+        }),
+      );
+      const host = routeValidationHost(validate);
+      const trigger = await monoAgentModule.create({
+        instanceId: "cron-route-validation",
+        config: monoAgentModule.schema.parse({
+          jobsDirectory: "jobs",
+          timezone: "UTC",
+        }),
+        provenance: {},
+        configDirectory: root,
+        workspaceDirectory: root,
+        dataDirectory: root,
+        logger: nullLogger,
+        host,
+        signal: new AbortController().signal,
+      });
+
+      expect(trigger.jobs.map((job) => job.id)).toEqual(["model-only", "runtime-only"]);
+      expect(validate.mock.calls).toEqual([
+        [undefined, "provider:secondary"],
+        ["pi", undefined],
+      ]);
+    });
+
+    await withTempDirectory(async (root) => {
+      const jobsDirectory = join(root, "jobs");
+      await mkdir(jobsDirectory);
+      for (const [name, model] of [
+        ["first", "provider:missing-one"],
+        ["second", "provider:missing-two"],
+      ] as const) {
+        await writeFile(join(jobsDirectory, `${name}.md`), jobMarkdown([
+          'expression: "* * * * *"',
+          `model: ${model}`,
+        ]));
+      }
+
+      await expect(monoAgentModule.create({
+        instanceId: "cron-invalid-route",
+        config: monoAgentModule.schema.parse({
+          jobsDirectory: "jobs",
+          timezone: "UTC",
+        }),
+        provenance: {},
+        configDirectory: root,
+        workspaceDirectory: root,
+        dataDirectory: root,
+        logger: nullLogger,
+        host: routeValidationHost((runtime = "pi", model = "provider:primary") => ({
+          configured: false,
+          runtime,
+          model,
+        })),
+        signal: new AbortController().signal,
+      })).rejects.toThrow(/2 cron jobs select unconfigured runtime routes/u);
     });
   });
 
@@ -283,6 +368,23 @@ const nullLogger = {
   warn() {},
   error() {},
 };
+
+function routeValidationHost(
+  validate: RuntimeRouteValidationGrant["validate"],
+): TriggerHost {
+  const grant: RuntimeRouteValidationGrant = { validate };
+  return {
+    grantedCapabilities: new Set([HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION]),
+    getCapability<T>(name: string): T | undefined {
+      return (name === HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION
+        ? grant
+        : undefined) as T | undefined;
+    },
+    async emit() {
+      throw new Error("Route-validation wiring must not schedule or emit.");
+    },
+  };
+}
 
 function jobMarkdown(frontmatter: readonly string[], prompt = "Run the job."): string {
   return `---

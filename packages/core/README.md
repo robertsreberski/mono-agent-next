@@ -206,6 +206,13 @@ manifests are then preflighted before module imports, and module-owned schemas
 validate inline leaves. `createAgentHost` starts that exact validated snapshot
 and routes normalized requests.
 
+Selected modules that declare `routing.validate.v1` receive a frozen,
+synchronous route validator. It resolves omitted runtime or model values
+through the configured primary route and reports exact admission without
+disclosing the route catalog or source config. Route-authoring modules use this
+grant to reject invalid authored routes or control updates before they can
+defer failure into a later turn.
+
 With an artifact-capable state module, Core admits each request and settles its
 run, canonical transcript revision, public response cache, and exact
 conversation/runtime/model session pointer through bounded multi-key

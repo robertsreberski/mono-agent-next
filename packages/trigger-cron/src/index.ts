@@ -2,17 +2,25 @@
 
 import { resolve } from "node:path";
 
-import { MODULE_API_VERSION } from "@mono-agent/module-sdk";
+import {
+  HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+  MODULE_API_VERSION,
+  type RuntimeRouteValidationGrant,
+} from "@mono-agent/module-sdk";
 import {
   type TriggerModuleCreateContext,
   type TriggerModuleDefinition,
 } from "@mono-agent/module-sdk/internal";
 
 import {
+  TriggerCronConfigError,
   triggerCronConfigSchema,
   type TriggerCronConfig,
 } from "./config.js";
-import { loadCronJobsFromDirectory } from "./jobs.js";
+import {
+  loadCronJobsFromDirectory,
+  type CronJob,
+} from "./jobs.js";
 import {
   HOST_CAPABILITY_CRON_DURABLE_STATE,
   createCronTrigger,
@@ -28,12 +36,19 @@ export const monoAgentModule = Object.freeze({
     apiVersion: MODULE_API_VERSION,
     kind: "trigger",
     responsibility: "Discovers scheduled Markdown jobs and emits deterministic idempotent trigger events.",
-    capabilities: Object.freeze([HOST_CAPABILITY_CRON_DURABLE_STATE]),
+    capabilities: Object.freeze([
+      HOST_CAPABILITY_CRON_DURABLE_STATE,
+      HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+    ]),
   }),
   schema: triggerCronConfigSchema,
   async create(context: TriggerModuleCreateContext<TriggerCronConfig>) {
+    const routeValidation = context.host.getCapability<RuntimeRouteValidationGrant>(
+      HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+    );
     const directory = resolve(context.configDirectory, context.config.jobsDirectory);
     const jobs = await loadCronJobsFromDirectory(directory, context.config.timezone);
+    assertConfiguredCronJobs(jobs, routeValidation);
     return createCronTrigger({
       instanceId: context.instanceId,
       jobs,
@@ -42,6 +57,36 @@ export const monoAgentModule = Object.freeze({
     });
   },
 }) satisfies TriggerModuleDefinition<TriggerCronConfig>;
+
+function assertConfiguredCronJobs(
+  jobs: readonly CronJob[],
+  validation: RuntimeRouteValidationGrant | undefined,
+): void {
+  if (
+    validation === undefined
+    && jobs.some((job) => job.runtime !== undefined || job.model !== undefined)
+  ) {
+    throw new Error(
+      `Runtime-selected cron jobs require the declared ${
+        HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION
+      } host grant.`,
+    );
+  }
+  if (validation === undefined) return;
+  const rejected = jobs.flatMap((job) => {
+    if (job.runtime === undefined && job.model === undefined) return [];
+    const result = validation.validate(job.runtime, job.model);
+    return result.configured
+      ? []
+      : [`${job.source}: ${result.runtime}:${result.model} is not a configured runtime route.`];
+  });
+  if (rejected.length === 0) return;
+  throw new TriggerCronConfigError(rejected.length === 1
+    ? rejected[0]!
+    : `${String(rejected.length)} cron jobs select unconfigured runtime routes:\n${
+      rejected.map((entry) => `- ${entry}`).join("\n")
+    }`);
+}
 
 export {
   DEFAULT_CRON_TIMEZONE,

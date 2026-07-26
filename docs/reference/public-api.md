@@ -18,7 +18,7 @@ pnpm run generate:source-beta-docs
 
 | Package | Public entrypoints | Named exports | Package API |
 | --- | ---: | ---: | --- |
-| `@mono-agent/module-sdk` | 5 | 344 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
+| `@mono-agent/module-sdk` | 5 | 347 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
 | `@mono-agent/core` | 1 | 60 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/core/README.md) |
 | `@mono-agent/cli` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/cli/README.md) |
 | `@mono-agent/runtime-pi` | 1 | 6 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-pi/README.md) |
@@ -123,6 +123,7 @@ DEFAULT_HTTP_TIMEOUT_MS
 DEFAULT_OWNER_PRIVATE_READ_MAX_BYTES
 EnvEligibleSchemaOptions
 HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE
+HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION
 HttpSafetyError
 HttpSafetyErrorCode
 InteractionContext
@@ -218,6 +219,8 @@ RuntimeNativeToolDescriptor
 RuntimeNativeToolEffect
 RuntimeNativeToolSandboxEnforcement
 RuntimeRetryability
+RuntimeRouteValidationGrant
+RuntimeRouteValidationResult
 RuntimeSession
 RuntimeSessionEvent
 RuntimeSideEffectStatus

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
-import type { Runtime } from "@mono-agent/module-sdk";
+import type {
+  Runtime,
+  RuntimeRouteValidationGrant,
+  RuntimeRouteValidationResult,
+} from "@mono-agent/module-sdk";
 import { AgentConfigError } from "./errors.js";
 import { toolEffects } from "./host-tool-catalog.js";
 import type { CoreRuntimeTool } from "./mcp.js";
@@ -57,6 +61,23 @@ export function runtimeSessionMapKey(route: RuntimeRoute, conversationId: string
   const suffix = Buffer.from(conversationId, "utf8").toString("base64url");
   return `${runtimeSessionRouteKey(route)}:${suffix}`;
 }
+export function createRuntimeRouteValidationGrant(
+  config: LoadedAgentConfig,
+): RuntimeRouteValidationGrant {
+  return Object.freeze({
+    validate(runtime?: string, model?: string): RuntimeRouteValidationResult {
+      const selectedRuntime = runtime ?? config.raw.routing.primary.runtime;
+      const selectedModel = model ?? config.raw.routing.primary.model;
+      const configured = [config.raw.routing.primary, ...config.raw.routing.fallbacks]
+        .some((route) => route.runtime === selectedRuntime && route.model === selectedModel);
+      return Object.freeze({
+        configured,
+        runtime: selectedRuntime,
+        model: selectedModel,
+      });
+    },
+  });
+}
 /**
  * Reject a per-turn route selection that is not one of the configured routes.
  *
@@ -68,13 +89,12 @@ export function runtimeSessionMapKey(route: RuntimeRoute, conversationId: string
  */
 export function assertConfiguredRoute(config: LoadedAgentConfig, input: AgentSubmitInput): void {
   if (input.runtime === undefined && input.model === undefined) return;
-  const runtime = input.runtime ?? config.raw.routing.primary.runtime;
-  const model = input.model ?? config.raw.routing.primary.model;
-  const configured = [config.raw.routing.primary, ...config.raw.routing.fallbacks];
-  if (configured.some((route) => route.runtime === runtime && route.model === model)) return;
+  const validation = createRuntimeRouteValidationGrant(config)
+    .validate(input.runtime, input.model);
+  if (validation.configured) return;
   throw new AgentConfigError("Requested route is not a configured route", [{
     path: input.model === undefined ? "runtime" : "model",
-    message: `${runtime}:${model} is not declared in routing.primary or routing.fallbacks`,
+    message: `${validation.runtime}:${validation.model} is not declared in routing.primary or routing.fallbacks`,
     code: "unconfigured_route",
   }]);
 }
