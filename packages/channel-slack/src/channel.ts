@@ -319,6 +319,9 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
       failureSummary = undefined;
       try {
         inbox = await SlackInbox.open(context.dataDirectory, lifecycle.signal);
+        if (stopping || lifecycle.signal.aborted) {
+          throw new Error("Slack channel stopped while starting.");
+        }
         const snapshot = inbox.snapshot();
         if (snapshot.blocked !== undefined) throw new Error(snapshot.blocked);
         running = true;

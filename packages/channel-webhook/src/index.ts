@@ -57,6 +57,7 @@ function createWebhookModuleChannel(
   let transport: WebhookChannel | undefined;
   let info: WebhookChannelStartInfo | undefined;
   let startPromise: Promise<void> | undefined;
+  let stopping = false;
   const delivery = context.config.outbound === undefined ? undefined : new WebhookDelivery(context.config.outbound);
   const defaultDeliveryConversationId = context.config.outbound === undefined
     ? undefined
@@ -94,6 +95,9 @@ function createWebhookModuleChannel(
   };
 
   const start = async (startContext: ModuleStartContext): Promise<void> => {
+    if (stopping) {
+      throw new Error("Webhook channel cannot be started after stop().");
+    }
     if (startPromise !== undefined) {
       return startPromise;
     }
@@ -105,13 +109,21 @@ function createWebhookModuleChannel(
           resolve(context.configDirectory, context.config.routesDirectory),
           context.config.defaultMode,
         );
+      if (stopping) {
+        throw new Error("Webhook channel stopped while starting.");
+      }
       transport = createWebhookChannel({
         config: context.config,
         submit,
         requestIdNamespace: context.instanceId,
         ...(routes === undefined ? {} : { routes }),
       });
-      info = await transport.start();
+      const startInfo = await transport.start();
+      if (stopping) {
+        await transport.stop();
+        throw new Error("Webhook channel stopped while starting.");
+      }
+      info = startInfo;
       context.logger.info("Webhook channel listening.", {
         instanceId: context.instanceId,
         endpoint: info.invokeUrl,
@@ -122,6 +134,7 @@ function createWebhookModuleChannel(
   };
 
   const stop = async (_stopContext: ModuleStopContext): Promise<void> => {
+    stopping = true;
     await transport?.stop();
     info = undefined;
   };
@@ -192,6 +205,7 @@ function createWebhookModuleChannel(
     },
     start,
     async drain(): Promise<void> {
+      stopping = true;
       await transport?.stop();
       info = undefined;
     },
