@@ -51,6 +51,7 @@ pnpm --filter @mono-agent/operator... run build
 Discover a running agent, connect, and reduce one turn without interpreting the
 wire locally:
 
+<!-- doc-test:typescript -->
 ```ts
 import {
   OperatorDirectory,

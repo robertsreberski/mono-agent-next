@@ -89,6 +89,7 @@ static-directory symlinks are never served.
 
 Programmatic startup is equivalent:
 
+<!-- doc-test:typescript -->
 ```ts
 import { startWebServer } from "@mono-agent/web";
 

@@ -38,6 +38,7 @@ pnpm --filter @mono-agent/module-sdk run build
 
 An installed runtime package exports one side-effect-free `monoAgentModule`:
 
+<!-- doc-test:typescript -->
 ```ts
 import {
   MODULE_API_VERSION,

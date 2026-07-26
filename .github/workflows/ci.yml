@@ -78,11 +78,11 @@ jobs:
           pnpm run check:source-beta-budgets
           pnpm run check:source-beta-docs
           pnpm run check:docs
-          pnpm run check:doc-snippets
 
       - name: Build and typecheck the complete workspace
         run: |
           pnpm run build
+          pnpm run check:doc-snippets
           pnpm run typecheck
 
       - name: Lint typed promise handling

@@ -1,13 +1,23 @@
 // SPDX-License-Identifier: MIT
+import { readFileSync } from "node:fs";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, test } from "vitest";
 
 import { collectTypeScriptDocSnippets, TYPESCRIPT_SNIPPET_MARKER } from "../lib/doc-snippets.mjs";
 
 const roots = [];
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+const REQUIRED_FLAGSHIP_SNIPPET_FILES = [
+  "docs/programmatic/index.md",
+  "packages/core/README.md",
+  "packages/module-sdk/README.md",
+  "packages/operator/README.md",
+  "packages/web/README.md",
+];
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -47,6 +57,23 @@ describe("documentation snippets", () => {
       snippets: [],
       errors: ["README.md:3 <!-- doc-test:typescript --> must be followed by a TypeScript fence."],
     });
+  });
+
+  test("keeps every flagship TypeScript example enrolled in the repository gate", () => {
+    const collected = collectTypeScriptDocSnippets({ root: repositoryRoot });
+    const enrolledFiles = [...new Set(collected.snippets.map((snippet) => snippet.file))].sort();
+
+    expect(collected.errors).toEqual([]);
+    expect(enrolledFiles).toEqual(expect.arrayContaining(REQUIRED_FLAGSHIP_SNIPPET_FILES));
+  });
+
+  test("runs the repository snippet gate after every public package is built", () => {
+    const workflow = readFileSync(resolve(repositoryRoot, ".github/workflows/ci.yml"), "utf8");
+    const build = workflow.indexOf("          pnpm run build");
+    const snippets = workflow.indexOf("          pnpm run check:doc-snippets");
+
+    expect(build).toBeGreaterThanOrEqual(0);
+    expect(snippets).toBeGreaterThan(build);
   });
 });
 
