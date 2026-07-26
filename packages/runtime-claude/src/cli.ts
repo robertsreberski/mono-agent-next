@@ -81,6 +81,7 @@ export function createClaudeCliTransport(options: ClaudeCliTransportOptions): Cl
         "--verbose",
         "--include-partial-messages",
         "--permission-mode", "dontAsk",
+        "--setting-sources", "",
         "--tools", "",
         "--model", request.model,
         ...(promptFile.path === undefined ? [] : ["--system-prompt-file", promptFile.path]),
