@@ -22,6 +22,7 @@ import {
   getMetadata,
   openBujoDatabase,
   setMetadata,
+  verifyBujoSchema,
 } from "../bujo-db.js";
 import { openMemoryLocalForTesting as openMemoryLocal } from "../store.js";
 
@@ -220,16 +221,23 @@ describe("memory-local capture receipt retention", () => {
     const database = openBujoDatabase(join(fixture.directory, MEMORY_LOCAL_DATABASE_FILENAME));
     try {
       expect(() => assertCaptureReceiptIntegrity(database, undefined, 3)).not.toThrow();
-      let failure: unknown;
-      try {
-        assertCaptureReceiptIntegrity(database, undefined, 2);
-      } catch (error) {
-        failure = error;
+      expect(captureReceiptCount(database, 3)).toBe(3);
+      for (const operation of [
+        () => assertCaptureReceiptIntegrity(database, undefined, 2),
+        () => captureReceiptCount(database, 2),
+        () => verifyBujoSchema(database, 2),
+      ]) {
+        let failure: unknown;
+        try {
+          operation();
+        } catch (error) {
+          failure = error;
+        }
+        expect(failure).toMatchObject({
+          code: "capacity_exceeded",
+          message: expect.not.stringContaining("corrupt"),
+        });
       }
-      expect(failure).toMatchObject({
-        code: "capacity_exceeded",
-        message: expect.not.stringContaining("corrupt"),
-      });
     } finally {
       database.close();
     }

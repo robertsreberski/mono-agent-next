@@ -43,6 +43,8 @@ const CAPTURE_RECEIPT_PAGE_SIZE = 512;
 export const MAX_CAPTURE_RECEIPTS = 100_000;
 export const CAPTURE_RECEIPT_LOW_WATERMARK = 90_000;
 const MAX_CAPTURE_RECEIPT_SCAN_ROWS = 1_000_000;
+const MAX_METADATA_SCAN_ROWS =
+  MAX_NON_RECEIPT_METADATA_ROWS + MAX_CAPTURE_RECEIPT_SCAN_ROWS;
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000;
 const CANONICAL_RECEIPT_TIMESTAMP =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
@@ -242,7 +244,20 @@ export function createBujoSchema(database: DatabaseSync, dimensions: number): vo
   }
 }
 
-export function verifyBujoSchema(database: DatabaseSync): number {
+export function verifyBujoSchema(
+  database: DatabaseSync,
+  receiptScanLimit = MAX_CAPTURE_RECEIPT_SCAN_ROWS,
+): number {
+  return verifyBujoSchemaState(database, receiptScanLimit).dimensions;
+}
+
+function verifyBujoSchemaState(
+  database: DatabaseSync,
+  receiptScanLimit = MAX_CAPTURE_RECEIPT_SCAN_ROWS,
+): {
+  readonly dimensions: number;
+  readonly receiptCount: number;
+} {
   quickCheck(database);
   const rows = database.prepare(
     "SELECT name, sql FROM sqlite_schema WHERE type IN ('table','view')",
@@ -259,23 +274,22 @@ export function verifyBujoSchema(database: DatabaseSync): number {
   if (!Number.isSafeInteger(dimensions) || dimensions < 1 || dimensions > 16_384) {
     throw new MemoryLocalError("corrupt_store", "Memory vector table has an invalid dimension.");
   }
-  const metadataCount = database.prepare(`
-    SELECT
-      COUNT(*) AS count,
-      COALESCE(SUM(
-        CASE WHEN key GLOB 'memory-local:capture-receipt:*' THEN 1 ELSE 0 END
-      ), 0) AS receipt_count
-    FROM index_metadata
-  `).get() as unknown as { count: number; receipt_count: number };
-  const totalMetadata = number(metadataCount.count, "metadata row count");
-  const receiptMetadata = number(metadataCount.receipt_count, "capture receipt count");
+  assertScanLimit(receiptScanLimit);
+  const metadataScanLimit = receiptScanLimit === MAX_CAPTURE_RECEIPT_SCAN_ROWS
+    ? MAX_METADATA_SCAN_ROWS
+    : MAX_NON_RECEIPT_METADATA_ROWS + receiptScanLimit;
+  const totalMetadata = boundedMetadataCount(database, metadataScanLimit);
+  const receiptMetadata = captureReceiptCount(database, receiptScanLimit);
   if (totalMetadata - receiptMetadata > MAX_NON_RECEIPT_METADATA_ROWS) {
     throw new MemoryLocalError(
       "corrupt_store",
       "Memory non-receipt metadata row count exceeds its safety bound.",
     );
   }
-  return dimensions;
+  return Object.freeze({
+    dimensions,
+    receiptCount: receiptMetadata,
+  });
 }
 
 export function quickCheck(database: DatabaseSync): void {
@@ -694,7 +708,7 @@ export function writeMemoryVector(
 }
 
 export function auditBujoDatabase(database: DatabaseSync): BujoAuditSnapshot {
-  quickCheck(database);
+  const schema = verifyBujoSchemaState(database);
   const counts = database.prepare(`
     SELECT
       (SELECT COUNT(*) FROM memories) AS record_count,
@@ -703,11 +717,6 @@ export function auditBujoDatabase(database: DatabaseSync): BujoAuditSnapshot {
       (SELECT COUNT(*) FROM memories_vec) AS vector_count,
       (SELECT COUNT(*) FROM index_metadata WHERE key LIKE 'memory-local:capture-intake:%') AS pending_capture_count,
       (SELECT COUNT(*) FROM index_metadata WHERE key LIKE 'memory-local:vector-intake:%') AS pending_vector_count,
-      (
-        SELECT COUNT(*)
-        FROM index_metadata
-        WHERE key GLOB 'memory-local:capture-receipt:*'
-      ) AS capture_receipt_count,
       (SELECT COUNT(*) FROM memories m LEFT JOIN memories_fts f ON f.id = m.id WHERE f.id IS NULL) AS missing_fts,
       (SELECT COUNT(*) FROM memories_fts f LEFT JOIN memories m ON m.id = f.id WHERE m.id IS NULL) AS orphan_fts,
       (SELECT COUNT(*) FROM memories m LEFT JOIN memories_vec v ON v.rowid = m.seq WHERE v.rowid IS NULL) AS missing_vectors,
@@ -725,7 +734,7 @@ export function auditBujoDatabase(database: DatabaseSync): BujoAuditSnapshot {
     vectorCount: number(counts.vector_count, "vector count"),
     pendingCaptureCount: number(counts.pending_capture_count, "pending capture count"),
     pendingVectorCount: number(counts.pending_vector_count, "pending vector count"),
-    captureReceiptCount: number(counts.capture_receipt_count, "capture receipt count"),
+    captureReceiptCount: schema.receiptCount,
     missingFtsRows: number(counts.missing_fts, "missing FTS count"),
     orphanFtsRows: number(counts.orphan_fts, "orphan FTS count"),
     missingVectorRows: number(counts.missing_vectors, "missing vector count"),
@@ -733,7 +742,7 @@ export function auditBujoDatabase(database: DatabaseSync): BujoAuditSnapshot {
       counts.missing_declared_vectors,
       "missing declared vector count",
     ),
-    vectorDimension: verifyBujoSchema(database),
+    vectorDimension: schema.dimensions,
     integrity: "ok",
   });
 }
@@ -943,33 +952,8 @@ function captureReceiptRows(
   database: DatabaseSync,
   scanLimit = MAX_CAPTURE_RECEIPT_SCAN_ROWS,
 ): Iterable<{ readonly key: string; readonly value: string }> {
-  const preflight = database.prepare(`
-    SELECT
-      COUNT(*) AS receipt_count,
-      COALESCE(SUM(
-        CASE
-          WHEN typeof(key) != 'text'
-            OR typeof(value) != 'text'
-            OR LENGTH(CAST(key AS BLOB)) > 371
-            OR LENGTH(CAST(value AS BLOB)) > ?
-          THEN 1
-          ELSE 0
-        END
-      ), 0) AS invalid_count
-    FROM index_metadata
-    WHERE key GLOB ?
-  `).get(MAX_CAPTURE_RECEIPT_BYTES, CAPTURE_RECEIPT_GLOB) as unknown as {
-    receipt_count: number;
-    invalid_count: number;
-  };
-  const count = number(preflight.receipt_count, "capture receipt count");
-  if (!Number.isSafeInteger(scanLimit) || scanLimit < 0 || count > scanLimit) {
-    throw new MemoryLocalError(
-      "capacity_exceeded",
-      "Memory capture receipt count exceeds the bounded integrity scan limit.",
-    );
-  }
-  if (number(preflight.invalid_count, "invalid capture receipt storage count") !== 0) {
+  const preflight = boundedCaptureReceiptPreflight(database, scanLimit);
+  if (preflight.invalidStorageCount !== 0) {
     throw new MemoryLocalError(
       "corrupt_store",
       "Memory capture receipt storage is invalid.",
@@ -985,13 +969,19 @@ function captureReceiptRows(
   return {
     *[Symbol.iterator]() {
       let after = "";
-      while (true) {
+      let remaining = preflight.count;
+      while (remaining > 0) {
         const rows = page.all(
           CAPTURE_RECEIPT_GLOB,
           after,
-          CAPTURE_RECEIPT_PAGE_SIZE,
+          Math.min(CAPTURE_RECEIPT_PAGE_SIZE, remaining),
         ) as unknown as { key: unknown; value: unknown }[];
-        if (rows.length === 0) return;
+        if (rows.length === 0) {
+          throw new MemoryLocalError(
+            "corrupt_store",
+            "Memory capture receipt rows changed during bounded paging.",
+          );
+        }
         for (const row of rows) {
           if (
             typeof row.key !== "string"
@@ -1005,6 +995,7 @@ function captureReceiptRows(
           }
           yield { key: row.key, value: row.value };
         }
+        remaining -= rows.length;
         after = rows.at(-1)!.key as string;
       }
     },
@@ -1067,13 +1058,91 @@ export function parseCaptureReceipt(value: string): CaptureReceipt {
   );
 }
 
-export function captureReceiptCount(database: DatabaseSync): number {
+export function captureReceiptCount(
+  database: DatabaseSync,
+  scanLimit = MAX_CAPTURE_RECEIPT_SCAN_ROWS,
+): number {
+  return boundedCaptureReceiptPreflight(database, scanLimit).count;
+}
+
+function boundedCaptureReceiptPreflight(
+  database: DatabaseSync,
+  scanLimit: number,
+): {
+  readonly count: number;
+  readonly invalidStorageCount: number;
+} {
+  assertScanLimit(scanLimit);
+  const row = database.prepare(`
+    WITH bounded_receipts AS (
+      SELECT key, value
+      FROM index_metadata
+      WHERE key GLOB ?
+      ORDER BY key
+      LIMIT ?
+    )
+    SELECT
+      COUNT(*) AS receipt_count,
+      COALESCE(SUM(
+        CASE
+          WHEN typeof(key) != 'text'
+            OR typeof(value) != 'text'
+            OR LENGTH(CAST(key AS BLOB)) > 371
+            OR LENGTH(CAST(value AS BLOB)) > ?
+          THEN 1
+          ELSE 0
+        END
+      ), 0) AS invalid_count
+    FROM bounded_receipts
+  `).get(
+    CAPTURE_RECEIPT_GLOB,
+    scanLimit + 1,
+    MAX_CAPTURE_RECEIPT_BYTES,
+  ) as unknown as { receipt_count: number; invalid_count: number };
+  const count = number(row.receipt_count, "capture receipt count");
+  if (count > scanLimit) {
+    throw new MemoryLocalError(
+      "capacity_exceeded",
+      "Memory capture receipt count exceeds the bounded integrity scan limit.",
+    );
+  }
+  return Object.freeze({
+    count,
+    invalidStorageCount: number(
+      row.invalid_count,
+      "invalid capture receipt storage count",
+    ),
+  });
+}
+
+function boundedMetadataCount(database: DatabaseSync, scanLimit: number): number {
+  assertScanLimit(scanLimit);
   const row = database.prepare(`
     SELECT COUNT(*) AS count
-    FROM index_metadata
-    WHERE key GLOB ?
-  `).get(CAPTURE_RECEIPT_GLOB) as unknown as { count: number };
-  return number(row.count, "capture receipt count");
+    FROM (
+      SELECT key
+      FROM index_metadata
+      ORDER BY key
+      LIMIT ?
+    )
+  `).get(scanLimit + 1) as unknown as { count: number };
+  const count = number(row.count, "metadata row count");
+  if (count > scanLimit) {
+    throw new MemoryLocalError(
+      "capacity_exceeded",
+      "Memory metadata row count exceeds the bounded schema scan limit.",
+    );
+  }
+  return count;
+}
+
+function assertScanLimit(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 0 || value >= Number.MAX_SAFE_INTEGER) {
+    throw new MemoryLocalError(
+      "capacity_exceeded",
+      "Memory metadata scan limit is invalid.",
+    );
+  }
 }
 
 function captureReceiptExpired(
