@@ -6,30 +6,25 @@ import {
   lstat,
   mkdir,
   open,
+  readdir,
   rename,
   rm,
+  rmdir,
   unlink,
   type FileHandle,
 } from "node:fs/promises";
 import { basename, join } from "node:path";
 
-const LOCK_MAX_BYTES = 16 * 1024;
-const LOCK_KIND = "mono-agent.scaffold-lock";
-const UUID_PATTERN =
-  /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
-
-interface FileIdentity {
-  readonly device: number;
-  readonly inode: number;
-}
-
-interface ScaffoldLockRecord {
-  readonly schemaVersion: 1;
-  readonly kind: typeof LOCK_KIND;
-  readonly nonce: string;
-  readonly ownerPid: number;
-  readonly stageName: string;
-}
+import {
+  SCAFFOLD_JOURNAL_MAX_BYTES,
+  createScaffoldJournalHeader,
+  parseScaffoldJournal,
+  scaffoldParkedPath,
+  scaffoldStagePath,
+  type FileIdentity,
+  type ScaffoldJournalFrame,
+  type ScaffoldJournalState,
+} from "./scaffold-journal.ts";
 
 interface LockCandidate {
   readonly handle: FileHandle;
@@ -42,9 +37,17 @@ interface ExistingScaffoldLock {
   readonly identity: FileIdentity;
   readonly parent: string;
   readonly parentIdentity: FileIdentity;
+  readonly targetPath: string;
   readonly stagePath: string;
+  readonly parkedPath: string;
   readonly candidatePath: string;
-  readonly record: ScaffoldLockRecord;
+  readonly abandonedPath: string;
+  readonly state: ScaffoldJournalState;
+}
+
+interface StaleScaffoldRecovery {
+  readonly retainedRecoveryPaths: readonly string[];
+  readonly publishedTargetRecovered: boolean;
 }
 
 class RetryScaffoldLockAcquisition extends Error {}
@@ -53,9 +56,15 @@ export interface ScaffoldLock {
   readonly path: string;
   readonly handle: FileHandle;
   readonly identity: FileIdentity;
+  readonly nonce: string;
   readonly parent: string;
   readonly parentIdentity: FileIdentity;
+  readonly targetPath: string;
   readonly stagePath: string;
+  readonly parkedPath: string;
+  readonly abandonedPath: string;
+  readonly retainedRecoveryPaths: readonly string[];
+  readonly publishedTargetRecovered: boolean;
 }
 
 export interface ScaffoldStage {
@@ -63,29 +72,46 @@ export interface ScaffoldStage {
   readonly identity: FileIdentity;
 }
 
+export interface ScaffoldLockRecoveryHooks {
+  readonly beforeCanonicalJournalRemoval?: () => Promise<void>;
+  readonly afterCanonicalJournalRemoval?: () => Promise<void>;
+}
+
 export async function acquireScaffoldLock(
   parent: string,
   targetName: string,
+  recoveryHooks: ScaffoldLockRecoveryHooks = {},
 ): Promise<ScaffoldLock> {
   const parentDetails = await lstat(parent);
-  assertRealDirectory(parentDetails, "scaffold parent");
+  assertAuthorityDirectory(parentDetails, "scaffold parent");
   const parentIdentity = identityOf(parentDetails);
   const path = join(parent, `.${targetName}.mono-agent-scaffold.lock`);
+  const targetPath = join(parent, targetName);
+  const retainedRecoveryPaths: string[] = [];
+  let publishedTargetRecovered = false;
 
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    await assertDirectoryIdentity(parent, parentIdentity, "scaffold parent");
+    await assertDirectoryIdentity(
+      parent,
+      parentIdentity,
+      "scaffold parent",
+      "authority",
+    );
+    await restoreAbandonedJournalCanonicalAlias(
+      path,
+      parent,
+      parentIdentity,
+    );
     const nonce = randomUUID().toLowerCase();
-    const stageName = `.${targetName}.mono-agent-stage-${nonce}`;
     const candidate = `${path}.candidate-${nonce}`;
     const lockCandidate = await createLockCandidate(
       candidate,
-      {
-        schemaVersion: 1,
-        kind: LOCK_KIND,
+      createScaffoldJournalHeader(
+        parent,
+        parentIdentity,
+        targetName,
         nonce,
-        ownerPid: process.pid,
-        stageName,
-      },
+      ),
       parent,
       parentIdentity,
     );
@@ -107,12 +133,15 @@ export async function acquireScaffoldLock(
       }
       if (!hasCode(error, "EEXIST")) throw error;
       try {
-        await inspectExistingScaffoldLock(
+        const recovered = await inspectExistingScaffoldLock(
           path,
           parent,
           parentIdentity,
           targetName,
+          recoveryHooks,
         );
+        retainedRecoveryPaths.push(...recovered.retainedRecoveryPaths);
+        publishedTargetRecovered ||= recovered.publishedTargetRecovered;
       } catch (existingError) {
         if (
           hasCode(existingError, "ENOENT")
@@ -132,6 +161,11 @@ export async function acquireScaffoldLock(
       if (!sameFileIdentity(identityOf(locked), lockCandidate.identity)) {
         throw new Error("Scaffold lock changed identity while it was acquired.");
       }
+      if (await lstatOrUndefined(scaffoldAbandonedPath(path)) !== undefined) {
+        throw new Error(
+          `An orphaned scaffold journal abandonment marker requires manual inspection: ${scaffoldAbandonedPath(path)}`,
+        );
+      }
       await removeExactFile(
         candidate,
         lockCandidate.identity,
@@ -145,9 +179,15 @@ export async function acquireScaffoldLock(
         path,
         handle: lockCandidate.handle,
         identity: lockCandidate.identity,
+        nonce,
         parent,
         parentIdentity,
-        stagePath: join(parent, stageName),
+        targetPath,
+        stagePath: scaffoldStagePath(parent, targetName, nonce),
+        parkedPath: scaffoldParkedPath(parent, targetName, nonce),
+        abandonedPath: scaffoldAbandonedPath(path),
+        retainedRecoveryPaths: Object.freeze([...retainedRecoveryPaths]),
+        publishedTargetRecovered,
       });
     } catch (error) {
       const cleanupFailures: unknown[] = [];
@@ -199,10 +239,186 @@ export async function createScaffoldStage(
   const details = await lstat(lock.stagePath);
   assertOwnerPrivateDirectory(details, "scaffold stage");
   await syncDirectory(lock.parent);
-  return Object.freeze({
+  const stage = Object.freeze({
     path: lock.stagePath,
     identity: identityOf(details),
   });
+  try {
+    await appendScaffoldJournal(lock, Object.freeze({
+      phase: "stage-created",
+      identity: stage.identity,
+    }));
+  } catch (error) {
+    try {
+      await removeExactDirectory(
+        stage.path,
+        stage.identity,
+        lock.parent,
+        lock.parentIdentity,
+        "scaffold stage",
+      );
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        "Scaffold stage journal cleanup failed",
+      );
+    }
+    throw error;
+  }
+  return stage;
+}
+
+export async function prepareScaffoldTargetParking(
+  lock: ScaffoldLock,
+): Promise<FileIdentity> {
+  const identity = await currentParkableTargetIdentity(lock);
+  await appendScaffoldJournal(lock, Object.freeze({
+    phase: "park-intent",
+    identity,
+  }));
+  return identity;
+}
+
+export async function assertScaffoldTargetParkingReady(
+  lock: ScaffoldLock,
+  identity: FileIdentity,
+): Promise<void> {
+  const currentIdentity = await currentParkableTargetIdentity(lock);
+  if (!sameFileIdentity(currentIdentity, identity)) {
+    throw new Error("Existing scaffold target changed identity before parking.");
+  }
+}
+
+export async function recordScaffoldTargetParked(
+  lock: ScaffoldLock,
+  identity: FileIdentity,
+): Promise<void> {
+  await assertScaffoldLock(lock);
+  if (await lstatOrUndefined(lock.targetPath) !== undefined) {
+    throw new Error("Scaffold target reappeared while its empty inode was parked.");
+  }
+  await assertEmptyDirectory(
+    lock.parkedPath,
+    identity,
+    "parked scaffold target",
+    "authority",
+  );
+  await syncDirectory(lock.parent);
+  await appendScaffoldJournal(lock, Object.freeze({
+    phase: "parked",
+    identity,
+  }));
+}
+
+export async function recordScaffoldPublished(
+  lock: ScaffoldLock,
+  stage: ScaffoldStage,
+  beforeJournal?: () => Promise<void>,
+): Promise<void> {
+  await assertScaffoldLock(lock);
+  if (await lstatOrUndefined(stage.path) !== undefined) {
+    throw new Error("Scaffold stage still exists after publication.");
+  }
+  await assertScaffoldStage(lock, stage, lock.targetPath);
+  await syncDirectory(lock.parent);
+  await beforeJournal?.();
+  await appendScaffoldJournal(lock, Object.freeze({
+    phase: "published",
+    identity: stage.identity,
+  }));
+}
+
+export async function commitScaffoldJournal(
+  lock: ScaffoldLock,
+): Promise<void> {
+  await appendScaffoldJournal(lock, Object.freeze({ phase: "committed" }));
+}
+
+export type ParkedDirectoryRemover = (path: string) => Promise<void>;
+
+export async function removeOrRetainParkedScaffoldTarget(
+  lock: ScaffoldLock,
+  identity: FileIdentity,
+  remover: ParkedDirectoryRemover = rmdir,
+): Promise<readonly string[]> {
+  await assertScaffoldLock(lock);
+  await assertEmptyDirectory(
+    lock.parkedPath,
+    identity,
+    "parked scaffold target",
+    "authority",
+  );
+  try {
+    await remover(lock.parkedPath);
+  } catch (error) {
+    const remaining = await lstatOrUndefined(lock.parkedPath);
+    if (remaining === undefined) {
+      await syncDirectory(lock.parent);
+      return Object.freeze([]);
+    }
+    try {
+      await assertEmptyDirectory(
+        lock.parkedPath,
+        identity,
+        "retained parked scaffold target",
+        "authority",
+      );
+    } catch (validationError) {
+      throw new AggregateError(
+        [error, validationError],
+        `Parked scaffold target cleanup became unsafe: ${lock.parkedPath}`,
+      );
+    }
+    return Object.freeze([lock.parkedPath]);
+  }
+  if (await lstatOrUndefined(lock.parkedPath) !== undefined) {
+    throw new Error("Parked scaffold target cleanup did not remove its path.");
+  }
+  await syncDirectory(lock.parent);
+  return Object.freeze([]);
+}
+
+export async function restoreParkedScaffoldTarget(
+  lock: ScaffoldLock,
+  identity: FileIdentity,
+): Promise<void> {
+  await assertScaffoldLock(lock);
+  if (await lstatOrUndefined(lock.targetPath) !== undefined) {
+    throw new Error("Scaffold target is occupied; exact parked target was retained.");
+  }
+  await assertEmptyDirectory(
+    lock.parkedPath,
+    identity,
+    "parked scaffold target",
+    "authority",
+  );
+  await rename(lock.parkedPath, lock.targetPath);
+  await assertEmptyDirectory(
+    lock.targetPath,
+    identity,
+    "restored scaffold target",
+    "authority",
+  );
+  await syncDirectory(lock.parent);
+}
+
+async function currentParkableTargetIdentity(
+  lock: ScaffoldLock,
+): Promise<FileIdentity> {
+  await assertScaffoldLock(lock);
+  const details = await lstat(lock.targetPath);
+  assertAuthorityDirectory(details, "existing scaffold target");
+  const identity = identityOf(details);
+  await assertEmptyDirectory(
+    lock.targetPath,
+    identity,
+    "existing scaffold target",
+    "authority",
+  );
+  if (await lstatOrUndefined(lock.parkedPath) !== undefined) {
+    throw new Error(`Scaffold parked path already exists: ${lock.parkedPath}`);
+  }
+  return identity;
 }
 
 export async function removeScaffoldStage(
@@ -226,6 +442,7 @@ export async function assertScaffoldLock(
     lock.parent,
     lock.parentIdentity,
     "scaffold parent",
+    "authority",
   );
   await assertScaffoldLockHandle(lock);
   const details = await lstat(lock.path);
@@ -265,15 +482,64 @@ export async function releaseScaffoldLock(lock: ScaffoldLock): Promise<void> {
   );
 }
 
+export async function retainScaffoldLockForRecovery(
+  lock: ScaffoldLock,
+): Promise<void> {
+  await withClosedFileHandle(
+    lock.handle,
+    async () => {
+      await assertScaffoldLock(lock);
+      try {
+        await link(lock.path, lock.abandonedPath);
+      } catch (error) {
+        if (!hasCode(error, "EEXIST")) throw error;
+      }
+      const abandoned = await lstat(lock.abandonedPath);
+      assertOwnerPrivateFile(abandoned, "abandoned scaffold journal");
+      if (!sameFileIdentity(identityOf(abandoned), lock.identity)) {
+        throw new Error("Abandoned scaffold journal changed identity.");
+      }
+      await syncDirectory(lock.parent);
+    },
+    "Scaffold journal abandonment failed",
+  );
+}
+
+async function appendScaffoldJournal(
+  lock: ScaffoldLock,
+  frame: ScaffoldJournalFrame,
+): Promise<void> {
+  await assertScaffoldLock(lock);
+  const bytes = Buffer.from(`${JSON.stringify(frame)}\n`, "utf8");
+  const before = await lock.handle.stat();
+  if (before.size + bytes.byteLength > SCAFFOLD_JOURNAL_MAX_BYTES) {
+    throw new Error("Scaffold journal exceeds its byte bound.");
+  }
+  await writeFully(lock.handle, bytes);
+  await lock.handle.sync();
+  const after = await lock.handle.stat();
+  const current = await lstat(lock.path);
+  assertOwnerPrivateFile(after, "scaffold journal");
+  assertOwnerPrivateFile(current, "scaffold journal");
+  if (
+    !sameIdentity(before, after)
+    || !sameIdentity(after, current)
+    || after.size !== before.size + bytes.byteLength
+  ) {
+    throw new Error("Scaffold journal changed while a phase was appended.");
+  }
+}
+
 async function createLockCandidate(
   path: string,
-  record: ScaffoldLockRecord,
+  record: unknown,
   parent: string,
   parentIdentity: FileIdentity,
 ): Promise<LockCandidate> {
   const handle = await open(
     path,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL,
+    constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT
+      | constants.O_EXCL | constants.O_NOFOLLOW,
     0o600,
   );
   let candidate: LockCandidate | undefined;
@@ -284,7 +550,11 @@ async function createLockCandidate(
       identity: identityOf(details),
     });
     assertOwnerPrivateFile(details, "scaffold lock candidate");
-    await handle.writeFile(`${JSON.stringify(record)}\n`, "utf8");
+    const bytes = Buffer.from(`${JSON.stringify(record)}\n`, "utf8");
+    if (bytes.byteLength > SCAFFOLD_JOURNAL_MAX_BYTES) {
+      throw new Error("Scaffold journal header exceeds its byte bound.");
+    }
+    await writeFully(handle, bytes);
     await handle.sync();
     const after = await handle.stat();
     if (!sameFileIdentity(identityOf(after), candidate.identity)) {
@@ -347,22 +617,24 @@ async function inspectExistingScaffoldLock(
   parent: string,
   parentIdentity: FileIdentity,
   targetName: string,
-): Promise<void> {
+  recoveryHooks: ScaffoldLockRecoveryHooks,
+): Promise<StaleScaffoldRecovery> {
   const existing = await readScaffoldLock(
     path,
     parent,
     parentIdentity,
     targetName,
   );
-  await withClosedFileHandle(
+  return withClosedFileHandle(
     existing.handle,
     async () => {
-      if (pidIsAlive(existing.record.ownerPid)) {
+      const abandoned = await isScaffoldJournalAbandoned(existing);
+      if (!abandoned && pidIsAlive(existing.state.header.ownerPid)) {
         throw new Error(
           `Another scaffold operation owns the target; lock: ${path}`,
         );
       }
-      await recoverStaleScaffoldLock(existing);
+      return recoverStaleScaffoldLock(existing, recoveryHooks);
     },
     "Existing scaffold lock inspection failed",
   );
@@ -374,7 +646,12 @@ async function readScaffoldLock(
   parentIdentity: FileIdentity,
   targetName: string,
 ): Promise<ExistingScaffoldLock> {
-  await assertDirectoryIdentity(parent, parentIdentity, "scaffold parent");
+  await assertDirectoryIdentity(
+    parent,
+    parentIdentity,
+    "scaffold parent",
+    "authority",
+  );
   const handle = await open(
     path,
     constants.O_RDONLY | constants.O_NOFOLLOW,
@@ -382,10 +659,10 @@ async function readScaffoldLock(
   try {
     const before = await handle.stat();
     assertOwnerPrivateFile(before, `scaffold lock ${path}`);
-    if (before.size < 1 || before.size > LOCK_MAX_BYTES) {
+    if (before.size < 1 || before.size > SCAFFOLD_JOURNAL_MAX_BYTES) {
       throw new Error(`Scaffold lock has an invalid size: ${path}`);
     }
-    const bytes = await readBounded(handle, LOCK_MAX_BYTES);
+    const bytes = await readBounded(handle, SCAFFOLD_JOURNAL_MAX_BYTES);
     const after = await handle.stat();
     const current = await lstat(path);
     assertOwnerPrivateFile(current, `scaffold lock ${path}`);
@@ -398,19 +675,24 @@ async function readScaffoldLock(
         `Scaffold lock changed while it was read: ${path}`,
       );
     }
-    const value = JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-    ) as unknown;
-    const record = parseLockRecord(value, targetName);
+    const state = parseScaffoldJournal(
+      bytes,
+      parent,
+      parentIdentity,
+      targetName,
+    );
     return Object.freeze({
       path,
       handle,
       identity: identityOf(after),
       parent,
       parentIdentity,
-      stagePath: join(parent, record.stageName),
-      candidatePath: `${path}.candidate-${record.nonce}`,
-      record,
+      targetPath: join(parent, targetName),
+      stagePath: scaffoldStagePath(parent, targetName, state.header.nonce),
+      parkedPath: scaffoldParkedPath(parent, targetName, state.header.nonce),
+      candidatePath: `${path}.candidate-${state.header.nonce}`,
+      abandonedPath: scaffoldAbandonedPath(path),
+      state,
     });
   } catch (error) {
     try {
@@ -425,53 +707,168 @@ async function readScaffoldLock(
   }
 }
 
-function parseLockRecord(
-  value: unknown,
-  targetName: string,
-): ScaffoldLockRecord {
-  if (
-    !isRecord(value)
-    || !hasExactKeys(value, [
-      "schemaVersion",
-      "kind",
-      "nonce",
-      "ownerPid",
-      "stageName",
-    ])
-    || value.schemaVersion !== 1
-    || value.kind !== LOCK_KIND
-    || typeof value.nonce !== "string"
-    || !UUID_PATTERN.test(value.nonce)
-    || !Number.isSafeInteger(value.ownerPid)
-    || (value.ownerPid as number) < 1
-    || value.stageName
-      !== `.${targetName}.mono-agent-stage-${value.nonce}`
-  ) {
-    throw new Error("Scaffold lock has an invalid owner record.");
+async function recoverStaleScaffoldLock(
+  lock: Awaited<ReturnType<typeof readScaffoldLock>>,
+  recoveryHooks: ScaffoldLockRecoveryHooks,
+): Promise<StaleScaffoldRecovery> {
+  await assertDirectoryIdentity(
+    lock.parent,
+    lock.parentIdentity,
+    "scaffold parent",
+    "authority",
+  );
+  const retained: string[] = [];
+  const stageDetails = await lstatOrUndefined(lock.stagePath);
+  const targetDetails = await lstatOrUndefined(lock.targetPath);
+  const parkedDetails = await lstatOrUndefined(lock.parkedPath);
+  const stageIdentity = lock.state.stageIdentity;
+  const physicallyPublished = (
+    stageIdentity !== undefined
+    && targetDetails !== undefined
+    && sameFileIdentity(identityOf(targetDetails), stageIdentity)
+  );
+  if (lock.state.publishedIdentity !== undefined || physicallyPublished) {
+    if (stageIdentity === undefined || !physicallyPublished) {
+      throw journalRecoveryError(
+        lock,
+        "Published scaffold target does not match its journaled stage",
+      );
+    }
+    await assertDirectoryIdentity(
+      lock.targetPath,
+      stageIdentity,
+      "published scaffold target",
+      "private",
+    );
+    if (stageDetails !== undefined) {
+      throw journalRecoveryError(
+        lock,
+        "Published scaffold still has a stage path",
+      );
+    }
+    if (lock.state.parkIntentIdentity === undefined) {
+      if (parkedDetails !== undefined) {
+        throw journalRecoveryError(
+          lock,
+          "Unexpected parked path accompanies an absent-target publication",
+        );
+      }
+    } else if (parkedDetails !== undefined) {
+      const retainedParked = await removeOrRetainRecoveredParkedTarget(
+        lock,
+        lock.state.parkIntentIdentity,
+      );
+      retained.push(...retainedParked);
+    }
+    await retireRecoveredScaffoldJournal(lock, recoveryHooks);
+    return Object.freeze({
+      retainedRecoveryPaths: Object.freeze(retained),
+      publishedTargetRecovered: true,
+    });
   }
+
+  if (lock.state.parkIntentIdentity !== undefined) {
+    const parkedIdentity = lock.state.parkIntentIdentity;
+    if (parkedDetails !== undefined) {
+      await assertEmptyDirectory(
+        lock.parkedPath,
+        parkedIdentity,
+        "parked scaffold target",
+        "authority",
+      );
+      if (targetDetails !== undefined) {
+        throw journalRecoveryError(
+          lock,
+          "A target competitor prevents exact parked-target restoration",
+        );
+      }
+      await rename(lock.parkedPath, lock.targetPath);
+      await assertEmptyDirectory(
+        lock.targetPath,
+        parkedIdentity,
+        "restored scaffold target",
+        "authority",
+      );
+      await syncDirectory(lock.parent);
+    } else {
+      if (targetDetails === undefined) {
+        throw journalRecoveryError(
+          lock,
+          "The journaled empty target is no longer recoverable",
+        );
+      }
+      await assertEmptyDirectory(
+        lock.targetPath,
+        parkedIdentity,
+        "unmoved scaffold target",
+        "authority",
+      );
+    }
+  } else {
+    if (parkedDetails !== undefined) {
+      throw journalRecoveryError(
+        lock,
+        "An unjournaled parked scaffold target exists",
+      );
+    }
+    if (targetDetails !== undefined) {
+      const targetIdentity = identityOf(targetDetails);
+      await assertEmptyDirectory(
+        lock.targetPath,
+        targetIdentity,
+        "existing scaffold target",
+        "authority",
+      );
+    }
+  }
+
+  if (stageIdentity === undefined) {
+    if (stageDetails !== undefined) {
+      assertOwnerPrivateDirectory(stageDetails, "unjournaled scaffold stage");
+      retained.push(lock.stagePath);
+    }
+  } else {
+    if (stageDetails === undefined) {
+      throw journalRecoveryError(
+        lock,
+        "Journaled scaffold stage disappeared before publication",
+      );
+    }
+    await assertDirectoryIdentity(
+      lock.stagePath,
+      stageIdentity,
+      "stale scaffold stage",
+      "private",
+    );
+    retained.push(lock.stagePath);
+  }
+  await retireRecoveredScaffoldJournal(lock, recoveryHooks);
   return Object.freeze({
-    schemaVersion: 1,
-    kind: LOCK_KIND,
-    nonce: value.nonce,
-    ownerPid: value.ownerPid as number,
-    stageName: value.stageName as string,
+    retainedRecoveryPaths: Object.freeze(retained),
+    publishedTargetRecovered: false,
   });
 }
 
-async function recoverStaleScaffoldLock(
-  lock: Awaited<ReturnType<typeof readScaffoldLock>>,
+async function retireRecoveredScaffoldJournal(
+  lock: ExistingScaffoldLock,
+  recoveryHooks: ScaffoldLockRecoveryHooks,
 ): Promise<void> {
-  const stageDetails = await lstatOrUndefined(lock.stagePath);
-  if (stageDetails !== undefined) {
-    assertOwnerPrivateDirectory(stageDetails, "stale scaffold stage");
-    await quarantineExactDirectory(
-      lock.stagePath,
-      identityOf(stageDetails),
-      lock.parent,
-      lock.parentIdentity,
-      "stale scaffold stage",
-    );
-  }
+  await discardStaleCandidate(lock);
+  await recoveryHooks.beforeCanonicalJournalRemoval?.();
+  await removeExactFile(
+    lock.path,
+    lock.identity,
+    lock.parent,
+    lock.parentIdentity,
+    "stale scaffold lock",
+  );
+  await recoveryHooks.afterCanonicalJournalRemoval?.();
+  await discardAbandonedJournalAlias(lock);
+}
+
+async function discardStaleCandidate(
+  lock: ExistingScaffoldLock,
+): Promise<void> {
   const candidateDetails = await lstatOrUndefined(lock.candidatePath);
   if (candidateDetails !== undefined) {
     assertOwnerPrivateFile(candidateDetails, "stale scaffold lock candidate");
@@ -486,13 +883,119 @@ async function recoverStaleScaffoldLock(
       "stale scaffold lock candidate",
     );
   }
-  await removeExactFile(
-    lock.path,
-    lock.identity,
-    lock.parent,
-    lock.parentIdentity,
-    "stale scaffold lock",
+}
+
+async function discardAbandonedJournalAlias(
+  lock: ExistingScaffoldLock,
+): Promise<void> {
+  const abandonedDetails = await lstatOrUndefined(lock.abandonedPath);
+  if (abandonedDetails !== undefined) {
+    assertOwnerPrivateFile(
+      abandonedDetails,
+      "abandoned scaffold recovery journal",
+    );
+    if (!sameFileIdentity(identityOf(abandonedDetails), lock.identity)) {
+      throw new Error(
+        "Abandoned scaffold recovery journal has an unknown identity.",
+      );
+    }
+    await removeExactFile(
+      lock.abandonedPath,
+      lock.identity,
+      lock.parent,
+      lock.parentIdentity,
+      "abandoned scaffold recovery journal",
+    );
+  }
+}
+
+async function restoreAbandonedJournalCanonicalAlias(
+  lockPath: string,
+  parent: string,
+  parentIdentity: FileIdentity,
+): Promise<void> {
+  const abandonedPath = scaffoldAbandonedPath(lockPath);
+  const abandoned = await lstatOrUndefined(abandonedPath);
+  if (abandoned === undefined) return;
+  assertOwnerPrivateFile(abandoned, "abandoned scaffold recovery journal");
+  if (await lstatOrUndefined(lockPath) !== undefined) return;
+  await assertDirectoryIdentity(
+    parent,
+    parentIdentity,
+    "scaffold parent",
+    "authority",
   );
+  try {
+    await link(abandonedPath, lockPath);
+  } catch (error) {
+    if (hasCode(error, "EEXIST")) return;
+    throw error;
+  }
+  const restored = await lstat(lockPath);
+  assertOwnerPrivateFile(restored, "restored scaffold recovery journal");
+  if (!sameIdentity(restored, abandoned)) {
+    throw new Error("Restored scaffold recovery journal changed identity.");
+  }
+  await syncDirectory(parent);
+}
+
+async function isScaffoldJournalAbandoned(
+  lock: ExistingScaffoldLock,
+): Promise<boolean> {
+  const details = await lstatOrUndefined(lock.abandonedPath);
+  if (details === undefined) return false;
+  assertOwnerPrivateFile(details, "abandoned scaffold recovery journal");
+  if (!sameFileIdentity(identityOf(details), lock.identity)) {
+    throw new Error(
+      "Abandoned scaffold recovery journal has an unknown identity.",
+    );
+  }
+  return true;
+}
+
+async function removeOrRetainRecoveredParkedTarget(
+  lock: ExistingScaffoldLock,
+  identity: FileIdentity,
+): Promise<readonly string[]> {
+  await assertEmptyDirectory(
+    lock.parkedPath,
+    identity,
+    "parked scaffold target",
+    "authority",
+  );
+  try {
+    await rmdir(lock.parkedPath);
+    await syncDirectory(lock.parent);
+    return Object.freeze([]);
+  } catch (error) {
+    try {
+      await assertEmptyDirectory(
+        lock.parkedPath,
+        identity,
+        "retained parked scaffold target",
+        "authority",
+      );
+    } catch (validationError) {
+      throw new AggregateError(
+        [error, validationError],
+        `Recovered parked scaffold target cleanup became unsafe: ${lock.parkedPath}`,
+      );
+    }
+    return Object.freeze([lock.parkedPath]);
+  }
+}
+
+function journalRecoveryError(
+  lock: ExistingScaffoldLock,
+  message: string,
+): Error {
+  return new Error(
+    `${message}; journal=${lock.path}; target=${lock.targetPath}; stage=${lock.stagePath}; parked=${lock.parkedPath}.`,
+  );
+}
+
+function scaffoldAbandonedPath(lockPath: string): string {
+  return `${lockPath}.abandoned`;
 }
 
 async function removeExactDirectory(
@@ -630,12 +1133,28 @@ async function assertDirectoryIdentity(
   path: string,
   expected: FileIdentity,
   label: string,
+  privacy?: "authority" | "private",
 ): Promise<void> {
   const details = await lstat(path);
   assertRealDirectory(details, label);
+  if (privacy === "authority") assertAuthorityDirectory(details, label);
+  if (privacy === "private") assertOwnerPrivate(details, label);
   if (!sameFileIdentity(identityOf(details), expected)) {
     throw new Error(`${label} changed identity.`);
   }
+}
+
+async function assertEmptyDirectory(
+  path: string,
+  expected: FileIdentity,
+  label: string,
+  privacy: "authority" | "private",
+): Promise<void> {
+  await assertDirectoryIdentity(path, expected, label, privacy);
+  if ((await readdir(path)).length !== 0) {
+    throw new Error(`${label} is not empty.`);
+  }
+  await assertDirectoryIdentity(path, expected, label, privacy);
 }
 
 async function syncDirectory(path: string): Promise<void> {
@@ -659,6 +1178,11 @@ function assertRealDirectory(details: Stats, label: string): void {
   }
 }
 
+function assertAuthorityDirectory(details: Stats, label: string): void {
+  assertRealDirectory(details, label);
+  assertOwner(details, label, 0o022);
+}
+
 function assertOwnerPrivateDirectory(details: Stats, label: string): void {
   assertRealDirectory(details, label);
   assertOwnerPrivate(details, label);
@@ -672,12 +1196,24 @@ function assertOwnerPrivateFile(details: Stats, label: string): void {
 }
 
 function assertOwnerPrivate(details: Stats, label: string): void {
+  assertOwner(details, label, 0o077);
+}
+
+function assertOwner(
+  details: Stats,
+  label: string,
+  forbiddenMode: number,
+): void {
   if (typeof process.getuid !== "function") return;
   if (details.uid !== process.getuid()) {
     throw new Error(`${label} must be owned by the current user.`);
   }
-  if ((details.mode & 0o077) !== 0) {
-    throw new Error(`${label} must not grant group or other permissions.`);
+  if ((details.mode & forbiddenMode) !== 0) {
+    throw new Error(
+      forbiddenMode === 0o077
+        ? `${label} must not grant group or other permissions.`
+        : `${label} must not grant group or other write permissions.`,
+    );
   }
 }
 
@@ -714,17 +1250,22 @@ async function lstatOrUndefined(path: string): Promise<Stats | undefined> {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(
-  value: Record<string, unknown>,
-  expected: readonly string[],
-): boolean {
-  const keys = Object.keys(value).sort();
-  return keys.length === expected.length
-    && [...expected].sort().every((key, index) => keys[index] === key);
+async function writeFully(
+  handle: FileHandle,
+  bytes: Uint8Array,
+): Promise<void> {
+  let offset = 0;
+  while (offset < bytes.byteLength) {
+    const result = await handle.write(
+      bytes,
+      offset,
+      bytes.byteLength - offset,
+    );
+    if (result.bytesWritten < 1) {
+      throw new Error("Scaffold journal write made no progress.");
+    }
+    offset += result.bytesWritten;
+  }
 }
 
 function hasCode(error: unknown, code: string): boolean {

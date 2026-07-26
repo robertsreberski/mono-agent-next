@@ -17,30 +17,30 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `9be686089ed15b66e3eb321e4e1515545e2c9966283e566467070d07d17931b2`
+Source manifest digest: `1b6f177d54e18c37f64d203c3f1990ab26bf47609bcaf7d6ce06abe817e4b444`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 311 | 96015 |
-| Tests | 164 | 76505 |
+| Production | 312 | 97025 |
+| Tests | 164 | 77053 |
 | Repository and product tooling | 56 | 18848 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **531** | **191368** |
+| **Total executable source** | **532** | **192926** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 308.7 lines.
+Average production file size is 311.0 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 96015 | 130000 | within limit |
+| repository-production | 97025 | 130000 | within limit |
 | kernel-production | 16229 | 16500 | within limit |
 | durable-protocol-production | 7626 | 9500 | within limit |
 
@@ -50,9 +50,9 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 76505 | 72012 | within limit |
+| test source, at 0.75 of production | 77053 | 72769 | within limit |
 
-The current ratio is 0.797.
+The current ratio is 0.794.
 
 ## Largest package ownership surfaces
 
@@ -64,7 +64,7 @@ The current ratio is 0.797.
 | `@mono-agent/memory-local` | 19 | 8097 | 4767 |
 | `@mono-agent/web` | 28 | 7169 | 2507 |
 | `@mono-agent/service-macos` | 22 | 5770 | 2131 |
-| `create-mono-agent` | 11 | 4477 | 1651 |
+| `create-mono-agent` | 12 | 5487 | 2199 |
 | `@mono-agent/channel-slack` | 15 | 3765 | 2191 |
 
 The complete package table is retained in the generated report model exposed by

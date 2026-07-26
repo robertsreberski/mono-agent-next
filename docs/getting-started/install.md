@@ -92,8 +92,16 @@ node packages/create-mono-agent/dist/bin/create-mono-agent.js \
 ```
 
 Accepted templates are `minimal`, `personal`, and `multi-runtime`; `minimal` is
-the default. The target must not already exist. Installation never runs unless
-`--install` is explicit, so omit that flag during the source-only preview.
+the default. The target must be absent or an existing empty real directory;
+symlinks, non-directories, and non-empty targets fail closed. Installation
+never runs unless `--install` is explicit, so omit that flag during the
+source-only preview.
+
+Publication is protected by a fsynced append-only journal. If a process exits
+while temporarily parking an existing empty target, the next invocation
+restores or reconciles only the journaled device and inode identities. Safe
+artifacts that could not be removed are listed in the JSON result's
+`retainedRecoveryPaths` array for manual inspection.
 
 Every template writes:
 

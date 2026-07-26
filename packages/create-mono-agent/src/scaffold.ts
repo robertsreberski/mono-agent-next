@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: MIT
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import {
   lstat,
   mkdir,
   readdir,
   rename,
-  rmdir,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, parse, resolve } from "node:path";
@@ -17,10 +15,21 @@ import {
 } from "./npm-name.js";
 import {
   acquireScaffoldLock,
+  assertScaffoldTargetParkingReady,
   assertScaffoldStage,
+  commitScaffoldJournal,
   createScaffoldStage,
+  prepareScaffoldTargetParking,
+  recordScaffoldPublished,
+  recordScaffoldTargetParked,
   releaseScaffoldLock,
+  removeOrRetainParkedScaffoldTarget,
   removeScaffoldStage,
+  retainScaffoldLockForRecovery,
+  restoreParkedScaffoldTarget,
+  type ParkedDirectoryRemover,
+  type ScaffoldLock,
+  type ScaffoldLockRecoveryHooks,
   type ScaffoldStage,
 } from "./scaffold-lock.js";
 import {
@@ -54,13 +63,71 @@ export interface ScaffoldResult {
   installed: boolean;
   packageManager?: InstallPackageManager;
   files: readonly string[];
+  retainedRecoveryPaths: readonly string[];
+}
+
+interface ScaffoldPublicationContext {
+  readonly lockPath: string;
+  readonly targetPath: string;
+  readonly stagePath: string;
+  readonly parkedPath: string;
+}
+
+export interface ScaffoldAgentTestHooks extends ScaffoldLockRecoveryHooks {
+  readonly afterParkIntent?: (
+    context: ScaffoldPublicationContext,
+  ) => Promise<void>;
+  readonly afterParkedBeforePublish?: (
+    context: ScaffoldPublicationContext,
+  ) => Promise<void>;
+  readonly afterPublishBeforeJournal?: (
+    context: ScaffoldPublicationContext,
+  ) => Promise<void>;
+  readonly afterPublishedBeforeParkedCleanup?: (
+    context: ScaffoldPublicationContext,
+  ) => Promise<void>;
+  readonly removeParkedDirectory?: ParkedDirectoryRemover;
 }
 
 export class ScaffoldError extends Error {
   override readonly name = "ScaffoldError";
 }
 
+class RetainedScaffoldJournalError extends Error {
+  override readonly name = "RetainedScaffoldJournalError";
+
+  constructor(
+    readonly journalPath: string,
+    readonly stagePath: string,
+    readonly parkedPath: string,
+    cause: unknown,
+  ) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(
+      `${detail}; retained scaffold recovery journal=${journalPath}; stage=${stagePath}; parked=${parkedPath}`,
+      { cause },
+    );
+  }
+}
+
 export async function scaffoldAgent(options: ScaffoldAgentOptions): Promise<ScaffoldResult> {
+  return scaffoldAgentWithHooks(options, {});
+}
+
+/**
+ * Package-internal fault-injection seam. The package root does not export it.
+ */
+export async function scaffoldAgentForTesting(
+  options: ScaffoldAgentOptions,
+  hooks: ScaffoldAgentTestHooks,
+): Promise<ScaffoldResult> {
+  return scaffoldAgentWithHooks(options, hooks);
+}
+
+async function scaffoldAgentWithHooks(
+  options: ScaffoldAgentOptions,
+  hooks: ScaffoldAgentTestHooks,
+): Promise<ScaffoldResult> {
   const cwd = resolve(options.cwd ?? process.cwd());
   const target = resolve(cwd, options.targetDirectory);
   if (target === parse(target).root) {
@@ -77,7 +144,7 @@ export async function scaffoldAgent(options: ScaffoldAgentOptions): Promise<Scaf
   await mkdir(parent, { recursive: true, mode: 0o700 });
 
   const lockPath = lockPathFor(parent, target);
-  const lock = await acquireScaffoldLock(parent, basename(target)).catch(
+  const lock = await acquireScaffoldLock(parent, basename(target), hooks).catch(
     (error: unknown) => {
       const detail = error instanceof Error ? error.message : String(error);
       if (
@@ -93,7 +160,16 @@ export async function scaffoldAgent(options: ScaffoldAgentOptions): Promise<Scaf
 
   let stage: ScaffoldStage | undefined;
   let primaryFailure: unknown;
+  let retainJournal = false;
   try {
+    if (lock.publishedTargetRecovered) {
+      const retained = lock.retainedRecoveryPaths.length === 0
+        ? ""
+        : `; retained recovery paths: ${lock.retainedRecoveryPaths.join(", ")}`;
+      throw new ScaffoldError(
+        `Recovered a previously published scaffold at ${target}; refusing to overwrite it${retained}`,
+      );
+    }
     await assertTargetAbsentOrEmpty(target);
     stage = await createScaffoldStage(lock);
     const files = renderProject({
@@ -108,7 +184,12 @@ export async function scaffoldAgent(options: ScaffoldAgentOptions): Promise<Scaf
       await (options.installer ?? installDependencies)(packageManager, stage.path);
     }
 
-    await publishStage(lock, stage, target);
+    const publicationRecoveryPaths = await publishStage(
+      lock,
+      stage,
+      target,
+      hooks,
+    );
     stage = undefined;
 
     return {
@@ -118,13 +199,23 @@ export async function scaffoldAgent(options: ScaffoldAgentOptions): Promise<Scaf
       installed: options.install === true,
       ...(options.install === true ? { packageManager: options.packageManager ?? "pnpm" } : {}),
       files: files.map((file) => file.path),
+      retainedRecoveryPaths: Object.freeze([
+        ...lock.retainedRecoveryPaths,
+        ...publicationRecoveryPaths,
+      ]),
     };
   } catch (error) {
+    if (error instanceof RetainedScaffoldJournalError) {
+      retainJournal = true;
+    }
+    if (stage !== undefined && retainJournal) {
+      stage = undefined;
+    }
     primaryFailure = error;
     throw error;
   } finally {
     const cleanupFailures: unknown[] = [];
-    if (stage !== undefined) {
+    if (stage !== undefined && !retainJournal) {
       try {
         await removeScaffoldStage(lock, stage);
       } catch (error) {
@@ -132,14 +223,30 @@ export async function scaffoldAgent(options: ScaffoldAgentOptions): Promise<Scaf
       }
     }
     try {
-      await releaseScaffoldLock(lock);
+      if (retainJournal) {
+        await retainScaffoldLockForRecovery(lock);
+      } else {
+        await releaseScaffoldLock(lock);
+      }
     } catch (error) {
       cleanupFailures.push(error);
     }
-    if (primaryFailure === undefined && cleanupFailures.length > 0) {
-      throw cleanupFailures.length === 1
-        ? cleanupFailures[0]
-        : new AggregateError(cleanupFailures, "Scaffold cleanup failed");
+    if (cleanupFailures.length > 0) {
+      if (primaryFailure === undefined && cleanupFailures.length === 1) {
+        throw cleanupFailures[0];
+      }
+      throw new AggregateError(
+        primaryFailure === undefined
+          ? cleanupFailures
+          : [primaryFailure, ...cleanupFailures],
+        primaryFailure === undefined
+          ? "Scaffold operation cleanup failed"
+          : `Scaffold operation cleanup failed after: ${
+              primaryFailure instanceof Error
+                ? primaryFailure.message
+                : String(primaryFailure)
+            }`,
+      );
     }
   }
 }
@@ -166,18 +273,37 @@ async function writeRenderedProject(
 }
 
 async function publishStage(
-  lock: Awaited<ReturnType<typeof acquireScaffoldLock>>,
+  lock: ScaffoldLock,
   stage: ScaffoldStage,
   target: string,
-): Promise<void> {
+  hooks: ScaffoldAgentTestHooks,
+): Promise<readonly string[]> {
+  const context = Object.freeze({
+    lockPath: lock.path,
+    targetPath: target,
+    stagePath: stage.path,
+    parkedPath: lock.parkedPath,
+  });
   const state = await targetState(target);
   if (state === "absent") {
+    let publicationRenameCompleted = false;
     try {
       await assertScaffoldStage(lock, stage);
       await rename(stage.path, target);
-      await assertScaffoldStage(lock, stage, target);
-      return;
+      publicationRenameCompleted = true;
+      await recordScaffoldPublished(
+        lock,
+        stage,
+        hooks.afterPublishBeforeJournal === undefined
+          ? undefined
+          : () => hooks.afterPublishBeforeJournal!(context),
+      );
+      await commitScaffoldJournal(lock);
+      return Object.freeze([]);
     } catch (error) {
+      if (publicationRenameCompleted) {
+        throw retainJournalError(lock, error);
+      }
       if (isAlreadyExists(error) || isDirectoryNotEmpty(error)) {
         throw new ScaffoldError(`Target changed while scaffolding: ${target}`);
       }
@@ -188,25 +314,69 @@ async function publishStage(
     throw targetStateError(target, state);
   }
 
-  const parkedPath = join(dirname(target), `.${basename(target)}.mono-agent-empty-${randomUUID()}`);
-  await rename(target, parkedPath);
-  let targetParked = true;
+  let parkedIdentity: Awaited<ReturnType<
+    typeof prepareScaffoldTargetParking
+  >> | undefined;
+  let targetParked = false;
+  let publicationRenameCompleted = false;
   try {
-    const parkedState = await targetState(parkedPath);
-    if (parkedState !== "empty-directory") {
-      throw new ScaffoldError(`Target changed while scaffolding: ${target}`);
-    }
+    parkedIdentity = await prepareScaffoldTargetParking(lock);
+    await hooks.afterParkIntent?.(context);
+    await assertScaffoldTargetParkingReady(lock, parkedIdentity);
+    await rename(target, lock.parkedPath);
+    targetParked = true;
+    await recordScaffoldTargetParked(lock, parkedIdentity);
+    await hooks.afterParkedBeforePublish?.(context);
     await assertScaffoldStage(lock, stage);
     await rename(stage.path, target);
-    await assertScaffoldStage(lock, stage, target);
-    await rmdir(parkedPath);
-    targetParked = false;
+    publicationRenameCompleted = true;
+    await recordScaffoldPublished(
+      lock,
+      stage,
+      hooks.afterPublishBeforeJournal === undefined
+        ? undefined
+          : () => hooks.afterPublishBeforeJournal!(context),
+    );
+    await hooks.afterPublishedBeforeParkedCleanup?.(context);
+    const retainedRecoveryPaths = await removeOrRetainParkedScaffoldTarget(
+      lock,
+      parkedIdentity,
+      hooks.removeParkedDirectory,
+    );
+    await commitScaffoldJournal(lock);
+    return retainedRecoveryPaths;
   } catch (error) {
-    if (targetParked) {
-      await rename(parkedPath, target).catch(() => undefined);
+    if (publicationRenameCompleted) {
+      throw retainJournalError(lock, error);
+    }
+    if (targetParked && parkedIdentity !== undefined) {
+      try {
+        await restoreParkedScaffoldTarget(lock, parkedIdentity);
+      } catch (restoreError) {
+        throw retainJournalError(
+          lock,
+          new AggregateError(
+            [error, restoreError],
+            `Scaffold publication and exact target restoration failed; parked=${lock.parkedPath}`,
+          ),
+        );
+      }
     }
     throw error;
   }
+}
+
+function retainJournalError(
+  lock: ScaffoldLock,
+  cause: unknown,
+): RetainedScaffoldJournalError {
+  if (cause instanceof RetainedScaffoldJournalError) return cause;
+  return new RetainedScaffoldJournalError(
+    lock.path,
+    lock.stagePath,
+    lock.parkedPath,
+    cause,
+  );
 }
 
 async function assertTargetAbsentOrEmpty(target: string): Promise<void> {

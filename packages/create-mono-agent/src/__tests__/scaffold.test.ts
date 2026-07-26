@@ -2,6 +2,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  chmod,
   lstat,
   mkdtemp,
   mkdir,
@@ -24,6 +25,7 @@ import {
   packageManagerInvocationForTesting,
   ScaffoldError,
   scaffoldAgent,
+  scaffoldAgentForTesting,
 } from "../scaffold.js";
 import {
   acquireScaffoldLock,
@@ -430,23 +432,504 @@ describe("scaffoldAgent", () => {
       expect.stringMatching(new RegExp(`^\\.${targetName}\\.mono-agent-stage-`, "u")),
     );
 
+    const stageName = leaked.find((entry) =>
+      entry.startsWith(`.${targetName}.mono-agent-stage-`));
+    if (stageName === undefined) throw new Error("Missing crashed scaffold stage");
+
     await expect(scaffoldAgent({
       targetDirectory: join(root, targetName),
     })).resolves.toMatchObject({
       directory: join(root, targetName),
       installed: false,
+      retainedRecoveryPaths: [join(root, stageName)],
     });
 
     const recovered = await readdir(root);
     expect(recovered).toContain(targetName);
     expect(recovered).not.toContain(`.${targetName}.mono-agent-scaffold.lock`);
-    const recoveredStages = recovered.filter((entry) =>
-      entry.startsWith(`.${targetName}.mono-agent-stage-`)
-      && entry.includes(".recovered-"));
-    expect(recoveredStages).toHaveLength(1);
-    await expect(readFile(join(root, recoveredStages[0]!, "partial"), "utf8"))
+    expect(recovered).toContain(stageName);
+    await expect(readFile(join(root, stageName, "partial"), "utf8"))
       .resolves.toBe("partial\n");
   }, 20_000);
+
+  it("restores the exact parked target after SIGKILL before publication", async () => {
+    const root = await makeTemporaryDirectory();
+    const targetName = "parked-crash-agent";
+    const target = join(root, targetName);
+    await mkdir(target, { mode: 0o750 });
+    const original = await lstat(target);
+
+    const child = await crashScaffoldPublication(
+      root,
+      targetName,
+      "after-parked",
+    );
+    expect(child).toMatchObject({
+      code: null,
+      signal: "SIGKILL",
+      stderr: "",
+    });
+    await expect(lstat(target)).rejects.toMatchObject({ code: "ENOENT" });
+    const crashedEntries = await readdir(root);
+    const parkedName = crashedEntries.find((entry) =>
+      entry.startsWith(`.${targetName}.mono-agent-parked-`));
+    const stageName = crashedEntries.find((entry) =>
+      entry.startsWith(`.${targetName}.mono-agent-stage-`));
+    if (parkedName === undefined || stageName === undefined) {
+      throw new Error("Missing deterministic crash artifacts");
+    }
+    const parked = await lstat(join(root, parkedName));
+    expect(identityOfStats(parked)).toEqual(identityOfStats(original));
+
+    let restoredBeforeRetryPublication:
+      | { readonly dev: number; readonly ino: number; readonly mode: number }
+      | undefined;
+    const result = await scaffoldAgent({
+      targetDirectory: target,
+      install: true,
+      installer: async () => {
+        restoredBeforeRetryPublication = await lstat(target);
+      },
+    });
+    expect(identityOfStats(restoredBeforeRetryPublication!))
+      .toEqual(identityOfStats(original));
+    expect(restoredBeforeRetryPublication!.mode & 0o777)
+      .toBe(original.mode & 0o777);
+    expect(result.retainedRecoveryPaths).toEqual([join(root, stageName)]);
+    expect(await readdir(root)).not.toContain(parkedName);
+    await expect(readFile(join(target, "package.json"), "utf8"))
+      .resolves.toContain('"name": "parked-crash-agent"');
+  }, 20_000);
+
+  it("preserves the exact target after SIGKILL at durable park intent", async () => {
+    const root = await makeTemporaryDirectory();
+    const targetName = "intent-crash-agent";
+    const target = join(root, targetName);
+    await mkdir(target, { mode: 0o750 });
+    const original = identityOfStats(await lstat(target));
+
+    const child = await crashScaffoldPublication(
+      root,
+      targetName,
+      "after-intent",
+    );
+    expect(child).toMatchObject({ code: null, signal: "SIGKILL" });
+    expect(identityOfStats(await lstat(target))).toEqual(original);
+    expect((await readdir(root)).some((entry) =>
+      entry.startsWith(`.${targetName}.mono-agent-parked-`))).toBe(false);
+
+    let observedBeforePublication:
+      | { readonly device: number; readonly inode: number }
+      | undefined;
+    const result = await scaffoldAgent({
+      targetDirectory: target,
+      install: true,
+      installer: async () => {
+        observedBeforePublication = identityOfStats(await lstat(target));
+      },
+    });
+    expect(observedBeforePublication).toEqual(original);
+    expect(result.retainedRecoveryPaths).toHaveLength(1);
+  }, 20_000);
+
+  it("restores the exact parked target when publication fails before its rename", async () => {
+    const root = await makeTemporaryDirectory();
+    const targetName = "parked-hook-failure-agent";
+    const target = join(root, targetName);
+    await mkdir(target, { mode: 0o750 });
+    const original = await lstat(target);
+
+    await expect(scaffoldAgentForTesting(
+      { targetDirectory: target },
+      {
+        afterParkedBeforePublish: async () => {
+          throw new Error("injected pre-publication failure");
+        },
+      },
+    )).rejects.toThrow(/injected pre-publication failure/u);
+
+    const restored = await lstat(target);
+    expect(identityOfStats(restored)).toEqual(identityOfStats(original));
+    expect(restored.mode & 0o777).toBe(original.mode & 0o777);
+    expect(await readdir(target)).toEqual([]);
+    expect(await readdir(root)).toEqual([targetName]);
+  });
+
+  it.each([
+    {
+      name: "before the published frame",
+      hooks: {
+        afterPublishBeforeJournal: async () => {
+          throw new Error("injected pre-journal failure");
+        },
+      },
+    },
+    {
+      name: "before parked-target cleanup",
+      hooks: {
+        afterPublishedBeforeParkedCleanup: async () => {
+          throw new Error("injected pre-cleanup failure");
+        },
+      },
+    },
+  ])("retains the exact journal after publication $name", async ({ hooks }) => {
+    const root = await makeTemporaryDirectory();
+    const targetName = `retained-${randomUUID()}`;
+    const target = join(root, targetName);
+    await mkdir(target, { mode: 0o750 });
+    const originalIdentity = identityOfStats(await lstat(target));
+
+    await expect(scaffoldAgentForTesting(
+      { targetDirectory: target },
+      hooks,
+    )).rejects.toThrow(/retained scaffold recovery journal=/u);
+
+    await expect(readFile(join(target, "package.json"), "utf8"))
+      .resolves.toContain(`"name": "${targetName}"`);
+    const entries = await readdir(root);
+    const lockName = `.${targetName}.mono-agent-scaffold.lock`;
+    const abandonedName = `${lockName}.abandoned`;
+    const parkedName = entries.find((entry) =>
+      entry.startsWith(`.${targetName}.mono-agent-parked-`));
+    expect(entries).toContain(lockName);
+    expect(entries).toContain(abandonedName);
+    expect(entries.some((entry) =>
+      entry.startsWith(`.${targetName}.mono-agent-stage-`))).toBe(false);
+    if (parkedName === undefined) throw new Error("Missing retained parked target");
+    expect(identityOfStats(await lstat(join(root, parkedName))))
+      .toEqual(originalIdentity);
+
+    await expect(scaffoldAgent({ targetDirectory: target }))
+      .rejects.toThrow(/Recovered a previously published scaffold/u);
+    expect((await readdir(root))).not.toContain(lockName);
+    expect((await readdir(root))).not.toContain(abandonedName);
+    await expect(lstat(join(root, parkedName)))
+      .rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each([
+    {
+      name: "before canonical journal removal",
+      canonicalRemains: true,
+      hooks: {
+        beforeCanonicalJournalRemoval: async () => {
+          throw new Error("injected canonical retirement failure");
+        },
+      },
+    },
+    {
+      name: "after canonical journal removal",
+      canonicalRemains: false,
+      hooks: {
+        afterCanonicalJournalRemoval: async () => {
+          throw new Error("injected marker retirement failure");
+        },
+      },
+    },
+  ])(
+    "recovers an abandoned journal when retirement fails $name",
+    async ({ canonicalRemains, hooks }) => {
+      const root = await makeTemporaryDirectory();
+      const targetName = `retirement-${randomUUID()}`;
+      const target = join(root, targetName);
+      await mkdir(target, { mode: 0o750 });
+      await expect(scaffoldAgentForTesting(
+        { targetDirectory: target },
+        {
+          afterPublishBeforeJournal: async () => {
+            throw new Error("retain publication for retirement test");
+          },
+        },
+      )).rejects.toThrow(/retained scaffold recovery journal=/u);
+
+      const lockPath = join(
+        root,
+        `.${targetName}.mono-agent-scaffold.lock`,
+      );
+      const abandonedPath = `${lockPath}.abandoned`;
+      await expect(scaffoldAgentForTesting(
+        { targetDirectory: target },
+        hooks,
+      )).rejects.toThrow(/retirement failure/u);
+      if (canonicalRemains) {
+        await expect(lstat(lockPath)).resolves.toBeDefined();
+      } else {
+        await expect(lstat(lockPath))
+          .rejects.toMatchObject({ code: "ENOENT" });
+      }
+      await expect(lstat(abandonedPath)).resolves.toBeDefined();
+
+      await expect(scaffoldAgent({ targetDirectory: target }))
+        .rejects.toThrow(/Recovered a previously published scaffold/u);
+      await expect(lstat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(lstat(abandonedPath))
+        .rejects.toMatchObject({ code: "ENOENT" });
+      await expect(readFile(join(target, "package.json"), "utf8"))
+        .resolves.toContain(`"name": "${targetName}"`);
+    },
+  );
+
+  it("recognizes a SIGKILL publication before its published frame", async () => {
+    const root = await makeTemporaryDirectory();
+    const targetName = "published-crash-agent";
+    const target = join(root, targetName);
+    await mkdir(target, { mode: 0o750 });
+
+    const child = await crashScaffoldPublication(
+      root,
+      targetName,
+      "after-publish-before-journal",
+    );
+    expect(child).toMatchObject({
+      code: null,
+      signal: "SIGKILL",
+      stderr: "",
+    });
+    const published = await lstat(target);
+    const entries = await readdir(root);
+    const parkedName = entries.find((entry) =>
+      entry.startsWith(`.${targetName}.mono-agent-parked-`));
+    if (parkedName === undefined) throw new Error("Missing parked target");
+    const journal = join(
+      root,
+      `.${targetName}.mono-agent-scaffold.lock`,
+    );
+    expect(await readFile(journal, "utf8")).not.toContain(
+      '"phase":"published"',
+    );
+
+    await expect(scaffoldAgent({ targetDirectory: target }))
+      .rejects.toThrow(/Recovered a previously published scaffold/u);
+    expect(identityOfStats(await lstat(target))).toEqual(
+      identityOfStats(published),
+    );
+    await expect(readFile(join(target, "partial"), "utf8"))
+      .resolves.toBe("partial\n");
+    await expect(lstat(join(root, parkedName)))
+      .rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(journal)).rejects.toMatchObject({ code: "ENOENT" });
+  }, 20_000);
+
+  it.each([
+    {
+      name: "ASCII",
+      tail: Buffer.from('{"phase":"published"', "utf8"),
+    },
+    {
+      name: "invalid UTF-8",
+      tail: Buffer.from([0x7b, 0x22, 0xc3]),
+    },
+  ])("ignores an unterminated $name journal tail", async ({ tail }) => {
+    const root = await makeTemporaryDirectory();
+    const targetName = `torn-${String(tail[tail.length - 1])}-agent`;
+    const target = join(root, targetName);
+    await mkdir(target, { mode: 0o700 });
+
+    const child = await crashScaffoldPublication(
+      root,
+      targetName,
+      "after-publish-before-journal",
+      tail,
+    );
+    expect(child).toMatchObject({ code: null, signal: "SIGKILL" });
+
+    await expect(scaffoldAgent({ targetDirectory: target }))
+      .rejects.toThrow(/Recovered a previously published scaffold/u);
+    await expect(readFile(join(target, "partial"), "utf8"))
+      .resolves.toBe("partial\n");
+  }, 20_000);
+
+  it("rejects a malformed newline-terminated journal frame", async () => {
+    const root = await makeTemporaryDirectory();
+    const targetName = "durable-torn-agent";
+    const target = join(root, targetName);
+    await mkdir(target, { mode: 0o700 });
+    const malformed = Buffer.from('{"phase":"published"\n', "utf8");
+
+    const child = await crashScaffoldPublication(
+      root,
+      targetName,
+      "after-publish-before-journal",
+      malformed,
+    );
+    expect(child).toMatchObject({ code: null, signal: "SIGKILL" });
+    const targetIdentity = identityOfStats(await lstat(target));
+    const journal = join(
+      root,
+      `.${targetName}.mono-agent-scaffold.lock`,
+    );
+
+    await expect(scaffoldAgent({ targetDirectory: target }))
+      .rejects.toThrow(/contains invalid JSON/u);
+    expect(identityOfStats(await lstat(target))).toEqual(targetIdentity);
+    await expect(lstat(journal)).resolves.toMatchObject({ isFile: expect.any(Function) });
+    expect((await readdir(root)).some((entry) =>
+      entry.startsWith(`.${targetName}.mono-agent-parked-`))).toBe(true);
+  }, 20_000);
+
+  it.each(["symlink", "inode", "mode"] as const)(
+    "fails closed on a %s-substituted parked target",
+    async (substitution) => {
+      const root = await makeTemporaryDirectory();
+      const targetName = `${substitution}-park-agent`;
+      const target = join(root, targetName);
+      await mkdir(target, { mode: 0o700 });
+      const child = await crashScaffoldPublication(
+        root,
+        targetName,
+        "after-parked",
+      );
+      expect(child).toMatchObject({ code: null, signal: "SIGKILL" });
+      const entries = await readdir(root);
+      const parkedName = entries.find((entry) =>
+        entry.startsWith(`.${targetName}.mono-agent-parked-`));
+      if (parkedName === undefined) throw new Error("Missing parked target");
+      const parkedPath = join(root, parkedName);
+      const exactOriginal = `${parkedPath}.exact-original`;
+      const external = join(root, `${targetName}-external`);
+      if (substitution === "symlink") {
+        await mkdir(external, { mode: 0o700 });
+        await writeFile(join(external, "sentinel"), "keep\n", { mode: 0o600 });
+        await rename(parkedPath, exactOriginal);
+        await symlink(external, parkedPath, "dir");
+      } else if (substitution === "inode") {
+        await rename(parkedPath, exactOriginal);
+        await mkdir(parkedPath, { mode: 0o700 });
+      } else {
+        await chmod(parkedPath, 0o770);
+      }
+      const journal = join(
+        root,
+        `.${targetName}.mono-agent-scaffold.lock`,
+      );
+
+      await expect(scaffoldAgent({ targetDirectory: target })).rejects.toThrow(
+        substitution === "symlink"
+          ? /real directory/u
+          : substitution === "inode"
+            ? /changed identity/u
+            : /group or other write/u,
+      );
+      await expect(lstat(journal)).resolves.toBeDefined();
+      await expect(lstat(parkedPath)).resolves.toBeDefined();
+      if (substitution !== "mode") {
+        await expect(lstat(exactOriginal)).resolves.toBeDefined();
+      }
+      if (substitution === "symlink") {
+        await expect(readFile(join(external, "sentinel"), "utf8"))
+          .resolves.toBe("keep\n");
+      }
+    },
+    20_000,
+  );
+
+  it("fails closed on a substituted published target inode", async () => {
+    const root = await makeTemporaryDirectory();
+    const targetName = "published-swap-agent";
+    const target = join(root, targetName);
+    await mkdir(target, { mode: 0o700 });
+    const child = await crashScaffoldPublication(
+      root,
+      targetName,
+      "after-publish-before-journal",
+    );
+    expect(child).toMatchObject({ code: null, signal: "SIGKILL" });
+    const exactPublished = `${target}.exact-published`;
+    await rename(target, exactPublished);
+    await mkdir(target, { mode: 0o700 });
+    await writeFile(join(target, "sentinel"), "competitor\n", { mode: 0o600 });
+    const journal = join(
+      root,
+      `.${targetName}.mono-agent-scaffold.lock`,
+    );
+
+    await expect(scaffoldAgent({ targetDirectory: target }))
+      .rejects.toThrow(/competitor prevents exact parked-target restoration/u);
+    await expect(readFile(join(target, "sentinel"), "utf8"))
+      .resolves.toBe("competitor\n");
+    await expect(readFile(join(exactPublished, "partial"), "utf8"))
+      .resolves.toBe("partial\n");
+    await expect(lstat(journal)).resolves.toBeDefined();
+    expect((await readdir(root)).some((entry) =>
+      entry.startsWith(`.${targetName}.mono-agent-parked-`))).toBe(true);
+  }, 20_000);
+
+  it("reports an exact retained parked path when cleanup fails safely", async () => {
+    const root = await makeTemporaryDirectory();
+    const target = join(root, "cleanup-failure-agent");
+    await mkdir(target, { mode: 0o750 });
+    const original = identityOfStats(await lstat(target));
+    let retainedPath = "";
+
+    const result = await scaffoldAgentForTesting(
+      { targetDirectory: target },
+      {
+        removeParkedDirectory: async (path) => {
+          retainedPath = path;
+          const error = new Error("simulated directory sync failure");
+          Object.assign(error, { code: "EIO" });
+          throw error;
+        },
+      },
+    );
+
+    expect(result.retainedRecoveryPaths).toEqual([retainedPath]);
+    expect(identityOfStats(await lstat(retainedPath))).toEqual(original);
+    expect(await readdir(retainedPath)).toEqual([]);
+    await expect(readFile(join(target, "package.json"), "utf8"))
+      .resolves.toContain('"name": "cleanup-failure-agent"');
+    await expect(lstat(join(
+      root,
+      ".cleanup-failure-agent.mono-agent-scaffold.lock",
+    ))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses unsafe stale v1 recovery without guessing parked siblings", async () => {
+    const root = await makeTemporaryDirectory();
+    const targetName = "legacy-agent";
+    const nonce = randomUUID().toLowerCase();
+    const lockPath = join(
+      root,
+      `.${targetName}.mono-agent-scaffold.lock`,
+    );
+    const stagePath = join(
+      root,
+      `.${targetName}.mono-agent-stage-${nonce}`,
+    );
+    const parkedPath = join(
+      root,
+      `.${targetName}.mono-agent-empty-${randomUUID().toLowerCase()}`,
+    );
+    const legacy = `${JSON.stringify({
+      schemaVersion: 1,
+      kind: "mono-agent.scaffold-lock",
+      nonce,
+      ownerPid: 99_999_999,
+      stageName: `.${targetName}.mono-agent-stage-${nonce}`,
+    })}\n`;
+    await writeFile(lockPath, legacy, { mode: 0o600 });
+    await mkdir(stagePath, { mode: 0o700 });
+    await writeFile(join(stagePath, "partial"), "legacy\n", { mode: 0o600 });
+    await mkdir(parkedPath, { mode: 0o700 });
+    const lockIdentity = identityOfStats(await lstat(lockPath));
+    const stageIdentity = identityOfStats(await lstat(stagePath));
+    const parkedIdentity = identityOfStats(await lstat(parkedPath));
+
+    await expect(scaffoldAgent({
+      targetDirectory: join(root, targetName),
+    })).rejects.toThrow(/schema version 1 cannot be recovered safely/u);
+    expect(await readFile(lockPath, "utf8")).toBe(legacy);
+    expect(identityOfStats(await lstat(lockPath))).toEqual(lockIdentity);
+    expect(identityOfStats(await lstat(stagePath))).toEqual(stageIdentity);
+    expect(identityOfStats(await lstat(parkedPath))).toEqual(parkedIdentity);
+    await expect(readFile(join(stagePath, "partial"), "utf8"))
+      .resolves.toBe("legacy\n");
+  });
+
+  it("keeps the scaffold fault seam out of the package root", async () => {
+    const publicApi = await import("../index.js");
+    expect(publicApi).not.toHaveProperty("scaffoldAgentForTesting");
+  });
 
   it("fails closed on a substituted stale stage without touching its referent", async () => {
     const root = await makeTemporaryDirectory();
@@ -735,6 +1218,64 @@ async function crashScaffoldOwner(
   ].join("\n"));
 }
 
+async function crashScaffoldPublication(
+  parent: string,
+  targetName: string,
+  point: "after-intent" | "after-parked" | "after-publish-before-journal",
+  tornTail?: Uint8Array,
+): Promise<{
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly stderr: string;
+}> {
+  const moduleUrl = new URL("../scaffold-lock.ts", import.meta.url).href;
+  const source = [
+    "import { constants } from \"node:fs\";",
+    "import { open, rename, writeFile } from \"node:fs/promises\";",
+    "import { join } from \"node:path\";",
+    `import {
+      acquireScaffoldLock,
+      assertScaffoldTargetParkingReady,
+      createScaffoldStage,
+      prepareScaffoldTargetParking,
+      recordScaffoldPublished,
+      recordScaffoldTargetParked
+    } from ${JSON.stringify(moduleUrl)};`,
+    `const lock = await acquireScaffoldLock(${JSON.stringify(parent)}, ${JSON.stringify(targetName)});`,
+    "const stage = await createScaffoldStage(lock);",
+    'await writeFile(join(stage.path, "partial"), "partial\\n", { mode: 0o600 });',
+    "const parkedIdentity = await prepareScaffoldTargetParking(lock);",
+    ...(point === "after-intent"
+      ? ['process.kill(process.pid, "SIGKILL");']
+      : [
+          "await assertScaffoldTargetParkingReady(lock, parkedIdentity);",
+          "await rename(lock.targetPath, lock.parkedPath);",
+          "await recordScaffoldTargetParked(lock, parkedIdentity);",
+        ]),
+    ...(point === "after-parked"
+      ? ['process.kill(process.pid, "SIGKILL");']
+      : []),
+    ...(point === "after-publish-before-journal"
+      ? [
+          "await rename(stage.path, lock.targetPath);",
+          "await recordScaffoldPublished(lock, stage, async () => {",
+          ...(tornTail === undefined
+            ? []
+            : [
+                `  const tail = Buffer.from(${JSON.stringify(Buffer.from(tornTail).toString("base64"))}, "base64");`,
+                "  const journal = await open(lock.path, constants.O_WRONLY | constants.O_APPEND | constants.O_NOFOLLOW);",
+                "  await journal.write(tail);",
+                "  await journal.sync();",
+                "  await journal.close();",
+              ]),
+          '  process.kill(process.pid, "SIGKILL");',
+          "});",
+        ]
+      : []),
+  ].join("\n");
+  return runChild(source);
+}
+
 async function writePackageManagerStub(
   path: string,
   lines: readonly string[],
@@ -780,4 +1321,10 @@ function codeOf(error: unknown): unknown {
   return typeof error === "object" && error !== null
     ? Reflect.get(error, "code")
     : undefined;
+}
+
+function identityOfStats(
+  value: { readonly dev: number; readonly ino: number },
+): { readonly device: number; readonly inode: number } {
+  return { device: value.dev, inode: value.ino };
 }

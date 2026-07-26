@@ -39,6 +39,7 @@ describe("runCreateMonoAgentCli", () => {
       event: "scaffolded",
       template: "minimal",
       installed: false,
+      retainedRecoveryPaths: [],
     });
     expect(JSON.parse(await readFile(join(root, "my-agent", "package.json"), "utf8")).name).toBe("my-agent");
   });
