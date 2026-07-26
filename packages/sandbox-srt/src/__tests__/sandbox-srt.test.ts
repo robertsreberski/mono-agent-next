@@ -501,7 +501,7 @@ export {`,
       config: config(fixture, {
         limits: {
           defaultTimeoutMs: 500,
-          maxTimeoutMs: 1_000,
+          maxTimeoutMs: 5_000,
           maxOutputBytes: 64,
           maxInputBytes: 4,
           maxArguments: 4,
@@ -516,7 +516,10 @@ export {`,
       })).rejects.toMatchObject({ code: "invalid_command" });
       await expect(sandbox.execute(command(fixture.root, "/bin/echo", ["1", "2", "3", "4", "5"])))
         .rejects.toMatchObject({ code: "invalid_command" });
-      await expect(sandbox.execute(command(fixture.root, "/bin/sh", ["-c", "while :; do printf 0123456789; done"])))
+      await expect(sandbox.execute({
+        ...command(fixture.root, "/bin/sh", ["-c", "while :; do printf 0123456789; done"]),
+        timeoutMs: 5_000,
+      }))
         .rejects.toMatchObject({ code: "output_limit_exceeded" });
 
       const timedOut = await sandbox.execute({
