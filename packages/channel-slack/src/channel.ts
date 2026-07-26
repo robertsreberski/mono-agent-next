@@ -305,13 +305,21 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
     let maintenanceInbox: SlackInbox | undefined;
     let maintenanceLease: SlackInboxLease | undefined;
     try {
-      const directory = await SlackInbox.discoverExistingDirectory(
+      const discovered = await SlackInbox.discoverExistingDirectory(
         context.dataDirectory,
         signal,
       );
-      if (directory === undefined) return await operation(undefined);
-      maintenanceLease = await acquireSlackInboxLease(directory, signal);
-      maintenanceInbox = await SlackInbox.openExisting(directory, signal);
+      if (discovered === undefined) return await operation(undefined);
+      maintenanceLease = await acquireSlackInboxLease(
+        discovered.directory,
+        signal,
+        { ...discovered, createIfMissing: true },
+      );
+      maintenanceInbox = await SlackInbox.openExisting(
+        discovered.directory,
+        signal,
+        discovered,
+      );
       if (maintenanceInbox === undefined) {
         throw new Error("Slack durable inbox changed while entering maintenance.");
       }
@@ -596,22 +604,30 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
       let openedInbox: SlackInbox | undefined;
       let acquiredLease: SlackInboxLease | undefined;
       try {
-        openedInbox = await SlackInbox.open(
+        const preparedInbox = await SlackInbox.prepareForServing(
           context.dataDirectory,
           inboxLifecycle.signal,
         );
-        inbox = openedInbox;
         if (stopping || lifecycle.signal.aborted) {
           throw new Error("Slack channel stopped while starting.");
         }
         acquiredLease = await acquireSlackInboxLease(
-          openedInbox.directory,
+          preparedInbox.directory,
           inboxLifecycle.signal,
+          { ...preparedInbox, createIfMissing: true },
         );
-        inboxLease = acquiredLease;
         if (stopping || lifecycle.signal.aborted) {
           throw new Error("Slack channel stopped while starting.");
         }
+        openedInbox = await SlackInbox.openPrepared(
+          preparedInbox,
+          inboxLifecycle.signal,
+        );
+        if (stopping || lifecycle.signal.aborted) {
+          throw new Error("Slack channel stopped while starting.");
+        }
+        inbox = openedInbox;
+        inboxLease = acquiredLease;
         const snapshot = inbox.snapshot();
         if (snapshot.blocked !== undefined) throw new Error(snapshot.blocked);
         running = true;

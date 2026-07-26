@@ -3,6 +3,8 @@ import type { OwnerPrivatePathIdentity } from "@mono-agent/module-sdk";
 
 import type { SlackSocketEvent } from "./socket.js";
 
+export const SLACK_INBOX_LEASE_FILE = ".mono-agent-slack-inbox.lease.sqlite";
+
 export function cloneEvent(event: SlackSocketEvent): SlackSocketEvent {
   if (event.kind === "message") {
     return Object.freeze({

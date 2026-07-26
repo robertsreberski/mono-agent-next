@@ -31,6 +31,7 @@ import {
   type SlackSocketTransport,
 } from "../index.js";
 import { SlackInbox } from "../inbox.js";
+import { acquireSlackInboxLease } from "../inbox-lease.js";
 
 const CONFIG = { appToken: "xapp-000000000000000", botToken: "xoxb-000000000000000", allowedTeamIds: ["T1"], allowedChannelIds: ["C1"], defaultDestination: "C1" };
 const temporaryDirectories: string[] = [];
@@ -1816,6 +1817,47 @@ describe("slack channel", () => {
       });
     });
     await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("retains a startup lease until a concurrent stop lets inbox open unwind", async () => {
+    const dataDirectory = temporaryDirectory();
+    let enteredOpen!: () => void;
+    let releaseOpen!: () => void;
+    const openEntered = new Promise<void>((resolve) => { enteredOpen = resolve; });
+    const openGate = new Promise<void>((resolve) => { releaseOpen = resolve; });
+    const originalOpenPrepared = SlackInbox.openPrepared.bind(SlackInbox);
+    const openSpy = vi.spyOn(SlackInbox, "openPrepared").mockImplementation(
+      async (prepared, signal) => {
+        enteredOpen();
+        await openGate;
+        return await originalOpenPrepared(prepared, signal);
+      },
+    );
+    const channel = createSlackChannel({
+      context: context(parseSlackConfig(CONFIG), async () => ({ status: "completed" }), {}, dataDirectory),
+      socketFactory: () => ({ async start() {}, async stop() {} }),
+      clientFactory: () => client(),
+    });
+
+    try {
+      const starting = channel.start?.({ signal: new AbortController().signal });
+      if (starting === undefined) throw new Error("Expected Slack channel start.");
+      await openEntered;
+      await expect(channel.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      })).resolves.toBeUndefined();
+      await expect(acquireSlackInboxLease(dataDirectory)).rejects.toThrow(/in use/iu);
+
+      releaseOpen();
+      await expect(starting).rejects.toThrow(/stopped while starting/iu);
+      const recoveredLease = await acquireSlackInboxLease(dataDirectory);
+      await recoveredLease.release();
+      expect(channel.running).toBe(false);
+    } finally {
+      releaseOpen();
+      openSpy.mockRestore();
+    }
   });
 
   it("honors an extended drain deadline so an in-flight turn can settle before shutdown", async () => {

@@ -147,11 +147,20 @@ the opened inbox instead of transitioning the channel back to healthy.
 
 The inbox is owner-private (`0700` directory, `0600` files), bounded, and fails
 closed on corruption, unsafe links/modes, queue overflow, or an uncertain
-atomic commit. A stable SQLite lease file uses an identity-checked exclusive
-transaction, so a second process cannot inspect or mutate inbox state while the
-serving channel is live; process exit releases the operating-system lock. The
-inbox contains inbound Slack text and private attachment URLs, so backup and
-access controls must treat it as sensitive. Startup never automatically
+atomic commit. Startup and maintenance first discover only directory and child
+file metadata, open the exact validated lease inode through a retained file
+descriptor, and acquire its exclusive SQLite transaction before reading marker
+or state contents. Marker and state reads are likewise pinned to the discovered
+device/inode identities, and a stable directory rename or replacement fails
+closed before persistence. This prevents a replacement directory from being
+read, locked, or mutated through a stale discovery path. Process exit releases
+the operating-system lock. These checks protect the trusted host from static
+replacement and ordinary rename races; as with the framework's other
+device/inode checks, they are not a security boundary against deliberate
+same-UID code, which can rewrite or replace owner-private entries or perform
+ABA swaps.
+The inbox contains inbound Slack text and private attachment URLs, so backup
+and access controls must treat it as sensitive. Startup never automatically
 requeues a crash- or error-stranded processing record because the channel
 boundary cannot know whether durable Core execution is selected.
 
@@ -196,9 +205,9 @@ online purge.
 | `ask.ts` | Ask rendering, token routing, answer state, and replacement-safe cleanup. |
 | `config.ts` | Strict env-only credentials, allowlists, shortcuts, and App Home actions. |
 | `socket.ts` | Injectable single-consumer Socket Mode lifecycle and interaction normalization. |
-| `inbox.ts` | Owner-private atomic admission queue, lane state, and bounded envelope dedupe. |
+| `inbox.ts` | Owner-private identity-pinned admission queue, lane state, and bounded envelope dedupe. |
 | `inbox-commands.ts` | Payload-free inbox inspection and exact confirmation-gated recovery commands. |
-| `inbox-lease.ts` | Owner-private identity-checked process exclusion for serving and maintenance access. |
+| `inbox-lease.ts` | Descriptor-pinned SQLite process exclusion for serving and maintenance access. |
 | `inbox-values.ts` | Immutable event cloning and strict persisted inbox value validation helpers. |
 | `client.ts` | Bounded Slack Web API and attachment operations. |
 | `delivery.ts` | Exact-destination idempotent delivery. |
