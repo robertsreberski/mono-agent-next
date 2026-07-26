@@ -17,30 +17,30 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `65375145eeb3993b6b9dd84d30a27a9f0c14102743ad5374c3ed28351f1795f9`
+Source manifest digest: `26c25ef5ada0c4b1cf7443ffe5a2ba2c0f1995684e718a28accd89c52ed044a4`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 312 | 97354 |
-| Tests | 164 | 77698 |
+| Production | 314 | 97915 |
+| Tests | 167 | 78640 |
 | Repository and product tooling | 56 | 18852 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **532** | **193904** |
+| **Total executable source** | **537** | **195407** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 312.0 lines.
+Average production file size is 311.8 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 97354 | 130000 | within limit |
+| repository-production | 97915 | 130000 | within limit |
 | kernel-production | 16229 | 16500 | within limit |
 | durable-protocol-production | 7626 | 9500 | within limit |
 
@@ -50,9 +50,9 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 77698 | 73016 | within limit |
+| test source, at 0.75 of production | 78640 | 73437 | within limit |
 
-The current ratio is 0.798.
+The current ratio is 0.803.
 
 ## Largest package ownership surfaces
 
@@ -62,7 +62,7 @@ The current ratio is 0.798.
 | `@mono-agent/core` | 39 | 12902 | 18232 |
 | `@mono-agent/runtime-pi` | 28 | 8865 | 4978 |
 | `@mono-agent/memory-local` | 19 | 8097 | 4767 |
-| `@mono-agent/web` | 28 | 7446 | 3065 |
+| `@mono-agent/web` | 30 | 8007 | 3965 |
 | `@mono-agent/service-macos` | 22 | 5770 | 2131 |
 | `create-mono-agent` | 12 | 5487 | 2199 |
 | `@mono-agent/channel-slack` | 15 | 3765 | 2191 |

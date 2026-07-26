@@ -10,10 +10,16 @@ import {
   useAuiState,
 } from "@assistant-ui/react";
 import { MarkdownTextPrimitive } from "@assistant-ui/react-markdown";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { useConsole, type ConsoleConnection } from "./console";
 import { Icon } from "./components/Icon";
+import { NotificationBell } from "./components/NotificationBell";
+import {
+  ComposerTriggerPopover,
+  type ComposerTriggerCommand,
+} from "./components/assistant-ui/ComposerTriggerPopover";
+import { ContextDisplay } from "./components/assistant-ui/ContextDisplay";
 import { ModelSelector } from "./components/assistant-ui/ModelSelector";
 import {
   CompactionRow,
@@ -21,7 +27,7 @@ import {
   Reasoning,
   ToolCall,
 } from "./components/assistant-ui/Reasoning";
-import type { AskQuestion, Attachment } from "./types";
+import type { AskQuestion, Attachment, Message, Telemetry } from "./types";
 
 function QuoteBlock({ text }: QuoteMessagePartProps) {
   return <blockquote className="message-quote">
@@ -78,12 +84,19 @@ function Attachments() {
   return (
     <ul className="message-attachments" aria-label="Attachments">
       {(raw as readonly Attachment[]).map((attachment) => (
-        <li className="attachment-chip" key={attachment.id}>
+        <li
+          className="attachment-chip"
+          key={attachment.id}
+          aria-label={`${attachment.name}, ${attachmentMetadata(attachment)}`}
+        >
           <span className="attachment-icon" aria-hidden="true">
             <Icon name={attachment.mediaType.startsWith("image/") ? "spark" : "attach"} size={14} />
           </span>
           {attachment.url === undefined ? (
-            <span className="attachment-name" title={attachment.name}>{attachment.name}</span>
+            <span className="attachment-details">
+              <span className="attachment-name" title={attachment.name}>{attachment.name}</span>
+              <span className="attachment-meta">{attachmentMetadata(attachment)}</span>
+            </span>
           ) : (
             <a
               className="attachment-link"
@@ -91,13 +104,33 @@ function Attachments() {
               download={attachment.name}
               rel="noreferrer"
             >
-              <span className="attachment-name" title={attachment.name}>{attachment.name}</span>
+              <span className="attachment-details">
+                <span className="attachment-name" title={attachment.name}>{attachment.name}</span>
+                <span className="attachment-meta">{attachmentMetadata(attachment)}</span>
+              </span>
             </a>
           )}
         </li>
       ))}
     </ul>
   );
+}
+
+export function attachmentMetadata(attachment: Attachment): string {
+  const parts = [attachment.mediaType];
+  if (attachment.sizeBytes !== undefined && Number.isFinite(attachment.sizeBytes)) {
+    parts.push(formatFileSize(attachment.sizeBytes));
+  }
+  return parts.join(" · ");
+}
+
+function formatFileSize(sizeBytes: number): string {
+  const bytes = Math.max(0, sizeBytes);
+  if (bytes < 1_000) return `${Math.round(bytes)} B`;
+  if (bytes < 1_000_000) {
+    return `${(bytes / 1_000).toFixed(bytes < 10_000 ? 1 : 0).replace(/\.0$/u, "")} KB`;
+  }
+  return `${(bytes / 1_000_000).toFixed(bytes < 10_000_000 ? 1 : 0).replace(/\.0$/u, "")} MB`;
 }
 
 function CopyAction() {
@@ -136,6 +169,7 @@ function AssistantMessage() {
     <MessagePrimitive.Root className="message message-assistant">
       <div className="assistant-mark" aria-hidden="true"><Icon name="spark" size={15} /></div>
       <div className="assistant-content">
+        <Attachments />
         <MessagePrimitive.Parts components={parts} />
         <MessagePrimitive.Error>
           <div className="message-error" role="alert">The response ended with an error.</div>
@@ -251,6 +285,173 @@ function Composer() {
   const canAttach =
     !isRunning
     && consoleState.selectedAgent?.capabilities.attachments === true;
+  const commands = useMemo<readonly ComposerTriggerCommand[]>(() => [
+    ...(!isRunning && consoleState.selectedAgent?.capabilities.runtimeOverrides === true
+      ? [{
+          id: "settings",
+          label: "Run settings",
+          description: "Choose the model and reasoning effort",
+          icon: "settings" as const,
+          execute: () => window.dispatchEvent(new Event(OPEN_RUN_SETTINGS_EVENT)),
+        }]
+      : []),
+    ...(isRunning
+      ? [{
+          id: "stop",
+          label: "Stop response",
+          description: "Cancel the current agent run",
+          icon: "stop" as const,
+          execute: () => void consoleState.cancel(),
+        }]
+      : []),
+    ...(
+      !isRunning
+      && consoleState.selectedAgent?.online === true
+      && consoleState.pendingFiles.length === 0
+        ? [{
+            id: "new",
+            label: "New conversation",
+            description: "Start a clean conversation with this agent",
+            icon: "spark" as const,
+            execute: () => void consoleState.createThread(),
+          }]
+        : []
+    ),
+  ], [
+    consoleState.cancel,
+    consoleState.createThread,
+    consoleState.pendingFiles.length,
+    consoleState.selectedAgent,
+    isRunning,
+  ]);
+  return (
+    <div className="composer-shell">
+      <AskUser />
+      <ComposerPrimitive.Unstable_TriggerPopoverRoot>
+        <ComposerPrimitive.Root className="composer-root">
+          <ComposerTriggerPopover commands={commands} />
+          <ComposerPrimitive.Quote className="composer-quote">
+            <Icon name="quote" size={14} />
+            <ComposerPrimitive.QuoteText className="composer-quote-text" />
+            <ComposerPrimitive.QuoteDismiss
+              className="composer-quote-dismiss"
+              aria-label="Remove quote"
+            >
+              <Icon name="close" size={14} />
+            </ComposerPrimitive.QuoteDismiss>
+          </ComposerPrimitive.Quote>
+          {consoleState.pendingFiles.length > 0 && (
+            <ul className="composer-attachments">
+              {consoleState.pendingFiles.map((file, index) => (
+                <li className="attachment-chip" key={`${file.name}:${index}`}>
+                  <span className="attachment-icon" aria-hidden="true">
+                    <Icon name={file.type.startsWith("image/") ? "spark" : "attach"} size={14} />
+                  </span>
+                  <span className="attachment-details">
+                    <span className="attachment-name" title={file.name}>{file.name}</span>
+                    <span className="attachment-meta">
+                      {attachmentMetadata({
+                        id: `${file.name}:${index}`,
+                        name: file.name,
+                        mediaType: file.type || "application/octet-stream",
+                        sizeBytes: file.size,
+                      })}
+                    </span>
+                  </span>
+                  <button
+                    className="attachment-remove"
+                    type="button"
+                    onClick={() => consoleState.removeFile(index)}
+                    aria-label={`Remove ${file.name}`}
+                  >
+                    <Icon name="close" size={13} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <ComposerPrimitive.Input
+            id="composer-input"
+            className="composer-input"
+            placeholder={isRunning ? "Steer the active run…" : "Message the agent…"}
+            rows={1}
+            submitMode="enter"
+            aria-label="Message"
+          />
+          <div className="composer-toolbar">
+            <div className="composer-tools">
+              {canAttach && (
+                <>
+                  <input
+                    ref={fileInput}
+                    type="file"
+                    multiple
+                    hidden
+                    onChange={(event) => {
+                      if (event.target.files) consoleState.addFiles(event.target.files);
+                      event.target.value = "";
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="icon-button composer-tool"
+                    onClick={() => fileInput.current?.click()}
+                    title="Attach files"
+                    aria-label="Attach files"
+                  >
+                    <Icon name="attach" size={17} />
+                  </button>
+                </>
+              )}
+              <span className="composer-hint">
+                {isRunning ? "Enter to steer this run" : "Enter to send · / for commands"}
+              </span>
+            </div>
+            <div className="composer-actions">
+              <ComposerPrimitive.Send
+                className="composer-send"
+                aria-label={isRunning ? "Send live input" : "Send message"}
+              >
+                <Icon name="send" size={16} />
+              </ComposerPrimitive.Send>
+              {isRunning && (
+                <ComposerPrimitive.Cancel className="composer-stop" aria-label="Stop response">
+                  <Icon name="stop" size={14} />
+                  <span>Stop</span>
+                </ComposerPrimitive.Cancel>
+              )}
+            </div>
+          </div>
+        </ComposerPrimitive.Root>
+      </ComposerPrimitive.Unstable_TriggerPopoverRoot>
+    </div>
+  );
+}
+
+export const OPEN_RUN_SETTINGS_EVENT = "mono-agent:run-settings";
+
+export function currentAssistantContext(
+  messages: readonly Message[] | undefined,
+  running: boolean,
+): {
+  readonly pending: boolean;
+  readonly telemetry?: Telemetry;
+} {
+  const latestAssistant = messages?.findLast((message) => message.role === "assistant");
+  if (running && latestAssistant?.status !== "running") return { pending: true };
+  return {
+    pending:
+      running
+      && latestAssistant?.telemetry?.contextUsed === undefined,
+    ...(latestAssistant?.telemetry === undefined
+      ? {}
+      : { telemetry: latestAssistant.telemetry }),
+  };
+}
+
+function ModelControls() {
+  const consoleState = useConsole();
+  const rootRef = useRef<HTMLSpanElement>(null);
   const models = consoleState.selectedAgent?.models;
   const defaults = consoleState.selectedAgent?.defaults;
   const runtime = consoleState.runtime || defaults?.runtime;
@@ -258,80 +459,64 @@ function Composer() {
   const route = runtime === undefined || modelId === undefined
     ? undefined
     : { runtime, id: modelId };
+  const selectedModel = route === undefined
+    ? undefined
+    : models?.find((model) => model.runtime === route.runtime && model.id === route.id);
+  const canOverride =
+    consoleState.selectedAgent?.capabilities.runtimeOverrides === true
+    && models !== undefined;
+  const detailMatches =
+    consoleState.selectedThread !== undefined
+    && consoleState.detail?.thread.id === consoleState.selectedThread.id
+    && consoleState.detail.thread.agentId === consoleState.selectedThread.agentId;
+  const running = (
+    detailMatches
+      ? consoleState.detail?.thread.status
+      : consoleState.selectedThread?.status
+  ) === "running";
+  const context = currentAssistantContext(
+    detailMatches ? consoleState.detail?.messages : undefined,
+    running,
+  );
+
+  useEffect(() => {
+    const open = () => {
+      if (!canOverride || running) return;
+      const trigger = rootRef.current?.querySelector<HTMLButtonElement>(
+        'button[aria-label="Run settings"]',
+      );
+      if (trigger?.getAttribute("aria-expanded") !== "true") trigger?.click();
+    };
+    window.addEventListener(OPEN_RUN_SETTINGS_EVENT, open);
+    return () => window.removeEventListener(OPEN_RUN_SETTINGS_EVENT, open);
+  }, [canOverride, running]);
+
   return (
-    <div className="composer-shell">
-      <AskUser />
-      <ComposerPrimitive.Root className="composer-root">
-        <ComposerPrimitive.Quote className="composer-quote">
-          <span aria-hidden="true">❝</span>
-          <ComposerPrimitive.QuoteText />
-          <ComposerPrimitive.QuoteDismiss aria-label="Remove quote">×</ComposerPrimitive.QuoteDismiss>
-        </ComposerPrimitive.Quote>
-        {consoleState.pendingFiles.length > 0 && (
-          <ul className="composer-attachments">
-            {consoleState.pendingFiles.map((file, index) => (
-              <li key={`${file.name}:${index}`}>
-                <span>{file.name}</span>
-                <button type="button" onClick={() => consoleState.removeFile(index)} aria-label={`Remove ${file.name}`}>×</button>
-              </li>
-            ))}
-          </ul>
-        )}
-        <ComposerPrimitive.Input
-          id="composer-input"
-          className="composer-input"
-          placeholder={isRunning ? "Steer the active run…" : "Message the agent…"}
-          rows={1}
-          submitMode="enter"
-          aria-label="Message"
-        />
-        <div className="composer-toolbar">
-          <div className="model-controls">
-            {canAttach && (
-              <>
-                <input
-                  ref={fileInput}
-                  type="file"
-                  multiple
-                  hidden
-                  onChange={(event) => {
-                    if (event.target.files) consoleState.addFiles(event.target.files);
-                    event.target.value = "";
-                  }}
-                />
-                <button type="button" onClick={() => fileInput.current?.click()} title="Attach files">＋ File</button>
-              </>
-            )}
-            {consoleState.selectedAgent?.capabilities.runtimeOverrides === true
-              && models !== undefined && (
-              <ModelSelector
-                models={models}
-                {...(route === undefined ? {} : { route })}
-                effort={consoleState.effort}
-                disabled={isRunning}
-                onRouteChange={(next) => {
-                  consoleState.setRuntime(next.runtime);
-                  consoleState.setModel(next.id);
-                  // Effort is advertised per route, so a level chosen for the
-                  // previous model must not survive the switch.
-                  consoleState.setEffort("");
-                }}
-                onEffortChange={consoleState.setEffort}
-              />
-            )}
-          </div>
-          <div className="composer-actions">
-            <ComposerPrimitive.Send className="composer-send" aria-label={isRunning ? "Send live input" : "Send message"}>
-              Send
-            </ComposerPrimitive.Send>
-            {isRunning && (
-              <ComposerPrimitive.Cancel className="composer-stop" aria-label="Stop response">
-                Stop
-              </ComposerPrimitive.Cancel>
-            )}
-          </div>
-        </div>
-      </ComposerPrimitive.Root>
+    <div className="model-controls" aria-label="Conversation controls">
+      <ContextDisplay
+        {...context}
+        {...(selectedModel?.contextWindow === undefined
+          ? {}
+          : { modelContextWindow: selectedModel.contextWindow })}
+      />
+      {canOverride && (
+        <span ref={rootRef} className="model-selector-wrap">
+          <ModelSelector
+            models={models}
+            {...(route === undefined ? {} : { route })}
+            effort={consoleState.effort}
+            disabled={running}
+            onRouteChange={(next) => {
+              consoleState.setRuntime(next.runtime);
+              consoleState.setModel(next.id);
+              // Effort is advertised per route, so a level chosen for the
+              // previous model must not survive the switch.
+              consoleState.setEffort("");
+            }}
+            onEffortChange={consoleState.setEffort}
+          />
+        </span>
+      )}
     </div>
   );
 }
@@ -526,6 +711,8 @@ export function Chat({
           </span>
         </div>
         <div className="chat-header-actions">
+          <ModelControls />
+          <NotificationBell className="icon-button header-notifications" iconSize={17} />
           {thread !== undefined && (
             <button
               type="button"
@@ -557,9 +744,9 @@ export function Chat({
       </header>
       <ConnectionBanner connection={consoleState.connection} />
       {consoleState.error !== undefined && consoleState.bootstrap !== undefined && (
-        <div className="connection-banner" role="alert">
-          <span className="connection-pulse" />
-          {consoleState.error}
+        <div className="error-banner" role="alert">
+          <span>{consoleState.error}</span>
+          <button type="button" onClick={() => void consoleState.retry()}>Retry</button>
         </div>
       )}
       {thread === undefined ? (

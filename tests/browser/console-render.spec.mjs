@@ -101,6 +101,30 @@ test("streams the user message and the assistant reply into the same thread", as
   await expect(page.locator(".message-assistant")).toHaveCount(1);
 });
 
+test("renders restored header and composer affordances in the shipped bundle", async ({ page }) => {
+  await sendFirstMessage(page, "render the restored console controls");
+
+  const header = page.locator(".chat-header-actions");
+  const context = header.getByRole("button", { name: "Context usage" });
+  await expect(context).toBeVisible();
+  await expect(context).toContainText("15");
+  await expect(header.getByRole("button", { name: "Run settings" })).toBeVisible();
+  await expect(
+    header.getByRole("button", { name: /notifications/iu }),
+  ).toBeVisible();
+
+  const composer = page.locator(".composer-root");
+  await expect(composer.getByRole("button", { name: "Run settings" })).toHaveCount(0);
+  const send = composer.getByRole("button", { name: "Send message" });
+  await expect(send.locator("svg")).toHaveCount(1);
+  await expect(send).toHaveText("");
+
+  const copy = page.locator(".message-assistant button.message-action");
+  await expect(copy).toHaveText("Copy");
+  await expect(copy).toHaveCSS("height", "27px");
+  await expect(copy).toHaveCSS("cursor", "pointer");
+});
+
 test("refuses to open the console without the token", async ({ page }) => {
   await page.goto("/");
   await page.evaluate(() => { window.sessionStorage.clear(); });
