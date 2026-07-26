@@ -38,6 +38,8 @@ export class FetchOtlpTransport implements OtlpTransport {
     const headers: Record<string, string> = Object.create(null) as Record<string, string>;
     const location = response.headers.get("location");
     if (location !== null) headers.location = location;
+    const retryAfter = response.headers.get("retry-after");
+    if (retryAfter !== null) headers["retry-after"] = retryAfter;
     void response.body?.cancel().catch(() => undefined);
     return { status: response.status, headers };
   }
