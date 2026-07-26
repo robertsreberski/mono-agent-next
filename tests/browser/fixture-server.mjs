@@ -60,6 +60,17 @@ async function dispatchScriptedTurn(reply) {
   });
   await reply.emit({ type: "text-delta", delta: "browser render " });
   await reply.emit({ type: "text-delta", delta: "smoke ok" });
+  await reply.emit({
+    type: "usage",
+    usage: {
+      inputTokens: 12,
+      outputTokens: 3,
+      contextWindow: 128_000,
+      contextUsed: 15,
+      compacted: false,
+      sessionEvicted: false,
+    },
+  });
   return { status: "completed", text: BROWSER_FIXTURE_REPLY };
 }
 
@@ -94,6 +105,13 @@ export async function startBrowserFixture({
             agent: { id: BROWSER_FIXTURE_AGENT_ID, label: BROWSER_FIXTURE_AGENT_LABEL },
             process: { pid: process.pid },
             defaults: { runtime: "smoke", model: "smoke:model" },
+            models: [{
+              runtime: "smoke",
+              id: "smoke:model",
+              label: "Smoke Model",
+              efforts: ["low"],
+              contextWindow: 128_000,
+            }],
             configPath: join(root, "mono-agent.config.json"),
             projectRoot: root,
           }

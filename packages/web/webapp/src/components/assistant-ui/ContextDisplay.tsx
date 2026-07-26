@@ -45,7 +45,10 @@ export function ContextDisplay({
     <Popover.Root>
       <Popover.Trigger className="context-display-trigger" aria-label="Context usage">
         <Icon name="spark" size={14} className="context-display-icon" />
-        <span className="context-display-trigger-state">
+        <span
+          className="context-display-trigger-state"
+          data-state={pending ? "awaiting_measurement" : undefined}
+        >
           {pending ? "Context pending" : contextUsed === undefined ? "Context" : compactCount(contextUsed)}
         </span>
         {roundedPercent !== undefined && (
