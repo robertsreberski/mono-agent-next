@@ -12,9 +12,9 @@ failures stay visible.
 
 ## Source quickstart
 
-The public preview is source-only. The v1 packages are not published to npm yet.
+The public preview is source-only. The packages are not published to npm yet.
 Existing registry artifacts under the same package names belong to the
-predecessor repository, not this v1 source; do not install or execute them.
+predecessor repository, not this source; do not install or execute them.
 Clone and build this workspace instead.
 
 Prerequisites are Node.js 22.19.0 or newer and pnpm 10.16.0 or newer. The
@@ -45,7 +45,7 @@ start an authenticated loopback webhook, complete one deterministic turn, and
 prove graceful shutdown:
 
 ```bash
-pnpm run verify:v1-minimal
+pnpm run verify:minimal
 ```
 
 For contributor checks and the other bounded proofs:
@@ -53,11 +53,11 @@ For contributor checks and the other bounded proofs:
 ```bash
 pnpm typecheck
 pnpm test
-pnpm run verify:v1-operator-products
-pnpm run verify:v1-system
+pnpm run verify:operator-products
+pnpm run verify:system
 ```
 
-`verify:v1-system` requires a clean committed checkout. It clones that exact SHA
+`verify:system` requires a clean committed checkout. It clones that exact SHA
 into an owner-private temporary workspace, packs all 23 packages, installs the
 three scaffold closures from those exact artifacts, and emits machine-readable
 digest evidence. None of these commands publishes a package or touches a live
@@ -65,7 +65,7 @@ consumer.
 
 ## Architecture
 
-The v1 roster contains exactly 23 publishable packages: 22 under `packages/`
+The roster contains exactly 23 publishable packages: 22 under `packages/`
 and the paired `@mono-agent/docs-mcp` companion under `extras/`.
 
 | Layer | Packages |
@@ -91,7 +91,7 @@ running agent + selected @mono-agent/channel-operator
 ```
 
 See the [maintainer architecture map](./ARCHITECTURE.md) for every package and
-dependency boundary, or the [v1 architecture decision](./docs/reference/v1-architecture.md)
+dependency boundary, or the [architecture decision](./docs/reference/architecture.md)
 for the canonical reader-facing contract.
 
 ## Strict configuration
@@ -137,7 +137,7 @@ Every module selection uses a literal bare npm package name:
 Selection is not discovery. Each `$use` package must be a direct production
 dependency of the agent project, be present in the root importer of its npm or
 pnpm lockfile, resolve inside its installed package root, and expose matching
-v1 metadata. Core rejects unknown envelope fields, mismatched kinds or versions,
+metadata. Core rejects unknown envelope fields, mismatched kinds or versions,
 unsafe dependency specifications, unresolved cross-module references, and
 invalid module options. Secret fields require an explicit `{"$env":"NAME"}`
 reference; mono-agent does not implicitly load `.env` files.
@@ -170,7 +170,7 @@ Registry installation remains part of the later release phase.
 
 ## CLI contract
 
-The v1 CLI is a thin foreground frontend over `@mono-agent/core`. A config path
+The CLI is a thin foreground frontend over `@mono-agent/core`. A config path
 is always explicit.
 
 ```bash
@@ -228,7 +228,7 @@ Security reporting and repository-wide policy live in [SECURITY.md](./SECURITY.m
 
 - [Getting started](./docs/getting-started/index.md)
 - [Core concepts](./docs/getting-started/concepts.md)
-- [Exact v1 architecture](./docs/reference/v1-architecture.md)
+- [Exact architecture](./docs/reference/architecture.md)
 - [Generated package directory](./PACKAGES.md)
 - [Generated config reference](./docs/config/reference.md)
 - [Generated public API inventory](./docs/reference/public-api.md)

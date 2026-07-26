@@ -304,7 +304,7 @@ export function renderSourceBetaComplexityMarkdown(report) {
     .slice(0, 8);
   return `---
 title: "Source-beta complexity report"
-description: "Reproducible production, test, tooling, package, dependency, public-API, and scaffold-closure measurements for mono-agent v1."
+description: "Reproducible production, test, tooling, package, dependency, public-API, and scaffold-closure measurements for mono-agent."
 sidebar:
   order: 10
 ---
@@ -395,7 +395,7 @@ installs all three closures and executes their first-turn fixtures.
 export function renderSourceBetaPublicApiMarkdown(report) {
   return `---
 title: "Public API inventory"
-description: "Generated package-by-package inventory of every public code entrypoint and named export in mono-agent v1."
+description: "Generated package-by-package inventory of every public code entrypoint and named export in mono-agent."
 sidebar:
   order: 3
 ---
@@ -446,12 +446,12 @@ export function renderSourceBetaConfigMarkdown(report, renderedProjects, configR
   }).join("\n");
   return `---
 title: "Generated config reference"
-description: "Exact v1 agent envelope, selected-module rules, scaffold dependency closures, environment references, and generated seed configurations."
+description: "Exact agent envelope, selected-module rules, scaffold dependency closures, environment references, and generated seed configurations."
 sidebar:
   order: 2
 ---
 
-Mono-agent v1 intentionally has no global mega-schema. Core owns one strict
+Mono-agent intentionally has no global mega-schema. Core owns one strict
 agent envelope; each literal \`$use\` selection contributes its own schema.
 Generate the exact installed project schema with:
 

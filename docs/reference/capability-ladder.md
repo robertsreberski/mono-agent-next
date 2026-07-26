@@ -1,6 +1,6 @@
 ---
 title: "Capability ladder"
-description: "Choose the lowest v1 ownership boundary that completely satisfies a new capability."
+description: "Choose the lowest ownership boundary that completely satisfies a new capability."
 sidebar:
   order: 5
 ---
@@ -32,5 +32,5 @@ assigns its collision-safe name, applies tool/approval/sandbox policy, and owns
 turn-scoped dispatch. Ordinary project and domain tools stay at rung 3 in
 `.mcp.json`.
 
-The [v1 architecture](/reference/v1-architecture/) defines dependency direction
+The [architecture](/reference/architecture/) defines dependency direction
 and the [package directory](/reference/packages/) names each current owner.

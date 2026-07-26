@@ -11,7 +11,7 @@ export const PACKAGE_DIRECTORY_END = "<!-- package-directory:end -->";
 export const PACKAGE_DIRECTORY_PAGE_FRONTMATTER = [
   "---",
   'title: "Packages"',
-  'description: "Directory of every mono-agent v1 source package, its ownership tier, responsibility, and authoritative README."',
+  'description: "Directory of every mono-agent source package, its ownership tier, responsibility, and authoritative README."',
   "sidebar:",
   "  order: 1",
   "---",

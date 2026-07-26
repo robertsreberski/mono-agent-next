@@ -1,6 +1,6 @@
-# V1 configuration reference
+# Configuration reference
 
-Mono-agent v1 uses one strict JSON envelope:
+Mono-agent uses one strict JSON envelope:
 
 - `configVersion`, `agent`, `runtimes`, `routing`, and `policy` are required.
 - `session`, `context`, `channels`, `memory`, `state`, `triggers`, and

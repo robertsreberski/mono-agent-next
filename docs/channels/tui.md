@@ -12,7 +12,7 @@ embed either the terminal or browser product.
 
 Coverage: `config` (`channels.operator` in `mono-agent.config.json`). The
 existing `/channels/tui/` documentation path is retained for stable links; the
-v1 config id is `operator`.
+config id is `operator`.
 
 ## Configuration
 
@@ -112,4 +112,4 @@ vertical.
 
 - [Terminal operator](/observability/tui/) — standalone pi-tui product.
 - [Web operator](/observability/web-console/) — standalone authenticated browser product.
-- [v1 architecture](/reference/v1-architecture/) — dependency and product boundaries.
+- [architecture](/reference/architecture/) — dependency and product boundaries.

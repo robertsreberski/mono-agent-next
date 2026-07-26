@@ -1,6 +1,6 @@
 ---
 title: "Configuration"
-description: "Understand the strict v1 agent envelope, selected typed modules, environment references, and separate product scopes."
+description: "Understand the strict agent envelope, selected typed modules, environment references, and separate product scopes."
 sidebar:
   order: 0
 ---

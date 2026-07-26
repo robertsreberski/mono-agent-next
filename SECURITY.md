@@ -47,7 +47,7 @@ Repository maintenance does not authorize deleting an operator's ignored credent
 4. Remove only the explicitly reviewed local `.env`, auth, artifact, trace, log, upload, and temporary files. Preserve any run evidence still needed for incident review.
 5. Check whether a secret ever entered Git with `git log --all -- .env` and a targeted `git rev-list --objects --all` search. If it did, coordinate history rewriting with every clone after revocation; ordinary file deletion is insufficient.
 6. From the installed agent folder, restart only the explicitly intended
-   target, run the project-local v1 CLI with
+   target, run the project-local CLI with
    `node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js validate --config <file>`,
    and smoke-test the exact enabled surface with the replacement credential.
 

@@ -54,7 +54,7 @@ describe("source-only newcomer boundary", () => {
       "pnpm build",
       "node packages/create-mono-agent/dist/bin/create-mono-agent.js",
       "--template minimal",
-      "pnpm run verify:v1-minimal",
+      "pnpm run verify:minimal",
     ];
 
     let cursor = -1;
@@ -145,7 +145,7 @@ describe("source-only newcomer boundary", () => {
         "node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js",
       ],
       ["docs/observability/web-console.md", "node packages/web/dist/bin.js"],
-      ["docs/reference/v1-architecture.md", "node packages/cli/dist/bin/mono-agent.js"],
+      ["docs/reference/architecture.md", "node packages/cli/dist/bin/mono-agent.js"],
       [
         "packages/memory-local/README.md",
         "node packages/memory-local/dist/bin/memory-local.js",

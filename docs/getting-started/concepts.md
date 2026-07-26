@@ -1,11 +1,11 @@
 ---
 title: "Core Concepts"
-description: "Understand strict agent projects, typed module selection, routing, operator products, durability, and fail-closed behavior in mono-agent v1."
+description: "Understand strict agent projects, typed module selection, routing, operator products, durability, and fail-closed behavior in mono-agent."
 sidebar:
   order: 3
 ---
 
-Mono-agent v1 separates the neutral agent host, selected agent-process modules,
+Mono-agent separates the neutral agent host, selected agent-process modules,
 and standalone operator or service products. This page is the mental model for
 reading config and deciding where a change belongs.
 
@@ -65,7 +65,7 @@ Before import, core proves that the package:
 2. is present as the same direct installed version in the root npm or pnpm
    lockfile;
 3. resolves to a real entry contained by its installed package root;
-4. declares matching package identity, v1 API version, module kind, and
+4. declares matching package identity, API version, module kind, and
    responsibility; and
 5. exports a matching `monoAgentModule` whose strict schema accepts the selected
    options.
@@ -202,7 +202,7 @@ shell profiles or `.env` files.
 
 ## Fail closed, preserve evidence
 
-V1 treats security and durability failures as terminal for the affected
+The architecture treats security and durability failures as terminal for the affected
 operation:
 
 - unsafe package identity or lockfile drift prevents import;
@@ -231,5 +231,5 @@ the packed minimal and operator-product proofs. Registry release, live consumer
 migration, data audit, rollback rehearsal, deployment, soak, observation,
 cutover, and predecessor retirement remain a later explicitly authorized phase.
 
-See the [v1 architecture](/reference/v1-architecture/) for the exact package
+See the [architecture](/reference/architecture/) for the exact package
 roster and enforced dependency graph.

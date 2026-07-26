@@ -1,13 +1,13 @@
 ---
 title: "Reference"
-description: "Generated v1 configuration, package, public-API, architecture, security, and complexity reference."
+description: "Generated configuration, package, public-API, architecture, security, and complexity reference."
 sidebar:
   order: 0
 ---
 
-Use these pages as the current v1 source authority:
+Use these pages as the current source authority:
 
-- [V1 architecture](/reference/v1-architecture/) — strict config, typed slots,
+- [Architecture](/reference/architecture/) — strict config, typed slots,
   package boundaries, products, and source-phase limits.
 - [Generated config reference](/config/reference/) — exact scaffold closures,
   config paths, environment names, and seed configurations.

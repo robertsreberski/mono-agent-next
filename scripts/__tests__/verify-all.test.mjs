@@ -61,7 +61,7 @@ describe("verify-all", () => {
       "check:lint",
       "check:doc-snippets",
       "check:deep-imports",
-      "verify:v1-operator-products",
+      "verify:operator-products",
       "test:browser",
       "verify:consumers",
       "release:pack",
@@ -107,7 +107,6 @@ describe("verify-all", () => {
     const coveredElsewhere = new Map([
       ["check:pnpm-policy", () => manifest.scripts.preinstall.includes("pnpm-release-age-policy.mjs")],
       ["check:secrets", () => workflow.includes("ghcr.io/gitleaks/gitleaks")],
-      ["check:dependency-vulnerabilities", () => workflow.includes("pnpm run check:v1-dependency-vulnerabilities")],
       ["release:validate", () => releaseWorkflow.includes("pnpm run release:validate")],
       ["release:pack", () => releaseWorkflow.includes("pnpm run release:pack")],
       ["release:consumer", () => releaseWorkflow.includes("pnpm run release:consumer")],
@@ -270,9 +269,9 @@ describe("verify-all", () => {
 
   it("keeps the built-export import-safety check in CI after build and before tests", () => {
     const workflow = readFileSync(resolve(repoRoot, ".github/workflows/ci.yml"), "utf8");
-    const build = workflow.indexOf("- name: Build and typecheck the complete v1 workspace");
+    const build = workflow.indexOf("- name: Build and typecheck the complete workspace");
     const exportsCheck = workflow.indexOf("- name: Check built package exports and import safety");
-    const tests = workflow.indexOf("- name: Test the complete v1 workspace");
+    const tests = workflow.indexOf("- name: Test the complete workspace");
 
     expect(build).toBeGreaterThanOrEqual(0);
     expect(exportsCheck).toBeGreaterThan(build);

@@ -97,7 +97,7 @@ export function createMonoAgentDocsMcpServer(): McpServer {
         "First call {\"action\":\"search\",\"query\":\"...\"}; search returns 2-3k Markdown excerpts as a map.",
         "Then call {\"action\":\"read\",\"target\":\"<readTarget>\"} for an anchored window up to 10k characters.",
         "Follow internalLinks with action=read and continue long documents with the exact previousTarget/nextTarget actions in navigation.",
-        "All retrieval and link resolution is offline and restricted to the version-matched v1 documentation corpus.",
+        "All retrieval and link resolution is offline and restricted to the version-matched documentation corpus.",
       ].join(" "),
       inputSchema: docsInputSchema,
       outputSchema: docsOutputSchema,

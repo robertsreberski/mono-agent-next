@@ -1,10 +1,10 @@
 # Package Layers
 
 `scripts/lib/package-catalog.mjs` is the source of truth for package category
-metadata and dependency boundary checks. Twenty-two v1 packages live under
+metadata and dependency boundary checks. Twenty-two packages live under
 `packages/<package-name>`; the independently installed documentation MCP
 companion lives under `extras/docs-mcp`. The catalog's historical `plugin` tier
-label describes that physical/release boundary only: v1 has no generic runtime
+label describes that physical/release boundary only: has no generic runtime
 plugin plane. The generated diagram groups packages by category and derives
 solid dependency arrows from their manifests.
 
@@ -140,7 +140,7 @@ Open a package README for its config-first usage, internal data flow and source 
 | --- | --- | --- | --- |
 | `@mono-agent/cli` | `core` / `app` | Provides thin validation, inspection, module-command, authoring, and foreground-run frontends over the core public API. | [README for @mono-agent/cli](./packages/cli/README.md) |
 | `@mono-agent/service-macos` | `core` / `app` | Inspects, plans, and explicitly reconciles fingerprinted macOS launchd service state. | [README for @mono-agent/service-macos](./packages/service-macos/README.md) |
-| `create-mono-agent` | `alias` / `app` | Transactionally scaffolds minimal, Personal, and multi-runtime v1 projects and delegates to the CLI. | [README for create-mono-agent](./packages/create-mono-agent/README.md) |
+| `create-mono-agent` | `alias` / `app` | Transactionally scaffolds minimal, Personal, and multi-runtime projects and delegates to the CLI. | [README for create-mono-agent](./packages/create-mono-agent/README.md) |
 | `@mono-agent/operator` | `core` / `operator-surface` | Defines the operator protocol, strict client, directory, domain state, actions, and fixtures. | [README for @mono-agent/operator](./packages/operator/README.md) |
 | `@mono-agent/tui` | `core` / `operator-surface` | Runs the standalone pi-tui renderer over the shared operator client and domain contracts. | [README for @mono-agent/tui](./packages/tui/README.md) |
 | `@mono-agent/web` | `core` / `operator-surface` | Runs the standalone authenticated browser product with owner-private durable conversations. | [README for @mono-agent/web](./packages/web/README.md) |
@@ -152,7 +152,7 @@ Open a package README for its config-first usage, internal data flow and source 
 | `@mono-agent/sandbox-srt` | `core` / `execution` | Executes selected commands through a fingerprinted fail-closed Sandbox Runtime Tool boundary. | [README for @mono-agent/sandbox-srt](./packages/sandbox-srt/README.md) |
 | `@mono-agent/state-local` | `core` / `execution` | Provides owner-private CAS state, durable transcript/run records, RunHistory, idempotency, and presence publication. | [README for @mono-agent/state-local](./packages/state-local/README.md) |
 | `@mono-agent/trigger-cron` | `core` / `execution` | Discovers scheduled Markdown jobs and emits deterministic idempotent trigger events. | [README for @mono-agent/trigger-cron](./packages/trigger-cron/README.md) |
-| `@mono-agent/docs-mcp` | `plugin` / `context` | Provides offline search and guided reading over version-matched v1 documentation through MCP. | [README for @mono-agent/docs-mcp](./extras/docs-mcp/README.md) |
+| `@mono-agent/docs-mcp` | `plugin` / `context` | Provides offline search and guided reading over version-matched documentation through MCP. | [README for @mono-agent/docs-mcp](./extras/docs-mcp/README.md) |
 | `@mono-agent/memory-local` | `core` / `context` | Provides owner-private SQLite memory recall, capture, forgetting, and permanent first-run identity. | [README for @mono-agent/memory-local](./packages/memory-local/README.md) |
 | `@mono-agent/exporter-otlp` | `core` / `observability` | Exports bounded normalized telemetry batches to an OTLP HTTP endpoint. | [README for @mono-agent/exporter-otlp](./packages/exporter-otlp/README.md) |
 | `@mono-agent/core` | `core` / `core` | Loads strict agent configuration, runs selected typed modules, and governs one callable-tool catalog. | [README for @mono-agent/core](./packages/core/README.md) |

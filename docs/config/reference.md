@@ -1,11 +1,11 @@
 ---
 title: "Generated config reference"
-description: "Exact v1 agent envelope, selected-module rules, scaffold dependency closures, environment references, and generated seed configurations."
+description: "Exact agent envelope, selected-module rules, scaffold dependency closures, environment references, and generated seed configurations."
 sidebar:
   order: 2
 ---
 
-Mono-agent v1 intentionally has no global mega-schema. Core owns one strict
+Mono-agent intentionally has no global mega-schema. Core owns one strict
 agent envelope; each literal `$use` selection contributes its own schema.
 Generate the exact installed project schema with:
 

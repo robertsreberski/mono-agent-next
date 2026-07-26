@@ -1,11 +1,11 @@
 ---
 title: "Home"
-description: "Build and understand the public mono-agent v1 source target: strict selected modules, standalone operator products, and explicit delivery phases."
+description: "Build and understand the public mono-agent source target: strict selected modules, standalone operator products, and explicit delivery phases."
 sidebar:
   order: 0
 ---
 
-mono-agent v1 is a config-first agent framework. One strict
+mono-agent is a config-first agent framework. One strict
 `mono-agent.config.json` selects typed runtime, channel, memory, state, trigger,
 exporter, and sandbox modules; `@mono-agent/core` validates their installed
 identity and runs them through neutral contracts.
@@ -26,12 +26,12 @@ are a later, separately approved phase.
    focused verification.
 2. [Prove and inspect a first agent](/getting-started/quickstart/) through the
    packed minimal path.
-3. [Learn the v1 concepts](/getting-started/concepts/) before changing config or
+3. [Learn the concepts](/getting-started/concepts/) before changing config or
    adding a module.
-4. Read the [exact v1 architecture](/reference/v1-architecture/) for the closed
+4. Read the [exact architecture](/reference/architecture/) for the closed
    23-package roster and dependency rules.
 
-## What v1 contains
+## What mono-agent contains
 
 - Four runtime modules: Pi, Claude, Codex, and OpenCode.
 - Five channel modules: Telegram, Slack, webhook, OpenAI-compatible API, and the
@@ -73,7 +73,7 @@ only.
 
 ## Safety model
 
-V1 rejects unknown config, implicit secrets, unsafe module locations, dependency
+Mono-agent rejects unknown config, implicit secrets, unsafe module locations, dependency
 or lockfile drift, incompatible module metadata, unsafe local storage, corrupt
 durable formats, unbounded transport inputs, and unverifiable sandbox or export
 destinations. Failures remain observable; unsafe state is preserved for

@@ -1,6 +1,6 @@
 ---
 title: "Getting Started"
-description: "Build the public v1 workspace, run the packed minimal proof, and learn the strict config-first model."
+description: "Build the public workspace, run the packed minimal proof, and learn the strict config-first model."
 sidebar:
   order: 0
 ---

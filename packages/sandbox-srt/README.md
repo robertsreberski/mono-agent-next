@@ -40,7 +40,7 @@ command count, and selected digests without exposing command data.
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -152,7 +152,7 @@ arbitrary settings file allows or denies any particular destination.
 
 | Export | Use it for |
 | --- | --- |
-| `monoAgentModule` | Select this package in the reserved v1 sandbox slot. |
+| `monoAgentModule` | Select this package in the reserved sandbox slot. |
 | `SandboxSrtConfig` | Type explicit executable, settings, limits, and environment configuration. |
 | `SandboxSrt` | Use the concrete integrity-pinned sandbox implementation. |
 | `TrustedFile` | Inspect the immutable selected-file fingerprint. |
@@ -203,7 +203,7 @@ provider-native runtimes. Setup and Core own those decisions.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Sandbox behavior](../../docs/tools/sandbox.md)
 - [Module SDK](../module-sdk/README.md)
 

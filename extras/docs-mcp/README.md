@@ -1,7 +1,7 @@
 # @mono-agent/docs-mcp
 
 Give Codex, Claude Code, or another MCP host offline, version-matched search over
-the canonical mono-agent v1 documentation.
+the canonical mono-agent documentation.
 
 ## Category
 
@@ -10,7 +10,7 @@ the canonical mono-agent v1 documentation.
 
 Category: `context`
 Tier: `plugin`
-Catalog responsibility: Provides offline search and guided reading over version-matched v1 documentation through MCP.
+Catalog responsibility: Provides offline search and guided reading over version-matched documentation through MCP.
 
 <!-- package-metadata:end -->
 
@@ -20,13 +20,13 @@ explicitly and remains outside every agent runtime dependency closure.
 ## Responsibility
 
 Provides version-matched, offline semantic and exact-identifier search plus
-guided reading over the canonical mono-agent v1 documentation through one
+guided reading over the canonical mono-agent documentation through one
 read-only MCP tool.
 
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install or execute them during the source
+repository, not this source. Do not install or execute them during the source
 preview. Build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md), then run its
 entry point directly:
@@ -63,7 +63,7 @@ node extras/docs-mcp/dist/cli.js --version
 
 ### Data flow
 
-1. A release build reads canonical v1 documentation, creates deterministic
+1. A release build reads canonical documentation, creates deterministic
    chunks and local embeddings, and packages the checksummed corpus.
 2. At startup, the MCP server validates and loads that packaged corpus.
 3. A `search` action combines local semantic and BM25 rankings through

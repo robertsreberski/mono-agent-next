@@ -539,11 +539,11 @@ function projectReadme(displayName: string, template: ProjectTemplate): string {
     "",
     "## Source-preview boundary",
     "",
-    "These v1 package versions are not published to npm during the source preview.",
+    "These package versions are not published to npm during the source preview.",
     "Existing registry artifacts under the same names belong to the predecessor repository.",
     "Do not install this rendered manifest or start this project from registry packages.",
     "",
-    "Inspect the generated config and manifest here. Return to the v1 source checkout and",
+    "Inspect the generated config and manifest here. Return to the source checkout and",
     "run `pnpm run verify:consumers` for the hermetic validation of all three templates.",
     "",
   ].join("\n");

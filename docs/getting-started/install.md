@@ -1,6 +1,6 @@
 ---
 title: "Install & Prerequisites"
-description: "Install and verify the public mono-agent v1 source workspace without publishing packages or touching live consumers."
+description: "Install and verify the public mono-agent source workspace without publishing packages or touching live consumers."
 sidebar:
   order: 1
 ---
@@ -8,13 +8,13 @@ sidebar:
 This page installs the public source workspace. Consumer installation from npm
 is intentionally deferred until a separately authorized release phase.
 Existing registry artifacts under the same package names belong to the
-predecessor repository, not this v1 source; do not install or execute them.
+predecessor repository, not this source; do not install or execute them.
 
 ## Prerequisites
 
 | Requirement | Minimum | Notes |
 | --- | --- | --- |
-| Node.js | 22.19.0 | Required by every v1 package. |
+| Node.js | 22.19.0 | Required by every package. |
 | pnpm | 10.16.0 | The workspace pins pnpm 10.28.2 in `package.json`. |
 | Git | Current | Required to clone `mono-agent-next`. |
 | macOS | Optional | Required only for `@mono-agent/service-macos`; the foreground host and most modules are cross-platform Node.js packages. |
@@ -48,13 +48,13 @@ pnpm test
 For the smallest real package-boundary proof:
 
 ```bash
-pnpm run verify:v1-minimal
+pnpm run verify:minimal
 ```
 
 For the separate terminal and browser operator products:
 
 ```bash
-pnpm run verify:v1-operator-products
+pnpm run verify:operator-products
 ```
 
 These scripts use temporary directories and local packed artifacts. They do not
@@ -136,6 +136,6 @@ This source rebuild exposes no supported registry installation path. A future
 release procedure must first pack the exact candidate, verify package contents
 and identities, publish under reviewed authority, and prove a clean registry
 install. Only then should this page document registry-backed scaffolding or
-adding v1 packages to a real agent project.
+adding packages to a real agent project.
 
 Continue with the [first-agent proof](/getting-started/quickstart/).

@@ -39,7 +39,7 @@ Catalog responsibility: Runs the standalone authenticated browser product with o
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -276,7 +276,7 @@ config, or observability.
 
 ## Related Documentation
 
-- [v1 architecture](../../docs/reference/v1-architecture.md)
+- [architecture](../../docs/reference/architecture.md)
 - [Setup and security](../../docs/reference/setup-security.md)
 - [`@mono-agent/operator`](../operator/README.md)
 - [`@mono-agent/channel-operator`](../channel-operator/README.md)

@@ -11,7 +11,7 @@ export const PACKAGE_CATEGORIES = [
 ];
 
 /**
- * The mono-agent v1 publishable roster. This is deliberately the complete
+ * The mono-agent publishable roster. This is deliberately the complete
  * product architecture rather than a compatibility catalog: deleted v0 names
  * must not be added back as aliases or transitional packages.
  */
@@ -185,7 +185,7 @@ export const packageCatalog = [
     dir: "create-mono-agent",
     name: "create-mono-agent",
     category: "app",
-    responsibility: "Transactionally scaffolds minimal, Personal, and multi-runtime v1 projects and delegates to the CLI.",
+    responsibility: "Transactionally scaffolds minimal, Personal, and multi-runtime projects and delegates to the CLI.",
     allowedDependencyCategories: ["app"],
     publishable: true,
     tier: "alias",
@@ -195,7 +195,7 @@ export const packageCatalog = [
     name: "@mono-agent/docs-mcp",
     path: "extras/docs-mcp",
     category: "context",
-    responsibility: "Provides offline search and guided reading over version-matched v1 documentation through MCP.",
+    responsibility: "Provides offline search and guided reading over version-matched documentation through MCP.",
     allowedDependencyCategories: [],
     publishable: true,
     tier: "plugin",

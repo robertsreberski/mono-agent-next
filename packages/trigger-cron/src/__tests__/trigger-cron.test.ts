@@ -23,7 +23,7 @@ import {
 } from "../scheduler.js";
 
 describe("trigger-cron configuration and jobs", () => {
-  it("accepts the v1 config shape and rejects unknown, escaping, or invalid timezone input", () => {
+  it("accepts the config shape and rejects unknown, escaping, or invalid timezone input", () => {
     expect(parseTriggerCronConfig({ jobsDirectory: "./cron", timezone: "Europe/Rome" })).toEqual({
       jobsDirectory: "./cron",
       timezone: "Europe/Rome",

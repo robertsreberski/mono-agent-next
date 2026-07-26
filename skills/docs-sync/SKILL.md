@@ -34,7 +34,7 @@ site.
 - `docs/<area>/*.md` (channels, config, runtime, memory, tools, observability, …)
 - `docs/config/reference.md` — generated selected-module schema and scaffold
   examples
-- `docs/reference/v1-architecture.md`, `docs/reference/packages.md`
+- `docs/reference/architecture.md`, `docs/reference/packages.md`
 - `docs/playbooks/*` — task-shaped playbooks; extend the closest one
 - Package READMEs — 9 required sections in a fixed order, enforced by
   `check:architecture`; `## Architecture` includes data flow and package

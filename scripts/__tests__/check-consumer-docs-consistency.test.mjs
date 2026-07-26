@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 describe("check-consumer-docs-consistency", () => {
-  it("flags retired pre-v1 package references in repo user docs", async () => {
+  it("flags retired predecessor package references in repo user docs", async () => {
     const repoRoot = await tempRepo();
     await writeRepoDoc(repoRoot, "docs/getting-started/quickstart.md", [
       "# Quickstart",
@@ -310,7 +310,7 @@ describe("check-consumer-docs-consistency", () => {
     const historyProbes = [
       "The deprecated alias `memory_recall` was previously the active tool name.",
       "`memory_recall` remains accepted only as a deprecated input alias; do not recommend it.",
-      "The historical name `memory_recall` appeared in pre-v1 docs.",
+      "The historical name `memory_recall` appeared in predecessor docs.",
     ];
     await writeRepoDoc(
       historyRepoRoot,
@@ -442,7 +442,7 @@ describe("check-consumer-docs-consistency", () => {
       "The deprecated alias `memory_recall` was used previously in old docs.",
       "The deprecated alias `memory_recall` is retained only so existing configs continue to work.",
       "Avoid using `memory_recall` because it is a deprecated alias.",
-      "Do not call `memory_recall`; it was the pre-v1 spelling.",
+      "Do not call `memory_recall`; it was the predecessor spelling.",
       "Existing migration notes may mention `memory_recall`, which is retired.",
       "The old configuration example `memory_recall` is shown only for comparison.",
       "Replace any occurrence of `memory_recall` with `MemoryRecall`.",
@@ -724,7 +724,7 @@ describe("check-consumer-docs-consistency", () => {
 
   it("flags residual absolute observability claims in playbooks, composer references, and operator sources", async () => {
     const repoRoot = await tempRepo();
-    await writeRepoDoc(repoRoot, "docs/reference/v1-architecture.md", [
+    await writeRepoDoc(repoRoot, "docs/reference/architecture.md", [
       "# Architecture",
       "live chat with full stream-event insight",
       "every structured `AgentStreamEvent` verbatim",
@@ -817,7 +817,7 @@ describe("check-consumer-docs-consistency", () => {
     expect(reported).toContain("full-fidelity TUI NDJSON metadata");
     expect(reported).toContain("guaranteed tool-output artifact persistence");
     for (const relativePath of [
-      "docs/reference/v1-architecture.md",
+      "docs/reference/architecture.md",
       "docs/playbooks/index.md",
       "docs/config/reference.md",
       "docs/runtime/index.md",
@@ -895,7 +895,7 @@ describe("check-consumer-docs-consistency", () => {
     expect(result.issues).toEqual([]);
   });
 
-  it("flags retired pre-v1 names in supplied consumer README files", async () => {
+  it("flags retired predecessor names in supplied consumer README files", async () => {
     const repoRoot = await tempRepo();
     await writeRepoDoc(repoRoot, "docs/index.md", "# Docs\n");
     const consumerDir = await tempDir("consumer-docs-");

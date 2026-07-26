@@ -48,7 +48,7 @@ describe("state-local diagnostics", () => {
       code: "state-local.integrity",
       severity: "info",
       message:
-        "Owner-private local state identity, writer lease, and execution protocol v1 are verified.",
+        "Owner-private local state identity, writer lease, and execution protocol are verified.",
     }]);
     expect(await readFile(store.snapshotPath)).toEqual(snapshotBefore);
     await expect(lstat(registryDirectory)).rejects.toMatchObject({ code: "ENOENT" });

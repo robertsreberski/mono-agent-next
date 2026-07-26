@@ -1,6 +1,6 @@
 # @mono-agent/trigger-cron
 
-A deterministic, Markdown-backed cron trigger for mono-agent v1.
+A deterministic, Markdown-backed cron trigger for mono-agent.
 
 ## Category
 
@@ -25,7 +25,7 @@ the typed trigger host with stable run and idempotency metadata.
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -170,7 +170,7 @@ proactive channel owns delivery.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Generated config reference](../../docs/config/reference.md)
 
 ## Verification

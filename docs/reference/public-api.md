@@ -1,6 +1,6 @@
 ---
 title: "Public API inventory"
-description: "Generated package-by-package inventory of every public code entrypoint and named export in mono-agent v1."
+description: "Generated package-by-package inventory of every public code entrypoint and named export in mono-agent."
 sidebar:
   order: 3
 ---

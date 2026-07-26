@@ -1,7 +1,7 @@
 {
   "name": "@mono-agent/runtime-claude",
   "version": "0.15.0",
-  "description": "Claude Agent SDK and CLI runtime module for mono-agent v1.",
+  "description": "Claude Agent SDK and CLI runtime module for mono-agent.",
   "type": "module",
   "license": "MIT",
   "repository": {

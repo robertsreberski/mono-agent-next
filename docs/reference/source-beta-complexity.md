@@ -1,6 +1,6 @@
 ---
 title: "Source-beta complexity report"
-description: "Reproducible production, test, tooling, package, dependency, public-API, and scaffold-closure measurements for mono-agent v1."
+description: "Reproducible production, test, tooling, package, dependency, public-API, and scaffold-closure measurements for mono-agent."
 sidebar:
   order: 10
 ---
@@ -17,17 +17,17 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `9ea9a0758acf5d48c938a6e0a55a03b8f0a749bb3be5ccd9a749b387cb6b2209`
+Source manifest digest: `9e1a12e158440f2c2d5e0a46869396f722a2abed02416408ed15a0316c460502`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
 | Production | 311 | 95293 |
-| Tests | 160 | 75178 |
+| Tests | 160 | 75180 |
 | Repository and product tooling | 56 | 18809 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **527** | **189280** |
+| **Total executable source** | **527** | **189282** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
@@ -50,7 +50,7 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 75178 | 71470 | within limit |
+| test source, at 0.75 of production | 75180 | 71470 | within limit |
 
 The current ratio is 0.789.
 

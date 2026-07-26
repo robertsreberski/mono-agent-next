@@ -22,7 +22,7 @@ import { findPackageVerificationErrors } from "../lib/package-verification.mjs";
 const root = process.cwd();
 const packageScope = "@mono-agent/";
 const requiredReadmeSections = REQUIRED_PACKAGE_README_SECTIONS.map((section) => `## ${section}`);
-const v1ModuleKinds = new Map([
+const moduleKinds = new Map([
   ["@mono-agent/runtime-pi", "runtime"],
   ["@mono-agent/runtime-claude", "runtime"],
   ["@mono-agent/runtime-codex", "runtime"],
@@ -38,7 +38,7 @@ const v1ModuleKinds = new Map([
   ["@mono-agent/exporter-otlp", "exporter"],
   ["@mono-agent/sandbox-srt", "sandbox"],
 ]);
-const v1InternalDependencyClosure = new Map([
+const internalDependencyClosure = new Map([
   ["@mono-agent/module-sdk", []],
   ["@mono-agent/core", ["@mono-agent/module-sdk"]],
   ["@mono-agent/cli", ["@mono-agent/core"]],
@@ -157,19 +157,19 @@ for (const catalogEntry of packageCatalog) {
     ...manifest.peerDependencies,
   };
   const depNames = Object.keys(deps);
-  const expectedV1Dependencies = v1InternalDependencyClosure.get(packageName);
-  if (expectedV1Dependencies !== undefined) {
-    const actualV1Dependencies = depNames
+  const expectedDependencies = internalDependencyClosure.get(packageName);
+  if (expectedDependencies !== undefined) {
+    const actualDependencies = depNames
       .filter((name) => name.startsWith(packageScope) || name === "create-mono-agent")
       .sort();
-    const expected = [...expectedV1Dependencies].sort();
-    if (JSON.stringify(actualV1Dependencies) !== JSON.stringify(expected)) {
+    const expected = [...expectedDependencies].sort();
+    if (JSON.stringify(actualDependencies) !== JSON.stringify(expected)) {
       errors.push(
-        `${packagePath} must have exact v1 workspace closure ${expected.join(", ") || "none"}; found ${actualV1Dependencies.join(", ") || "none"}.`,
+        `${packagePath} must have exact workspace closure ${expected.join(", ") || "none"}; found ${actualDependencies.join(", ") || "none"}.`,
       );
     }
   }
-  const expectedModuleKind = v1ModuleKinds.get(packageName);
+  const expectedModuleKind = moduleKinds.get(packageName);
   if (expectedModuleKind !== undefined) {
     const moduleMetadata = manifest["mono-agent"];
     if (moduleMetadata?.packageName !== packageName

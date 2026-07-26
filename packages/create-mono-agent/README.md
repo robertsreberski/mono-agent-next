@@ -11,7 +11,7 @@ bin so global installs retain one natural command name.
 
 Category: `app`
 Tier: `alias`
-Catalog responsibility: Transactionally scaffolds minimal, Personal, and multi-runtime v1 projects and delegates to the CLI.
+Catalog responsibility: Transactionally scaffolds minimal, Personal, and multi-runtime projects and delegates to the CLI.
 
 <!-- package-metadata:end -->
 
@@ -22,15 +22,15 @@ Project tooling (`tier: alias` in the first-party package catalog).
 Create one no-clobber project directory containing an exact template dependency
 closure, strict agent config, bootstrap schema, agent instructions, and a
 names-only environment example. `minimal` is the default; `personal` and
-`multi-runtime` are explicit. It also transactionally installs its bundled v1
+`multi-runtime` are explicit. It also transactionally installs its bundled
 `mono-agent-composer` skill. Outside `init`, `setup`, and `install-skill`, the
 `mono-agent` bin delegates to `@mono-agent/cli`.
 
 ## Install / Usage
 
-The v1 package is not published during the source preview. The existing
+The package is not published during the source preview. The existing
 registry artifact under this name belongs to the predecessor repository, not
-this v1 source; do not install or execute it. Follow the
+this source; do not install or execute it. Follow the
 [workspace source setup](../../docs/getting-started/install.md), then run the
 built entry point from the repository root:
 
@@ -47,7 +47,7 @@ node packages/create-mono-agent/dist/bin/mono-agent.js install-skill
 
 The rendered manifest names release versions that are not available from npm
 yet, so source-preview users should inspect the project and use
-`pnpm run verify:v1-minimal` for the hermetic installed proof. Do not pass
+`pnpm run verify:minimal` for the hermetic installed proof. Do not pass
 `--install` until those packages have been published and clean-install
 verification is green.
 
@@ -203,7 +203,7 @@ the scaffolded runtime dependency graph.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Source installation](../../docs/getting-started/install.md)
 - [Your first agent](../../docs/getting-started/quickstart.md)
 - [Generated config reference](../../docs/config/reference.md)

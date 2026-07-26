@@ -28,7 +28,7 @@ behavior does not drift by implementation.
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -143,7 +143,7 @@ Core remains the authority for final names, global and request-local tool
 policy, approval, sandbox eligibility, the 120-second call deadline,
 normalization, redaction, artifact handling, and explicit errors. An empty
 effect list is read-only for approval purposes. Effectful module tools are
-ineligible while sandboxing is active because v1 has no module-execution
+ineligible while sandboxing is active because has no module-execution
 sandbox bridge.
 
 For channel-dispatched completions, `ChannelTurnResult.messageId` is Core's
@@ -657,7 +657,7 @@ render resolved secrets in diagnostics.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Capability ladder](../../docs/reference/capability-ladder.md)
 - [Generated public API inventory](../../docs/reference/public-api.md)
 

@@ -27,7 +27,7 @@ the same configured chat allowlist remains authoritative.
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -204,7 +204,7 @@ evicting that guard when its capacity is exhausted.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Generated config reference](../../docs/config/reference.md)
 
 ## Verification

@@ -1,5 +1,5 @@
 ---
-title: "Mono-agent v1 architecture"
+title: "Mono-agent architecture"
 description: "The accepted config-first architecture, exact 23-package roster, strict module boundary, operator split, and delivery-phase separation."
 sidebar:
   order: 9
@@ -17,7 +17,7 @@ consumer adoption.
 
 ## Decision
 
-Mono-agent v1 has one neutral composition host and a closed set of typed modules.
+Mono-agent has one neutral composition host and a closed set of typed modules.
 Agent projects select implementations in strict JSON using literal `$use`
 package names. Selection is proven against both the project's direct production
 dependencies and its root lockfile before any module is imported.
@@ -28,7 +28,7 @@ capability.
 
 ## Exact package architecture
 
-V1 contains exactly 23 publishable packages. Twenty-two live under `packages/`;
+Mono-agent contains exactly 23 publishable packages. Twenty-two live under `packages/`;
 the documentation MCP companion is the only publishable package under `extras/`.
 
 | Package | Category | Contract |
@@ -54,7 +54,7 @@ the documentation MCP companion is the only publishable package under `extras/`.
 | `@mono-agent/tui` | operator-surface | Standalone pi-tui renderer over the shared operator client. |
 | `@mono-agent/web` | operator-surface | Standalone authenticated browser product with owner-private durable conversations. |
 | `create-mono-agent` | app | Transactional minimal, Personal, and multi-runtime project scaffolding. |
-| `@mono-agent/docs-mcp` | context | Offline search and guided reading over version-matched v1 docs. |
+| `@mono-agent/docs-mcp` | context | Offline search and guided reading over version-matched docs. |
 | `@mono-agent/service-macos` | app | Explicit inspection, planning, and reconciliation of fingerprinted macOS services. |
 
 The generated [package directory](/reference/packages/) is the package-by-package
@@ -351,7 +351,7 @@ record; it never receives the bearer-token value.
 
 ## Source authority and gate status
 
-V1 is defined by the current architecture, catalog, package contracts, and
+The architecture is defined by the current architecture, catalog, package contracts, and
 executable checks. The repository does not claim a retroactive, one-row-per-v0-
 behavior parity ledger. Retired-package assertions prove the explicit exclusions
 they name; they are not evidence that every historical behavior was retained.
@@ -360,13 +360,13 @@ they name; they are not evidence that every historical behavior was retained.
 | --- | --- | --- |
 | Architecture and 23-package roster | Implemented | This page, `scripts/lib/package-catalog.mjs`, generated package docs, and `check:architecture`. |
 | Strict config, module selection, and public APIs | Implemented | Package contracts, focused tests, generated config/API docs, and packed consumer proofs. |
-| Source build and clean packed execution | Implemented | `verify:v1-minimal`, `verify:v1-operator-products`, and `verify:v1-system`. |
+| Source build and clean packed execution | Implemented | `verify:minimal`, `verify:operator-products`, and `verify:system`. |
 | npm publication and clean registry install | Not completed | Release guard, pack/consumer checks, and a later explicitly authorized release. |
 | Consumer data adoption and service changes | Not performed by this source milestone | Package-specific safety contracts and a separately reviewed adoption plan. |
 
 ## Deliberate separation from delivery
 
-The first v1 deliverable is a buildable, tested, runnable public repository with
+The first deliverable is a buildable, tested, runnable public repository with
 packed minimal-agent and standalone operator-product proofs. That establishes a
 source candidate, not a production release.
 

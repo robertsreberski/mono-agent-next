@@ -287,7 +287,7 @@ function createUsage(): string {
     "",
     "Source preview: use this executable from the built mono-agent-next checkout.",
     "Existing registry artifacts under these names belong to the predecessor repository.",
-    "Do not use --install until an authorized v1 release passes clean registry verification.",
+    "Do not use --install until an authorized release passes clean registry verification.",
     "The default template is minimal.",
     "Package installation never runs unless --install is supplied.",
     "",

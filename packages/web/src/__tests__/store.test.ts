@@ -38,7 +38,7 @@ describe("durable web state", () => {
     await reopened.close();
   });
 
-  it("migrates v1 state without text loss and durably retains bounded content-free telemetry", async () => {
+  it("migrates state without text loss and durably retains bounded content-free telemetry", async () => {
     const root = await temporaryDirectory();
     const dataDirectory = join(root, "state");
     const scaffold = await DurableWebStore.open(dataDirectory);

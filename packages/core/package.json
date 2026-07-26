@@ -1,7 +1,7 @@
 {
   "name": "@mono-agent/core",
   "version": "0.15.0",
-  "description": "Strict config loader and lifecycle kernel for mono-agent v1.",
+  "description": "Strict config loader and lifecycle kernel for mono-agent.",
   "type": "module",
   "license": "MIT",
   "repository": {

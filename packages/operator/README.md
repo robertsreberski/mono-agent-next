@@ -38,7 +38,7 @@ absent field means "not advertised" and is never guessed.
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -275,7 +275,7 @@ a renderer exits. It does not define a generic product or plugin registry.
 
 ## Related Documentation
 
-- [v1 architecture decision](../../docs/reference/v1-architecture.md)
+- [architecture decision](../../docs/reference/architecture.md)
 - [Capability ladder](../../docs/reference/capability-ladder.md)
 - [Operator stream endpoint](../../docs/channels/tui.md)
 - [Terminal operator product](../../docs/observability/tui.md)

@@ -1,11 +1,11 @@
 ---
 title: "Setup and security"
-description: "Security boundaries for v1 source setup, selected modules, local storage, network listeners, products, and migration rehearsal."
+description: "Security boundaries for source setup, selected modules, local storage, network listeners, products, and migration rehearsal."
 sidebar:
   order: 6
 ---
 
-V1 is local-first and single-owner by default, but a configured agent can read
+Mono-agent is local-first and single-owner by default, but a configured agent can read
 context, execute allowed tools, persist user data, and send through selected
 channels. Treat every reachable operator or channel endpoint as carrying the
 authority that its schema and policy allow.
@@ -108,7 +108,7 @@ path, directory handle, or ambient filesystem authority. A producer result may
 include the safe basename plus bounded identifiers and metadata, but no
 absolute-path field.
 
-V1 still has no continuation or child-run spawn/observe/cancel grant. Independent
+The repository still has no continuation or child-run spawn/observe/cancel grant. Independent
 durable work belongs in an external service and re-enters through an explicit
 channel or webhook.
 

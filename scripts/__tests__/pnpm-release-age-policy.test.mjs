@@ -49,7 +49,10 @@ describe("pnpm release-age policy", () => {
         workspaceSource,
       })).toEqual({ exclusions: [], issues: [], minimumReleaseAge: 0 });
     }
-  });
+    // Spawns a Node process that runs the real gate, which exceeds the 5s
+    // default under load. Unrelated to this change; observed failing three
+    // times while it competed with other work on this machine.
+  }, 15_000);
 
   it("requires an explicit non-negative integer instead of inheriting a pnpm-major default", () => {
     expect(validate({ minimumReleaseAge: undefined }).issues).toContain(

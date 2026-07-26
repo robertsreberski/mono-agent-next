@@ -32,7 +32,7 @@ import {
   createFreshProofWorkspace,
   removeFreshProofWorkspace,
   snapshotTarball,
-} from "../lib/v1-system-proof.mjs";
+} from "../lib/system-proof.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const VERSION = "0.15.0";
@@ -256,16 +256,16 @@ async function main() {
       ? error
       : new AggregateError(
         [cleanupFailure, error],
-        "Packed v1 fixture shutdown and workspace cleanup both failed.",
+        "Packed fixture shutdown and workspace cleanup both failed.",
       );
   }
 
   if (proofFailure !== undefined || cleanupFailure !== undefined) {
     const failures = [proofFailure, cleanupFailure].filter((error) => error !== undefined);
     if (failures.length === 1) throw failures[0];
-    throw new AggregateError(failures, "Packed v1 proof and safe cleanup both failed.");
+    throw new AggregateError(failures, "Packed proof and safe cleanup both failed.");
   }
-  if (proofInputs === undefined) throw new Error("Packed v1 proof completed without evidence.");
+  if (proofInputs === undefined) throw new Error("Packed proof completed without evidence.");
 
   const sourceFinal = captureCleanGitHead({ repo: REPO_ROOT });
   const evidence = buildV1SystemProofEvidence({
@@ -295,7 +295,7 @@ async function closeProofResources(resources) {
   if (failures.length > 0) {
     throw new AggregateError(
       failures,
-      "Packed v1 proof could not close all bounded fixture resources.",
+      "Packed proof could not close all bounded fixture resources.",
     );
   }
 }
@@ -304,7 +304,7 @@ function assertExactCatalog() {
   const actual = packageCatalog.map((entry) => entry.name);
   if (JSON.stringify(actual) !== JSON.stringify(EXPECTED_PACKAGE_NAMES)) {
     throw new Error(
-      `v1 package catalog must be the exact ordered 23-package roster; found ${actual.length}: ${actual.join(", ")}`,
+      `package catalog must be the exact ordered 23-package roster; found ${actual.length}: ${actual.join(", ")}`,
     );
   }
   for (const entry of packageCatalog) {

@@ -9,7 +9,7 @@
 // bundle are the shipped ones. The only substitution is the agent behind the
 // channel: `dispatch` is scripted, so the turn is deterministic and no provider
 // is contacted. That is the same substitution
-// `scripts/verify/v1-operator-products.mjs` already makes.
+// `scripts/verify/operator-products.mjs` already makes.
 //
 // The script stays alive until it is signalled; Playwright's `webServer` owns
 // its lifetime.

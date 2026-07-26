@@ -77,7 +77,7 @@ export function normalizeLexical(value: string): string {
 export function canonicalStoredMemoryTimestamp(value: string): string {
   // v0-final admitted timezone-bearing ISO timestamps that were not always in
   // toISOString() form. Adoption keeps those bytes unchanged and normalizes
-  // only the public v1 projection.
+  // only the public projection.
   const match = LEGACY_STORED_TIMESTAMP.exec(value);
   if (match === null) return value;
   const year = Number(match[1]);

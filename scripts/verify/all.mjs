@@ -64,9 +64,9 @@ export function createRepoGate({ releaseTag, nodeVersion = process.versions.node
     { label: "check:doc-snippets", command: "pnpm", args: ["run", "check:doc-snippets"] },
     { label: "check:deep-imports", command: "pnpm", args: ["run", "check:deep-imports"] },
     {
-      label: "verify:v1-operator-products",
+      label: "verify:operator-products",
       command: "pnpm",
-      args: ["run", "verify:v1-operator-products"],
+      args: ["run", "verify:operator-products"],
     },
     { label: "test:browser", command: "pnpm", args: ["run", "test:browser"] },
     {

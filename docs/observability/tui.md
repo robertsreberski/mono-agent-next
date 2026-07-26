@@ -10,7 +10,7 @@ already-running agent through `@mono-agent/operator`, renders normalized
 conversation state with pi-tui, and never loads agent config, starts a runtime,
 or owns the agent process.
 
-The v1 binary is `mono-agent-tui`. The old host command, embedded responder,
+The binary is `mono-agent-tui`. The old host command, embedded responder,
 `--local`, replay/config panes, and conversational self-configuration are not
 part of this product.
 
@@ -135,4 +135,4 @@ persistence, or agent lifecycle commands.
 
 - [Operator channel](/channels/tui/) — selected endpoint, auth, bounds, and current capabilities.
 - [Web operator](/observability/web-console/) — independently configured durable browser product.
-- [v1 architecture](/reference/v1-architecture/) — shared operator and renderer boundaries.
+- [architecture](/reference/architecture/) — shared operator and renderer boundaries.

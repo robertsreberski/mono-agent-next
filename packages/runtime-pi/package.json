@@ -1,7 +1,7 @@
 {
   "name": "@mono-agent/runtime-pi",
   "version": "0.15.0",
-  "description": "Pi-native runtime module for mono-agent v1.",
+  "description": "Pi-native runtime module for mono-agent.",
   "type": "module",
   "license": "MIT",
   "repository": {

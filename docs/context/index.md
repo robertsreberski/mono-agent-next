@@ -1,11 +1,11 @@
 ---
 title: "Instructions, skills, and MCP"
-description: "Keep agent instructions, reusable know-how, and model-callable project tools in their explicit v1 authorities."
+description: "Keep agent instructions, reusable know-how, and model-callable project tools in their explicit authorities."
 sidebar:
   order: 0
 ---
 
-V1 separates four concerns:
+Mono-agent separates four concerns:
 
 | Concern | Authority |
 | --- | --- |
@@ -14,7 +14,7 @@ V1 separates four concerns:
 | Project-specific model-callable tools | Standard `.mcp.json` entries. |
 | Tool behavior inseparable from a selected module | That module's bounded contribution, governed by Core. |
 
-The old second persona file is not part of v1. Consolidate identity and soul
+The old second persona file is not part of mono-agent. Consolidate identity and soul
 content into the single reviewed instructions source. A skill supplies
 instructions for an existing CLI, MCP server, or workflow; it does not gain
 hidden host authority.

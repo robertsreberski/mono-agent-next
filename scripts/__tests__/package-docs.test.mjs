@@ -126,7 +126,7 @@ describe("package documentation generation", () => {
       directory,
     );
     expect(page).toContain(
-      'description: "Directory of every mono-agent v1 source package, its ownership tier, responsibility, and authoritative README."',
+      'description: "Directory of every mono-agent source package, its ownership tier, responsibility, and authoritative README."',
     );
     expect(page).not.toContain("Stale npm directory.");
     expect(updatePackageDirectoryPage(page, directory)).toBe(page);
