@@ -18,6 +18,11 @@ import {
 } from "./destination.js";
 import { createSlackEventProcessor } from "./event-processor.js";
 import { SlackInbox } from "./inbox.js";
+import { createSlackInboxCommands } from "./inbox-commands.js";
+import {
+  acquireSlackInboxLease,
+  type SlackInboxLease,
+} from "./inbox-lease.js";
 import { createSlackSendTools } from "./send-tools.js";
 import {
   createSlackSocketModeTransport,
@@ -28,7 +33,8 @@ import {
 
 const PACKAGE_NAME = "@mono-agent/channel-slack";
 const PACKAGE_VERSION = "0.15.0";
-const STOP_TIMEOUT_MS = 1_000;
+const DEFAULT_DRAIN_TIMEOUT_MS = 1_000;
+const CANCELLATION_SETTLEMENT_MS = 1_000;
 
 export interface SlackChannel extends Channel {
   readonly running: boolean;
@@ -67,15 +73,23 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
   const delivery = new SlackDelivery(context.config, client);
   const sendTools = createSlackSendTools();
   let lifecycle: AbortController | undefined;
+  let inboxLifecycle: AbortController | undefined;
   let inbox: SlackInbox | undefined;
+  let inboxLease: SlackInboxLease | undefined;
   let primaryWorker: Promise<void> | undefined;
   let controlWorker: Promise<void> | undefined;
+  let shutdownPromise: Promise<void> | undefined;
   let primaryRequested = false;
   let controlRequested = false;
+  let maintenanceActive = false;
+  let starting = false;
+  let shuttingDown = false;
   let stopping = false;
   let running = false;
   let active = 0;
+  let recoverySafe = true;
   let failureSummary: string | undefined;
+  const shutdownAbortedEnvelopeIds = new Set<string>();
   let schedulePrimary: () => void = () => undefined;
   let scheduleControl: () => void = () => undefined;
   let lastAdmissionOrder = 0;
@@ -100,6 +114,7 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
   };
 
   const failClosed = (summary: string, abort = true): void => {
+    recoverySafe = false;
     if (failureSummary === undefined) {
       failureSummary = summary;
       context.logger.error(summary, { instanceId: context.instanceId });
@@ -124,21 +139,31 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
   const runPrimaryWorker = async (): Promise<void> => {
     const currentInbox = inbox;
     const signal = lifecycle?.signal;
-    if (currentInbox === undefined || signal === undefined || signal.aborted) return;
+    const inboxSignal = inboxLifecycle?.signal;
+    if (currentInbox === undefined
+      || signal === undefined
+      || inboxSignal === undefined
+      || signal.aborted
+      || inboxSignal.aborted) return;
     while (!signal.aborted) {
       const event = await currentInbox.claimNextPrimary(
         processor.isControlEligible,
-        signal,
+        inboxSignal,
       );
       if (event === undefined) return;
       processor.forgetPrimaryOnly(event.envelopeId);
       active += 1;
       try {
         await processor.processPrimaryEvent(event, signal);
-        await currentInbox.complete(event.envelopeId, signal);
+        await currentInbox.complete(event.envelopeId, inboxSignal);
         admissionOrders.delete(event.envelopeId);
-      } catch {
+      } catch (error) {
         admissionOrders.delete(event.envelopeId);
+        if (isOwnedShutdownAbort(error, signal)) {
+          shutdownAbortedEnvelopeIds.add(event.envelopeId);
+          return;
+        }
+        recoverySafe = false;
         await failProcessing(currentInbox, event.envelopeId);
         return;
       } finally {
@@ -151,10 +176,15 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
   const runControlWorker = async (): Promise<void> => {
     const currentInbox = inbox;
     const signal = lifecycle?.signal;
-    if (currentInbox === undefined || signal === undefined || signal.aborted) return;
+    const inboxSignal = inboxLifecycle?.signal;
+    if (currentInbox === undefined
+      || signal === undefined
+      || inboxSignal === undefined
+      || signal.aborted
+      || inboxSignal.aborted) return;
     const event = await currentInbox.claimNextControl(
       processor.isControlEligible,
-      signal,
+      inboxSignal,
     );
     if (event === undefined) return;
     active += 1;
@@ -162,14 +192,19 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
     try {
       consumed = await processor.processControlEvent(event, signal);
       if (consumed) {
-        await currentInbox.complete(event.envelopeId, signal);
+        await currentInbox.complete(event.envelopeId, inboxSignal);
         admissionOrders.delete(event.envelopeId);
       } else {
         processor.markPrimaryOnly(event.envelopeId);
-        await currentInbox.release(event.envelopeId, signal);
+        await currentInbox.release(event.envelopeId, inboxSignal);
       }
-    } catch {
+    } catch (error) {
       admissionOrders.delete(event.envelopeId);
+      if (isOwnedShutdownAbort(error, signal)) {
+        shutdownAbortedEnvelopeIds.add(event.envelopeId);
+        return;
+      }
+      recoverySafe = false;
       await failProcessing(currentInbox, event.envelopeId);
       return;
     } finally {
@@ -220,16 +255,19 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
 
   const admit = async (event: SlackSocketEvent): Promise<void> => {
     const signal = lifecycle?.signal;
+    const inboxSignal = inboxLifecycle?.signal;
     if (!running
       || stopping
       || signal === undefined
+      || inboxSignal === undefined
       || signal.aborted
+      || inboxSignal.aborted
       || inbox === undefined) {
       throw new Error("Slack channel is not accepting envelopes.");
     }
     if (!authorized(event)) return;
     try {
-      const result = await inbox.enqueue(event, signal);
+      const result = await inbox.enqueue(event, inboxSignal);
       if (result === "enqueued") {
         lastAdmissionOrder += 1;
         admissionOrders.set(event.envelopeId, lastAdmissionOrder);
@@ -245,23 +283,252 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
     failClosed(failure.summary, false);
   };
 
-  const stop = async (): Promise<void> => {
-    stopping = true;
-    await Promise.race([
-      socket.stop().catch(() => undefined),
-      delay(STOP_TIMEOUT_MS),
-    ]);
-    await waitForWorkers(primaryWorker, controlWorker);
-    lifecycle?.abort(new Error("Slack channel stopped."));
-    await waitForWorkers(primaryWorker, controlWorker);
-    await inbox?.close().catch(() => undefined);
-    inbox = undefined;
+  const withMaintenanceInbox = async <T>(
+    signal: AbortSignal,
+    operation: (maintenanceInbox: SlackInbox | undefined) => Promise<T> | T,
+  ): Promise<T> => {
+    if (
+      maintenanceActive
+      || starting
+      || shuttingDown
+      || running
+      || inbox !== undefined
+      || primaryWorker !== undefined
+      || controlWorker !== undefined
+    ) {
+      throw new Error(
+        "Slack inbox maintenance commands require a stopped channel instance.",
+      );
+    }
+    throwIfAborted(signal);
+    maintenanceActive = true;
+    let maintenanceInbox: SlackInbox | undefined;
+    let maintenanceLease: SlackInboxLease | undefined;
+    try {
+      const discovered = await SlackInbox.discoverExistingDirectory(
+        context.dataDirectory,
+        signal,
+      );
+      if (discovered === undefined) return await operation(undefined);
+      maintenanceLease = await acquireSlackInboxLease(
+        discovered.directory,
+        signal,
+        { ...discovered, createIfMissing: true },
+      );
+      maintenanceInbox = await SlackInbox.openExisting(
+        discovered.directory,
+        signal,
+        discovered,
+      );
+      if (maintenanceInbox === undefined) {
+        throw new Error("Slack durable inbox changed while entering maintenance.");
+      }
+      return await operation(maintenanceInbox);
+    } finally {
+      try {
+        await maintenanceInbox?.close();
+      } finally {
+        try {
+          await maintenanceLease?.release();
+        } finally {
+          maintenanceActive = false;
+        }
+      }
+    }
+  };
+
+  const commands = createSlackInboxCommands({ withInbox: withMaintenanceInbox });
+
+  const clearShutdownState = (
+    currentInbox: SlackInbox | undefined,
+    currentLease: SlackInboxLease | undefined,
+  ): void => {
+    if (inbox === currentInbox) inbox = undefined;
+    if (inboxLease === currentLease) inboxLease = undefined;
     processor.clear();
     admissionOrders.clear();
+    shutdownAbortedEnvelopeIds.clear();
     lastAdmissionOrder = 0;
     primaryRequested = false;
     controlRequested = false;
+    shuttingDown = false;
+  };
+
+  const closeShutdownResources = async (
+    currentInbox: SlackInbox | undefined,
+    currentLease: SlackInboxLease | undefined,
+  ): Promise<unknown> => {
+    let cleanupFailure: unknown;
+    await currentInbox?.close().catch((error: unknown) => {
+      cleanupFailure ??= error;
+    });
+    await currentLease?.release().catch((error: unknown) => {
+      cleanupFailure ??= error;
+    });
+    clearShutdownState(currentInbox, currentLease);
+    return cleanupFailure;
+  };
+
+  const finalizeRetainedShutdown = async (
+    currentInbox: SlackInbox | undefined,
+    currentLease: SlackInboxLease | undefined,
+  ): Promise<void> => {
+    try {
+      const processingEvents = currentInbox?.snapshot().processing ?? 0;
+      if (processingEvents > 0) {
+        recoverySafe = false;
+        context.logger.error(
+          "Slack channel retained shutdown quiesced with ambiguous processing blocked for exact operator recovery.",
+          { instanceId: context.instanceId, processingEvents },
+        );
+      }
+    } catch {
+      recoverySafe = false;
+      context.logger.error(
+        "Slack channel retained shutdown cleanup failed; durable processing remains blocked.",
+        { instanceId: context.instanceId },
+      );
+    } finally {
+      const cleanupFailure = await closeShutdownResources(
+        currentInbox,
+        currentLease,
+      );
+      if (cleanupFailure !== undefined) {
+        context.logger.error(
+          "Slack channel retained shutdown resources could not be closed cleanly.",
+          { instanceId: context.instanceId },
+        );
+      }
+    }
+  };
+
+  const shutdown = async (
+    mode: "drain" | "stop",
+    signal: AbortSignal,
+    deadline?: string,
+  ): Promise<void> => {
+    shuttingDown = true;
+    stopping = true;
     running = false;
+    const currentInbox = inbox;
+    const currentLease = inboxLease;
+    const currentLifecycle = lifecycle;
+    const currentPrimaryWorker = primaryWorker;
+    const currentControlWorker = controlWorker;
+    const hadWorkers = currentPrimaryWorker !== undefined
+      || currentControlWorker !== undefined;
+    const socketStopping = Promise.resolve()
+      .then(async () => socket.stop())
+      .catch(() => undefined);
+    let shutdownFailure: unknown;
+    let retainResources = false;
+    let cleanupDeadline = deadline;
+    try {
+      let workersSettled = mode === "drain"
+        ? await waitForWorkers(
+            currentPrimaryWorker,
+            currentControlWorker,
+            deadline,
+            signal,
+          )
+        : false;
+      if (mode === "drain") {
+        if (!workersSettled) {
+          const processingEvents = currentInbox?.snapshot().processing ?? 0;
+          if (processingEvents > 0) {
+            context.logger.error(
+              "Slack channel drain expired with durable inbox work still "
+                + "processing; bounded cancellation must settle before restart recovery.",
+              { instanceId: context.instanceId, processingEvents },
+            );
+          }
+        }
+      }
+      const shutdownReason = new SlackChannelShutdownError(
+        mode === "drain"
+          ? "Slack channel drain grace ended."
+          : "Slack channel stopped.",
+      );
+      currentLifecycle?.abort(shutdownReason);
+      if (!workersSettled) {
+        cleanupDeadline = new Date(
+          Date.now() + CANCELLATION_SETTLEMENT_MS,
+        ).toISOString();
+        workersSettled = await waitForWorkers(
+          currentPrimaryWorker,
+          currentControlWorker,
+          cleanupDeadline,
+          signal,
+        );
+      }
+      if (
+        workersSettled
+        && hadWorkers
+        && recoverySafe
+        && shutdownAbortedEnvelopeIds.size > 0
+        && currentInbox !== undefined
+      ) {
+        await currentInbox.requeueProcessingForShutdown(
+          [...shutdownAbortedEnvelopeIds],
+        );
+      }
+      const processingEvents = currentInbox?.snapshot().processing ?? 0;
+      if (!workersSettled || processingEvents > 0) {
+        const summary = !workersSettled
+          ? "Slack channel shutdown cancellation did not settle; durable processing remains blocked for exact operator recovery."
+          : "Slack channel shutdown left ambiguous durable processing blocked for exact operator recovery.";
+        context.logger.error(summary, {
+          instanceId: context.instanceId,
+          processingEvents,
+        });
+        failureSummary ??= summary;
+        recoverySafe = false;
+        shutdownFailure = new Error(summary);
+        if (!workersSettled) {
+          retainResources = true;
+          void settleWorkers(
+            currentPrimaryWorker,
+            currentControlWorker,
+          ).then(async () => finalizeRetainedShutdown(
+            currentInbox,
+            currentLease,
+          )).catch(() => {
+            context.logger.error(
+              "Slack channel retained shutdown finalizer failed closed.",
+              { instanceId: context.instanceId },
+            );
+          });
+        }
+      }
+      await waitForPromise(
+        socketStopping,
+        drainTimeoutMs(cleanupDeadline),
+        signal,
+      );
+    } catch (error) {
+      shutdownFailure ??= error;
+      recoverySafe = false;
+      if (failureSummary === undefined) {
+        failureSummary = "Slack durable inbox shutdown cleanup failed.";
+        context.logger.error(failureSummary, { instanceId: context.instanceId });
+      }
+    } finally {
+      if (retainResources) {
+        shuttingDown = false;
+      } else {
+        shutdownFailure ??= await closeShutdownResources(
+          currentInbox,
+          currentLease,
+        );
+      }
+    }
+    if (shutdownFailure !== undefined) {
+      if (failureSummary === undefined) {
+        failureSummary = "Slack durable inbox shutdown cleanup failed.";
+        context.logger.error(failureSummary, { instanceId: context.instanceId });
+      }
+      throw shutdownFailure;
+    }
   };
 
   return {
@@ -275,6 +542,7 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
       verbatim: false,
       cancellation: context.host.cancel !== undefined,
     }),
+    commands,
     sendTools,
     resolveDefaultDeliveryConversationId() {
       return context.config.defaultDestination === undefined
@@ -307,21 +575,59 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
       return running;
     },
     async start(startContext) {
+      if (starting || shuttingDown) {
+        throw new Error("Slack channel lifecycle transition is already in progress.");
+      }
       if (running) return;
       if (inbox !== undefined
         || primaryWorker !== undefined
-        || controlWorker !== undefined) {
+        || controlWorker !== undefined
+        || maintenanceActive) {
         throw new Error("Slack channel must be stopped before restart.");
       }
       throwIfAborted(startContext.signal);
+      starting = true;
+      shutdownPromise = undefined;
       lifecycle = new AbortController();
+      inboxLifecycle = new AbortController();
+      const currentLifecycle = lifecycle;
+      const currentInboxLifecycle = inboxLifecycle;
+      currentLifecycle.signal.addEventListener("abort", () => {
+        if (!isShutdownAbort(currentLifecycle.signal)) {
+          currentInboxLifecycle.abort(currentLifecycle.signal.reason);
+        }
+      }, { once: true });
       stopping = false;
+      recoverySafe = true;
       failureSummary = undefined;
+      shutdownAbortedEnvelopeIds.clear();
+      let openedInbox: SlackInbox | undefined;
+      let acquiredLease: SlackInboxLease | undefined;
       try {
-        inbox = await SlackInbox.open(context.dataDirectory, lifecycle.signal);
+        const preparedInbox = await SlackInbox.prepareForServing(
+          context.dataDirectory,
+          inboxLifecycle.signal,
+        );
         if (stopping || lifecycle.signal.aborted) {
           throw new Error("Slack channel stopped while starting.");
         }
+        acquiredLease = await acquireSlackInboxLease(
+          preparedInbox.directory,
+          inboxLifecycle.signal,
+          { ...preparedInbox, createIfMissing: true },
+        );
+        if (stopping || lifecycle.signal.aborted) {
+          throw new Error("Slack channel stopped while starting.");
+        }
+        openedInbox = await SlackInbox.openPrepared(
+          preparedInbox,
+          inboxLifecycle.signal,
+        );
+        if (stopping || lifecycle.signal.aborted) {
+          throw new Error("Slack channel stopped while starting.");
+        }
+        inbox = openedInbox;
+        inboxLease = acquiredLease;
         const snapshot = inbox.snapshot();
         if (snapshot.blocked !== undefined) throw new Error(snapshot.blocked);
         running = true;
@@ -332,15 +638,26 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
         failureSummary = "Slack channel startup failed closed.";
         lifecycle.abort(error);
         await socket.stop().catch(() => undefined);
-        await inbox?.close().catch(() => undefined);
+        await openedInbox?.close().catch(() => undefined);
+        await acquiredLease?.release().catch(() => undefined);
+        if (inbox === openedInbox) inbox = undefined;
+        if (inboxLease === acquiredLease) inboxLease = undefined;
         throw error;
+      } finally {
+        starting = false;
       }
     },
-    async drain() {
-      await stop();
+    async drain(drainContext) {
+      shutdownPromise ??= shutdown(
+        "drain",
+        drainContext.signal,
+        drainContext.deadline,
+      );
+      await shutdownPromise;
     },
-    async stop() {
-      await stop();
+    async stop(stopContext) {
+      shutdownPromise ??= shutdown("stop", stopContext.signal);
+      await shutdownPromise;
     },
     async health(): Promise<ModuleHealth> {
       const snapshot = inbox?.snapshot();
@@ -385,22 +702,75 @@ export function createSlackChannel(options: CreateSlackChannelOptions): SlackCha
 async function waitForWorkers(
   primary: Promise<void> | undefined,
   control: Promise<void> | undefined,
+  deadline: string | undefined,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const workers = [primary, control].filter(
+    (worker): worker is Promise<void> => worker !== undefined,
+  );
+  if (workers.length === 0) return true;
+  return await waitForPromise(
+    settleWorkers(primary, control),
+    drainTimeoutMs(deadline),
+    signal,
+  );
+}
+
+async function settleWorkers(
+  primary: Promise<void> | undefined,
+  control: Promise<void> | undefined,
 ): Promise<void> {
   const workers = [primary, control].filter(
     (worker): worker is Promise<void> => worker !== undefined,
   );
-  if (workers.length === 0) return;
-  await Promise.race([
-    Promise.all(workers.map(async (worker) => worker.catch(() => undefined))),
-    delay(STOP_TIMEOUT_MS),
-  ]);
+  await Promise.all(workers.map(async (worker) => worker.catch(() => undefined)));
 }
 
-async function delay(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, ms);
+async function waitForPromise(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<boolean> {
+  if (timeoutMs === 0 || signal.aborted) return false;
+  return await new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (result: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve(result);
+    };
+    const onAbort = (): void => { finish(false); };
+    const timer = setTimeout(() => { finish(false); }, timeoutMs);
     timer.unref();
+    signal.addEventListener("abort", onAbort, { once: true });
+    void promise.then(
+      () => { finish(true); },
+      () => { finish(true); },
+    );
   });
+}
+
+function drainTimeoutMs(deadline: string | undefined): number {
+  if (deadline === undefined) return DEFAULT_DRAIN_TIMEOUT_MS;
+  const parsed = Date.parse(deadline);
+  return Number.isFinite(parsed) ? Math.max(0, parsed - Date.now()) : 0;
+}
+
+class SlackChannelShutdownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SlackChannelShutdownError";
+  }
+}
+
+function isShutdownAbort(signal: AbortSignal): boolean {
+  return signal.aborted && signal.reason instanceof SlackChannelShutdownError;
+}
+
+function isOwnedShutdownAbort(error: unknown, signal: AbortSignal): boolean {
+  return isShutdownAbort(signal) && error === signal.reason;
 }
 
 function throwIfAborted(signal: AbortSignal): void {

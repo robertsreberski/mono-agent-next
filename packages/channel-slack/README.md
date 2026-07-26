@@ -26,7 +26,10 @@ global/message shortcuts, and provide idempotent proactive Slack delivery. The
 selected instance contributes `SlackSendMessage` under Core's ordinary tool
 policy without widening its configured channel allowlist. Bot/app-authored
 message events are ignored, and inbound files share one aggregate per-message
-byte budget in addition to the per-file bound.
+byte budget in addition to the per-file bound. Two module-owned maintenance
+commands inspect payload-free durable inbox metadata and explicitly requeue one
+exact processing envelope without starting the channel. A cross-process
+owner-private lease excludes those commands while a serving instance is live.
 
 ## Install / Usage
 
@@ -125,16 +128,72 @@ apply is atomically returned to its original pending position and becomes
 primary-only. A crash or error after either lane starts is not blindly replayed:
 the processing record remains explicitly blocked and channel health becomes
 `unhealthy`, because Core or Slack side effects may be ambiguous.
+During a host-requested drain, the channel stops admission and lets active work
+settle until the supplied deadline. If that grace expires, it logs an error,
+aborts the active turn, and allows one bounded cancellation-settlement window.
+Only a worker that actually settles by throwing the channel-owned shutdown
+reason is eligible for automatic processing-to-pending recovery. The channel
+atomically returns only those proven-cancelled envelope ids and preserves the
+untouched backlog. If a worker ignores cancellation or a different failure
+races shutdown, stop fails and the processing record remains blocked for exact
+operator recovery instead of risking overlapping replay. The channel retains
+the serving lease until that exact worker eventually quiesces; if it never
+does, terminating the serving process releases the operating-system lock before
+offline recovery. A direct lifecycle stop begins at the bounded cancellation
+phase. Durable inbox commits are allowed to finish across turn cancellation so
+a clean stop cannot turn a committed write into an uncertain one.
 If stop overtakes the asynchronous inbox open, startup fails closed and closes
 the opened inbox instead of transitioning the channel back to healthy.
 
 The inbox is owner-private (`0700` directory, `0600` files), bounded, and fails
 closed on corruption, unsafe links/modes, queue overflow, or an uncertain
-atomic commit. It contains inbound Slack text and private attachment URLs, so
-backup and access controls must treat it as sensitive. To intentionally discard
-blocked or pending input, stop the agent, inspect/backup the instance data
-directory, then remove only that channel instance's marker-owned data directory;
-the next start creates an empty inbox. There is no online purge.
+atomic commit. Startup and maintenance first discover only directory and child
+file metadata, open the exact validated lease inode through a retained file
+descriptor, and acquire its exclusive SQLite transaction before reading marker
+or state contents. Marker and state reads are likewise pinned to the discovered
+device/inode identities, and a stable directory rename or replacement fails
+closed rather than accepting the replacement as the discovered inbox;
+subsequent persistence remains identity- and compare-and-swap checked. Process
+exit releases the operating-system lock. These checks protect the trusted host
+from static replacement and ordinary rename races; as with the framework's
+other device/inode checks, they are not a security boundary against deliberate
+same-UID code, which can rewrite or replace owner-private entries or perform
+ABA swaps.
+The inbox contains inbound Slack text and private attachment URLs, so backup
+and access controls must treat it as sensitive. Startup never automatically
+requeues a crash- or error-stranded processing record because the channel
+boundary cannot know whether durable Core execution is selected.
+
+To inspect or recover one such record, stop the serving agent first and run the
+generic module-command path against the selected Slack instance:
+
+```bash
+node packages/cli/dist/bin/mono-agent.js module command \
+  --config ./mono-agent.config.json \
+  --module slack \
+  --name channel-slack:inbox-inspect \
+  --input-json '{}'
+
+node packages/cli/dist/bin/mono-agent.js module command \
+  --config ./mono-agent.config.json \
+  --module slack \
+  --name channel-slack:inbox-requeue \
+  --input-json '{"envelopeId":"Ev123","confirm":true}'
+```
+
+Replace `slack` with the configured channel instance id. Inspection returns at
+most the inbox's bounded 256 entries and exposes only `envelopeId`, `status`,
+optional `lane`, and `admittedAt`; event text, attachment URLs, and other
+payload fields are never returned, and inspecting an absent inbox does not
+create one. Requeue requires both an exact currently processing envelope id and
+`confirm: true`; a missing, pending, failed, or mismatched record fails closed
+and leaves the inbox unchanged. Requeue only after assessing whether the
+interrupted turn may already have produced side effects. Both commands fail
+while another process holds the serving lease. To intentionally discard every
+blocked and pending entry instead,
+inspect and back up the instance data directory, then remove only that channel
+instance's marker-owned directory while the agent is stopped. There is no
+online purge.
 
 ### Package structure
 
@@ -146,7 +205,9 @@ the next start creates an empty inbox. There is no online purge.
 | `ask.ts` | Ask rendering, token routing, answer state, and replacement-safe cleanup. |
 | `config.ts` | Strict env-only credentials, allowlists, shortcuts, and App Home actions. |
 | `socket.ts` | Injectable single-consumer Socket Mode lifecycle and interaction normalization. |
-| `inbox.ts` | Owner-private atomic admission queue, lane state, and bounded envelope dedupe. |
+| `inbox.ts` | Owner-private identity-pinned admission queue, lane state, and bounded envelope dedupe. |
+| `inbox-commands.ts` | Payload-free inbox inspection and exact confirmation-gated recovery commands. |
+| `inbox-lease.ts` | Descriptor-pinned SQLite process exclusion for serving and maintenance access. |
 | `inbox-values.ts` | Immutable event cloning and strict persisted inbox value validation helpers. |
 | `client.ts` | Bounded Slack Web API and attachment operations. |
 | `delivery.ts` | Exact-destination idempotent delivery. |
@@ -165,6 +226,13 @@ the next start creates an empty inbox. There is no online purge.
 | `createSlackChannel` | Inject deterministic Socket/Web API transports. |
 | `createSlackSocketModeTransport` | Use the first-party Socket Mode connection. |
 | `parseSlackConfig` | Validate already resolved package config. |
+
+The selected instance also exposes two generic maintenance commands:
+
+| Command | Use |
+| --- | --- |
+| `channel-slack:inbox-inspect` | List bounded, payload-free durable entry metadata while the channel is stopped. |
+| `channel-slack:inbox-requeue` | Atomically return one exact processing entry to pending with `confirm: true`. |
 
 <!-- public-api-inventory:start -->
 <!-- Generated by scripts/generate/public-api-docs.mjs. Do not edit by hand. -->

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtempSync } from "node:fs";
-import { readFile, readdir, rm } from "node:fs/promises";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -29,6 +31,7 @@ import {
   type SlackSocketTransport,
 } from "../index.js";
 import { SlackInbox } from "../inbox.js";
+import { acquireSlackInboxLease } from "../inbox-lease.js";
 
 const CONFIG = { appToken: "xapp-000000000000000", botToken: "xoxb-000000000000000", allowedTeamIds: ["T1"], allowedChannelIds: ["C1"], defaultDestination: "C1" };
 const temporaryDirectories: string[] = [];
@@ -1816,6 +1819,702 @@ describe("slack channel", () => {
     await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
   });
 
+  it("retains a startup lease until a concurrent stop lets inbox open unwind", async () => {
+    const dataDirectory = temporaryDirectory();
+    let enteredOpen!: () => void;
+    let releaseOpen!: () => void;
+    const openEntered = new Promise<void>((resolve) => { enteredOpen = resolve; });
+    const openGate = new Promise<void>((resolve) => { releaseOpen = resolve; });
+    const originalOpenPrepared = SlackInbox.openPrepared.bind(SlackInbox);
+    const openSpy = vi.spyOn(SlackInbox, "openPrepared").mockImplementation(
+      async (prepared, signal) => {
+        enteredOpen();
+        await openGate;
+        return await originalOpenPrepared(prepared, signal);
+      },
+    );
+    const channel = createSlackChannel({
+      context: context(parseSlackConfig(CONFIG), async () => ({ status: "completed" }), {}, dataDirectory),
+      socketFactory: () => ({ async start() {}, async stop() {} }),
+      clientFactory: () => client(),
+    });
+
+    try {
+      const starting = channel.start?.({ signal: new AbortController().signal });
+      if (starting === undefined) throw new Error("Expected Slack channel start.");
+      await openEntered;
+      await expect(channel.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      })).resolves.toBeUndefined();
+      await expect(acquireSlackInboxLease(dataDirectory)).rejects.toThrow(/in use/iu);
+
+      releaseOpen();
+      await expect(starting).rejects.toThrow(/stopped while starting/iu);
+      const recoveredLease = await acquireSlackInboxLease(dataDirectory);
+      await recoveredLease.release();
+      expect(channel.running).toBe(false);
+    } finally {
+      releaseOpen();
+      openSpy.mockRestore();
+    }
+  });
+
+  it("honors an extended drain deadline so an in-flight turn can settle before shutdown", async () => {
+    const dataDirectory = temporaryDirectory();
+    let releaseDispatch!: () => void;
+    const dispatchGate = new Promise<void>((resolve) => { releaseDispatch = resolve; });
+    const error = vi.fn<ModuleLogger["error"]>();
+    const channelContext = context(
+      parseSlackConfig(CONFIG),
+      async () => {
+        await dispatchGate;
+        return { status: "completed", text: "settled" };
+      },
+      {},
+      dataDirectory,
+    );
+    const socket = durableAckSocket(dataDirectory);
+    const channel = createSlackChannel({
+      context: {
+        ...channelContext,
+        logger: { ...logger(), error },
+      },
+      socketFactory: () => socket.transport,
+      clientFactory: () => client(),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await socket.emit(message("slow-clean-stop", "finish before the deadline"));
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal })).toMatchObject({
+        details: { pendingEvents: 0, processingEvents: 1 },
+      });
+    });
+
+    const releaseTimer = setTimeout(releaseDispatch, 1_100);
+    try {
+      await channel.drain?.({
+        signal: new AbortController().signal,
+        deadline: new Date(Date.now() + 2_000).toISOString(),
+      });
+    } finally {
+      clearTimeout(releaseTimer);
+    }
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+    expect(error).not.toHaveBeenCalled();
+
+    const reopened = await SlackInbox.open(dataDirectory);
+    expect(reopened.snapshot()).toMatchObject({
+      pending: 0,
+      processing: 0,
+      failed: 0,
+      completed: 1,
+    });
+    await reopened.close();
+
+    const restarted = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async () => ({ status: "completed", text: "unused" }),
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => durableAckSocket(dataDirectory).transport,
+      clientFactory: () => client(),
+    });
+    await expect(restarted.start?.({ signal: new AbortController().signal }))
+      .resolves.toBeUndefined();
+    await restarted.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  }, 5_000);
+
+  it("logs and requeues in-flight work when the drain deadline expires, preserving restart order", async () => {
+    const dataDirectory = temporaryDirectory();
+    const firstDispatch = vi.fn<ChannelHost["dispatch"]>(async (request) => {
+      await waitUntilAborted(request.signal);
+      throw request.signal.reason;
+    });
+    const error = vi.fn<ModuleLogger["error"]>();
+    const firstContext = context(parseSlackConfig(CONFIG), firstDispatch, {}, dataDirectory);
+    const firstSocket = durableAckSocket(dataDirectory);
+    const first = createSlackChannel({
+      context: { ...firstContext, logger: { ...logger(), error } },
+      socketFactory: () => firstSocket.transport,
+      clientFactory: () => client(),
+    });
+    await first.start?.({ signal: new AbortController().signal });
+    await firstSocket.emit(message("restart-1", "one"));
+    await firstSocket.emit(message("restart-2", "two"));
+    await firstSocket.emit(message("restart-3", "three"));
+    await vi.waitFor(async () => {
+      expect(await first.health?.({ signal: new AbortController().signal })).toMatchObject({
+        details: { pendingEvents: 2, processingEvents: 1 },
+      });
+    });
+
+    await first.drain?.({
+      signal: new AbortController().signal,
+      deadline: new Date(Date.now() + 25).toISOString(),
+    });
+    await first.stop?.({ signal: new AbortController().signal, reason: "restart" });
+    expect(error).toHaveBeenCalledWith(
+      expect.stringMatching(/drain.*processing.*recovery/iu),
+      expect.objectContaining({ instanceId: "slack", processingEvents: 1 }),
+    );
+
+    const resumed: string[] = [];
+    const second = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async (request) => {
+          resumed.push(request.requestId);
+          return { status: "completed", text: "resumed" };
+        },
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => durableAckSocket(dataDirectory).transport,
+      clientFactory: () => client(),
+    });
+    await expect(second.start?.({ signal: new AbortController().signal }))
+      .resolves.toBeUndefined();
+    await vi.waitFor(() => expect(resumed).toEqual(["restart-1", "restart-2", "restart-3"]));
+    await second.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("force-stops a cooperatively cancelled turn before requeueing it for restart", async () => {
+    const dataDirectory = temporaryDirectory();
+    const firstSocket = durableAckSocket(dataDirectory);
+    const first = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async (request) => {
+          await waitUntilAborted(request.signal);
+          throw request.signal.reason;
+        },
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => firstSocket.transport,
+      clientFactory: () => client(),
+    });
+    await first.start?.({ signal: new AbortController().signal });
+    await firstSocket.emit(message("force-stop-restart", "resume after stop"));
+    await vi.waitFor(async () => {
+      expect(await first.health?.({ signal: new AbortController().signal })).toMatchObject({
+        details: { processingEvents: 1 },
+      });
+    });
+    await first.stop?.({ signal: AbortSignal.timeout(500), reason: "restart" });
+
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async () => ({
+      status: "completed",
+      text: "resumed",
+    }));
+    const restarted = createSlackChannel({
+      context: context(parseSlackConfig(CONFIG), dispatch, {}, dataDirectory),
+      socketFactory: () => durableAckSocket(dataDirectory).transport,
+      clientFactory: () => client(),
+    });
+    await expect(restarted.start?.({ signal: new AbortController().signal }))
+      .resolves.toBeUndefined();
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    expect(dispatch.mock.calls[0]?.[0]).toMatchObject({
+      requestId: "force-stop-restart",
+    });
+    await restarted.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("retains the serving lease until non-cooperative shutdown work quiesces", async () => {
+    const dataDirectory = temporaryDirectory();
+    const error = vi.fn<ModuleLogger["error"]>();
+    let releaseDispatch!: () => void;
+    const dispatchGate = new Promise<void>((resolve) => { releaseDispatch = resolve; });
+    const firstContext = context(
+      parseSlackConfig(CONFIG),
+      async () => {
+        await dispatchGate;
+        return { status: "completed", text: "settled after the stop bound" };
+      },
+      {},
+      dataDirectory,
+    );
+    const firstSocket = durableAckSocket(dataDirectory);
+    const first = createSlackChannel({
+      context: { ...firstContext, logger: { ...logger(), error } },
+      socketFactory: () => firstSocket.transport,
+      clientFactory: () => client(),
+    });
+    await first.start?.({ signal: new AbortController().signal });
+    await firstSocket.emit(message("manual-recovery", "never settles"));
+    await vi.waitFor(async () => {
+      expect(await first.health?.({ signal: new AbortController().signal })).toMatchObject({
+        details: { processingEvents: 1 },
+      });
+    });
+
+    await expect(first.stop?.({
+      signal: AbortSignal.timeout(75),
+      reason: "restart",
+    })).rejects.toThrow(/did not settle|processing remains blocked/iu);
+    expect(error).toHaveBeenCalledWith(
+      expect.stringMatching(/did not settle.*blocked/iu),
+      expect.objectContaining({ instanceId: "slack", processingEvents: 1 }),
+    );
+
+    const blocked = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async () => ({ status: "completed" }),
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => durableAckSocket(dataDirectory).transport,
+      clientFactory: () => client(),
+    });
+    await expect(blocked.start?.({ signal: new AbortController().signal }))
+      .rejects.toThrow(/in use by a serving channel|stop it before maintenance/iu);
+    await expect(blocked.stop?.({
+      signal: new AbortController().signal,
+      reason: "startup-failed",
+    })).resolves.toBeUndefined();
+
+    const maintenance = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async () => ({ status: "completed" }),
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => ({ async start() {}, async stop() {} }),
+      clientFactory: () => client(),
+    });
+    const requeue = maintenance.commands?.find(
+      (command) => command.name === "channel-slack:inbox-requeue",
+    );
+    const inspect = maintenance.commands?.find(
+      (command) => command.name === "channel-slack:inbox-inspect",
+    );
+    if (inspect === undefined || requeue === undefined) {
+      throw new Error("Expected Slack inbox maintenance commands.");
+    }
+    const commandContext = {
+      signal: new AbortController().signal,
+      logger: logger(),
+    };
+    await expect(requeue.run(
+      { envelopeId: "manual-recovery", confirm: true },
+      commandContext,
+    )).rejects.toThrow(/in use by a serving channel|stop it before maintenance/iu);
+
+    releaseDispatch();
+    await vi.waitFor(async () => {
+      await expect(inspect.run({}, commandContext)).resolves.toEqual({ entries: [] });
+    });
+    await maintenance.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+
+    const recoveredDispatch = vi.fn<ChannelHost["dispatch"]>(async () => ({
+      status: "completed",
+      text: "operator accepted replay risk",
+    }));
+    const recovered = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        recoveredDispatch,
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => durableAckSocket(dataDirectory).transport,
+      clientFactory: () => client(),
+    });
+    await recovered.start?.({ signal: new AbortController().signal });
+    expect(recoveredDispatch).not.toHaveBeenCalled();
+    expect(await recovered.health?.({
+      signal: new AbortController().signal,
+    })).toMatchObject({ details: { processingEvents: 0, completedReceipts: 1 } });
+    await recovered.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+  });
+
+  it("keeps a real processing failure racing shutdown failed instead of requeueing it", async () => {
+    const dataDirectory = temporaryDirectory();
+    const error = vi.fn<ModuleLogger["error"]>();
+    const channelContext = context(
+      parseSlackConfig(CONFIG),
+      async (request) => {
+        await waitUntilAborted(request.signal);
+        throw new Error("provider failed while shutdown raced");
+      },
+      {},
+      dataDirectory,
+    );
+    const socket = durableAckSocket(dataDirectory);
+    const channel = createSlackChannel({
+      context: { ...channelContext, logger: { ...logger(), error } },
+      socketFactory: () => socket.transport,
+      clientFactory: () => client(),
+    });
+    await channel.start?.({ signal: new AbortController().signal });
+    await socket.emit(message("raced-failure", "must stay failed"));
+    await vi.waitFor(async () => {
+      expect(await channel.health?.({ signal: new AbortController().signal })).toMatchObject({
+        details: { processingEvents: 1 },
+      });
+    });
+
+    await expect(channel.stop?.({
+      signal: AbortSignal.timeout(500),
+      reason: "restart",
+    })).resolves.toBeUndefined();
+    expect(error).toHaveBeenCalledWith(
+      "Slack durable inbox processing failed; operator recovery is required.",
+      { instanceId: "slack" },
+    );
+    const reopened = await SlackInbox.openExisting(dataDirectory);
+    expect(reopened?.snapshot()).toMatchObject({
+      processing: 0,
+      failed: 1,
+    });
+    await reopened?.close();
+  });
+
+  it("discovers bounded inbox maintenance commands and requeues only an exact confirmed entry", async () => {
+    const dataDirectory = temporaryDirectory();
+    const seeded = await SlackInbox.open(dataDirectory);
+    await seeded.enqueue(message("processing-entry", "secret in-flight payload"));
+    await seeded.enqueue(message("pending-entry-1", "secret untouched payload one"));
+    await seeded.enqueue(message("pending-entry-2", "secret untouched payload two"));
+    await seeded.claimNextPrimary(() => false);
+    await seeded.close();
+
+    const start = vi.fn<SlackSocketTransport["start"]>();
+    const stop = vi.fn<SlackSocketTransport["stop"]>(async () => undefined);
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async () => ({ status: "completed" }));
+    const channel = createSlackChannel({
+      context: context(parseSlackConfig(CONFIG), dispatch, {}, dataDirectory),
+      socketFactory: () => ({ start, stop }),
+      clientFactory: () => client(),
+    });
+    expect(channel.commands?.map(({ name, kind }) => ({ name, kind }))).toEqual([
+      { name: "channel-slack:inbox-inspect", kind: "maintenance" },
+      { name: "channel-slack:inbox-requeue", kind: "maintenance" },
+    ]);
+    const inspect = channel.commands?.find(
+      (command) => command.name === "channel-slack:inbox-inspect",
+    );
+    const requeue = channel.commands?.find(
+      (command) => command.name === "channel-slack:inbox-requeue",
+    );
+    if (inspect === undefined || requeue === undefined) {
+      throw new Error("Expected Slack inbox maintenance commands.");
+    }
+    const commandContext = {
+      signal: new AbortController().signal,
+      logger: logger(),
+    };
+
+    const inspected = await inspect.run({}, commandContext);
+    expect(inspected).toMatchObject({
+      entries: [
+        {
+          envelopeId: "processing-entry",
+          status: "processing",
+          lane: "primary",
+          admittedAt: expect.any(String),
+        },
+        {
+          envelopeId: "pending-entry-1",
+          status: "pending",
+          admittedAt: expect.any(String),
+        },
+        {
+          envelopeId: "pending-entry-2",
+          status: "pending",
+          admittedAt: expect.any(String),
+        },
+      ],
+    });
+    expect(JSON.stringify(inspected)).not.toContain("secret");
+
+    await expect(requeue.run(
+      { envelopeId: "processing-entry", confirm: false },
+      commandContext,
+    )).rejects.toThrow(/confirm.*true/iu);
+    await expect(requeue.run(
+      { envelopeId: "wrong-entry", confirm: true },
+      commandContext,
+    )).rejects.toThrow(/exact processing/iu);
+    await expect(requeue.run(
+      { envelopeId: "pending-entry-1", confirm: true },
+      commandContext,
+    )).rejects.toThrow(/exact processing/iu);
+    await expect(requeue.run(
+      { envelopeId: "processing-entry", confirm: true, extra: true },
+      commandContext,
+    )).rejects.toThrow(/unknown field/iu);
+
+    await expect(requeue.run(
+      { envelopeId: "processing-entry", confirm: true },
+      commandContext,
+    )).resolves.toEqual({
+      envelopeId: "processing-entry",
+      previousStatus: "processing",
+      previousLane: "primary",
+      status: "pending",
+      requeued: true,
+    });
+    const reopened = await SlackInbox.open(dataDirectory);
+    expect(reopened.snapshot()).toMatchObject({
+      pending: 3,
+      processing: 0,
+      failed: 0,
+      completed: 0,
+    });
+    expect(reopened.inspectEntries().map(({ envelopeId, status }) => ({
+      envelopeId,
+      status,
+    }))).toEqual([
+      { envelopeId: "processing-entry", status: "pending" },
+      { envelopeId: "pending-entry-1", status: "pending" },
+      { envelopeId: "pending-entry-2", status: "pending" },
+    ]);
+    await reopened.close();
+    expect(start).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+    expect(start).not.toHaveBeenCalled();
+  });
+
+  it("fences maintenance commands while another channel instance holds the serving lease", async () => {
+    const dataDirectory = temporaryDirectory();
+    let releaseDispatch!: () => void;
+    const dispatchGate = new Promise<void>((resolve) => { releaseDispatch = resolve; });
+    const firstSocket = durableAckSocket(dataDirectory);
+    const first = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async () => {
+          await dispatchGate;
+          return { status: "completed", text: "done" };
+        },
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => firstSocket.transport,
+      clientFactory: () => client(),
+    });
+    await first.start?.({ signal: new AbortController().signal });
+    await firstSocket.emit(message("leased-processing", "stay exclusive"));
+    await vi.waitFor(async () => {
+      expect(await first.health?.({ signal: new AbortController().signal })).toMatchObject({
+        details: { processingEvents: 1 },
+      });
+    });
+
+    const secondStart = vi.fn<SlackSocketTransport["start"]>();
+    const secondDispatch = vi.fn<ChannelHost["dispatch"]>(async () => ({
+      status: "completed",
+    }));
+    const second = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        secondDispatch,
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => ({ start: secondStart, async stop() {} }),
+      clientFactory: () => client(),
+    });
+    const inspect = second.commands?.find(
+      (command) => command.name === "channel-slack:inbox-inspect",
+    );
+    const requeue = second.commands?.find(
+      (command) => command.name === "channel-slack:inbox-requeue",
+    );
+    if (inspect === undefined || requeue === undefined) {
+      throw new Error("Expected Slack inbox maintenance commands.");
+    }
+    const commandContext = {
+      signal: new AbortController().signal,
+      logger: logger(),
+    };
+    await expect(inspect.run({}, commandContext))
+      .rejects.toThrow(/in use by a serving channel|stop it before maintenance/iu);
+    await expect(requeue.run(
+      { envelopeId: "leased-processing", confirm: true },
+      commandContext,
+    )).rejects.toThrow(/in use by a serving channel|stop it before maintenance/iu);
+    expect(secondStart).not.toHaveBeenCalled();
+    expect(secondDispatch).not.toHaveBeenCalled();
+
+    releaseDispatch();
+    await vi.waitFor(async () => {
+      expect(await first.health?.({ signal: new AbortController().signal })).toMatchObject({
+        details: { processingEvents: 0, completedReceipts: 1 },
+      });
+    });
+    await first.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+    await expect(inspect.run({}, commandContext)).resolves.toEqual({ entries: [] });
+    await second.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
+  it("recovers the cross-process inbox lease after its owner is killed", async () => {
+    const dataDirectory = temporaryDirectory();
+    const seed = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async () => ({ status: "completed" }),
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => ({ async start() {}, async stop() {} }),
+      clientFactory: () => client(),
+    });
+    await seed.start?.({ signal: new AbortController().signal });
+    await seed.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+
+    const child = spawn(process.execPath, [
+      "-e",
+      [
+        "const { DatabaseSync } = require('node:sqlite');",
+        "const database = new DatabaseSync(process.argv[1], { timeout: 0 });",
+        "database.exec('PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;');",
+        "process.stdout.write('locked\\n');",
+        "setInterval(() => undefined, 1_000);",
+      ].join(""),
+      join(dataDirectory, ".mono-agent-slack-inbox.lease.sqlite"),
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let childOutput = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { childOutput += chunk; });
+    child.stderr.on("data", (chunk: string) => { childOutput += chunk; });
+
+    try {
+      await vi.waitFor(() => {
+        expect(childOutput).toContain("locked");
+        expect(child.exitCode).toBeNull();
+      });
+      const maintenance = createSlackChannel({
+        context: context(
+          parseSlackConfig(CONFIG),
+          async () => ({ status: "completed" }),
+          {},
+          dataDirectory,
+        ),
+        socketFactory: () => ({ async start() {}, async stop() {} }),
+        clientFactory: () => client(),
+      });
+      const inspect = maintenance.commands?.find(
+        (command) => command.name === "channel-slack:inbox-inspect",
+      );
+      if (inspect === undefined) throw new Error("Expected Slack inbox inspect command.");
+      const commandContext = {
+        signal: new AbortController().signal,
+        logger: logger(),
+      };
+      await expect(inspect.run({}, commandContext))
+        .rejects.toThrow(/in use by a serving channel|stop it before maintenance/iu);
+
+      const exited = once(child, "exit");
+      child.kill("SIGKILL");
+      await exited;
+      await expect(inspect.run({}, commandContext)).resolves.toEqual({ entries: [] });
+      await maintenance.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      });
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
+        child.kill("SIGKILL");
+        await exited;
+      }
+    }
+  });
+
+  it("acquires the maintenance lease before reading or validating inbox state", async () => {
+    const dataDirectory = temporaryDirectory();
+    const seed = createSlackChannel({
+      context: context(
+        parseSlackConfig(CONFIG),
+        async () => ({ status: "completed" }),
+        {},
+        dataDirectory,
+      ),
+      socketFactory: () => ({ async start() {}, async stop() {} }),
+      clientFactory: () => client(),
+    });
+    await seed.start?.({ signal: new AbortController().signal });
+    await seed.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+    await writeFile(join(dataDirectory, "inbox-v1.json"), "invalid state payload\n");
+
+    const child = spawn(process.execPath, [
+      "-e",
+      [
+        "const { DatabaseSync } = require('node:sqlite');",
+        "const database = new DatabaseSync(process.argv[1], { timeout: 0 });",
+        "database.exec('PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;');",
+        "process.stdout.write('locked\\n');",
+        "setInterval(() => undefined, 1_000);",
+      ].join(""),
+      join(dataDirectory, ".mono-agent-slack-inbox.lease.sqlite"),
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let childOutput = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => { childOutput += chunk; });
+    child.stderr.on("data", (chunk: string) => { childOutput += chunk; });
+
+    try {
+      await vi.waitFor(() => {
+        expect(childOutput).toContain("locked");
+        expect(child.exitCode).toBeNull();
+      });
+      const maintenance = createSlackChannel({
+        context: context(
+          parseSlackConfig(CONFIG),
+          async () => ({ status: "completed" }),
+          {},
+          dataDirectory,
+        ),
+        socketFactory: () => ({ async start() {}, async stop() {} }),
+        clientFactory: () => client(),
+      });
+      const inspect = maintenance.commands?.find(
+        (command) => command.name === "channel-slack:inbox-inspect",
+      );
+      if (inspect === undefined) throw new Error("Expected Slack inbox inspect command.");
+      const commandContext = {
+        signal: new AbortController().signal,
+        logger: logger(),
+      };
+
+      await expect(inspect.run({}, commandContext))
+        .rejects.toThrow(/in use by a serving channel|stop it before maintenance/iu);
+
+      const exited = once(child, "exit");
+      child.kill("SIGKILL");
+      await exited;
+      await expect(inspect.run({}, commandContext))
+        .rejects.toThrow(/state is not valid JSON/iu);
+      await maintenance.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      });
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        const exited = once(child, "exit");
+        child.kill("SIGKILL");
+        await exited;
+      }
+    }
+  });
+
   it("fails closed and retains an explicit failed record when queued processing becomes ambiguous", async () => {
     const dataDirectory = temporaryDirectory();
     const socket = durableAckSocket(dataDirectory);
@@ -1850,6 +2549,10 @@ describe("slack channel", () => {
     });
     await expect(restarted.start?.({ signal: new AbortController().signal })).rejects.toThrow(/operator|blocked|failed|recovery/iu);
     expect(restarted.running).toBe(false);
+    await expect(restarted.stop?.({
+      signal: new AbortController().signal,
+      reason: "startup-failed",
+    })).resolves.toBeUndefined();
   });
 
   it("reports an unexpected Socket Mode error as stopped and unhealthy", async () => {
@@ -1925,6 +2628,13 @@ function context(config: ReturnType<typeof parseSlackConfig>, dispatch: ChannelH
   return { instanceId: "slack", config, provenance: {}, configDirectory: "/config", workspaceDirectory: "/workspace", dataDirectory, logger: logger(), host, signal: new AbortController().signal };
 }
 function logger(): ModuleLogger { return { debug() {}, info() {}, warn() {}, error() {} }; }
+
+async function waitUntilAborted(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    signal.addEventListener("abort", () => { resolve(); }, { once: true });
+  });
+}
 
 function temporaryDirectory(): string {
   const path = mkdtempSync(join(tmpdir(), "mono-agent-slack-"));

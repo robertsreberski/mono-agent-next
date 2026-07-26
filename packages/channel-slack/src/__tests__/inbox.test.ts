@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: MIT
-import { mkdtemp, chmod, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, chmod, mkdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { SlackInbox } from "../inbox.js";
+import { acquireSlackInboxLease } from "../inbox-lease.js";
 import type {
   SlackActionEvent,
   SlackMessageEvent,
@@ -13,12 +16,19 @@ import type {
 } from "../socket.js";
 
 const temporaryDirectories: string[] = [];
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
 describe("SlackInbox", () => {
+  it("reports an absent inbox without creating maintenance state", async () => {
+    const directory = await dataDirectory();
+    await expect(SlackInbox.openExisting(directory)).resolves.toBeUndefined();
+    await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("persists pending work atomically with owner-private state and reopens it", async () => {
     const directory = await dataDirectory();
     const inbox = await SlackInbox.open(directory);
@@ -32,6 +42,128 @@ describe("SlackInbox", () => {
     const reopened = await SlackInbox.open(directory);
     expect(reopened.snapshot()).toMatchObject({ pending: 1, processing: 0, failed: 0, completed: 0 });
     await reopened.close();
+  });
+
+  it("binds maintenance discovery, lease, and open to one directory identity", async () => {
+    const root = await temporaryRoot();
+    const activeDirectory = join(root, "active");
+    const replacementDirectory = join(root, "replacement");
+    const displacedDirectory = join(root, "displaced");
+    const active = await SlackInbox.open(activeDirectory);
+    await active.enqueue(event("E-original"));
+    await active.close();
+    await (await acquireSlackInboxLease(activeDirectory)).release();
+    const replacement = await SlackInbox.open(replacementDirectory);
+    await replacement.close();
+    await (await acquireSlackInboxLease(replacementDirectory)).release();
+    const replacementPayload = "replacement B private payload must not be read or changed\n";
+    const replacementStatePath = join(replacementDirectory, "inbox-v1.json");
+    await writeFile(replacementStatePath, replacementPayload);
+
+    const discovered = await SlackInbox.discoverExistingDirectory(activeDirectory);
+    if (discovered === undefined) throw new Error("Expected the active Slack inbox.");
+    let swappedDuringLock = false;
+    let replacementLeaseAcquired = false;
+    try {
+      await expect(acquireSlackInboxLease(
+        discovered.directory,
+        undefined,
+        discovered,
+        {
+          async afterAnchorOpen() {
+            await rename(activeDirectory, displacedDirectory);
+            await rename(replacementDirectory, activeDirectory);
+            swappedDuringLock = true;
+          },
+          async afterDescriptorLock() {
+            const replacementLease = await acquireSlackInboxLease(activeDirectory);
+            replacementLeaseAcquired = true;
+            await replacementLease.release();
+          },
+        },
+      )).rejects.toThrow(/lease validation failed/iu);
+      expect(replacementLeaseAcquired).toBe(true);
+      await expect(readFile(join(activeDirectory, "inbox-v1.json"), "utf8"))
+        .resolves.toBe(replacementPayload);
+    } finally {
+      if (swappedDuringLock) {
+        await rename(activeDirectory, replacementDirectory);
+        await rename(displacedDirectory, activeDirectory);
+      }
+    }
+
+    const lease = await acquireSlackInboxLease(
+      discovered.directory,
+      undefined,
+      discovered,
+    );
+    let activeDisplaced = false;
+    let replacementInstalled = false;
+    try {
+      await rename(activeDirectory, displacedDirectory);
+      activeDisplaced = true;
+      await rename(replacementDirectory, activeDirectory);
+      replacementInstalled = true;
+
+      const replacementLease = await acquireSlackInboxLease(activeDirectory);
+      await replacementLease.release();
+      await expect(SlackInbox.openExisting(
+        discovered.directory,
+        undefined,
+        discovered,
+      )).rejects.toMatchObject({
+        code: "unsafe-path",
+        message: "Slack durable inbox directory identity changed.",
+      });
+      await expect(readFile(join(activeDirectory, "inbox-v1.json"), "utf8"))
+        .resolves.toBe(replacementPayload);
+    } finally {
+      if (replacementInstalled) await rename(activeDirectory, replacementDirectory);
+      if (activeDisplaced) await rename(displacedDirectory, activeDirectory);
+      await lease.release();
+    }
+
+    await expect(readFile(replacementStatePath, "utf8")).resolves.toBe(replacementPayload);
+    const reopened = await SlackInbox.openExisting(activeDirectory);
+    expect(reopened?.inspectEntries()).toEqual([
+      expect.objectContaining({ envelopeId: "E-original", status: "pending" }),
+    ]);
+    await reopened?.close();
+  });
+
+  it("retains the OS lease across same-process discovery and contention", async () => {
+    const directory = await dataDirectory();
+    const inbox = await SlackInbox.open(directory);
+    await inbox.close();
+    const lease = await acquireSlackInboxLease(directory);
+    try {
+      const discovered = await SlackInbox.discoverExistingDirectory(directory);
+      if (discovered === undefined) throw new Error("Expected the Slack inbox.");
+      await expect(acquireSlackInboxLease(
+        discovered.directory,
+        undefined,
+        discovered,
+      )).rejects.toThrow(/in use/iu);
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        "-e",
+        [
+          "const { DatabaseSync } = require('node:sqlite');",
+          "const database = new DatabaseSync(process.argv[1], { timeout: 0 });",
+          "try {",
+          " database.exec('PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;');",
+          " process.stdout.write('acquired');",
+          " database.exec('ROLLBACK;');",
+          "} catch (error) {",
+          " process.stdout.write(/busy|locked/i.test(String(error)) ? 'busy' : 'unexpected');",
+          "} finally { database.close(); }",
+        ].join(""),
+        join(directory, ".mono-agent-slack-inbox.lease.sqlite"),
+      ], { encoding: "utf8" });
+      expect(stdout).toBe("busy");
+    } finally {
+      await lease.release();
+    }
   });
 
   it("retains completed receipts and deduplicates across reopen", async () => {
@@ -107,6 +239,41 @@ describe("SlackInbox", () => {
     await inbox.complete("E-control-2");
     expect(inbox.snapshot()).toMatchObject({ pending: 0, processing: 0, completed: 4 });
     await inbox.close();
+  });
+
+  it("atomically requeues both graceful-shutdown lanes without disturbing pending order", async () => {
+    const directory = await dataDirectory();
+    const inbox = await SlackInbox.open(directory);
+    await inbox.enqueue(event("E-primary"));
+    await inbox.enqueue(action("E-control"));
+    await inbox.enqueue(event("E-pending"));
+    await inbox.claimNextPrimary(controlEligible);
+    await inbox.claimNextControl(controlEligible);
+
+    await expect(inbox.requeueProcessingForShutdown([
+      "E-primary",
+      "E-control",
+    ])).resolves.toBe(2);
+    expect(inbox.inspectEntries()).toEqual([
+      expect.objectContaining({ envelopeId: "E-primary", status: "pending" }),
+      expect.objectContaining({ envelopeId: "E-control", status: "pending" }),
+      expect.objectContaining({ envelopeId: "E-pending", status: "pending" }),
+    ]);
+    expect(inbox.inspectEntries().every((entry) => entry.lane === undefined)).toBe(true);
+    await inbox.close();
+
+    const reopened = await SlackInbox.open(directory);
+    expect(reopened.snapshot()).toMatchObject({
+      pending: 3,
+      processing: 0,
+      failed: 0,
+    });
+    expect(reopened.snapshot().blocked).toBeUndefined();
+    await expect(reopened.claimNextPrimary(controlEligible)).resolves.toMatchObject({
+      envelopeId: "E-primary",
+    });
+    await reopened.release("E-primary");
+    await reopened.close();
   });
 
   it("refuses a second control lane and blocks restart on two stranded lanes", async () => {

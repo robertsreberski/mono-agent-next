@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath } from "node:fs/promises";
+import { constants, type Stats } from "node:fs";
+import { lstat, mkdir, open, realpath, type FileHandle } from "node:fs/promises";
 import { basename, dirname, join, parse, resolve } from "node:path";
 
 import {
@@ -8,12 +8,25 @@ import {
   atomicReplaceOwnerPrivateFile,
   createOwnerPrivateFile,
   ensureOwnerPrivateDirectory,
+  inspectOwnerPrivateDirectory,
   inspectOwnerPrivateFile,
-  readOwnerPrivateFile,
   type OwnerPrivatePathIdentity,
 } from "@mono-agent/module-sdk";
 
-import { boundedString, cloneEvent, exactKeys, hasCode, record, sameIdentity, throwIfAborted, validateEnvelopeId, validEnvelopeId, validTimestamp } from "./inbox-values.js";
+import { inspectSlackInboxLeaseMetadata } from "./inbox-lease.js";
+import {
+  boundedString,
+  cloneEvent,
+  exactKeys,
+  hasCode,
+  record,
+  sameIdentity,
+  SLACK_INBOX_LEASE_FILE,
+  throwIfAborted,
+  validateEnvelopeId,
+  validEnvelopeId,
+  validTimestamp,
+} from "./inbox-values.js";
 import type { SlackRemoteFile, SlackSocketEvent } from "./socket.js";
 
 export const SLACK_INBOX_SCHEMA_VERSION = 1;
@@ -35,10 +48,24 @@ interface SlackInboxEntry {
   readonly event: SlackSocketEvent;
 }
 
+export interface SlackInboxEntrySummary {
+  readonly envelopeId: string;
+  readonly status: SlackInboxEntryStatus;
+  readonly lane?: "primary" | "control";
+  readonly admittedAt: string;
+}
+
 interface SlackInboxState {
   readonly schemaVersion: 1;
   readonly entries: readonly SlackInboxEntry[];
   readonly receipts: readonly string[];
+}
+
+interface OpenedSlackInbox {
+  readonly directory: string;
+  readonly state: SlackInboxState;
+  readonly identity: OwnerPrivatePathIdentity;
+  readonly directoryIdentity: OwnerPrivatePathIdentity;
 }
 
 export interface SlackInboxSnapshot {
@@ -47,6 +74,14 @@ export interface SlackInboxSnapshot {
   readonly failed: number;
   readonly completed: number;
   readonly blocked?: string;
+}
+
+export interface SlackInboxDirectory {
+  readonly directory: string;
+  readonly identity: OwnerPrivatePathIdentity;
+  readonly markerIdentity?: OwnerPrivatePathIdentity;
+  readonly stateIdentity?: OwnerPrivatePathIdentity;
+  readonly leaseIdentity?: OwnerPrivatePathIdentity;
 }
 
 export type SlackInboxErrorCode =
@@ -73,6 +108,7 @@ export class SlackInbox {
   readonly statePath: string;
   private state: SlackInboxState;
   private identity: OwnerPrivatePathIdentity;
+  private readonly directoryIdentity: OwnerPrivatePathIdentity;
   private readonly recoveryBlocked: string | undefined;
   private tail = Promise.resolve();
   private closing = false;
@@ -83,39 +119,28 @@ export class SlackInbox {
     directory: string,
     state: SlackInboxState,
     identity: OwnerPrivatePathIdentity,
+    directoryIdentity: OwnerPrivatePathIdentity,
   ) {
     this.directory = directory;
     this.statePath = join(directory, STATE_FILE);
     this.state = state;
     this.identity = identity;
+    this.directoryIdentity = directoryIdentity;
     this.recoveryBlocked = blockedReason(state);
   }
 
   static async open(dataDirectory: string, signal?: AbortSignal): Promise<SlackInbox> {
+    const prepared = await SlackInbox.prepareForServing(dataDirectory, signal);
+    return await SlackInbox.openPrepared(prepared, signal);
+  }
+
+  static async prepareForServing(
+    dataDirectory: string,
+    signal?: AbortSignal,
+  ): Promise<SlackInboxDirectory> {
     try {
       const directory = await prepareDirectory(resolve(dataDirectory), signal);
-      await prepareMarker(directory, signal);
-      const statePath = join(directory, STATE_FILE);
-      let loaded: { readonly state: SlackInboxState; readonly identity: OwnerPrivatePathIdentity };
-      try {
-        loaded = await loadState(statePath, signal);
-      } catch (error) {
-        if (!(error instanceof OwnerPrivatePathError) || error.code !== "missing") throw error;
-        try {
-          const identity = await createOwnerPrivateFile(
-            statePath,
-            serializeState(emptyState()),
-            signal === undefined ? {} : { signal },
-          );
-          loaded = { state: emptyState(), identity };
-        } catch (createError) {
-          if (!(createError instanceof OwnerPrivatePathError) || createError.code !== "already_exists") {
-            throw createError;
-          }
-          loaded = await loadState(statePath, signal);
-        }
-      }
-      return new SlackInbox(directory, loaded.state, loaded.identity);
+      return await inspectDirectorySnapshot(directory, signal);
     } catch (error) {
       if (error instanceof SlackInboxError) throw error;
       if (error instanceof OwnerPrivatePathError) {
@@ -123,6 +148,111 @@ export class SlackInbox {
       }
       throw new SlackInboxError("corrupt", "Slack durable inbox could not be opened safely.", error);
     }
+  }
+
+  static async openPrepared(
+    prepared: SlackInboxDirectory,
+    signal?: AbortSignal,
+  ): Promise<SlackInbox> {
+    try {
+      const opened = await openSnapshot(prepared, true, signal);
+      if (opened === undefined) {
+        throw new SlackInboxError("corrupt", "Slack durable inbox was not initialized.");
+      }
+      return SlackInbox.fromOpened(opened);
+    } catch (error) {
+      if (error instanceof SlackInboxError) throw error;
+      if (error instanceof OwnerPrivatePathError) {
+        throw new SlackInboxError("unsafe-path", "Slack durable inbox path validation failed.", error);
+      }
+      throw new SlackInboxError("corrupt", "Slack durable inbox could not be opened safely.", error);
+    }
+  }
+
+  static async openExisting(
+    dataDirectory: string,
+    signal?: AbortSignal,
+    expected?: SlackInboxDirectory,
+  ): Promise<SlackInbox | undefined> {
+    try {
+      if (expected !== undefined) {
+        if (resolve(dataDirectory) !== expected.directory) {
+          throw new SlackInboxError(
+            "unsafe-path",
+            "Slack durable inbox discovery path changed before open.",
+          );
+        }
+        const opened = await openSnapshot(expected, false, signal);
+        return opened === undefined ? undefined : SlackInbox.fromOpened(opened);
+      }
+      const requested = resolve(dataDirectory);
+      throwIfAborted(signal);
+      const requestedInfo = await lstat(requested).catch((error: unknown) => {
+        if (hasCode(error, "ENOENT")) return undefined;
+        throw error;
+      });
+      if (requestedInfo === undefined) return undefined;
+      if (!requestedInfo.isDirectory() || requestedInfo.isSymbolicLink()) {
+        throw new SlackInboxError(
+          "unsafe-path",
+          "Slack durable inbox must be an owner-private directory.",
+        );
+      }
+      const directory = await canonicalizeParent(requested);
+      const opened = await openSnapshot(
+        await inspectDirectorySnapshot(directory, signal),
+        false,
+        signal,
+      );
+      return opened === undefined ? undefined : SlackInbox.fromOpened(opened);
+    } catch (error) {
+      if (error instanceof SlackInboxError) throw error;
+      if (error instanceof OwnerPrivatePathError) {
+        throw new SlackInboxError("unsafe-path", "Slack durable inbox path validation failed.", error);
+      }
+      throw new SlackInboxError("corrupt", "Slack durable inbox could not be opened safely.", error);
+    }
+  }
+
+  static async discoverExistingDirectory(
+    dataDirectory: string,
+    signal?: AbortSignal,
+  ): Promise<SlackInboxDirectory | undefined> {
+    try {
+      const requested = resolve(dataDirectory);
+      throwIfAborted(signal);
+      const requestedInfo = await lstat(requested).catch((error: unknown) => {
+        if (hasCode(error, "ENOENT")) return undefined;
+        throw error;
+      });
+      if (requestedInfo === undefined) return undefined;
+      if (!requestedInfo.isDirectory() || requestedInfo.isSymbolicLink()) {
+        throw new SlackInboxError(
+          "unsafe-path",
+          "Slack durable inbox must be an owner-private directory.",
+        );
+      }
+      const directory = await canonicalizeParent(requested);
+      const discovered = await inspectDirectorySnapshot(directory, signal);
+      return discovered.markerIdentity !== undefined || discovered.stateIdentity !== undefined
+        ? discovered
+        : undefined;
+    } catch (error) {
+      if (error instanceof SlackInboxError) throw error;
+      if (error instanceof OwnerPrivatePathError) {
+        throw new SlackInboxError("unsafe-path", "Slack durable inbox path validation failed.", error);
+      }
+      throw new SlackInboxError("corrupt", "Slack durable inbox could not be discovered safely.", error);
+    }
+  }
+
+  private static fromOpened(opened: OpenedSlackInbox): SlackInbox {
+    return new SlackInbox(
+      opened.directory,
+      opened.state,
+      opened.identity,
+      opened.directoryIdentity,
+    );
   }
 
   enqueue(event: SlackSocketEvent, signal?: AbortSignal): Promise<"enqueued" | "duplicate"> {
@@ -188,6 +318,37 @@ export class SlackInbox {
     }, signal);
   }
 
+  requeueProcessingForShutdown(
+    envelopeIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<number> {
+    if (envelopeIds.length > 2 || new Set(envelopeIds).size !== envelopeIds.length) {
+      throw new TypeError(
+        "Slack graceful shutdown recovery accepts at most two unique envelope ids.",
+      );
+    }
+    for (const envelopeId of envelopeIds) validateEnvelopeId(envelopeId);
+    const selected = new Set(envelopeIds);
+    return this.mutate((current) => {
+      const processing = current.entries.filter(
+        (entry) => entry.status === "processing" && selected.has(entry.envelopeId),
+      );
+      if (processing.length === 0) {
+        return { next: current, result: 0, write: false };
+      }
+      const entries = current.entries.map((entry) => {
+        if (entry.status !== "processing" || !selected.has(entry.envelopeId)) return entry;
+        const { lane: _lane, ...released } = entry;
+        return { ...released, status: "pending" as const };
+      });
+      return {
+        next: { ...current, entries },
+        result: processing.length,
+        write: true,
+      };
+    }, signal);
+  }
+
   complete(envelopeId: string, signal?: AbortSignal): Promise<void> {
     validateEnvelopeId(envelopeId);
     return this.mutate((current) => {
@@ -249,6 +410,15 @@ export class SlackInbox {
       completed: this.state.receipts.length,
       ...(blocked === undefined ? {} : { blocked }),
     });
+  }
+
+  inspectEntries(): readonly SlackInboxEntrySummary[] {
+    return Object.freeze(this.state.entries.map((entry) => Object.freeze({
+      envelopeId: entry.envelopeId,
+      status: entry.status,
+      ...(entry.lane === undefined ? {} : { lane: entry.lane }),
+      admittedAt: entry.admittedAt,
+    })));
   }
 
   async close(): Promise<void> {
@@ -317,6 +487,7 @@ export class SlackInbox {
       validateState(change.next);
       const encoded = serializeState(change.next);
       try {
+        await verifyDirectoryIdentity(this.directory, this.directoryIdentity, signal);
         const identity = await atomicReplaceOwnerPrivateFile(
           this.statePath,
           encoded,
@@ -325,6 +496,7 @@ export class SlackInbox {
             ...(signal === undefined ? {} : { signal }),
           },
         );
+        await verifyDirectoryIdentity(this.directory, this.directoryIdentity, signal);
         this.state = freezeState(change.next);
         this.identity = identity;
         return change.result;
@@ -418,48 +590,113 @@ async function syncDirectoryPath(path: string): Promise<void> {
   }
 }
 
-async function prepareMarker(directory: string, signal?: AbortSignal): Promise<void> {
-  const path = join(directory, MARKER_FILE);
+async function inspectDirectorySnapshot(
+  directory: string,
+  signal?: AbortSignal,
+): Promise<SlackInboxDirectory> {
+  const identity = await inspectOwnerPrivateDirectory(
+    directory,
+    signal === undefined ? {} : { signal },
+  );
+  const markerIdentity = await inspectOptionalFile(join(directory, MARKER_FILE), signal);
+  const stateIdentity = await inspectOptionalFile(join(directory, STATE_FILE), signal);
+  const leaseIdentity = await inspectSlackInboxLeaseMetadata(
+    join(directory, SLACK_INBOX_LEASE_FILE),
+    signal,
+  );
+  await verifyDirectoryIdentity(directory, identity, signal);
+  return Object.freeze({
+    directory,
+    identity,
+    ...(markerIdentity === undefined ? {} : { markerIdentity }),
+    ...(stateIdentity === undefined ? {} : { stateIdentity }),
+    ...(leaseIdentity === undefined ? {} : { leaseIdentity }),
+  });
+}
+
+async function inspectOptionalFile(
+  path: string,
+  signal?: AbortSignal,
+): Promise<OwnerPrivatePathIdentity | undefined> {
   try {
-    const contents = new TextDecoder().decode(await readOwnerPrivateFile(
-      path,
-      { maxBytes: 256, ...(signal === undefined ? {} : { signal }) },
-    ));
-    if (contents !== MARKER_CONTENT) {
-      throw new SlackInboxError("corrupt", "Slack durable inbox ownership marker is invalid.");
-    }
+    return await inspectOwnerPrivateFile(path, signal === undefined ? {} : { signal });
   } catch (error) {
-    if (!(error instanceof OwnerPrivatePathError) || error.code !== "missing") throw error;
-    try {
-      await createOwnerPrivateFile(path, MARKER_CONTENT, signal === undefined ? {} : { signal });
-    } catch (createError) {
-      if (!(createError instanceof OwnerPrivatePathError) || createError.code !== "already_exists") {
-        throw createError;
-      }
-      const contents = new TextDecoder().decode(await readOwnerPrivateFile(
-        path,
-        { maxBytes: 256, ...(signal === undefined ? {} : { signal }) },
-      ));
-      if (contents !== MARKER_CONTENT) {
-        throw new SlackInboxError("corrupt", "Slack durable inbox ownership marker is invalid.");
-      }
-    }
+    if (error instanceof OwnerPrivatePathError && error.code === "missing") return undefined;
+    throw error;
   }
 }
 
-async function loadState(
-  path: string,
+async function openSnapshot(
+  snapshot: SlackInboxDirectory,
+  createMissing: boolean,
+  signal?: AbortSignal,
+): Promise<OpenedSlackInbox | undefined> {
+  const { directory, identity: directoryIdentity } = snapshot;
+  await verifyDirectoryIdentity(directory, directoryIdentity, signal);
+  const markerPath = join(directory, MARKER_FILE);
+  const statePath = join(directory, STATE_FILE);
+  const markerIdentity = snapshot.markerIdentity;
+  const stateIdentity = snapshot.stateIdentity;
+
+  if (markerIdentity === undefined) {
+    await assertStillMissing(markerPath, signal);
+    if (!createMissing) {
+      if (stateIdentity === undefined) {
+        await assertStillMissing(statePath, signal);
+        await verifyDirectoryIdentity(directory, directoryIdentity, signal);
+        return undefined;
+      }
+      throw new SlackInboxError(
+        "corrupt",
+        "Slack durable inbox ownership marker is missing.",
+      );
+    }
+    await createOwnerPrivateFile(
+      markerPath,
+      MARKER_CONTENT,
+      signal === undefined ? {} : { signal },
+    );
+  } else {
+    const marker = new TextDecoder().decode(await readExactOwnerPrivateFile(
+      markerIdentity,
+      256,
+      signal,
+    ));
+    if (marker !== MARKER_CONTENT) {
+      throw new SlackInboxError("corrupt", "Slack durable inbox ownership marker is invalid.");
+    }
+  }
+  await verifyDirectoryIdentity(directory, directoryIdentity, signal);
+
+  let loaded: { readonly state: SlackInboxState; readonly identity: OwnerPrivatePathIdentity };
+  if (stateIdentity === undefined) {
+    await assertStillMissing(statePath, signal);
+    if (!createMissing) {
+      throw new SlackInboxError("corrupt", "Slack durable inbox state file is missing.");
+    }
+    const identity = await createOwnerPrivateFile(
+      statePath,
+      serializeState(emptyState()),
+      signal === undefined ? {} : { signal },
+    );
+    loaded = { state: emptyState(), identity };
+  } else {
+    loaded = await loadExactState(stateIdentity, signal);
+  }
+  await verifyDirectoryIdentity(directory, directoryIdentity, signal);
+  return Object.freeze({
+    directory,
+    state: loaded.state,
+    identity: loaded.identity,
+    directoryIdentity,
+  });
+}
+
+async function loadExactState(
+  identity: OwnerPrivatePathIdentity,
   signal?: AbortSignal,
 ): Promise<{ readonly state: SlackInboxState; readonly identity: OwnerPrivatePathIdentity }> {
-  const before = await inspectOwnerPrivateFile(path, signal === undefined ? {} : { signal });
-  const bytes = await readOwnerPrivateFile(path, {
-    maxBytes: MAX_SLACK_INBOX_BYTES,
-    ...(signal === undefined ? {} : { signal }),
-  });
-  const after = await inspectOwnerPrivateFile(path, signal === undefined ? {} : { signal });
-  if (!sameIdentity(before, after)) {
-    throw new SlackInboxError("unsafe-path", "Slack durable inbox changed while it was being opened.");
-  }
+  const bytes = await readExactOwnerPrivateFile(identity, MAX_SLACK_INBOX_BYTES, signal);
   let candidate: unknown;
   try {
     candidate = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
@@ -467,7 +704,151 @@ async function loadState(
     throw new SlackInboxError("corrupt", "Slack durable inbox state is not valid JSON.", error);
   }
   validateState(candidate);
-  return { state: freezeState(candidate), identity: after };
+  return { state: freezeState(candidate), identity };
+}
+
+async function readExactOwnerPrivateFile(
+  expected: OwnerPrivatePathIdentity,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  throwIfAborted(signal);
+  if (typeof constants.O_NOFOLLOW !== "number") {
+    throw new SlackInboxError("unsafe-path", "Slack durable inbox requires O_NOFOLLOW.");
+  }
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(expected.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const before = identityFromStat(expected.path, await handle.stat());
+    assertExactFileSnapshot(before, expected);
+    if (before.size > maxBytes) {
+      throw new SlackInboxError("corrupt", "Slack durable inbox file exceeds its byte limit.");
+    }
+    const bytes = await readAtMost(handle, expected.path, maxBytes, signal);
+    const after = identityFromStat(expected.path, await handle.stat());
+    if (!sameFileSnapshot(before, after)) {
+      throw new SlackInboxError(
+        "unsafe-path",
+        "Slack durable inbox file changed while it was being read.",
+      );
+    }
+    assertExactFileSnapshot(
+      identityFromStat(expected.path, await lstat(expected.path)),
+      expected,
+    );
+    throwIfAborted(signal);
+    return bytes;
+  } catch (error) {
+    if (error instanceof SlackInboxError) throw error;
+    throw new SlackInboxError(
+      "unsafe-path",
+      "Slack durable inbox file identity changed before it could be read.",
+      error,
+    );
+  } finally {
+    await handle?.close();
+  }
+}
+
+async function readAtMost(
+  handle: FileHandle,
+  path: string,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    throwIfAborted(signal);
+    const capacity = Math.min(64 * 1024, maxBytes - total + 1);
+    const chunk = new Uint8Array(capacity);
+    const { bytesRead } = await handle.read(chunk, 0, capacity, null);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+    if (total > maxBytes) {
+      throw new SlackInboxError("corrupt", `${path} exceeds its byte limit.`);
+    }
+    chunks.push(chunk.subarray(0, bytesRead));
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+async function assertStillMissing(path: string, signal?: AbortSignal): Promise<void> {
+  const current = await inspectOptionalFile(path, signal);
+  if (current !== undefined) {
+    throw new SlackInboxError(
+      "unsafe-path",
+      "Slack durable inbox file identity changed after discovery.",
+    );
+  }
+}
+
+function assertExactFileSnapshot(
+  actual: OwnerPrivatePathIdentity,
+  expected: OwnerPrivatePathIdentity,
+): void {
+  if (!sameFileSnapshot(actual, expected)) {
+    throw new SlackInboxError(
+      "unsafe-path",
+      "Slack durable inbox file identity changed after discovery.",
+    );
+  }
+}
+
+function identityFromStat(path: string, stat: Stats): OwnerPrivatePathIdentity {
+  if (!stat.isFile()) {
+    throw new SlackInboxError("unsafe-path", "Slack durable inbox entry is not a regular file.");
+  }
+  return Object.freeze({
+    path,
+    device: stat.dev,
+    inode: stat.ino,
+    uid: stat.uid,
+    mode: stat.mode & 0o777,
+    links: stat.nlink,
+    size: stat.size,
+  });
+}
+
+function sameFileSnapshot(
+  left: OwnerPrivatePathIdentity,
+  right: OwnerPrivatePathIdentity,
+): boolean {
+  return sameIdentity(left, right)
+    && left.uid === right.uid
+    && left.mode === right.mode
+    && left.links === right.links
+    && left.size === right.size;
+}
+
+function assertDirectoryIdentity(
+  actual: OwnerPrivatePathIdentity,
+  expected: OwnerPrivatePathIdentity | undefined,
+): void {
+  if (expected !== undefined && !sameIdentity(actual, expected)) {
+    throw new SlackInboxError(
+      "unsafe-path",
+      "Slack durable inbox directory identity changed.",
+    );
+  }
+}
+
+async function verifyDirectoryIdentity(
+  directory: string,
+  expected: OwnerPrivatePathIdentity,
+  signal?: AbortSignal,
+): Promise<void> {
+  const actual = await inspectOwnerPrivateDirectory(
+    directory,
+    signal === undefined ? {} : { signal },
+  );
+  assertDirectoryIdentity(actual, expected);
 }
 
 function validateState(value: unknown): asserts value is SlackInboxState {
