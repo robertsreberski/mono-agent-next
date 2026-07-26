@@ -47,6 +47,18 @@ function transportRequest() {
   };
 }
 
+const CLAUDE_CLI_CONTAINMENT_ARGS = Object.freeze([
+  "--print",
+  "--input-format", "text",
+  "--output-format", "stream-json",
+  "--verbose",
+  "--include-partial-messages",
+  "--permission-mode", "dontAsk",
+  "--setting-sources", "",
+  "--tools", "",
+  "--model", "claude-opus-4-8",
+]);
+
 describe("runtime-claude transports", () => {
   it("imports its module definition without loading the SDK or network", async () => {
     const fetch = vi.spyOn(globalThis, "fetch");
@@ -84,17 +96,29 @@ describe("runtime-claude transports", () => {
     expect(query).toHaveBeenCalledOnce();
   });
 
-  it("runs the CLI via direct argv/stdin and bounded fake JSONL", async () => {
+  it("runs the CLI with exact containment argv, direct stdin, and bounded fake JSONL", async () => {
     let child: FakeClaudeProcess | undefined;
     let systemPromptPath: string | undefined;
+    const responseSchema = {
+      type: "object",
+      properties: { answer: { type: "string" } },
+      required: ["answer"],
+    };
     const launch = vi.fn<SpawnProcess>((_command, args, options) => {
       expect(options.shell).toBe(false);
-      expect(args).toContain("--output-format");
       expect(args).not.toContain("private system instructions");
       const promptFileIndex = args.indexOf("--system-prompt-file");
       expect(promptFileIndex).toBeGreaterThan(-1);
       systemPromptPath = args[promptFileIndex + 1];
       expect(readFileSync(systemPromptPath as string, "utf8")).toBe("private system instructions");
+      expect(args).toEqual([
+        ...CLAUDE_CLI_CONTAINMENT_ARGS,
+        "--system-prompt-file", systemPromptPath,
+        "--resume", "cli-resume",
+        "--max-turns", "3",
+        "--effort", "high",
+        "--json-schema", JSON.stringify(responseSchema),
+      ]);
       child = new FakeClaudeProcess([
         { type: "stream_event", session_id: "cli-session", event: { type: "content_block_delta", delta: { type: "text_delta", text: "hello" } } },
         { type: "result", subtype: "success", session_id: "cli-session", result: "hello", usage: { input_tokens: 2, output_tokens: 1 } },
@@ -108,7 +132,14 @@ describe("runtime-claude transports", () => {
       maxStderrBytes: 4_096,
       spawnProcess: launch,
     });
-    const result = await transport.run({ ...transportRequest(), systemPrompt: "private system instructions" }, {
+    const result = await transport.run({
+      ...transportRequest(),
+      systemPrompt: "private system instructions",
+      sessionId: "cli-resume",
+      maxTurns: 3,
+      effort: "high",
+      responseSchema,
+    }, {
       text() {}, thinking() {}, session() {}, usage() {}, control() {},
     });
     expect(result).toMatchObject({ text: "hello", sessionId: "cli-session" });
@@ -116,6 +147,26 @@ describe("runtime-claude transports", () => {
     expect(systemPromptPath).toBeDefined();
     expect(existsSync(systemPromptPath as string)).toBe(false);
     expect(launch).toHaveBeenCalledWith("claude", expect.any(Array), expect.objectContaining({ shell: false }));
+  });
+
+  it("omits every optional CLI argv pair when request fields are absent", async () => {
+    const launch = vi.fn<SpawnProcess>((_command, args) => {
+      expect(args).toEqual(CLAUDE_CLI_CONTAINMENT_ARGS);
+      return new FakeClaudeProcess([
+        { type: "result", subtype: "success", session_id: "cli-session", result: "hello" },
+      ]);
+    });
+    const transport = createClaudeCliTransport({
+      binary: "claude",
+      timeoutMs: 1_000,
+      maxLineBytes: 16_384,
+      maxStderrBytes: 4_096,
+      spawnProcess: launch,
+    });
+    await expect(transport.run(transportRequest(), {
+      text() {}, thinking() {}, session() {}, usage() {}, control() {},
+    })).resolves.toMatchObject({ text: "hello", sessionId: "cli-session" });
+    expect(launch).toHaveBeenCalledOnce();
   });
 
   it("passes only operational and explicitly configured environment values", () => {

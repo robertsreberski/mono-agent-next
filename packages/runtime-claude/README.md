@@ -79,6 +79,11 @@ Native session ids are private to the exact runtime instance, model, and
 canonical conversation that created them. A mismatched continuation fails
 before either transport is invoked.
 
+Both transports disable filesystem setting sources and native tools. The CLI
+does so with explicit empty `--setting-sources` and `--tools` arguments, so
+ambient user, project, and local Claude settings cannot widen the selected
+runtime behavior.
+
 A provider-confirmed missing continuation uses the shared
 `runtime_session_unavailable` error code so Core can retire it without
 conflating provider loss with an invalid session envelope. Provider failures
