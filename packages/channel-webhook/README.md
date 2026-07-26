@@ -120,7 +120,13 @@ concurrent or retained retries join the same submission; the same key with a
 different raw body returns `409`. With durable Core state, the stable request id
 also makes a post-restart retry return the previously settled response without
 rerunning the model, while a changed body remains a `409` conflict. The
-route-local async polling record itself remains bounded process memory.
+route-local async polling record itself remains bounded process memory. A
+cancelled attempt is retryable rather than replayable: the next identical use
+of the key receives a new bounded attempt identity, keeps the same conversation,
+and runs again. This lets a client whose sync connection dropped retry the same
+key without reviving the cancelled durable request id. One retained key permits
+at most 10,000 attempts; exhausting that defensive ceiling returns
+`503 request_retry_capacity`.
 
 When `signatureSecret` is set, invocations must also carry
 `X-Mono-Agent-Signature: sha256=<hex>` computed over the exact raw request

@@ -250,6 +250,7 @@ function toChannelInboundRequest(
       webhook: {
         ...(request.routeName === undefined ? {} : { route: request.routeName }),
         bodySha256: request.bodySha256,
+        attempt: request.attempt,
       },
     },
   };
