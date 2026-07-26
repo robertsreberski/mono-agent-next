@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 import {
+  AgentConfigError,
   composeAgentConfigSchema,
   createAgentHost,
   diagnoseAgent,
@@ -134,9 +135,15 @@ export async function runCli(argv: readonly string[], io: CliIo = {}): Promise<n
     }
     const message = error instanceof Error ? error.message : String(error);
     if (wantsJson) {
-      resolvedIo.stderr(`${stringifyJson({ ok: false, error: message })}\n`);
+      resolvedIo.stderr(`${stringifyJson({
+        ok: false,
+        error: message,
+        ...(error instanceof AgentConfigError ? { issues: error.issues } : {}),
+      })}\n`);
     } else {
-      resolvedIo.stderr(`mono-agent: ${message}\n`);
+      resolvedIo.stderr(`mono-agent: ${message}\n${
+        error instanceof AgentConfigError ? renderIssues(error.issues) : ""
+      }`);
     }
     return 1;
   }

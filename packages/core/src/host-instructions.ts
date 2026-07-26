@@ -7,7 +7,7 @@ import {
   AGENT_INTERACTION_LIMITS, parseAskUserRequest,
   type AskUserAnswer, type AskUserRequest, type ConfigProvenanceMap, type Memory,
 } from "@mono-agent/module-sdk";
-import { decodeAuthorityText, readAuthorityFile } from "./authority-read.js";
+import { AuthorityReadError, decodeAuthorityText, readAuthorityFile } from "./authority-read.js";
 import { AgentConfigError, errorMessage } from "./errors.js";
 import { abortError, throwIfAborted } from "./host-lifecycle.js";
 import { snapshotMemoryRecallRecords } from "./host-transcript.js";
@@ -112,10 +112,13 @@ export async function readAuthorityText(
       requireSingleLink: true,
     }));
   } catch (error) {
-    throw new AgentConfigError(`Could not securely read ${path}`, [{
+    const overflow = error instanceof AuthorityReadError && error.code === "too_large";
+    throw new AgentConfigError(overflow
+      ? `Configured authority file exceeds its byte limit: ${path}`
+      : `Could not securely read ${path}`, [{
       path: issuePath,
       message: errorMessage(error),
-      code: "authority_read",
+      code: overflow ? "size" : "authority_read",
     }]);
   }
 }

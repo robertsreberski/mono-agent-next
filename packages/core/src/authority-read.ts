@@ -61,10 +61,11 @@ export async function readAuthorityFile(
     handle = await open(absolutePath, noFollowReadFlags());
     const before = await handle.stat({ bigint: true });
     validateRegularFile(absolutePath, before, requireSingleLink);
-    const bytes = await readMaxPlusOne(handle, absolutePath, maxBytes, options.signal);
+    const bytes = await readMaxPlusOne(handle, maxBytes, options.signal);
     const after = await handle.stat({ bigint: true });
     validateRegularFile(absolutePath, after, requireSingleLink);
-    if (!sameSnapshot(before, after) || after.size !== BigInt(bytes.byteLength)) {
+    if (!sameSnapshot(before, after)
+      || (bytes.byteLength <= maxBytes && after.size !== BigInt(bytes.byteLength))) {
       throw authorityError(
         "identity_changed",
         absolutePath,
@@ -75,6 +76,13 @@ export async function readAuthorityFile(
     throwIfAborted(options.signal);
     await assertPathIdentity(absolutePath, after, requireSingleLink);
     throwIfAborted(options.signal);
+    if (bytes.byteLength > maxBytes) {
+      throw authorityError(
+        "too_large",
+        absolutePath,
+        `${after.size.toString()} bytes exceeds ${String(maxBytes)}`,
+      );
+    }
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     return Object.freeze({
       source: Object.freeze({
@@ -115,7 +123,6 @@ export function decodeAuthorityText(snapshot: AuthorityFileSnapshot): string {
 }
 async function readMaxPlusOne(
   handle: FileHandle,
-  path: string,
   maxBytes: number,
   signal: AbortSignal | undefined,
 ): Promise<Uint8Array> {
@@ -129,9 +136,6 @@ async function readMaxPlusOne(
     if (bytesRead === 0) break;
     chunks.push(buffer.subarray(0, bytesRead));
     total += bytesRead;
-  }
-  if (total > maxBytes) {
-    throw authorityError("too_large", path, `Authority file exceeds ${maxBytes} bytes`);
   }
   const bytes = new Uint8Array(total);
   let offset = 0;

@@ -319,6 +319,7 @@ is an internal module behind it. None of these are public: the package maps only
 | --- | --- |
 | Load a validated agent config | `loadAgentConfig` |
 | Report validation issues without throwing | `validateAgentConfig` |
+| Inspect a thrown configuration failure | `AgentConfigError.issues` |
 | Generate the locked graph's schema | `composeAgentConfigSchema` |
 | Explain config ownership without leaking env values | `explainAgentConfig` |
 | Inspect the selected graph without starting it | `inspectAgent` |

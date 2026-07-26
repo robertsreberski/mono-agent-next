@@ -43,7 +43,10 @@ node packages/cli/dist/bin/mono-agent.js start --config ./mono-agent.config.json
 
 `start` runs in the foreground. Its first line is a JSON `started` event with
 the actual endpoints reported by selected channels. `SIGINT` and `SIGTERM`
-drain and stop the host before the command returns.
+drain and stop the host before the command returns. When startup raises an
+`AgentConfigError`, the CLI prints both its top-level message and every nested
+path-specific issue so byte-limit and other structured failures remain
+actionable.
 
 `doctor` combines strict Core validation with bounded diagnostics from only
 the selected typed modules. `auth`, `sandbox`, `runs`, and `memory` accept an

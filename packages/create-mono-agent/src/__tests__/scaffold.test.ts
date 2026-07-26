@@ -250,7 +250,7 @@ describe("project templates", () => {
     });
     expect(config).toMatchObject({
       context: {
-        skills: { roots: ["./skills"], load: "all", disclosure: "index", maxBytes: 96_000 },
+        skills: { roots: ["./skills"], load: "all", disclosure: "index", maxBytes: 256_000 },
       },
       policy: { tools: { default: "allow" } },
     });
