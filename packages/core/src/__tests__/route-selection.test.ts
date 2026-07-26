@@ -9,7 +9,11 @@
 
 import { describe, expect, it } from "vitest";
 
-import { assertConfiguredRoute, routeCandidates } from "../host-routing.js";
+import {
+  assertConfiguredRoute,
+  createRuntimeRouteValidationGrant,
+  routeCandidates,
+} from "../host-routing.js";
 import { AgentConfigError } from "../index.js";
 import type { AgentSubmitInput, LoadedAgentConfig } from "../types.js";
 
@@ -46,6 +50,38 @@ describe("per-turn route selection", () => {
     expect(() => assertConfiguredRoute(config, submit({
       model: "github-copilot:gemini-3.1-pro-preview",
     }))).not.toThrow();
+  });
+
+  it("exposes only a frozen synchronous validator with Core's exact defaulting", () => {
+    const grant = createRuntimeRouteValidationGrant(config);
+    const primary = grant.validate();
+    const modelOnly = grant.validate(undefined, "github-copilot:gemini-3.1-pro-preview");
+    const runtimeOnly = grant.validate("claude");
+    const invalid = grant.validate(undefined, "claude-opus-5");
+
+    expect(Object.isFrozen(grant)).toBe(true);
+    expect(primary).toEqual({
+      configured: true,
+      runtime: "pi",
+      model: "openai-codex:gpt-5.6-sol",
+    });
+    expect(modelOnly).toEqual({
+      configured: true,
+      runtime: "pi",
+      model: "github-copilot:gemini-3.1-pro-preview",
+    });
+    expect(runtimeOnly).toEqual({
+      configured: false,
+      runtime: "claude",
+      model: "openai-codex:gpt-5.6-sol",
+    });
+    expect(invalid).toEqual({
+      configured: false,
+      runtime: "pi",
+      model: "claude-opus-5",
+    });
+    expect(Object.isFrozen(primary)).toBe(true);
+    expect(Object.keys(grant)).toEqual(["validate"]);
   });
 
   it("rejects a model that exists in no configured route", () => {

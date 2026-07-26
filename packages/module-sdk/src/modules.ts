@@ -11,6 +11,22 @@ export interface ModuleHost {
   readonly grantedCapabilities: ReadonlySet<ModuleCapability>;
   getCapability<T = unknown>(name: ModuleCapability): T | undefined;
 }
+/**
+ * Opt-in provider-neutral host grant for validating one runtime/model override.
+ *
+ * The host applies the same defaulting as turn admission: an omitted runtime
+ * selects the primary runtime and an omitted model selects the primary model.
+ * The grant deliberately exposes no route catalog or wider agent config.
+ */
+export const HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION = "routing.validate.v1" as const;
+export interface RuntimeRouteValidationResult {
+  readonly configured: boolean;
+  readonly runtime: string;
+  readonly model: string;
+}
+export interface RuntimeRouteValidationGrant {
+  validate(runtime?: string, model?: string): RuntimeRouteValidationResult;
+}
 export interface ModuleCreateContext<TConfig, THost extends ModuleHost = ModuleHost> {
   readonly instanceId: string; readonly config: TConfig; readonly provenance: ConfigProvenanceMap;
   /** Absolute directory containing the loaded agent configuration. */

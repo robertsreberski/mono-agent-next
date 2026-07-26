@@ -863,7 +863,12 @@ async function proveScaffoldFirstTurns(scaffoldDirectory, providerBaseUrl, perso
     const renderedConfigPath = join(directory, "mono-agent.config.json");
     const renderedConfigSource = await readFile(renderedConfigPath, "utf8");
     const renderedConfig = JSON.parse(renderedConfigSource);
-    if (template === "personal") await writePersonalProofCron(directory);
+    if (template === "personal") {
+      await Promise.all([
+        writePersonalProofCron(directory),
+        writePersonalProofWebhookRoute(directory),
+      ]);
+    }
     const proofConfig = template === "personal"
       ? hermeticPersonalScaffoldConfig(renderedConfig, providerBaseUrl, personalOtlpEndpoint)
       : hermeticScaffoldConfig(renderedConfig, template, providerBaseUrl);
@@ -902,6 +907,9 @@ async function proveScaffoldFirstTurns(scaffoldDirectory, providerBaseUrl, perso
           )
           || parsed.telegramDeliveries !== 1
           || parsed.telegramCommandRegistrations !== 1
+          || parsed.telegramRouteValidation !== true
+          || parsed.routeLoadValidation?.webhook !== true
+          || parsed.routeLoadValidation?.cron !== true
           || parsed.personalSkillBytes !== PERSONAL_SKILL_PROOF_BYTES
           || JSON.stringify(parsed.channelIds) !== JSON.stringify([
             "openai-api",
@@ -928,7 +936,6 @@ id: morning-briefing
 expression: 30 7 * * *
 timezone: Europe/Rome
 runtime: pi
-model: packed-local:echo
 effort: high
 notify: telegram
 overlap: skip
@@ -937,6 +944,18 @@ maxRunMs: 300000
 
 Prepare a concise morning briefing from information already available in this workspace.
 Do not change files, contact external services, or perform any other side effect.
+`, "utf8");
+}
+
+async function writePersonalProofWebhookRoute(directory) {
+  await writeFile(join(directory, "webhook", "route-validation.md"), `---
+name: route-validation
+path: /webhook/route-validation
+mode: sync
+model: packed-local:echo
+---
+
+Prove that a model-only webhook route resolves against the primary runtime.
 `, "utf8");
 }
 
@@ -1072,7 +1091,7 @@ function hermeticPersonalScaffoldConfig(renderedConfig, providerBaseUrl, otlpEnd
 function scaffoldFirstTurnScenarioSource() {
   return String.raw`import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { createAgentHost } from "@mono-agent/core";
@@ -1096,6 +1115,8 @@ if (template === "personal") {
 const nativeFetch = globalThis.fetch;
 let telegramDeliveries = 0;
 let telegramCommandRegistrations = 0;
+let telegramUpdatesSent = false;
+const telegramMessages = [];
 if (template === "personal") globalThis.fetch = telegramFixtureFetch;
 let markerPath;
 let personalSkillBytes;
@@ -1121,6 +1142,11 @@ try {
   const webhookId = template === "personal" ? "webhook" : "inbound";
   const endpoint = host.startInfo.channels.find((channel) => channel.instanceId === webhookId)?.endpoint;
   assert.equal(typeof endpoint, "string", "scaffold webhook did not expose an endpoint");
+  let telegramRouteValidation;
+  if (template === "personal") {
+    await proveTelegramRouteValidation();
+    telegramRouteValidation = true;
+  }
   const payload = JSON.stringify({
     text: "packed scaffold " + template + " first turn",
     conversationId: "scaffold-first-turn",
@@ -1162,6 +1188,13 @@ try {
   host = undefined;
 
   let firstRunMarker;
+  let healthyTelegramCommandRegistrations;
+  let routeLoadValidation;
+  if (template === "personal") {
+    healthyTelegramCommandRegistrations = telegramCommandRegistrations;
+    assert.equal(healthyTelegramCommandRegistrations, 1);
+    routeLoadValidation = await proveRouteLoadValidation();
+  }
   if (markerPath !== undefined) {
     const initialized = await readFile(markerPath, "utf8");
     assert.match(initialized, /^initialized:[0-9a-f-]+\n$/u);
@@ -1184,7 +1217,13 @@ try {
     ...(firstRunMarker === undefined ? {} : { firstRunMarker }),
     ...(personalCron === undefined
       ? {}
-      : { personalCron, telegramCommandRegistrations, telegramDeliveries }),
+      : {
+          personalCron,
+          telegramCommandRegistrations: healthyTelegramCommandRegistrations,
+          telegramDeliveries,
+          telegramRouteValidation,
+          routeLoadValidation,
+        }),
     ...(personalSkillBytes === undefined ? {} : { personalSkillBytes }),
   }) + "\n");
 } finally {
@@ -1202,6 +1241,14 @@ async function telegramFixtureFetch(input, init) {
   if (url.origin !== "https://api.telegram.org") return nativeFetch(input, init);
   const method = url.pathname.split("/").at(-1);
   if (method === "getUpdates") {
+    if (!telegramUpdatesSent) {
+      telegramUpdatesSent = true;
+      return telegramResponse([
+        telegramMessageUpdate(1, "/model packed-local:echo"),
+        telegramMessageUpdate(2, "/model packed-local:missing"),
+        telegramMessageUpdate(3, "/model"),
+      ]);
+    }
     await pause(25, init?.signal);
     return telegramResponse([]);
   }
@@ -1210,13 +1257,130 @@ async function telegramFixtureFetch(input, init) {
     return telegramResponse(true);
   }
   if (method === "sendMessage") {
-    telegramDeliveries += 1;
-    return telegramResponse({ message_id: 9_000 + telegramDeliveries });
+    const message = JSON.parse(String(init?.body ?? "{}"));
+    telegramMessages.push(message);
+    if (message.reply_parameters === undefined) telegramDeliveries += 1;
+    return telegramResponse({ message_id: 9_000 + telegramMessages.length });
   }
   return new Response(JSON.stringify({ ok: false, description: "Unsupported fixture method." }), {
     status: 404,
     headers: { "content-type": "application/json" },
   });
+}
+
+function telegramMessageUpdate(updateId, text) {
+  return {
+    update_id: updateId,
+    message: {
+      message_id: updateId,
+      date: 1_700_000_000 + updateId,
+      chat: { id: 123456789, type: "private" },
+      from: { id: 123456789, is_bot: false, first_name: "Packed" },
+      text,
+    },
+  };
+}
+
+async function proveTelegramRouteValidation() {
+  const expected = [
+    "model set to packed-local:echo. Effort reset to default.",
+    'model "packed-local:missing" is not configured for runtime "pi".',
+    "model: packed-local:echo",
+  ];
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const texts = telegramMessages.map((message) => message.text);
+    if (expected.every((text) => texts.includes(text))) {
+      assert.deepEqual(
+        texts.filter((text) => expected.includes(text)),
+        expected,
+        "Telegram model validation responses must retain command order",
+      );
+      assert.equal(
+        telegramMessages
+          .filter((message) => expected.includes(message.text))
+          .every((message) => message.reply_parameters?.message_id !== undefined),
+        true,
+        "Telegram model validation responses must remain replies to their commands",
+      );
+      return;
+    }
+    await pause(10);
+  }
+  throw new Error(
+    "Telegram did not reject the invalid model while retaining the prior selection: "
+      + JSON.stringify(telegramMessages),
+  );
+}
+
+async function proveRouteLoadValidation() {
+  const configDirectory = dirname(configPath);
+  const invalidWebhook = join(configDirectory, "webhook", "zz-invalid-route.md");
+  await writeFile(invalidWebhook, [
+    "---",
+    "name: invalid-route",
+    "path: /webhook/invalid-route",
+    "model: packed-local:missing",
+    "---",
+    "",
+    "This invalid route must fail before the webhook listener binds.",
+    "",
+  ].join("\n"), "utf8");
+  try {
+    await assert.rejects(
+      () => createAgentHost(configPath, { drainTimeoutMs: 5_000, lifecycleTimeoutMs: 5_000 }),
+      (error) => {
+        assert.match(
+          errorChain(error),
+          /packed-local:missing.*not a configured runtime route/iu,
+        );
+        return true;
+      },
+    );
+  } finally {
+    await rm(invalidWebhook);
+  }
+
+  const invalidCron = join(configDirectory, ".mono-agent", "verify-cron", "zz-invalid-job.md");
+  await writeFile(invalidCron, [
+    "---",
+    "id: invalid-job",
+    "expression: 0 0 1 1 *",
+    "runtime: pi",
+    "model: packed-local:missing",
+    "---",
+    "",
+    "This invalid job must fail before the cron scheduler is created.",
+    "",
+  ].join("\n"), "utf8");
+  try {
+    await assert.rejects(
+      () => createAgentHost(configPath, { drainTimeoutMs: 5_000, lifecycleTimeoutMs: 5_000 }),
+      (error) => {
+        assert.match(
+          errorChain(error),
+          /packed-local:missing.*not a configured runtime route/iu,
+        );
+        return true;
+      },
+    );
+  } finally {
+    await rm(invalidCron);
+  }
+  return { webhook: true, cron: true };
+}
+
+function errorChain(error, seen = new Set()) {
+  if (error === null || typeof error !== "object" || seen.has(error)) return String(error);
+  seen.add(error);
+  const parts = [error instanceof Error ? error.message : String(error)];
+  if ("cause" in error && error.cause !== undefined) {
+    parts.push(errorChain(error.cause, seen));
+  }
+  if (error instanceof AggregateError) {
+    for (const nested of error.errors) parts.push(errorChain(nested, seen));
+  }
+  return parts.join("\n");
 }
 
 function telegramResponse(result) {

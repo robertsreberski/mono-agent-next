@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 import {
+  HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
   MODULE_API_VERSION,
   defineChannelModule,
   type Channel,
@@ -14,23 +15,28 @@ import {
   type ModuleHealthContext,
   type ModuleStartContext,
   type ModuleStopContext,
+  type RuntimeRouteValidationGrant,
 } from "@mono-agent/module-sdk";
 
 import {
+  WebhookConfigError,
   webhookConfigSchema,
   type WebhookConfig,
 } from "./config.js";
 import { MAX_WEBHOOK_ACTIVITY_BYTES } from "./limits.js";
 import {
-  createWebhookChannel,
+  WebhookSubmissionError,
   type WebhookChannel,
   type WebhookChannelStartInfo,
   type WebhookInboundRequest,
   type WebhookSubmit,
-  WebhookSubmissionError,
+  createWebhookChannel,
 } from "./server.js";
 import { WebhookDelivery } from "./delivery.js";
-import { loadWebhookRoutesFromDirectory } from "./routes.js";
+import {
+  loadWebhookRoutesFromDirectory,
+  type WebhookRoute,
+} from "./routes.js";
 
 const PACKAGE_NAME = "@mono-agent/channel-webhook";
 const PACKAGE_VERSION = "0.15.0";
@@ -50,7 +56,7 @@ export const monoAgentModule = defineChannelModule({
     apiVersion: MODULE_API_VERSION,
     kind: "channel",
     responsibility: "Serves bounded authenticated webhook ingress and explicit proactive webhook delivery.",
-    capabilities: [],
+    capabilities: [HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION],
   },
   schema: webhookConfigSchema,
   create: createWebhookModuleChannel,
@@ -59,6 +65,9 @@ export const monoAgentModule = defineChannelModule({
 function createWebhookModuleChannel(
   context: ChannelModuleCreateContext<WebhookConfig>,
 ): WebhookModuleChannel {
+  const routeValidation = context.host.getCapability<RuntimeRouteValidationGrant>(
+    HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+  );
   let transport: WebhookChannel | undefined;
   let info: WebhookChannelStartInfo | undefined;
   let startPromise: Promise<void> | undefined;
@@ -121,6 +130,10 @@ function createWebhookModuleChannel(
           resolve(context.configDirectory, context.config.routesDirectory),
           context.config.defaultMode,
         );
+      throwIfAborted(startContext.signal);
+      if (routes !== undefined) {
+        assertConfiguredWebhookRoutes(routes, routeValidation);
+      }
       if (stopping) {
         throw new Error("Webhook channel stopped while starting.");
       }
@@ -295,6 +308,36 @@ function boundedToolName(
   let end = maximumBytes - Buffer.byteLength(marker, "utf8");
   while (end > 0 && (bytes[end] ?? 0) >> 6 === 0b10) end -= 1;
   return `${bytes.subarray(0, end).toString("utf8")}${marker}`;
+}
+
+function assertConfiguredWebhookRoutes(
+  routes: readonly WebhookRoute[],
+  validation: RuntimeRouteValidationGrant | undefined,
+): void {
+  if (
+    validation === undefined
+    && routes.some((route) => route.runtime !== undefined || route.model !== undefined)
+  ) {
+    throw new Error(
+      `Runtime-selected webhook routes require the declared ${
+        HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION
+      } host grant.`,
+    );
+  }
+  if (validation === undefined) return;
+  const rejected = routes.flatMap((route) => {
+    if (route.runtime === undefined && route.model === undefined) return [];
+    const result = validation.validate(route.runtime, route.model);
+    return result.configured
+      ? []
+      : [`${route.source}: ${result.runtime}:${result.model} is not a configured runtime route.`];
+  });
+  if (rejected.length === 0) return;
+  throw new WebhookConfigError(rejected.length === 1
+    ? rejected[0]!
+    : `${String(rejected.length)} webhook routes select unconfigured runtime routes:\n${
+      rejected.map((entry) => `- ${entry}`).join("\n")
+    }`);
 }
 
 function toChannelInboundRequest(

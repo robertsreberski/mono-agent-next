@@ -3,12 +3,14 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import {
+  HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
   isEnvEligibleSchema,
   isSecretSchema,
   parseAskUserAnswer,
   type AskUserRequest,
   type ChannelHost,
   type ModuleLogger,
+  type RuntimeRouteValidationGrant,
 } from "@mono-agent/module-sdk";
 import {
   assertChannelBehaviorCompliance,
@@ -1007,6 +1009,9 @@ describe("telegram channel", () => {
     const dispatch = vi.fn<ChannelHost["dispatch"]>(async (request) => ({ status: "completed", text: `${request.text}:${request.attachments[0]?.name}` }));
     const channel = createTelegramChannel({ context: context(parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"], defaultDestination: "42" }), dispatch), clientFactory: () => client });
     expect(() => assertChannelModuleCompliance(monoAgentModule, { expectedPackageName: "@mono-agent/channel-telegram" })).not.toThrow();
+    expect(monoAgentModule.manifest.capabilities).toEqual([
+      HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+    ]);
     expect(() => assertChannelInstanceCompliance(channel)).not.toThrow();
     expect(channel.resolveDefaultDeliveryConversationId?.()).toBe("telegram:42");
     await channel.start?.({ signal: new AbortController().signal });
@@ -2718,6 +2723,62 @@ describe("telegram channel", () => {
     await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
   });
 
+  it("rejects a model typo without mutating the prior per-chat selection", async () => {
+    const now = new Date().toISOString();
+    let firstPoll = true;
+    const sent = vi.fn<TelegramBotClient["sendMessage"]>(async () => ({
+      messageId: "sent",
+    }));
+    const client: TelegramBotClient = {
+      async poll(_offset, timeout, signal) {
+        if (timeout === 0) return [];
+        if (firstPoll) {
+          firstPoll = false;
+          return [
+            { updateId: 1, kind: "message", chatId: "42", messageId: "1", senderId: "U", text: "/model runtime/model-a", attachments: [], receivedAt: now },
+            { updateId: 2, kind: "message", chatId: "42", messageId: "2", senderId: "U", text: "/effort high", attachments: [], receivedAt: now },
+            { updateId: 3, kind: "message", chatId: "42", messageId: "3", senderId: "U", text: "/model typo-model", attachments: [], receivedAt: now },
+            { updateId: 4, kind: "message", chatId: "42", messageId: "4", senderId: "U", text: "summarize", attachments: [], receivedAt: now },
+          ];
+        }
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener("abort", () => { resolve(); }, { once: true });
+        });
+        return [];
+      },
+      async download() { throw new Error("unexpected download"); },
+      sendMessage: sent,
+      async sendAttachment() { return { messageId: "attachment" }; },
+    };
+    const dispatch = vi.fn<ChannelHost["dispatch"]>(async () => ({
+      status: "completed",
+      text: "done",
+    }));
+    const channel = createTelegramChannel({
+      context: context(
+        parseTelegramConfig({ botToken: TOKEN, allowedChatIds: ["42"] }),
+        dispatch,
+      ),
+      clientFactory: () => client,
+    });
+
+    await channel.start?.({ signal: new AbortController().signal });
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledOnce());
+    expect(dispatch.mock.calls[0]?.[0]).toMatchObject({
+      text: "summarize",
+      model: "runtime/model-a",
+      effort: "high",
+    });
+    expect(sent.mock.calls.map(([request]) => request.text)).toEqual([
+      "model set to runtime/model-a. Effort reset to default.",
+      "effort set to high.",
+      'model "typo-model" is not configured for runtime "runtime".',
+      "done",
+    ]);
+    await channel.stop?.({ signal: new AbortController().signal, reason: "shutdown" });
+  });
+
   it("accumulates multi-select AskUser values until Done and answers free-text questions", async () => {
     const now = new Date().toISOString();
     const callbacks = new Map<string, string>();
@@ -3460,7 +3521,26 @@ function context(
   controls: Partial<ChannelHost> = {},
   moduleLogger: ModuleLogger = logger(),
 ): Parameters<typeof createTelegramChannel>[0]["context"] {
-  const host: ChannelHost = { grantedCapabilities: new Set(), getCapability() { return undefined; }, dispatch, ...controls };
+  const routeValidation: RuntimeRouteValidationGrant = {
+    validate(runtime = "runtime", model = "runtime/default") {
+      return {
+        configured: runtime === "runtime"
+          && (model === "runtime/default" || model === "runtime/model-a"),
+        runtime,
+        model,
+      };
+    },
+  };
+  const host: ChannelHost = {
+    grantedCapabilities: new Set([HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION]),
+    getCapability<T>(name: string): T | undefined {
+      return (name === HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION
+        ? routeValidation
+        : undefined) as T | undefined;
+    },
+    dispatch,
+    ...controls,
+  };
   return { instanceId: "telegram", config, provenance: {}, configDirectory: "/config", workspaceDirectory: "/workspace", dataDirectory: "/data", logger: moduleLogger, host, signal: new AbortController().signal };
 }
 

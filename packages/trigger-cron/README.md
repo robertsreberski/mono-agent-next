@@ -54,6 +54,9 @@ or an object containing `channel` and the channel-owned conversation
 `destination`. `enabled` defaults to `true`; set it to `false` to keep a fully
 validated job file in the directory without scheduling or exposing it through
 the maintenance command. A directory containing only disabled jobs is valid.
+Before any timer is armed, every enabled job's runtime/model override is
+checked against Core. An omitted runtime or model uses the configured primary
+route semantics; any unconfigured pair fails trigger creation.
 
 ```markdown
 ---
@@ -75,7 +78,8 @@ Compose the morning briefing.
 ### Data flow
 
 1. Core resolves the module config and the package validates its exact fields.
-2. Creation reads bounded regular Markdown files in stable filename order.
+2. Creation reads bounded regular Markdown files in stable filename order and
+   validates every enabled runtime/model pair through Core.
 3. `start()` restores each job's watermark, last outcome, missed ranges, and
    clock-regression evidence through the narrow `cron.durable-state.v1` host
    grant before it arms a timer.

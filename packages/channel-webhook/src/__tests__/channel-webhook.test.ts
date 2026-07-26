@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
   isEnvEligibleSchema,
   isSecretSchema,
   type ChannelHost,
@@ -18,6 +19,7 @@ import {
   type ChannelOutboundMessage,
   type ChannelReplySink,
   type ModuleLogger,
+  type RuntimeRouteValidationGrant,
 } from "@mono-agent/module-sdk";
 import {
   assertChannelBehaviorCompliance,
@@ -1058,7 +1060,7 @@ describe("mono-agent channel module", () => {
       packageVersion: "0.15.0",
       apiVersion: 1,
       kind: "channel",
-      capabilities: [],
+      capabilities: [HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION],
     });
 
     const config = monoAgentModule.schema.parse({
@@ -1503,8 +1505,14 @@ describe("mono-agent channel module", () => {
       dataDirectory: "/data",
       logger: noopLogger(),
       host: {
-        grantedCapabilities: new Set(),
-        getCapability<T>(): T | undefined { return undefined; },
+        grantedCapabilities: new Set([HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION]),
+        getCapability<T>(name: string): T | undefined {
+          return (name === HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION
+            ? configuredRouteValidation([
+              ["pi", "provider:route-model"],
+            ])
+            : undefined) as T | undefined;
+        },
         async dispatch(request) {
           inbound = request;
           return { status: "completed", text: "classified" };
@@ -1551,6 +1559,103 @@ describe("mono-agent channel module", () => {
       statusUrl: expect.stringContaining("/hooks/triage/requests/"),
     });
     await channel.stop?.({ signal: lifecycle.signal, reason: "shutdown" });
+  });
+
+  it("validates partial route defaults before bind and rejects every invalid route", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mono-agent-webhook-route-validation-"));
+    temporaryDirectories.push(root);
+    await writeFile(join(root, "model-only.md"), [
+      "---",
+      "name: model-only",
+      "path: /model-only",
+      "model: provider:secondary",
+      "---",
+      "Use the selected model.",
+      "",
+    ].join("\n"), "utf8");
+    await writeFile(join(root, "runtime-only.md"), [
+      "---",
+      "name: runtime-only",
+      "path: /runtime-only",
+      "runtime: pi",
+      "---",
+      "Use the selected runtime.",
+      "",
+    ].join("\n"), "utf8");
+    const validate = vi.fn<RuntimeRouteValidationGrant["validate"]>(
+      (runtime = "pi", model = "provider:primary") => ({
+        configured: runtime === "pi"
+          && (model === "provider:primary" || model === "provider:secondary"),
+        runtime,
+        model,
+      }),
+    );
+    const lifecycle = new AbortController();
+    const channel = await monoAgentModule.create({
+      instanceId: "partial-routes",
+      config: monoAgentModule.schema.parse({
+        apiKey: "route-validation-key",
+        routesDirectory: ".",
+      }),
+      configDirectory: root,
+      provenance: {},
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: routeValidationHost(validate),
+      signal: lifecycle.signal,
+    });
+    moduleChannels.add(channel);
+
+    await channel.start?.({ signal: lifecycle.signal });
+    expect(validate.mock.calls).toEqual([
+      [undefined, "provider:secondary"],
+      ["pi", undefined],
+    ]);
+    expect(channel.endpoint).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/model-only$/u);
+    await channel.stop?.({ signal: lifecycle.signal, reason: "shutdown" });
+
+    const invalidRoot = mkdtempSync(join(tmpdir(), "mono-agent-webhook-route-invalid-"));
+    temporaryDirectories.push(invalidRoot);
+    for (const [name, model] of [
+      ["first", "provider:missing-one"],
+      ["second", "provider:missing-two"],
+    ] as const) {
+      await writeFile(join(invalidRoot, `${name}.md`), [
+        "---",
+        `name: ${name}`,
+        `path: /${name}`,
+        `model: ${model}`,
+        "---",
+        "This route must not bind.",
+        "",
+      ].join("\n"), "utf8");
+    }
+    const invalid = await monoAgentModule.create({
+      instanceId: "invalid-routes",
+      config: monoAgentModule.schema.parse({
+        apiKey: "route-invalid-key",
+        routesDirectory: ".",
+      }),
+      configDirectory: invalidRoot,
+      provenance: {},
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: routeValidationHost((runtime = "pi", model = "provider:primary") => ({
+        configured: false,
+        runtime,
+        model,
+      })),
+      signal: lifecycle.signal,
+    });
+    moduleChannels.add(invalid);
+
+    await expect(invalid.start?.({ signal: lifecycle.signal })).rejects.toThrow(
+      /2 webhook routes select unconfigured runtime routes/u,
+    );
+    expect(invalid.endpoint).toBeUndefined();
+    expect(invalid.startInfo).toBeUndefined();
   });
 
   it("reports every rejected webhook route in one pass", async () => {
@@ -1725,6 +1830,58 @@ describe("mono-agent channel module", () => {
       status: "rejected",
       reason: { message: "Webhook channel stopped while starting." },
     });
+    expect(channel.endpoint).toBeUndefined();
+    expect(channel.startInfo).toBeUndefined();
+    expect(await channel.health?.({ signal: lifecycle.signal })).toMatchObject({
+      status: "unknown",
+      summary: "Webhook channel has not started.",
+    });
+  });
+
+  it("does not bind when the start signal aborts during directory-backed route loading", async () => {
+    const configDirectory = mkdtempSync(join(tmpdir(), "mono-agent-webhook-abort-routes-"));
+    temporaryDirectories.push(configDirectory);
+    const routesDirectory = join(configDirectory, "webhook");
+    await mkdir(routesDirectory);
+    await writeFile(join(routesDirectory, "route.md"), [
+      "---",
+      "name: aborted",
+      "path: /hooks/aborted",
+      "model: provider:route-model",
+      "---",
+      "This route must never bind.",
+      "",
+    ].join("\n"), "utf8");
+
+    const validate = vi.fn<RuntimeRouteValidationGrant["validate"]>(
+      (runtime = "pi", model = "provider:primary") => ({
+        configured: true,
+        runtime,
+        model,
+      }),
+    );
+    const lifecycle = new AbortController();
+    const channel = await monoAgentModule.create({
+      instanceId: "abort-during-routes",
+      config: monoAgentModule.schema.parse({
+        apiKey: "route-abort-key",
+        routesDirectory: "./webhook",
+      }),
+      configDirectory,
+      provenance: {},
+      workspaceDirectory: "/workspace",
+      dataDirectory: "/data",
+      logger: noopLogger(),
+      host: routeValidationHost(validate),
+      signal: lifecycle.signal,
+    });
+    moduleChannels.add(channel);
+
+    const start = channel.start!({ signal: lifecycle.signal });
+    lifecycle.abort(new Error("Webhook route loading was aborted."));
+
+    await expect(start).rejects.toThrow("Webhook route loading was aborted.");
+    expect(validate).not.toHaveBeenCalled();
     expect(channel.endpoint).toBeUndefined();
     expect(channel.startInfo).toBeUndefined();
     expect(await channel.health?.({ signal: lifecycle.signal })).toMatchObject({
@@ -1914,6 +2071,38 @@ function noopLogger(): ModuleLogger {
     info() {},
     warn() {},
     error() {},
+  };
+}
+
+function configuredRouteValidation(
+  routes: readonly (readonly [runtime: string, model: string])[],
+): RuntimeRouteValidationGrant {
+  return {
+    validate(runtime = "pi", model = "provider:primary") {
+      return {
+        configured: routes.some(([candidateRuntime, candidateModel]) =>
+          candidateRuntime === runtime && candidateModel === model),
+        runtime,
+        model,
+      };
+    },
+  };
+}
+
+function routeValidationHost(
+  validate: RuntimeRouteValidationGrant["validate"],
+): ChannelHost {
+  const grant: RuntimeRouteValidationGrant = { validate };
+  return {
+    grantedCapabilities: new Set([HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION]),
+    getCapability<T>(name: string): T | undefined {
+      return (name === HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION
+        ? grant
+        : undefined) as T | undefined;
+    },
+    async dispatch() {
+      return { status: "completed", text: "unused" };
+    },
   };
 }
 

@@ -89,6 +89,10 @@ Classify the incident and summarize the next action.
 The prompt is prepended to caller text but never returned in route discovery or
 status data. Route names and paths are unique; symlinks, oversized files,
 unknown fields, and route/status namespace collisions fail before listening.
+Every enabled route's runtime/model override is also checked against Core
+during channel start, after route loading and before the listener binds. An
+omitted runtime or model uses the configured primary route semantics; any
+unconfigured pair fails channel start.
 `notify` requests completion delivery through another selected channel instance
 after a successful non-empty turn. It may also be the channel-instance string
 alone when that channel owns a configured default destination. The invocation

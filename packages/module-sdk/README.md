@@ -108,6 +108,13 @@ config-relative paths, and `workspaceDirectory`, the agent's execution
 workspace. Modules must not resolve config-relative files against the process
 working directory.
 
+Modules that author a runtime/model route may opt in to the
+`routing.validate.v1` host capability. Its frozen synchronous grant validates
+one proposed pair against Core's configured routes and returns only the
+resolved runtime, model, and whether that pair is configured. An omitted
+runtime or model resolves through Core's primary route semantics. The grant
+does not expose the route catalog, raw config, or provider-specific metadata.
+
 ## Architecture
 
 ### Data flow
@@ -343,6 +350,7 @@ DEFAULT_HTTP_TIMEOUT_MS
 DEFAULT_OWNER_PRIVATE_READ_MAX_BYTES
 EnvEligibleSchemaOptions
 HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE
+HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION
 HttpSafetyError
 HttpSafetyErrorCode
 InteractionContext
@@ -438,6 +446,8 @@ RuntimeNativeToolDescriptor
 RuntimeNativeToolEffect
 RuntimeNativeToolSandboxEnforcement
 RuntimeRetryability
+RuntimeRouteValidationGrant
+RuntimeRouteValidationResult
 RuntimeSession
 RuntimeSessionEvent
 RuntimeSideEffectStatus

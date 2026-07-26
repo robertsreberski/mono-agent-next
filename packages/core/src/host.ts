@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import {
   HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE,
+  HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
   MODULE_TOOL_LIMITS,
   RUNTIME_SESSION_UNAVAILABLE_CODE, snapshotRuntimeTurnError,
   type ArtifactRef, type ApprovalRequest, type AskUserRequest,
@@ -29,7 +30,7 @@ import { deliveryTriggerKind, normalizeCompletionDelivery } from "./host-outboun
 import {
   boundedUtf8, redactBounded, redactChannelToolEvent, } from "./host-redaction.js";
 import {
-  assertConfiguredRoute, routeCandidates, runtimeEligibility, runtimeSessionMapKey,
+  assertConfiguredRoute, createRuntimeRouteValidationGrant, routeCandidates, runtimeEligibility, runtimeSessionMapKey,
   runtimeSessionRouteKey,
 } from "./host-routing.js";
 import { HostDiagnostics } from "./host-diagnostics.js";
@@ -649,6 +650,12 @@ class AgentHostImplementation implements AgentHost {
   }
   #moduleHost(module: LoadedAgentModule): ModuleHost | ChannelHost | MemoryHost | TriggerHost {
     const capabilityValues = new Map<string, unknown>();
+    if (declaresHostCapability(module, HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION)) {
+      capabilityValues.set(
+        HOST_CAPABILITY_RUNTIME_ROUTE_VALIDATION,
+        createRuntimeRouteValidationGrant(this.config),
+      );
+    }
     if (module.slot === "runtime" && this.#sandbox !== undefined && declaresHostCapability(module, "sandbox.execute.v1")) {
       capabilityValues.set("sandbox.execute.v1", {
         execute: (command: unknown) => this.#sandbox?.execute(command as never),
