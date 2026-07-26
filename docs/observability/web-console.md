@@ -183,26 +183,43 @@ turn. The service continues committing assistant text and its terminal state;
 the next admitted read sees the durable result. Explicit cancellation or
 product shutdown is required to abort upstream work.
 
-`dataDirectory` is created as `0700`. Its marker, singleton lease, and
-`state.json` are current-user-owned `0600` regular files. Existing permissive,
-wrong-owner, symlinked, multi-link, corrupt, or unknown-version paths fail
-closed and are preserved rather than repaired or overwritten.
+`dataDirectory` and `.active-turns` are created as `0700`. The marker,
+singleton lease, `state.json`, and active-turn journals are current-user-owned,
+single-link `0600` regular files. Existing permissive, wrong-owner, symlinked,
+multi-link, corrupt, or unknown-version paths fail closed and are preserved
+rather than repaired or overwritten.
 
-Each state mutation writes and fsyncs an exclusive same-directory temporary
-file, atomically renames it to `state.json`, and fsyncs the directory. The
-singleton lease uses an OS-released exclusive SQLite transaction; SQLite is
-used only for the lease, not as the conversation store. If post-rename
-durability becomes uncertain, the open store is poisoned until close/reopen so
-a stale in-memory snapshot cannot overwrite the visible commit. Turns left
-running by an unclean product stop become `interrupted` on the next exclusive
-open.
+Turn start, terminal settlement, and every non-frame mutation atomically
+rewrite canonical `state.json` through an fsynced same-directory temporary file
+and directory fsync. Streamed assistant frames use targeted copy-on-write state
+and append compact deltas to a per-turn journal, fsyncing each accepted delta
+before advancing the in-memory revision. Canonical commits fold those deltas
+into `state.json` and durably clear superseded journals.
 
-For a coherent backup, stop the product and copy `state.json` together with
-`.mono-agent-web-state`, preserving their modes. Restore those exact regular
-files into an empty `0700` data directory before starting. There is no remote
-reset or delete-all endpoint and no automatic retention policy in schema
-version 3. A valid schema version 1 or 2 file is copied field-for-field into
-version 3 and durably committed before reads are served.
+Recovery parses only complete newline-terminated journal records, ignores a
+final torn tail, replays complete deltas in global revision order, and then
+marks any still-running turn `interrupted`. A malformed complete header or
+record fails closed without replacing its bytes. The product admits at most 32
+active turns; each journal is limited to 16 MiB and 131,072 records, and all
+active journals together are limited to 64 MiB of encoded data. A capacity
+failure is rejected before append so the turn can still settle against its
+last accepted state.
+
+The singleton lease uses an OS-released exclusive SQLite transaction; SQLite
+is used only for the lease, not as the conversation store. If post-rename or
+journal durability becomes uncertain, the open store is poisoned until
+close/reopen so an uncertain in-memory snapshot cannot overwrite visible
+durable state.
+
+For a coherent clean backup, stop the product and copy `state.json` together
+with `.mono-agent-web-state`, preserving their modes. A clean stop terminalizes
+active turns, so `.active-turns` is empty. Do not use a state-only live copy:
+it can omit accepted stream frames. To preserve a stopped crash state, copy
+`state.json`, the marker, and the complete `.active-turns` directory together.
+Restore those artifacts into an empty `0700` data directory before starting.
+There is no remote reset or delete-all endpoint and no automatic retention
+policy in schema version 3. A valid schema version 1 or 2 file is copied
+field-for-field into version 3 and durably committed before reads are served.
 
 ## Current scope
 

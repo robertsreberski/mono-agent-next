@@ -311,6 +311,38 @@ describe("web service lifecycle", () => {
     await service.stop();
   });
 
+  it("settles journal capacity failures without poisoning later canonical writes", async () => {
+    const root = await temporaryDirectory();
+    const store = await DurableWebStore.open(join(root, "state"), {
+      activeTurnJournalLimits: { maxBytes: 512, maxTotalBytes: 1_024 },
+    });
+    const service = new WebService(store, gateway({
+      async runTurn(input) {
+        await input.onText("x".repeat(1_024));
+      },
+    }));
+    const thread = await service.createThread("personal");
+    await expect(
+      service.runTurn(thread.id, { text: "overflow" }, async () => undefined),
+    ).rejects.toMatchObject({ code: "capacity_exceeded" });
+    expect(service.thread(thread.id)).toMatchObject({
+      thread: { status: "failed" },
+      messages: [
+        { role: "user" },
+        {
+          role: "assistant",
+          text: "",
+          status: "failed",
+          error: { code: "capacity_exceeded" },
+        },
+      ],
+    });
+    await expect(service.createThread("personal", "Still writable")).resolves.toMatchObject({
+      title: "Still writable",
+    });
+    await service.stop();
+  });
+
   it("bounds shutdown, durably interrupts an abort-ignoring gateway, and releases the lease", async () => {
     const root = await temporaryDirectory();
     const stateDirectory = join(root, "state");
