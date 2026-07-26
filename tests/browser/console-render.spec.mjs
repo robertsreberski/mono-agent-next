@@ -6,6 +6,7 @@ import {
   BROWSER_FIXTURE_TOOL_NAME,
   BROWSER_FIXTURE_TOOL_RESULT_TEXT,
   BROWSER_FIXTURE_WEB_TOKEN,
+  startBrowserFixture,
 } from "./fixture-server.mjs";
 
 // Every assertion here reads the rendered DOM. None reads component source.
@@ -108,4 +109,29 @@ test("refuses to open the console without the token", async ({ page }) => {
   await expect(page.getByLabel("Web token")).toBeVisible();
   await expect(page.getByRole("button", { name: "Open console" })).toBeDisabled();
   await expect(page.locator("details.tool-call")).toHaveCount(0);
+});
+
+test("opens explicit no-auth mode without a token or lock action", async ({ page }) => {
+  const fixture = await startBrowserFixture({ port: 0, auth: { mode: "none" } });
+  try {
+    await page.goto(fixture.url);
+    await expect(page.getByRole("button", { name: /online$/u })).toBeVisible();
+    await expect(page.getByLabel("Web token")).toHaveCount(0);
+
+    await page.evaluate(() => {
+      window.sessionStorage.setItem("mono-agent-web-token", "stale-browser-token-0123456789");
+    });
+    await page.reload();
+    await expect(page.getByRole("button", { name: /online$/u })).toBeVisible();
+    await expect.poll(() => page.evaluate(() =>
+      window.sessionStorage.getItem("mono-agent-web-token"))).toBeNull();
+    await expect.poll(() => page.evaluate(async () =>
+      (await fetch("/api/v1/bootstrap")).status)).toBe(200);
+
+    await page.evaluate(() => window.dispatchEvent(new Event("mono-agent:command")));
+    await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
+    await expect(page.getByText("Lock console", { exact: true })).toHaveCount(0);
+  } finally {
+    await fixture.stop();
+  }
 });

@@ -32,12 +32,21 @@ export function saveToken(token: string): void {
   else window.sessionStorage.removeItem(TOKEN_KEY);
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+function authenticationHeader(): Record<string, string> {
+  const token = readToken();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  includeAuthentication = true,
+): Promise<T> {
   const response = await fetch(path, {
     ...init,
     headers: {
       accept: "application/json",
-      authorization: `Bearer ${readToken()}`,
+      ...(includeAuthentication ? authenticationHeader() : {}),
       ...(init.body === undefined ? {} : { "content-type": "application/json" }),
       ...init.headers,
     },
@@ -47,6 +56,13 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  probeBootstrap: (signal?: AbortSignal) =>
+    request<Bootstrap>(
+      "/api/v1/bootstrap",
+      signal === undefined ? {} : { signal },
+      false,
+    ),
+
   bootstrap: (signal?: AbortSignal) =>
     request<Bootstrap>("/api/v1/bootstrap", signal === undefined ? {} : { signal }),
 
@@ -113,7 +129,7 @@ export async function streamTurn(
     method: "POST",
     headers: {
       accept: "application/x-ndjson",
-      authorization: `Bearer ${readToken()}`,
+      ...authenticationHeader(),
       "content-type": "application/json",
     },
     body: JSON.stringify(input),
@@ -135,7 +151,7 @@ export async function subscribeEvents(
   const response = await fetch("/api/v1/events", {
     headers: {
       accept: "text/event-stream",
-      authorization: `Bearer ${readToken()}`,
+      ...authenticationHeader(),
       ...(afterRevision === undefined ? {} : { "last-event-id": String(afterRevision) }),
     },
     cache: "no-store",

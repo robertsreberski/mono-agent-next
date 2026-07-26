@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-/** Standalone authenticated browser product over `@mono-agent/operator`. */
+/** Standalone browser product with explicit token or trusted-network access over `@mono-agent/operator`. */
 export { loadWebConfig, parseWebConfig, webConfigJsonSchema } from "./config.js";
 export type {
   LoadWebConfigOptions,

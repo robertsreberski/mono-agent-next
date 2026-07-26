@@ -177,7 +177,7 @@ export const packageCatalog = [
     dir: "web",
     name: "@mono-agent/web",
     category: "operator-surface",
-    responsibility: "Runs the standalone authenticated browser product with owner-private durable conversations.",
+    responsibility: "Runs the standalone browser product with explicit token or trusted-network access and owner-private durable conversations.",
     allowedDependencyCategories: ["operator-surface"],
     publishable: true,
   },

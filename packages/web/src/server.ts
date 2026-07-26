@@ -15,7 +15,12 @@ import {
 } from "@mono-agent/operator";
 
 import type { WebConfig } from "./config.js";
-import { loadWebConfig } from "./config.js";
+import {
+  loadWebConfig,
+  normalizeAllowedHost,
+  normalizeExternalOrigin,
+  normalizeListenHost,
+} from "./config.js";
 import type {
   AnswerWebAskInput,
   CreateWebThreadInput,
@@ -87,7 +92,7 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
   let stopPromise: Promise<void> | undefined;
   const server = createServer((request, response) => {
     setSecurityHeaders(response);
-    void handleRequest(request, response, config.auth.token, service, staticDirectory, eventStreams).catch((error) => {
+    void handleRequest(request, response, config.auth, service, staticDirectory, eventStreams).catch((error) => {
       sendError(response, error);
     });
   });
@@ -148,7 +153,7 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
   async function handleRequest(
     request: IncomingMessage,
     response: ServerResponse,
-    token: string,
+    auth: WebConfig["auth"],
     web: WebService,
     assetsRoot: string,
     streams: Set<() => void>,
@@ -159,6 +164,7 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
       request,
       config.listen.host,
       listeningPort(server),
+      config.allowedHosts,
       config.externalOrigins,
     );
     if (request.method === "GET" && url.pathname === "/healthz") return sendJson(response, 200, { status: "healthy" });
@@ -177,7 +183,7 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
       return serveWebAsset(request, response, assetsRoot, url.pathname);
     }
 
-    authenticate(request, token);
+    if ("token" in auth) authenticate(request, auth.token);
     response.setHeader("cache-control", "no-store");
     if (request.method === "GET" && url.pathname === "/api/v1/events") {
       return openEventStream(request, response, web, streams);
@@ -186,13 +192,13 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
       return sendJson(response, 200, await web.bootstrap());
     }
     if (request.method === "POST" && url.pathname === "/api/v1/threads") {
-      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.allowedHosts, config.externalOrigins);
       const input = parseCreateThread(await readJsonBody(request));
       return sendJson(response, 201, await web.createThread(input.agentId, input.title));
     }
     const agentMatch = /^\/api\/v1\/agents\/([^/]+)$/u.exec(url.pathname);
     if (request.method === "PATCH" && agentMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.allowedHosts, config.externalOrigins);
       return sendJson(
         response,
         200,
@@ -204,7 +210,7 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
       return sendJson(response, 200, web.thread(decodePath(detailMatch[1]!)));
     }
     if (request.method === "PATCH" && detailMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.allowedHosts, config.externalOrigins);
       return sendJson(
         response,
         200,
@@ -212,14 +218,14 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
       );
     }
     if (request.method === "DELETE" && detailMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.allowedHosts, config.externalOrigins);
       await readJsonBody(request);
       await web.deleteThread(decodePath(detailMatch[1]!));
       return sendJson(response, 200, { deleted: true });
     }
     const turnMatch = /^\/api\/v1\/threads\/([^/]+)\/turns$/u.exec(url.pathname);
     if (request.method === "POST" && turnMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.allowedHosts, config.externalOrigins);
       const input = parseStartTurn(await readJsonBody(request));
       const threadId = decodePath(turnMatch[1]!);
       response.writeHead(200, {
@@ -249,19 +255,19 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
     }
     const cancelMatch = /^\/api\/v1\/threads\/([^/]+)\/cancel$/u.exec(url.pathname);
     if (request.method === "POST" && cancelMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.allowedHosts, config.externalOrigins);
       await readJsonBody(request);
       return sendJson(response, 200, await web.cancel(decodePath(cancelMatch[1]!)));
     }
     const askMatch = /^\/api\/v1\/threads\/([^/]+)\/ask$/u.exec(url.pathname);
     if (request.method === "POST" && askMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.allowedHosts, config.externalOrigins);
       const input = parseAnswerAsk(await readJsonBody(request, OPERATOR_LIMITS.askAnswerRequestBytes));
       return sendJson(response, 200, await web.answerAsk(decodePath(askMatch[1]!), input));
     }
     const liveInputMatch = /^\/api\/v1\/threads\/([^/]+)\/live-input$/u.exec(url.pathname);
     if (request.method === "POST" && liveInputMatch !== null) {
-      requireMutationSafety(request, config.listen.host, listeningPort(server), config.externalOrigins);
+      requireMutationSafety(request, config.listen.host, listeningPort(server), config.allowedHosts, config.externalOrigins);
       const input = parseOfferLiveInput(await readJsonBody(request));
       return sendJson(response, 200, await web.offerLiveInput(decodePath(liveInputMatch[1]!), input.text));
     }
@@ -283,11 +289,56 @@ export async function startWebServer(options: StartWebServerOptions = {}): Promi
 }
 
 function validateRuntimeConfig(config: WebConfig): void {
-  if (typeof config.auth?.token !== "string" || config.auth.token.length < 16) {
+  const auth = config.auth as unknown;
+  if (typeof auth !== "object" || auth === null || Array.isArray(auth)) {
+    throw new WebProductError("invalid_config", "Web auth must select token authentication or mode \"none\".");
+  }
+  const authRecord = auth as Record<string, unknown>;
+  const authKeys = Object.keys(authRecord);
+  const tokenAuth = authKeys.length === 1 && authKeys[0] === "token";
+  const noAuth = authKeys.length === 1 && authKeys[0] === "mode" && authRecord.mode === "none";
+  if (tokenAuth && (typeof authRecord.token !== "string" || authRecord.token.length < 16)) {
     throw new WebProductError("missing_auth_token", "Web browser authentication requires a token of at least 16 characters.");
   }
-  const nonLoopback = !isLoopback(normalizeHostname(config.listen.host));
-  if (nonLoopback && config.auth.token.length < 24) {
+  if (!tokenAuth && !noAuth) {
+    throw new WebProductError("invalid_config", "Web auth must select exactly one of token authentication or mode \"none\".");
+  }
+  if (typeof config.listen?.host !== "string") {
+    throw new WebProductError("invalid_config", "Web listen.host must be a hostname or IP address.");
+  }
+  const normalizedListenHost = normalizeListenHost(config.listen.host);
+  if (!Array.isArray(config.allowedHosts)) {
+    throw new WebProductError("invalid_config", "Web allowedHosts must be a normalized array.");
+  }
+  const normalizedAllowedHosts = config.allowedHosts.map((host, index) => {
+    if (typeof host !== "string") {
+      throw new WebProductError("invalid_config", `$.allowedHosts[${index}] must be a string.`);
+    }
+    return normalizeAllowedHost(host, `$.allowedHosts[${index}]`);
+  });
+  if (
+    normalizedAllowedHosts.some((host, index) => host !== config.allowedHosts[index])
+    || new Set(normalizedAllowedHosts).size !== normalizedAllowedHosts.length
+  ) {
+    throw new WebProductError("invalid_config", "Web allowedHosts must be normalized and deduplicated.");
+  }
+  if (!Array.isArray(config.externalOrigins)) {
+    throw new WebProductError("invalid_config", "Web externalOrigins must be a canonical array.");
+  }
+  const normalizedExternalOrigins = config.externalOrigins.map((origin, index) => {
+    if (typeof origin !== "string") {
+      throw new WebProductError("invalid_config", `$.externalOrigins[${index}] must be a string.`);
+    }
+    return normalizeExternalOrigin(origin, `$.externalOrigins[${index}]`);
+  });
+  if (
+    normalizedExternalOrigins.some((origin, index) => origin !== config.externalOrigins[index])
+    || new Set(normalizedExternalOrigins).size !== normalizedExternalOrigins.length
+  ) {
+    throw new WebProductError("invalid_config", "Web externalOrigins must be canonical and deduplicated.");
+  }
+  const nonLoopback = !isLoopback(normalizedListenHost);
+  if (nonLoopback && tokenAuth && (authRecord.token as string).length < 24) {
     throw new WebProductError("unsafe_non_loopback_bind", "A non-loopback listener requires an authentication token of at least 24 characters.");
   }
   if (nonLoopback && config.allowInsecureHttp !== true) {
@@ -309,6 +360,7 @@ function requireMutationSafety(
   request: IncomingMessage,
   configuredHost: string,
   port: number,
+  allowedHosts: readonly string[],
   externalOrigins: readonly string[],
 ): void {
   if (request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase() !== "application/json") {
@@ -336,15 +388,16 @@ function requireMutationSafety(
   if (parsed.protocol !== "http:" || parsed.username !== "" || parsed.password !== "" || parsed.pathname !== "/" || parsed.search !== "" || parsed.hash !== "") rejectOrigin();
   if (requestAuthority.username !== "" || requestAuthority.password !== "" || requestAuthority.pathname !== "/" || requestAuthority.search !== "" || requestAuthority.hash !== "") rejectOrigin();
   if (effectivePort(parsed) !== port || effectivePort(requestAuthority) !== port) rejectOrigin();
-  const originHost = normalizeHostname(parsed.hostname);
-  if (normalizeHostname(requestAuthority.hostname) !== originHost) rejectOrigin();
-  if (!isAllowedProductHost(originHost, configuredHost)) rejectOrigin();
+  const originHost = normalizeWebHostname(parsed.hostname);
+  if (normalizeWebHostname(requestAuthority.hostname) !== originHost) rejectOrigin();
+  if (!isAllowedProductHost(originHost, configuredHost, allowedHosts)) rejectOrigin();
 }
 
 function validateRequestAuthority(
   request: IncomingMessage,
   configuredHost: string,
   port: number,
+  allowedHosts: readonly string[],
   externalOrigins: readonly string[],
 ): void {
   if (externalOriginForAuthority(request, externalOrigins) !== undefined) return;
@@ -354,16 +407,25 @@ function validateRequestAuthority(
   try { authority = new URL(`http://${host}`); } catch { return rejectAuthority(); }
   if (authority.username !== "" || authority.password !== "" || authority.pathname !== "/" || authority.search !== "" || authority.hash !== "") rejectAuthority();
   if (effectivePort(authority) !== port) rejectAuthority();
-  if (!isAllowedProductHost(normalizeHostname(authority.hostname), configuredHost)) rejectAuthority();
+  if (!isAllowedProductHost(normalizeWebHostname(authority.hostname), configuredHost, allowedHosts)) rejectAuthority();
 }
 
 function externalOriginForAuthority(
   request: IncomingMessage,
   externalOrigins: readonly string[],
 ): string | undefined {
-  if (!isLoopbackPeer(request.socket.remoteAddress)) return undefined;
   const host = request.headers.host;
   if (host === undefined) return undefined;
+  return externalOriginForConnection(request.socket.remoteAddress, host, externalOrigins);
+}
+
+/** Internal deterministic seam for proving that proxy authority requires a loopback peer. */
+export function externalOriginForConnection(
+  remoteAddress: string | undefined,
+  host: string,
+  externalOrigins: readonly string[],
+): string | undefined {
+  if (!isLoopbackPeer(remoteAddress)) return undefined;
   let authority: URL;
   try {
     authority = new URL(`https://${host}`);
@@ -388,8 +450,13 @@ function isLoopbackPeer(address: string | undefined): boolean {
   return normalized === "::1" || /^127(?:\.|$)/u.test(normalized);
 }
 
-function isAllowedProductHost(originHost: string, configuredHost: string): boolean {
-  const configured = normalizeHostname(configuredHost);
+function isAllowedProductHost(
+  originHost: string,
+  configuredHost: string,
+  allowedHosts: readonly string[],
+): boolean {
+  if (allowedHosts.includes(originHost)) return true;
+  const configured = normalizeWebHostname(configuredHost);
   if (wildcard(configured)) return isValidatedLocalHost(originHost);
   if (isLoopback(configured)) return isLoopback(originHost);
   return originHost === configured;
@@ -418,8 +485,12 @@ function effectivePort(url: URL): number {
   return url.port === "" ? 80 : Number(url.port);
 }
 
-function normalizeHostname(host: string): string {
-  return host.toLowerCase().replace(/^\[|\]$/gu, "");
+/** Internal deterministic seam for canonical Host/listener comparisons. */
+export function normalizeWebHostname(host: string): string {
+  const candidate = host.toLowerCase().replace(/^\[|\]$/gu, "");
+  if (candidate.includes("%")) return candidate;
+  if (isIP(candidate) !== 6) return candidate;
+  return new URL(`http://[${candidate}]`).hostname.replace(/^\[|\]$/gu, "");
 }
 
 function rejectOrigin(): never {
@@ -891,8 +962,18 @@ function errorCode(error: unknown): string {
     : "internal_error";
 }
 
-function isLoopback(host: string): boolean { return host === "localhost" || host === "::1" || /^127(?:\.|$)/u.test(host); }
-function wildcard(host: string): boolean { return host === "0.0.0.0" || host === "::"; }
+function isLoopback(host: string): boolean {
+  const candidate = normalizeWebHostname(host);
+  if (candidate === "localhost") return true;
+  const ipVersion = isIP(candidate);
+  if (ipVersion === 4) return candidate.split(".", 1)[0] === "127";
+  if (ipVersion !== 6) return false;
+  return candidate === "::1";
+}
+function wildcard(host: string): boolean {
+  const candidate = normalizeWebHostname(host);
+  return candidate === "0.0.0.0" || candidate === "::";
+}
 function bracket(host: string): string { return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host; }
 
 function listeningPort(server: Server): number {

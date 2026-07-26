@@ -15,12 +15,26 @@ import {
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
 import { render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { parts } from "./chat";
 import { ConsoleProvider } from "./console";
 import { convertMessage } from "./runtime";
 import type { Message } from "./types";
+
+vi.mock("./api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./api")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      // These render-only tests do not mount the application shell. Keep its
+      // provider bootstrap pending so an unrelated async auth transition does
+      // not update the tree outside the render assertion's act boundary.
+      probeBootstrap: async () => await new Promise<never>(() => undefined),
+    },
+  };
+});
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 

@@ -171,12 +171,14 @@ function CommandPalette({
           run: () => consoleState.setShowOffline(!consoleState.showOffline),
         }]
       : []),
-    {
-      id: "lock",
-      label: "Lock console",
-      icon: "settings",
-      run: () => consoleState.logout(),
-    },
+    ...(consoleState.tokenAuthentication
+      ? [{
+          id: "lock",
+          label: "Lock console",
+          icon: "settings" as IconName,
+          run: () => consoleState.logout(),
+        }]
+      : []),
     ...consoleState.visibleAgents.map((agent) => ({
       id: `agent:${agent.id}`,
       label: `Switch to ${agent.label}`,

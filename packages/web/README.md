@@ -1,8 +1,9 @@
 # @mono-agent/web
 
-Standalone, authenticated browser operator for one or more locally registered
-mono-agent processes. It is a separate product with its own config, process,
-listener, and durable state; it is never selected by agent config.
+Standalone browser operator for one or more locally registered mono-agent
+processes. It is a separate product with its own config, explicit token or
+trusted-network access mode, process, listener, and durable state; it is never
+selected by agent config.
 
 ## Category
 
@@ -11,7 +12,7 @@ listener, and durable state; it is never selected by agent config.
 
 Category: `operator-surface`
 Tier: `core`
-Catalog responsibility: Runs the standalone authenticated browser product with owner-private durable conversations.
+Catalog responsibility: Runs the standalone browser product with explicit token or trusted-network access and owner-private durable conversations.
 
 <!-- package-metadata:end -->
 
@@ -19,7 +20,8 @@ Catalog responsibility: Runs the standalone authenticated browser product with o
 
 - Load one strict `web.config.json` independently of agent configuration.
 - Discover owner-private operator registry entries through `@mono-agent/operator`.
-- Authenticate every browser API request and reject cross-origin mutations.
+- Enforce the selected token or no-auth access mode while always rejecting
+  invalid authorities and cross-origin or browser-simple mutations.
 - Persist conversations and messages through atomic owner-private state commits.
 - Discover explicitly provenance-marked external `cron`/`webhook` proactive
   conversations, import their replay once, persist them durably, and retain
@@ -57,29 +59,71 @@ Create `web.config.json`:
   "auth": { "token": { "$env": "MONO_AGENT_WEB_AUTH_TOKEN" } },
   "allowInsecureHttp": false,
   "dataDirectory": "./.mono-agent/web",
-  "agentRegistries": ["../personal-agent/.mono-agent/trace-sources"]
+  "agentRegistries": ["../personal-agent/.mono-agent/trace-sources"],
+  "allowedHosts": [],
+  "externalOrigins": []
 }
 ```
 
 The secret must contain at least 16 characters. Literal secrets in the config
-file are rejected.
+file are rejected. `auth` is a strict union: select the token object above or
+`"auth": { "mode": "none" }`, never both.
 
-Loopback is the safe default. For LAN or direct Tailscale-IP HTTP, a token of at
-least 24 characters and the explicit `"allowInsecureHttp": true` opt-in are both
-required. This is plaintext trusted-network mode: the token and conversation
-state are not transport-encrypted. Prefer keeping web on loopback behind an
-HTTPS reverse proxy or Tailscale Serve. The opt-in acknowledges risk; it does
-not add TLS.
+Loopback is the safe default. Every LAN or direct Tailscale HTTP listener
+requires the explicit `"allowInsecureHttp": true` opt-in; token mode also
+requires a token of at least 24 characters. This is plaintext trusted-network
+access: credentials, when present, and conversation state are not
+transport-encrypted. The opt-in acknowledges risk; it does not add TLS.
+
+No-auth mode removes only the bearer check. Any client that reaches the listener
+and satisfies the Host/Origin boundary has owner-equivalent API access. Bind it
+only to an owner-trusted network protected by LAN or tailnet policy, and never
+expose it publicly.
+
+For a direct listener addressed by MagicDNS or LAN DNS, add hostname/IP-only
+entries to `allowedHosts`:
+
+```json
+{
+  "listen": { "host": "0.0.0.0", "port": 5050 },
+  "auth": { "mode": "none" },
+  "allowInsecureHttp": true,
+  "allowedHosts": ["mickey-home.tail8a9beb.ts.net"]
+}
+```
+
+Values have no scheme, credentials, path, wildcard, or port. They are
+normalized and deduplicated, while every request still must use the actual
+bound listener port. The configured listener authority remains implicitly
+accepted.
+
+Prefer keeping web on loopback behind an HTTPS reverse proxy or Tailscale Serve.
+That topology uses an exact canonical origin, including a non-default port:
+
+```json
+{
+  "listen": { "host": "127.0.0.1", "port": 5050 },
+  "externalOrigins": [
+    "https://mickey-home.tail8a9beb.ts.net:8444"
+  ]
+}
+```
+
+`externalOrigins` is honored only for a loopback TCP peer. It does not allow a
+direct remote host; use `allowedHosts` for that topology. Neither field adds
+TLS.
 
 ```bash
 MONO_AGENT_WEB_AUTH_TOKEN='replace-with-a-long-random-token' \
   node packages/web/dist/bin.js ./web.config.json
 ```
 
-The browser shell contains no state. It prompts for the token and keeps it in
-`sessionStorage`; every `/api/v1/*` request uses bearer auth. Shell, health, and
-API requests must also use a listener-approved local authority and actual port,
-which closes the DNS-rebinding/forged-Host boundary. The health probe is
+The browser shell first probes bootstrap without credentials. Token mode answers
+`401`, then prompts for a token and keeps it in `sessionStorage`. No-auth mode
+answers `200`, clears any stale token, omits bearer headers, and hides the lock
+action. Shell, health, and API requests in both modes must use a
+listener-approved authority and actual port; mutations retain the same
+Origin/fetch-site, JSON media-type, and body-size defenses. The health probe is
 `GET /healthz`.
 
 Public browser assets are capped at 16 MiB and read descriptor-first with
@@ -119,11 +163,11 @@ browser stream contains web-owned thread snapshots, not raw operator frames.
 
 | Source | Ownership |
 | --- | --- |
-| `config.ts` | Strict product config, environment secret resolution, and JSON Schema. |
+| `config.ts` | Strict product config, access-mode/host validation, environment secret resolution, and JSON Schema. |
 | `operator-gateway.ts` | Thin binding to the shared directory, client, reducer, and action policy. |
 | `store.ts` | Versioned state, exclusive process lease, atomic commits, and restart recovery. |
 | `service.ts` | Conversation/turn process lifecycle and exact cancellation. |
-| `server.ts` | Authenticated HTTP API, origin/media-type enforcement, link-free descriptor-first static asset reads, streaming, and shutdown. |
+| `server.ts` | Access-gated HTTP API, authority/origin/media-type enforcement, link-free descriptor-first static asset reads, streaming, and shutdown. |
 | `webapp/` | React/assistant-ui browser console, PWA assets, and Vite build. |
 | `bin.ts` | Foreground standalone process entrypoint. |
 
@@ -168,7 +212,7 @@ delete-all endpoint.
 
 | Export | Use |
 | --- | --- |
-| `startWebServer` | Start the authenticated standalone product and receive an idempotent stop handle. |
+| `startWebServer` | Start the access-gated standalone product and receive an idempotent stop handle. |
 | `loadWebConfig` | Read, resolve, and strictly validate `web.config.json`. |
 | `parseWebConfig` | Validate an already parsed authoring object with explicit source path and environment. |
 | `webConfigJsonSchema` | Write editor/schema artifacts from the executable product contract. |
@@ -227,7 +271,7 @@ webConfigJsonSchema
 The browser API is:
 
 - `GET /api/v1/bootstrap`
-- `GET /api/v1/events` (authenticated invalidation SSE)
+- `GET /api/v1/events` (access-gated invalidation SSE)
 - `POST /api/v1/threads`
 - `GET /api/v1/threads/:id`
 - `PATCH /api/v1/threads/:id`
@@ -260,9 +304,9 @@ validator for a bounded free-form effort.
 ## Dependency Boundary
 
 The only package dependency is `@mono-agent/operator`. Node HTTP, filesystem,
-and crypto primitives own product transport, state, and authentication. Web
-does not depend on core, module-sdk, a runtime, a channel implementation, v0
-config, or observability.
+and crypto primitives own product transport, state, and access enforcement.
+Web does not depend on core, module-sdk, a runtime, a channel implementation,
+v0 config, or observability.
 
 ## What This Package Does Not Own
 
@@ -290,8 +334,9 @@ pnpm --filter @mono-agent/web typecheck
 pnpm --filter @mono-agent/web test
 ```
 
-Focused tests cover strict secret resolution, body bounds, bearer auth,
-cross-origin rejection, real shared-client turn streaming, cancellation,
+Focused tests cover strict access-mode and host resolution, body bounds, bearer
+auth/no-auth behavior, authority and cross-origin rejection, real shared-client
+turn streaming, cancellation,
 AskUser/live-input routing, uploads/quotes, proactive import and dismissal,
 browser view routes, v1/v2-to-v3 migration, telemetry rendering and restart
 persistence, deletion, exclusive ownership,

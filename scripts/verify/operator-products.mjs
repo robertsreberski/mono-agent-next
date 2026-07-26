@@ -220,8 +220,10 @@ async function main() {
       configVersion: 1,
       listen: { host: "127.0.0.1", port: 0 },
       auth: { token: WEB_TOKEN },
+      allowInsecureHttp: false,
       dataDirectory: webDataDirectory,
       agentRegistries: [registryDirectory],
+      allowedHosts: [],
       externalOrigins: [],
       sourcePath: join(temporaryRoot, "web.config.json"),
     };
