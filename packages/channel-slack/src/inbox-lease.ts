@@ -19,6 +19,7 @@ import {
 } from "./inbox-values.js";
 
 const LEASE_APPLICATION_ID = 0x4d41534c;
+const LEASE_DATABASE_BYTES = 4_096;
 const SQLITE_RESERVED_SUFFIXES = ["-journal", "-shm", "-wal"] as const;
 const ACTIVE_DIRECTORY_LEASES = processGlobalLeaseRegistry();
 
@@ -59,6 +60,9 @@ export async function inspectSlackInboxLeaseMetadata(
   }
   if (identity.links !== 1) {
     throw new Error("Slack durable inbox lease must have exactly one hard link.");
+  }
+  if (identity.size !== LEASE_DATABASE_BYTES) {
+    throw new Error(`Slack durable inbox lease must be exactly ${LEASE_DATABASE_BYTES} bytes.`);
   }
   throwIfAborted(signal);
   return identity;
@@ -337,7 +341,7 @@ function sameFileSnapshot(
 }
 
 function createLeaseDatabase(): Uint8Array {
-  const pageBytes = 4_096;
+  const pageBytes = LEASE_DATABASE_BYTES;
   const database = Buffer.alloc(pageBytes);
   database.write("SQLite format 3\0", 0, "binary");
   database.writeUInt16BE(pageBytes, 16);

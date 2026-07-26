@@ -152,11 +152,11 @@ file metadata, open the exact validated lease inode through a retained file
 descriptor, and acquire its exclusive SQLite transaction before reading marker
 or state contents. Marker and state reads are likewise pinned to the discovered
 device/inode identities, and a stable directory rename or replacement fails
-closed before persistence. This prevents a replacement directory from being
-read, locked, or mutated through a stale discovery path. Process exit releases
-the operating-system lock. These checks protect the trusted host from static
-replacement and ordinary rename races; as with the framework's other
-device/inode checks, they are not a security boundary against deliberate
+closed rather than accepting the replacement as the discovered inbox;
+subsequent persistence remains identity- and compare-and-swap checked. Process
+exit releases the operating-system lock. These checks protect the trusted host
+from static replacement and ordinary rename races; as with the framework's
+other device/inode checks, they are not a security boundary against deliberate
 same-UID code, which can rewrite or replace owner-private entries or perform
 ABA swaps.
 The inbox contains inbound Slack text and private attachment URLs, so backup

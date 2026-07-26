@@ -17,17 +17,17 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `646de52647eb5264888819ea005c70fbf0ae120a0a53331e9e9c760c9b6b012c`
+Source manifest digest: `06759c537eb3db4e37eb4842d3db7ed38c77e0263110c2a55ee927a1ca866065`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 317 | 100457 |
+| Production | 317 | 100461 |
 | Tests | 167 | 80467 |
 | Repository and product tooling | 56 | 18852 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **540** | **199776** |
+| **Total executable source** | **540** | **199780** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
@@ -40,7 +40,7 @@ Average production file size is 316.9 lines.
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 100457 | 130000 | within limit |
+| repository-production | 100461 | 130000 | within limit |
 | kernel-production | 16229 | 16500 | within limit |
 | durable-protocol-production | 7626 | 9500 | within limit |
 
@@ -50,7 +50,7 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 80467 | 75343 | within limit |
+| test source, at 0.75 of production | 80467 | 75346 | within limit |
 
 The current ratio is 0.801.
 
@@ -65,7 +65,7 @@ The current ratio is 0.801.
 | `@mono-agent/memory-local` | 19 | 8097 | 4767 |
 | `@mono-agent/service-macos` | 22 | 5770 | 2131 |
 | `create-mono-agent` | 12 | 5487 | 2199 |
-| `@mono-agent/channel-slack` | 17 | 5144 | 3123 |
+| `@mono-agent/channel-slack` | 17 | 5148 | 3123 |
 
 The complete package table is retained in the generated report model exposed by
 `pnpm --silent run report:source-beta -- --json`.
