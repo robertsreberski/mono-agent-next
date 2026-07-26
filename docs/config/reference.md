@@ -294,6 +294,7 @@ Kind: `memory`. Canonical selected path: `memory`.
 | `memory.capture.model` | `object` | no | — | `closed object` | no | no | — |
 | `memory.capture.model.model` | `string` | yes | — | `maxLength 512; minLength 1` | no | no | — |
 | `memory.capture.model.runtime` | `string` | yes | — | `maxLength 256; minLength 1` | no | no | — |
+| `memory.capture.receiptRetentionDays` | `integer` | no | `30` | `maximum 3650; minimum 1` | no | no | — |
 | `memory.capture.timeoutMs` | `integer` | no | `360000` | `maximum 3600000; minimum 1` | no | no | — |
 | `memory.embeddings` | `object` | no | — | `closed object` | no | no | — |
 | `memory.embeddings.breakerFailures` | `integer` | no | `3` | `maximum 100; minimum 1` | no | no | — |

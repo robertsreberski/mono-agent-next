@@ -31,7 +31,7 @@ pnpm run generate:source-beta-docs
 | `@mono-agent/channel-openai-api` | 1 | 25 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-openai-api/README.md) |
 | `@mono-agent/channel-operator` | 1 | 21 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/channel-operator/README.md) |
 | `@mono-agent/trigger-cron` | 1 | 29 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/trigger-cron/README.md) |
-| `@mono-agent/memory-local` | 1 | 57 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/memory-local/README.md) |
+| `@mono-agent/memory-local` | 1 | 58 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/memory-local/README.md) |
 | `@mono-agent/state-local` | 1 | 26 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/state-local/README.md) |
 | `@mono-agent/exporter-otlp` | 1 | 13 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/exporter-otlp/README.md) |
 | `@mono-agent/sandbox-srt` | 1 | 14 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/sandbox-srt/README.md) |
@@ -775,6 +775,7 @@ triggerCronConfigSchema
 
 ```text
 AdoptV0MemoryLocalCopyOptions
+DEFAULT_CAPTURE_RECEIPT_RETENTION_DAYS
 DEFAULT_EMBEDDING_BREAKER_FAILURES
 DEFAULT_EMBEDDING_BREAKER_RESET_MS
 DEFAULT_EMBEDDING_TIMEOUT_MS

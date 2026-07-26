@@ -334,6 +334,11 @@ describe("memory-local maintenance commands", () => {
         .run({ strict: true }, { signal, logger })).resolves.toMatchObject({
           status: "healthy",
           records: 1,
+          receipts: {
+            count: 1,
+            capacity: 100_000,
+            lowWatermark: 90_000,
+          },
         });
       const backupCommand = findCommand(memory.commands, "memory-local:backup");
       await expect(backupCommand.run(undefined, { signal, logger }))

@@ -330,6 +330,11 @@ function auditToJson(result: MemoryLocalAudit): JsonValue {
       captures: result.intake.captures,
       vectors: result.intake.vectors,
     },
+    receipts: {
+      count: result.receipts.count,
+      capacity: result.receipts.capacity,
+      lowWatermark: result.receipts.lowWatermark,
+    },
     projections: {
       index: result.projections.index,
       futureLog: result.projections.futureLog,

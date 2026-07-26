@@ -43,7 +43,11 @@ import {
   adoptV0MemoryLocalCopyForTesting,
   snapshotV0MemoryLocalRootForTesting,
 } from "../migration.js";
-import { captureReceiptKey } from "../bujo-db.js";
+import {
+  MAX_CAPTURE_RECEIPTS,
+  assertCaptureReceiptIntegrity,
+  captureReceiptKey,
+} from "../bujo-db.js";
 
 const fixturePath = fileURLToPath(
   new URL("../../fixtures/v0-final-bujo.json", import.meta.url),
@@ -772,6 +776,65 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const after = await stat(markerPath);
     expect(after.ino).toBe(before.ino);
   });
+
+  it.each([MAX_CAPTURE_RECEIPTS, MAX_CAPTURE_RECEIPTS + 1])(
+    "adopts a valid legacy store with %d permanent receipts as degraded",
+    async (receiptCount) => {
+    const fixture = await readFixture();
+    const testRoot = await createTestRoot();
+    const source = join(testRoot, "v0-source");
+    const rehearsal = join(testRoot, "rehearsal-copy");
+    await seedV0FinalStore(source, fixture);
+    const database = new DatabaseSync(managedDatabasePath(source, fixture));
+    const insert = database.prepare(
+      "INSERT INTO index_metadata(key, value) VALUES (?, ?)",
+    );
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      for (let index = 0; index < receiptCount; index += 1) {
+        insert.run(
+          `memory-local:capture-receipt:${Buffer.from(
+            `migration-cap-${String(index).padStart(6, "0")}`,
+          ).toString("base64url")}`,
+          JSON.stringify({
+            recordIds: [],
+            sourceHash: index.toString(16).padStart(64, "0"),
+            version: 1,
+          }),
+        );
+      }
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+    try {
+      expect(() => assertCaptureReceiptIntegrity(database)).not.toThrow();
+    } finally {
+      database.close();
+    }
+
+    const snapshot = await snapshotV0MemoryLocalRoot({
+      sourceRoot: source,
+      targetRoot: rehearsal,
+      signal,
+    });
+    await expect(adoptV0MemoryLocalCopy({
+      liveSourceRoot: source,
+      targetRoot: rehearsal,
+      expectedSourceStateSha256: snapshot.sourceStateSha256,
+      expectedTreeSha256: snapshot.treeSha256,
+      confirm: snapshot.treeSha256,
+      signal,
+    })).resolves.toMatchObject({
+      audit: {
+        status: "degraded",
+        receipts: { count: receiptCount },
+      },
+    });
+    },
+    120_000,
+  );
 
   it("rejects dangling capture receipts before adoption commit", async () => {
     const fixture = await readFixture();
