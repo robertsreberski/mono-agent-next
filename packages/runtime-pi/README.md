@@ -26,7 +26,7 @@ events and the mono-agent runtime slot.
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -202,7 +202,7 @@ model's own maximum.
 
 ### Data flow
 
-1. The v1 core validates the selected module schema and creates one runtime
+1. The core validates the selected module schema and creates one runtime
    instance.
 2. The runtime resolves the `provider:model` route through Pi's built-in model
    registry or an explicitly configured local provider.
@@ -254,7 +254,7 @@ before model resolution or any provider request.
 
 | Export | Use it for |
 | --- | --- |
-| `monoAgentModule` | Select this package in a v1 `runtimes` slot. |
+| `monoAgentModule` | Select this package in a `runtimes` slot. |
 | `RuntimePiConfig` | Type a programmatically supplied module configuration. |
 
 <!-- public-api-inventory:start -->
@@ -293,7 +293,7 @@ remove those native tools rather than silently approving them.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Pi upstream reconnaissance skill](../../skills/pi-upstream-recon/SKILL.md)
 
 ## Verification

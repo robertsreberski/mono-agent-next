@@ -1,6 +1,6 @@
 ---
 title: "Programmatic API"
-description: "Load, validate, inspect, start, and operate v1 through public package APIs without a human CLI subprocess."
+description: "Load, validate, inspect, start, and operate through public package APIs without a human CLI subprocess."
 sidebar:
   order: 0
 ---

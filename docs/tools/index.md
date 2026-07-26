@@ -19,6 +19,6 @@ runtime-visible behavior:
 - [Documentation MCP](/tools/documentation-mcp/) is a coding-client companion,
   not a tool selected by the running agent.
 
-Core is not a generic plugin registry or process supervisor. V1 has no
+Core is not a generic plugin registry or process supervisor. Mono-agent has no
 continuation host grants, hidden child-run host capabilities, or module-tool
 configuration key.

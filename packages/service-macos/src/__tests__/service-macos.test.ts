@@ -76,7 +76,7 @@ afterEach(() => {
 });
 
 describe("service-macos config", () => {
-  it("strictly accepts the v1 desired-state shape", () => {
+  it("strictly accepts the desired-state shape", () => {
     expect(parseServiceMacosConfig({
       configVersion: 1,
       services: {

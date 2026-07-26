@@ -43,7 +43,7 @@ const FORBIDDEN_V0_PACKAGES = Object.freeze([
 
 async function main() {
   assertSupportedNode();
-  const temporaryRoot = await mkdtemp(join(tmpdir(), "mono-agent-v1-minimal-"));
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "mono-agent-minimal-"));
   const tarballDirectory = join(temporaryRoot, "tarballs");
   const bootstrapDirectory = join(temporaryRoot, "bootstrap");
   const consumerDirectory = join(temporaryRoot, "consumer");
@@ -198,7 +198,7 @@ async function main() {
 function assertSupportedNode() {
   const [major, minor] = process.versions.node.split(".").map(Number);
   if (major < 22 || (major === 22 && minor < 19)) {
-    throw new Error(`Packed v1 proof requires Node.js >=22.19.0; current runtime is ${process.versions.node}`);
+    throw new Error(`Packed proof requires Node.js >=22.19.0; current runtime is ${process.versions.node}`);
   }
 }
 

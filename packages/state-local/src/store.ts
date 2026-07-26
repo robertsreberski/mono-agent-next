@@ -947,7 +947,7 @@ export class StateLocalStore implements StateStore, StateLocalInternalAccessHost
       return Object.freeze([stateLocalDiagnostic(
         "state-local.integrity",
         "info",
-        "Owner-private local state identity, writer lease, and execution protocol v1 are verified.",
+        "Owner-private local state identity, writer lease, and execution protocol are verified.",
       )]);
     } catch {
       if (context.signal.aborted) throwIfAborted(context.signal);

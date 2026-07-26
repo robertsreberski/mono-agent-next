@@ -27,7 +27,7 @@ accepted/rejected counts and degraded health.
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -135,7 +135,7 @@ and a node budget. This scan does not make an untrusted collector safe.
 
 | Export | Use it for |
 | --- | --- |
-| `monoAgentModule` | Select this package in a v1 exporter slot. |
+| `monoAgentModule` | Select this package in a exporter slot. |
 | `OtlpExporterConfig` | Type programmatic exporter configuration. |
 | `OtlpExporter` | Construct an exporter with an injected deterministic transport. |
 | `OtlpTransport` | Implement a bounded collector transport for tests or a controlled host. |
@@ -183,7 +183,7 @@ values.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Module SDK](../module-sdk/README.md)
 
 ## Verification

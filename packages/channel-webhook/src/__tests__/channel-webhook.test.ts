@@ -979,7 +979,7 @@ describe("webhook outbound delivery", () => {
 });
 
 describe("mono-agent channel module", () => {
-  it("declares the v1 channel boundary and dispatches through the injected host", async () => {
+  it("declares the channel boundary and dispatches through the injected host", async () => {
     expect(() => assertChannelModuleCompliance(monoAgentModule, {
       expectedPackageName: "@mono-agent/channel-webhook",
       expectedPackageVersion: "0.15.0",

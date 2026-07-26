@@ -1,11 +1,11 @@
 ---
 name: mono-agent-composer
-description: Build or repair a config-first mono-agent v1 project with the bundled scaffolder, strict validation, and one real foreground smoke test.
+description: Build or repair a config-first mono-agent project with the bundled scaffolder, strict validation, and one real foreground smoke test.
 ---
 
 # Mono Agent Composer
 
-Create a runnable mono-agent v1 project from one strict
+Create a runnable mono-agent project from one strict
 `mono-agent.config.json`. Prefer the existing `create-mono-agent` templates and
 public CLI contracts; do not invent host glue or read package internals to guess
 configuration.
@@ -14,8 +14,8 @@ configuration.
 
 1. Establish the intended agent, runtime/model routes, channels, durable
    capabilities, tool policy, sandbox, and smoke test.
-2. Read [the v1 config reference](references/config.md).
-3. From the built v1 source checkout, scaffold a new absent directory with one
+2. Read [the config reference](references/config.md).
+3. From the built source checkout, scaffold a new absent directory with one
    explicit template:
 
    ```bash

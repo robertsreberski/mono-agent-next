@@ -1,11 +1,11 @@
 ---
 title: "Runtimes and routing"
-description: "Select one or more native v1 runtime modules and route attempts through explicit runtime and model references."
+description: "Select one or more native runtime modules and route attempts through explicit runtime and model references."
 sidebar:
   order: 0
 ---
 
-V1 ships four runtime implementations:
+Mono-agent ships four runtime implementations:
 
 | Package | Execution boundary |
 | --- | --- |
@@ -79,8 +79,8 @@ on turns nobody asked to escalate. Turn it on explicitly if you want it:
 }
 ```
 
-Provider sessions belong to the exact conversation/runtime/model route. V1
-does not migrate native v0 sessions; canonical transcript state is the
+Provider sessions belong to the exact conversation/runtime/model route.
+Mono-agent does not migrate native v0 sessions; canonical transcript state is the
 provider-neutral recovery authority.
 
 Use the [package directory](/reference/packages/) for each runtime's exact auth,

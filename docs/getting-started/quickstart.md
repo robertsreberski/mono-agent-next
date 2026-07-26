@@ -5,9 +5,9 @@ sidebar:
   order: 2
 ---
 
-The v1 packages are not published to npm during the source preview. Existing
+The packages are not published to npm during the source preview. Existing
 registry artifacts under the same package names belong to the predecessor
-repository, not this v1 source. Start with the built scaffolder to create and
+repository, not this source. Start with the built scaffolder to create and
 inspect your agent folder, then use the repository's hermetic packed proof for
 the runnable installed boundary.
 
@@ -50,7 +50,7 @@ Return to the source repository and run:
 
 ```bash
 cd "$SOURCE_ROOT"
-pnpm run verify:v1-minimal
+pnpm run verify:minimal
 ```
 
 The verifier:
@@ -72,9 +72,9 @@ read production credentials, or modify an existing agent.
 
 ## Understand the installed CLI workflow
 
-Once an agent project has been installed from reviewed v1 artifacts and has a
+Once an agent project has been installed from reviewed artifacts and has a
 root lockfile, invoke that project's exact CLI package path. This prevents a
-global predecessor command from shadowing v1.
+global predecessor command from shadowing this one.
 
 ### Validate
 

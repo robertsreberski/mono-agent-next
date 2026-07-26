@@ -1,7 +1,7 @@
 {
   "name": "@mono-agent/sandbox-srt",
   "version": "0.15.0",
-  "description": "Integrity-pinned SRT sandbox module for mono-agent v1.",
+  "description": "Integrity-pinned SRT sandbox module for mono-agent.",
   "type": "module",
   "license": "MIT",
   "repository": {

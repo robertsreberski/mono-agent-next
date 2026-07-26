@@ -1,11 +1,11 @@
 ---
 title: "Local BuJo memory"
-description: "Configure the v1 owner-private BuJo store, runtime-backed capture, deterministic recall, and explicit migration rehearsal."
+description: "Configure the owner-private BuJo store, runtime-backed capture, deterministic recall, and explicit migration rehearsal."
 sidebar:
   order: 0
 ---
 
-`@mono-agent/memory-local` is the single first-party v1 memory implementation.
+`@mono-agent/memory-local` is the single first-party memory implementation.
 It owns owner-private SQLite recall, completed-turn capture, forgetting,
 consolidation, and maintenance. Select it in the singleton `memory` slot:
 

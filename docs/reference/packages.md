@@ -1,6 +1,6 @@
 ---
 title: "Packages"
-description: "Directory of every mono-agent v1 source package, its ownership tier, responsibility, and authoritative README."
+description: "Directory of every mono-agent source package, its ownership tier, responsibility, and authoritative README."
 sidebar:
   order: 1
 ---
@@ -15,7 +15,7 @@ runtime composition, see the [repository package map](https://github.com/roberts
 - `core` tier packages live under `packages/`.
 - The one catalog `plugin`-tier entry is the independently registered docs-mcp
   companion under `extras/`; the tier name is physical/release metadata and
-  does not create a generic v1 plugin plane.
+  does not create a generic plugin plane.
 - The `alias` tier is the unscoped `create-mono-agent` project scaffolder and
   CLI entrypoint.
 
@@ -30,7 +30,7 @@ Category describes responsibility (`runtime`, `communication`, `context`, and so
 | --- | --- | --- | --- |
 | `@mono-agent/cli` | `core` / `app` | Provides thin validation, inspection, module-command, authoring, and foreground-run frontends over the core public API. | [README for @mono-agent/cli](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/cli/README.md) |
 | `@mono-agent/service-macos` | `core` / `app` | Inspects, plans, and explicitly reconciles fingerprinted macOS launchd service state. | [README for @mono-agent/service-macos](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/service-macos/README.md) |
-| `create-mono-agent` | `alias` / `app` | Transactionally scaffolds minimal, Personal, and multi-runtime v1 projects and delegates to the CLI. | [README for create-mono-agent](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/create-mono-agent/README.md) |
+| `create-mono-agent` | `alias` / `app` | Transactionally scaffolds minimal, Personal, and multi-runtime projects and delegates to the CLI. | [README for create-mono-agent](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/create-mono-agent/README.md) |
 | `@mono-agent/operator` | `core` / `operator-surface` | Defines the operator protocol, strict client, directory, domain state, actions, and fixtures. | [README for @mono-agent/operator](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/operator/README.md) |
 | `@mono-agent/tui` | `core` / `operator-surface` | Runs the standalone pi-tui renderer over the shared operator client and domain contracts. | [README for @mono-agent/tui](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/tui/README.md) |
 | `@mono-agent/web` | `core` / `operator-surface` | Runs the standalone authenticated browser product with owner-private durable conversations. | [README for @mono-agent/web](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/web/README.md) |
@@ -42,7 +42,7 @@ Category describes responsibility (`runtime`, `communication`, `context`, and so
 | `@mono-agent/sandbox-srt` | `core` / `execution` | Executes selected commands through a fingerprinted fail-closed Sandbox Runtime Tool boundary. | [README for @mono-agent/sandbox-srt](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/sandbox-srt/README.md) |
 | `@mono-agent/state-local` | `core` / `execution` | Provides owner-private CAS state, durable transcript/run records, RunHistory, idempotency, and presence publication. | [README for @mono-agent/state-local](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/state-local/README.md) |
 | `@mono-agent/trigger-cron` | `core` / `execution` | Discovers scheduled Markdown jobs and emits deterministic idempotent trigger events. | [README for @mono-agent/trigger-cron](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/trigger-cron/README.md) |
-| `@mono-agent/docs-mcp` | `plugin` / `context` | Provides offline search and guided reading over version-matched v1 documentation through MCP. | [README for @mono-agent/docs-mcp](https://github.com/robertsreberski/mono-agent-next/blob/main/extras/docs-mcp/README.md) |
+| `@mono-agent/docs-mcp` | `plugin` / `context` | Provides offline search and guided reading over version-matched documentation through MCP. | [README for @mono-agent/docs-mcp](https://github.com/robertsreberski/mono-agent-next/blob/main/extras/docs-mcp/README.md) |
 | `@mono-agent/memory-local` | `core` / `context` | Provides owner-private SQLite memory recall, capture, forgetting, and permanent first-run identity. | [README for @mono-agent/memory-local](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/memory-local/README.md) |
 | `@mono-agent/exporter-otlp` | `core` / `observability` | Exports bounded normalized telemetry batches to an OTLP HTTP endpoint. | [README for @mono-agent/exporter-otlp](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/exporter-otlp/README.md) |
 | `@mono-agent/core` | `core` / `core` | Loads strict agent configuration, runs selected typed modules, and governs one callable-tool catalog. | [README for @mono-agent/core](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/core/README.md) |

@@ -10,7 +10,7 @@ import {
 } from "../check/node-version.mjs";
 
 describe("Node.js support floor", () => {
-  test("keeps the exact v1 minimum and engine range together", () => {
+  test("keeps the exact minimum and engine range together", () => {
     expect(MINIMUM_NODE_VERSION).toBe("22.19.0");
     expect(SUPPORTED_NODE_ENGINE).toBe(">=22.19.0");
   });

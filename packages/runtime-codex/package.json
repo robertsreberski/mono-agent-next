@@ -1,7 +1,7 @@
 {
   "name": "@mono-agent/runtime-codex",
   "version": "0.15.0",
-  "description": "Codex app-server runtime module for mono-agent v1.",
+  "description": "Codex app-server runtime module for mono-agent.",
   "type": "module",
   "license": "MIT",
   "repository": {

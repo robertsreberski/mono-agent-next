@@ -23,11 +23,11 @@ import {
   assertSupportedNodeVersion,
 } from "../check/node-version.mjs";
 
-export const V1_SYSTEM_PROOF_SCHEMA = "mono-agent.v1-system-proof.v1";
-export const V1_ARTIFACT_SET_SCHEMA = "mono-agent.v1-artifact-set.v1";
-export const V1_CLOSURE_SCHEMA = "mono-agent.v1-installed-closure.v1";
-export const V1_CONFIG_SET_SCHEMA = "mono-agent.v1-config-set.v1";
-export const V1_PUBLIC_EXPORT_SPECIFIERS = Object.freeze([
+export const SYSTEM_PROOF_SCHEMA = "mono-agent.system-proof.v1";
+export const ARTIFACT_SET_SCHEMA = "mono-agent.artifact-set.v1";
+export const CLOSURE_SCHEMA = "mono-agent.installed-closure.v1";
+export const CONFIG_SET_SCHEMA = "mono-agent.config-set.v1";
+export const PUBLIC_EXPORT_SPECIFIERS = Object.freeze([
   "@mono-agent/module-sdk",
   "@mono-agent/module-sdk/http",
   "@mono-agent/module-sdk/internal",
@@ -79,8 +79,8 @@ export function assertV1PublicExportSpecifiers(specifiers) {
     "Packed public export proof contains duplicate specifiers.",
   );
   invariant(
-    JSON.stringify(actual) === JSON.stringify(V1_PUBLIC_EXPORT_SPECIFIERS),
-    `Packed public export proof must cover the exact ordered ${String(V1_PUBLIC_EXPORT_SPECIFIERS.length)}-specifier surface.`,
+    JSON.stringify(actual) === JSON.stringify(PUBLIC_EXPORT_SPECIFIERS),
+    `Packed public export proof must cover the exact ordered ${String(PUBLIC_EXPORT_SPECIFIERS.length)}-specifier surface.`,
   );
   return Object.freeze(actual);
 }
@@ -103,8 +103,8 @@ export function captureCleanGitHead({ repo = process.cwd(), spawn = spawnSync } 
   const status = git(root, ["status", "--porcelain=v1", "--untracked-files=all"], spawn);
   const after = git(root, ["rev-parse", "--verify", "HEAD^{commit}"], spawn).toLowerCase();
   validSha(after, "Git HEAD");
-  invariant(before === after, "Packed v1 proof refused source because Git HEAD changed during inspection.");
-  invariant(status === "", "Packed v1 proof requires a clean Git HEAD, including no untracked files.");
+  invariant(before === after, "Packed proof refused source because Git HEAD changed during inspection.");
+  invariant(status === "", "Packed proof requires a clean Git HEAD, including no untracked files.");
   return Object.freeze({ commitSha: before, clean: true });
 }
 
@@ -113,7 +113,7 @@ export function assertStableGitHead(initial, observed, stage = "proof") {
   validSource(observed, `Source after ${stage}`);
   invariant(
     initial.commitSha === observed.commitSha,
-    `Packed v1 proof refused source because Git HEAD changed during ${stage}.`,
+    `Packed proof refused source because Git HEAD changed during ${stage}.`,
   );
   return Object.freeze({ commitSha: initial.commitSha, clean: true, stable: true });
 }
@@ -127,7 +127,7 @@ export function createFreshProofWorkspace(options = {}) {
   assertStableGitHead(source, captureCleanGitHead({ repo, spawn }), "fresh-workspace creation");
 
   const parent = realpathSync(options.temporaryParent ?? tmpdir());
-  const root = mkdtempSync(join(parent, "mono-agent-v1-proof-"));
+  const root = mkdtempSync(join(parent, "mono-agent-proof-"));
   const workspace = Object.freeze({
     root,
     checkout: join(root, "checkout"),
@@ -273,7 +273,7 @@ export function buildArtifactSetEvidence(snapshots, { expectedPackageNames, expe
   );
   return {
     packageCount: packages.length,
-    aggregateSha256: digest(V1_ARTIFACT_SET_SCHEMA, packages),
+    aggregateSha256: digest(ARTIFACT_SET_SCHEMA, packages),
     packages,
   };
 }
@@ -320,7 +320,7 @@ export function buildInstalledClosure(listOutput, options = {}) {
   return {
     packageCount: packages.length,
     packages,
-    sha256: digest(V1_CLOSURE_SCHEMA, packages),
+    sha256: digest(CLOSURE_SCHEMA, packages),
   };
 }
 
@@ -336,7 +336,7 @@ export function assertClosureEvidence(evidence, options = {}) {
   );
   expectedFirstParty(packages, options);
   invariant(
-    evidence.sha256 === digest(V1_CLOSURE_SCHEMA, packages),
+    evidence.sha256 === digest(CLOSURE_SCHEMA, packages),
     "Installed-closure digest does not match its package records.",
   );
   return evidence;
@@ -365,7 +365,7 @@ export function buildConfigSetEvidence(records, { expectedTemplates } = {}) {
   const templates = records.map((record, index) => templateRecord(record, expectedTemplates[index]));
   return {
     templateCount: templates.length,
-    aggregateSha256: digest(V1_CONFIG_SET_SCHEMA, templates),
+    aggregateSha256: digest(CONFIG_SET_SCHEMA, templates),
     templates,
   };
 }
@@ -400,7 +400,7 @@ export function buildV1SystemProofEvidence(options = {}) {
   });
   assertConfigSetEvidence(options.configs, { expectedTemplates: options.expectedTemplates });
   const evidence = {
-    schema: V1_SYSTEM_PROOF_SCHEMA,
+    schema: SYSTEM_PROOF_SCHEMA,
     result: "passed",
     source,
     runtime,
@@ -418,13 +418,13 @@ export function buildV1SystemProofEvidence(options = {}) {
 
 export function assertV1SystemProofEvidence(evidence, options = {}) {
   invariant(
-    evidence?.schema === V1_SYSTEM_PROOF_SCHEMA && evidence.result === "passed",
-    "Packed v1 system proof evidence has an invalid schema or result.",
+    evidence?.schema === SYSTEM_PROOF_SCHEMA && evidence.result === "passed",
+    "Packed system proof evidence has an invalid schema or result.",
   );
   validSource(evidence.source, "Proof source", true);
   invariant(
     options.expectedSourceSha === undefined || evidence.source.commitSha === options.expectedSourceSha,
-    "Packed v1 system proof source SHA does not match the expected candidate.",
+    "Packed system proof source SHA does not match the expected candidate.",
   );
   invariant(
     evidence.runtime?.result === "passed"
@@ -433,12 +433,12 @@ export function assertV1SystemProofEvidence(evidence, options = {}) {
       && evidence.runtime.platform.length > 0
       && typeof evidence.runtime.arch === "string"
       && evidence.runtime.arch.length > 0,
-    "Packed v1 system proof runtime evidence is malformed.",
+    "Packed system proof runtime evidence is malformed.",
   );
   assertSupportedNodeVersion(evidence.runtime.nodeVersion);
   invariant(
     options.expectedNodeVersion === undefined || evidence.runtime.nodeVersion === options.expectedNodeVersion,
-    "Packed v1 system proof Node.js version does not match the executing runtime.",
+    "Packed system proof Node.js version does not match the executing runtime.",
   );
   assertArtifactSetEvidence(evidence.artifacts, options);
   assertClosureEvidence(evidence.closure, {
@@ -450,7 +450,7 @@ export function assertV1SystemProofEvidence(evidence, options = {}) {
   invariant(
     evidence.closureConfigSha256
       === combinedDigest(evidence.closure.sha256, evidence.configs.aggregateSha256),
-    "Packed v1 system proof closure/config digest does not match its evidence.",
+    "Packed system proof closure/config digest does not match its evidence.",
   );
   return evidence;
 }
@@ -464,7 +464,7 @@ function git(repo, args, spawn) {
   });
   invariant(
     result.error === undefined && result.status === 0,
-    `Packed v1 proof Git ${args[0]} failed.`,
+    `Packed proof Git ${args[0]} failed.`,
   );
   return (result.stdout ?? "").trim();
 }
@@ -644,7 +644,7 @@ function digest(schema, value) {
 function combinedDigest(closure, configs) {
   validDigest(closure, "Installed-closure digest");
   validDigest(configs, "Config-set digest");
-  return digest(`${V1_SYSTEM_PROOF_SCHEMA}.closure-config`, {
+  return digest(`${SYSTEM_PROOF_SCHEMA}.closure-config`, {
     closureSha256: closure,
     configSha256: configs,
   });

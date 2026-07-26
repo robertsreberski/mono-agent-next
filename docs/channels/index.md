@@ -1,6 +1,6 @@
 ---
 title: "Channels and triggers"
-description: "Select one of the five v1 channel modules explicitly, and keep scheduled work in the separate cron trigger."
+description: "Select one of the five channel modules explicitly, and keep scheduled work in the separate cron trigger."
 sidebar:
   order: 0
 ---
@@ -26,7 +26,7 @@ instance ids. Long prompts remain in `cron/*.md`, not duplicated in JSON.
 
 Installing a package does not activate it. Core loads only literal `$use`
 selections and does not scan dependencies, a catalog, or arbitrary paths.
-WhatsApp and A2A are explicit v1 cuts.
+WhatsApp and A2A are explicit cuts.
 
 The [operator channel guide](/channels/tui/) covers the endpoint shared by the
 two standalone operator products.

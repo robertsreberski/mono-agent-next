@@ -1,12 +1,12 @@
-# mono-agent v1 architecture
+# mono-agent architecture
 
-This is the maintainer map for the public v1 source target. The accepted
-product contract is in the [v1 architecture decision](./docs/reference/v1-architecture.md),
+This is the maintainer map for the public source target. The accepted
+product contract is in the [architecture decision](./docs/reference/architecture.md),
 and each package README owns its detailed public API and operational boundary.
 
 ## System shape
 
-`@mono-agent/core` is the only agent composition host. It knows the neutral v1
+`@mono-agent/core` is the only agent composition host. It knows the neutral
 module contracts from `@mono-agent/module-sdk`, but it does not import concrete
 runtimes, channels, memory, state, exporters, triggers, or sandboxes.
 
@@ -37,12 +37,12 @@ fallback success.
 
 ## Exact 23-package roster
 
-The catalog is closed for v1: 22 packages live under `packages/`; the paired
+The catalog is closed: 22 packages live under `packages/`; the paired
 documentation MCP companion is the one publishable package under `extras/`.
 
 | Package | Category | Responsibility |
 | --- | --- | --- |
-| [`@mono-agent/module-sdk`](./packages/module-sdk/README.md) | core | Typed v1 module contracts, schemas, compliance helpers, and bounded host primitives. |
+| [`@mono-agent/module-sdk`](./packages/module-sdk/README.md) | core | Typed module contracts, schemas, compliance helpers, and bounded host primitives. |
 | [`@mono-agent/core`](./packages/core/README.md) | core | Strict config loading and execution of explicitly selected modules. |
 | [`@mono-agent/cli`](./packages/cli/README.md) | app | Validation, inspection, schema/explain, module-command, and foreground-start frontend. |
 | [`@mono-agent/runtime-pi`](./packages/runtime-pi/README.md) | runtime | Pi-native attempts and native session linkage. |
@@ -63,7 +63,7 @@ documentation MCP companion is the one publishable package under `extras/`.
 | [`@mono-agent/tui`](./packages/tui/README.md) | operator-surface | Standalone pi-tui renderer over the shared operator client. |
 | [`@mono-agent/web`](./packages/web/README.md) | operator-surface | Standalone authenticated browser product with owner-private durable conversations. |
 | [`create-mono-agent`](./packages/create-mono-agent/README.md) | app | Transactional minimal, Personal, and multi-runtime project scaffolding. |
-| [`@mono-agent/docs-mcp`](./extras/docs-mcp/README.md) | context | Offline search and guided reading over version-matched v1 documentation. |
+| [`@mono-agent/docs-mcp`](./extras/docs-mcp/README.md) | context | Offline search and guided reading over version-matched documentation. |
 | [`@mono-agent/service-macos`](./packages/service-macos/README.md) | app | Explicit inspection, planning, and reconciliation of fingerprinted macOS services. |
 
 ## Dependency rules

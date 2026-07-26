@@ -165,4 +165,4 @@ from every agent.
 
 - [Operator channel](/channels/tui/) — authenticated agent endpoint and current capability set.
 - [Terminal operator](/observability/tui/) — independent pi-tui renderer.
-- [v1 architecture](/reference/v1-architecture/) — product/config ownership and dependency direction.
+- [architecture](/reference/architecture/) — product/config ownership and dependency direction.

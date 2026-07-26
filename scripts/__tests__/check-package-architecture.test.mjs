@@ -45,7 +45,7 @@ describe("package architecture adapter-neutrality guard", () => {
     expect(TEST_CHANNEL_IDS).toEqual([...SHIPPED_CHANNEL_IDS, SYNTHETIC_CHANNEL_ID]);
   });
 
-  it("contains exactly the 23-package v1 roster and no compatibility webhook package", () => {
+  it("contains exactly the 23-package roster and no compatibility webhook package", () => {
     expect(packageCatalog).toHaveLength(23);
     expect(packageCatalog.find((entry) => entry.name === "@mono-agent/webhook-adapter")).toBeUndefined();
     expect(packageCatalog.find((entry) => entry.name === "@mono-agent/channel-webhook")).toMatchObject({

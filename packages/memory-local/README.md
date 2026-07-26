@@ -31,7 +31,7 @@ durable retry intake and is never treated as success.
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -132,7 +132,7 @@ copied root only: the same exclusively created marker inode advances from
 v0 root and a separate restorable backup through rollback.
 Valid v0 timestamps that omitted milliseconds or used another offset remain
 byte-for-byte unchanged in the adopted database and are projected as canonical
-UTC timestamps by the v1 API. New v1 records still require exact
+UTC timestamps by the adoption API. New records still require exact
 millisecond-UTC timestamps, while malformed stored timestamps fail semantic
 adoption, strict audit, and existing-store admission.
 
@@ -174,7 +174,7 @@ adoption, strict audit, and existing-store admission.
 | `config.ts` | Exact capture, embedding, recall-tool, and byte-bound config. |
 | `security.ts` | Canonical root and pinned descriptor ownership/link/mode checks. |
 | `writer-lease.ts` | Exclusive fail-closed writer fence. |
-| `bujo-db.ts` | BuJo v1, FTS5, sqlite-vec, intake metadata, and index operations. |
+| `bujo-db.ts` | BuJo , FTS5, sqlite-vec, intake metadata, and index operations. |
 | `embeddings.ts` | Bounded no-redirect Ollama `/api/embed` client. |
 | `records.ts` | Record validation, read reconstruction, canonical hashing, and timestamp projection. |
 | `consolidation.ts` | Bounded projection rendering, crash-safe publication, duplicate reporting, and projection audit. |
@@ -322,7 +322,7 @@ policy.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Capability ladder](../../docs/reference/capability-ladder.md)
 - [Module SDK](../module-sdk/README.md)
 

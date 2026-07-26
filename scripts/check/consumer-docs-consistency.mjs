@@ -428,8 +428,8 @@ function scanRetiredDocReferences(records) {
       for (const match of findPatternMatches(retiredReference.pattern, record.text)) {
         const location = lineAndColumn(record.text, match.index);
         issues.push(
-          `${record.path}:${location.line}:${location.column}: references retired pre-v1 surface ` +
-            `"${retiredReference.label}". Update the user docs to the current v1 package map.`,
+          `${record.path}:${location.line}:${location.column}: references retired predecessor surface ` +
+            `"${retiredReference.label}". Update the user docs to the current package map.`,
         );
       }
     }
@@ -647,7 +647,7 @@ function usage() {
     "",
     "Scans repo user docs (AGENTS.md, README.md, PACKAGES.md, docs/**/*.md, relevant package READMEs,",
     "mono-agent-composer references, and demos/**/*.md)",
-    "for retired pre-v1 surfaces",
+    "for retired predecessor surfaces",
     "and scans those docs plus TUI source text for absolute artifact/replay claims",
     "that contradict wire truncation, best-effort export, recorder redaction, or terminal persistence.",
     "Each optional consumer folder should contain README.md and mono-agent.config.json.",

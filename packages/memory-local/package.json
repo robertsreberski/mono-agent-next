@@ -1,7 +1,7 @@
 {
   "name": "@mono-agent/memory-local",
   "version": "0.15.0",
-  "description": "Owner-private SQLite memory module for mono-agent v1.",
+  "description": "Owner-private SQLite memory module for mono-agent.",
   "type": "module",
   "license": "MIT",
   "repository": {

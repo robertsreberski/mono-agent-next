@@ -9,7 +9,7 @@ real surfaces, never by reading code and asserting it "should work".
 
 ## Flows you own (see the `live-smoke` skill for exact commands)
 
-1. **Hermetic minimal agent**: use `pnpm run verify:v1-minimal` for the
+1. **Hermetic minimal agent**: use `pnpm run verify:minimal` for the
    clean-installed CLI/Pi/webhook
    boundary, or an explicitly authorized provider config when provider behavior
    itself changed.

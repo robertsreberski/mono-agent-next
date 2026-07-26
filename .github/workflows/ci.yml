@@ -51,7 +51,7 @@ jobs:
 
       - name: Check dependency vulnerabilities
         if: ${{ matrix.node-version == '22.19.0' }}
-        run: pnpm run check:v1-dependency-vulnerabilities
+        run: pnpm run check:dependency-vulnerabilities
 
       - name: Scan secrets
         if: ${{ matrix.node-version == '22.19.0' }}
@@ -80,7 +80,7 @@ jobs:
           pnpm run check:docs
           pnpm run check:doc-snippets
 
-      - name: Build and typecheck the complete v1 workspace
+      - name: Build and typecheck the complete workspace
         run: |
           pnpm run build
           pnpm run typecheck
@@ -95,7 +95,7 @@ jobs:
         if: ${{ matrix.node-version == '22.19.0' }}
         run: pnpm run verify:consumers
 
-      - name: Test the complete v1 workspace
+      - name: Test the complete workspace
         run: |
           pnpm run scripts:test
           pnpm run test
@@ -105,7 +105,7 @@ jobs:
         run: pnpm run release:test:unit
 
       - name: Prove standalone operator products
-        run: pnpm run verify:v1-operator-products
+        run: pnpm run verify:operator-products
 
       - name: Install the browser lane's browser
         if: ${{ matrix.node-version == '22.19.0' }}
@@ -115,13 +115,13 @@ jobs:
         if: ${{ matrix.node-version == '22.19.0' }}
         run: pnpm run test:browser
 
-      - name: Prove packed minimal v1 consumer
+      - name: Prove packed minimal consumer
         if: ${{ matrix.node-version == '22.19.0' }}
-        run: pnpm run verify:v1-minimal
+        run: pnpm run verify:minimal
 
-      - name: Prove packed complete v1 system
+      - name: Prove packed complete system
         if: ${{ matrix.node-version == '22.19.0' }}
-        run: pnpm run verify:v1-system
+        run: pnpm run verify:system
 
       - name: Check generated contracts and whitespace
         run: git diff --exit-code && git diff --check

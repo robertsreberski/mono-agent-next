@@ -19,7 +19,7 @@ the published site.
 - The topical page under `docs/<area>/` (channels, config, runtime, memory,
   tools, observability, programmatic, getting-started).
 - `docs/config/reference.md` for generated config fields and scaffold examples.
-- `docs/reference/v1-architecture.md`, `docs/reference/packages.md`, and
+- `docs/reference/architecture.md`, `docs/reference/packages.md`, and
   `docs/reference/public-api.md` for architecture, catalog, and public API
   changes.
 - `docs/playbooks/` — update the closest existing playbook.

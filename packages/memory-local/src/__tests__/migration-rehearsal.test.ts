@@ -63,7 +63,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     const backup = join(testRoot, "pre-cutover-backup");
     await seedV0FinalStore(source, fixture);
 
@@ -226,7 +226,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
     await writeFile(join(source, "notes.txt"), "stable source\n", {
       flag: "wx",
@@ -258,7 +258,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
       const fixture = await readFixture();
       const testRoot = await createTestRoot();
       const source = join(testRoot, "v0-source");
-      const rehearsal = join(testRoot, "v1-rehearsal-copy");
+      const rehearsal = join(testRoot, "rehearsal-copy");
       const replacement = replacementKind === "directory"
         ? rehearsal
         : join(testRoot, "operator-target");
@@ -293,7 +293,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
 
     await expect(snapshotV0MemoryLocalRootForTesting({
@@ -321,7 +321,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
 
     await expect(snapshotV0MemoryLocalRootForTesting({
@@ -344,7 +344,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     const displaced = join(testRoot, "displaced-created-copy");
     await seedV0FinalStore(source, fixture);
 
@@ -372,7 +372,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     const displaced = join(testRoot, "displaced-created-copy");
     await seedV0FinalStore(source, fixture);
 
@@ -403,7 +403,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     const displaced = join(testRoot, "displaced-created-copy");
     await seedV0FinalStore(source, fixture);
 
@@ -437,7 +437,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     const displaced = join(testRoot, "displaced-created-copy");
     await seedV0FinalStore(source, fixture);
 
@@ -468,7 +468,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
 
     await expect(snapshotV0MemoryLocalRootForTesting({
@@ -491,7 +491,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
     const handle = await open(managedDatabasePath(source, fixture), "r+");
     try {
@@ -513,7 +513,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
     const handle = await open(`${managedDatabasePath(source, fixture)}-wal`, "wx", 0o600);
     try {
@@ -535,7 +535,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     const sourceFile = join(source, "stable-note.txt");
     await seedV0FinalStore(source, fixture);
     await writeFile(sourceFile, "alpha\n", { flag: "wx", mode: 0o600 });
@@ -562,7 +562,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     const nested = join(source, "archive", "2026");
     await seedV0FinalStore(source, fixture);
     await mkdir(nested, { recursive: true, mode: 0o700 });
@@ -599,7 +599,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
     const otherSource = join(testRoot, "unrelated-v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
     await seedV0FinalStore(otherSource, fixture);
 
@@ -658,7 +658,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "running-v0-source");
-    const rehearsal = join(testRoot, "running-v1-copy");
+    const rehearsal = join(testRoot, "running-copy");
     await seedV0FinalStore(source, fixture);
     const databasePath = managedDatabasePath(source, fixture);
     const live = new DatabaseSync(databasePath, { allowExtension: true });
@@ -734,7 +734,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
     const databasePath = join(
       source,
@@ -777,7 +777,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
     const database = new DatabaseSync(managedDatabasePath(source, fixture));
     try {
@@ -820,7 +820,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
     const database = new DatabaseSync(managedDatabasePath(source, fixture));
     try {
@@ -852,7 +852,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
     const replacementRoot = join(testRoot, "replacement-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
     await seedV0FinalStore(replacementRoot, fixture);
     const snapshot = await snapshotV0MemoryLocalRoot({
@@ -887,7 +887,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
     const snapshot = await snapshotV0MemoryLocalRoot({
       sourceRoot: source,
@@ -938,7 +938,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
     const snapshot = await snapshotV0MemoryLocalRoot({
       sourceRoot: source,
@@ -973,7 +973,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const source = join(testRoot, "v0-source");
-    const rehearsal = join(testRoot, "v1-rehearsal-copy");
+    const rehearsal = join(testRoot, "rehearsal-copy");
     await seedV0FinalStore(source, fixture);
     const snapshot = await snapshotV0MemoryLocalRoot({
       sourceRoot: source,
@@ -1042,7 +1042,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     const fixture = await readFixture();
     const testRoot = await createTestRoot();
     const legacySource = join(testRoot, "legacy-v0-source");
-    const legacyTarget = join(testRoot, "legacy-v1-copy");
+    const legacyTarget = join(testRoot, "legacy-copy");
     await seedV0FinalStore(legacySource, fixture);
     await rm(join(legacySource, MEMORY_LOCAL_MARKER_FILENAME));
 
@@ -1055,7 +1055,7 @@ describe("v0-final BuJo copied-data migration rehearsal", () => {
     });
 
     const inFlightSource = join(testRoot, "in-flight-v0-source");
-    const refusedTarget = join(testRoot, "refused-v1-copy");
+    const refusedTarget = join(testRoot, "refused-copy");
     await seedV0FinalStore(inFlightSource, fixture);
     await writeFile(
       join(inFlightSource, MEMORY_LOCAL_MARKER_FILENAME),

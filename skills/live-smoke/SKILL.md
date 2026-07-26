@@ -31,7 +31,7 @@ OpenAI-compatible provider and authenticated webhook, completes one turn, and
 proves signal-driven shutdown:
 
 ```bash
-pnpm run verify:v1-minimal
+pnpm run verify:minimal
 ```
 
 The proof owns and removes its temporary directory and child processes. For a
@@ -91,7 +91,7 @@ validated `mono-agent-web-smoke.*` directory.
 For the complete operator/TUI/web integration boundary, use:
 
 ```bash
-pnpm run verify:v1-operator-products
+pnpm run verify:operator-products
 ```
 
 ## D. Packed documentation MCP

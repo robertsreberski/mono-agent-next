@@ -85,7 +85,7 @@ describe("verify-consumers", () => {
     expect(help).not.toContain("pnpm run verify:consumers -- --");
   });
 
-  it("prints all three v1 source contracts and an aggregate verdict", async () => {
+  it("prints all three source contracts and an aggregate verdict", async () => {
     const stdout = sink();
     const result = await runVerifyConsumers({
       argv: ["--skip-build"],

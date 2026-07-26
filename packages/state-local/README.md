@@ -28,7 +28,7 @@ owner.
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -281,7 +281,7 @@ state APIs.
 
 | Export | Use it for |
 | --- | --- |
-| `monoAgentModule` | Select this package in the reserved v1 state slot. |
+| `monoAgentModule` | Select this package in the reserved state slot. |
 | `StateLocalConfig` | Type programmatic state module configuration. |
 | `StateLocalStore` | Use the concrete store for explicit presence publication or bounded maintenance. |
 | `StateLocalMaintenanceRequest` | Configure a bounded direct maintenance pass. |
@@ -347,7 +347,7 @@ write state-local's package-private records directly.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Module SDK](../module-sdk/README.md)
 
 ## Verification

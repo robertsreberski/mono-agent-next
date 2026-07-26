@@ -1,6 +1,6 @@
 # @mono-agent/core
 
-The strict, provider-neutral mono-agent v1 kernel. It reads one JSON agent
+The strict, provider-neutral mono-agent kernel. It reads one JSON agent
 configuration and its referenced MCP configuration through bounded no-follow
 descriptors, freezes the validated authority snapshot, verifies every selected
 package before import, and owns bounded turn routing and module lifecycle.
@@ -28,7 +28,7 @@ proactive-delivery receipts, health, drain, and shutdown.
 ## Install / Usage
 
 Existing registry artifacts under these package names belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -422,7 +422,7 @@ management, and product configuration remain outside core.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Capability ladder](../../docs/reference/capability-ladder.md)
 - [Project MCP](../../docs/tools/mcp.md)
 

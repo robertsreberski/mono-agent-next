@@ -32,7 +32,7 @@ const INTERACTIVE_INPUT = "prove interactive operator parity";
 const WAIT_TIMEOUT_MS = 5_000;
 
 async function main() {
-  const temporaryRoot = await mkdtemp(join(tmpdir(), "mono-agent-v1-operator-products-"));
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "mono-agent-operator-products-"));
   const registryDirectory = join(temporaryRoot, "registry");
   const webDataDirectory = join(temporaryRoot, "web-data");
   const lifecycle = new AbortController();

@@ -2,7 +2,7 @@
 
 ## Project
 
-This repository contains the config-first v1 framework built from npm packages under the `@mono-agent` scope. `@mono-agent/core` loads strict typed modules defined by `@mono-agent/module-sdk`; providers, channels, durable capabilities, triggers, operator products, scaffolding, documentation search, and macOS service integration remain separate ownership surfaces.
+This repository contains the config-first framework built from npm packages under the `@mono-agent` scope. `@mono-agent/core` loads strict typed modules defined by `@mono-agent/module-sdk`; providers, channels, durable capabilities, triggers, operator products, scaffolding, documentation search, and macOS service integration remain separate ownership surfaces.
 
 ## Successor bootstrap safety
 
@@ -11,9 +11,9 @@ packages, deploy or restart consumers, repoint services, migrate data, or
 retire an existing installation from this checkout. Release and consumer
 adoption are separate, explicitly authorized phases.
 
-## V1 architecture authority
+## Architecture authority
 
-- `docs/reference/v1-architecture.md`, `scripts/lib/package-catalog.mjs`, the
+- `docs/reference/architecture.md`, `scripts/lib/package-catalog.mjs`, the
   package contracts, and their CI gates define the product boundaries and
   exact 23-package roster.
 - Implement coherent vertical outcomes. Do not recreate deleted v0 packages as
@@ -65,7 +65,7 @@ adoption are separate, explicitly authorized phases.
 ## Framework boundaries
 
 - Communication channels, skills/MCP integration, runtime orchestration, state, memory, exporting, sandboxing, and triggers remain modular typed selections.
-- Memory remains optional. First-party v1 retains only the owner-private SQLite `memory-local` implementation; another strategy belongs in an explicitly selected external memory module rather than a second first-party mode.
+- Memory remains optional. First-party retains only the owner-private SQLite `memory-local` implementation; another strategy belongs in an explicitly selected external memory module rather than a second first-party mode.
 - Prefer real execution paths in verification. Fixtures are acceptable for tests, not as product-runtime substitutes.
 
 ## Capability ladder

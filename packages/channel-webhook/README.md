@@ -26,7 +26,7 @@ optionally HMAC-signed webhook destination.
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -131,7 +131,7 @@ Definitive delivered/duplicate receipts retain a bounded FIFO deduplication
 window; when full, the oldest such receipt is recycled. Ambiguous receipts are
 never evicted as safe-to-retry authority.
 
-The HTTP-only v1 slice always requires bearer authentication, including on
+The HTTP-only slice always requires bearer authentication, including on
 loopback, and accepts invocation bodies only with an `application/json`
 Content-Type. This prevents unauthenticated browser-simple POST requests from
 starting turns. `apiKey` is therefore required and its public config value must
@@ -268,7 +268,7 @@ state module.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Capability ladder](../../docs/reference/capability-ladder.md)
 
 ## Verification

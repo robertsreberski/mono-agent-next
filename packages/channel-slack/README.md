@@ -31,7 +31,7 @@ byte budget in addition to the per-file bound.
 ## Install / Usage
 
 Existing registry artifacts under this package name belong to the predecessor
-repository, not this v1 source. Do not install them during the source preview;
+repository, not this source. Do not install them during the source preview;
 build this checkout through the
 [workspace source setup](../../docs/getting-started/install.md) instead.
 
@@ -130,7 +130,7 @@ atomic commit. It contains inbound Slack text and private attachment URLs, so
 backup and access controls must treat it as sensitive. To intentionally discard
 blocked or pending input, stop the agent, inspect/backup the instance data
 directory, then remove only that channel instance's marker-owned data directory;
-the next start creates an empty v1 inbox. There is no online purge.
+the next start creates an empty inbox. There is no online purge.
 
 ### Package structure
 
@@ -230,7 +230,7 @@ silent delivery or quiet hours.
 
 ## Related Documentation
 
-- [V1 architecture](../../docs/reference/v1-architecture.md)
+- [Architecture](../../docs/reference/architecture.md)
 - [Generated config reference](../../docs/config/reference.md)
 
 ## Verification

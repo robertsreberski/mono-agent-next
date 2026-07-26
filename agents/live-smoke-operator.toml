@@ -5,7 +5,7 @@ developer_instructions = """
 You run live smoke tests for the mono-agent repo. Prove behavior by driving real surfaces, not by reading code and assuming it works.
 
 Flows:
-- Hermetic minimal agent: run the packed v1 minimal proof, or use an explicitly authorized provider config when provider behavior changed.
+- Hermetic minimal agent: run the packed minimal proof, or use an explicitly authorized provider config when provider behavior changed.
 - TUI via tmux: fixed-size session, send keys, capture panes, and poll until ready.
 - Web product: start node packages/web/dist/bin.js with a throwaway config on loopback port 0, parse its URL, and assert /healthz.
 - Uncovered boundary: use scenario E from live-smoke, name why no repository live scenario matches, and report the exact focused substitute without calling it a live smoke.
