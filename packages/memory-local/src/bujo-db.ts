@@ -42,6 +42,7 @@ const CAPTURE_RECEIPT_KEY =
 const CAPTURE_RECEIPT_PAGE_SIZE = 512;
 export const MAX_CAPTURE_RECEIPTS = 100_000;
 export const CAPTURE_RECEIPT_LOW_WATERMARK = 90_000;
+const MAX_CAPTURE_RECEIPT_SCAN_ROWS = 1_000_000;
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1_000;
 const CANONICAL_RECEIPT_TIMESTAMP =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
@@ -873,12 +874,13 @@ export function assertCaptureReceiptIntegrity(
     readonly retainedAt: string;
     readonly retentionDays: number;
   },
+  scanLimit = MAX_CAPTURE_RECEIPT_SCAN_ROWS,
 ): void {
   const now = retention === undefined
     ? undefined
     : receiptTimestampMillis(retention.retainedAt);
   const record = database.prepare("SELECT 1 AS present FROM memories WHERE id = ?");
-  for (const { value } of captureReceiptRows(database)) {
+  for (const { value } of captureReceiptRows(database, scanLimit)) {
     const receipt = parseCaptureReceipt(value);
     if (
       retention !== undefined
@@ -939,6 +941,7 @@ function forgetCaptureReceiptReferences(
 
 function captureReceiptRows(
   database: DatabaseSync,
+  scanLimit = MAX_CAPTURE_RECEIPT_SCAN_ROWS,
 ): Iterable<{ readonly key: string; readonly value: string }> {
   const preflight = database.prepare(`
     SELECT
@@ -959,7 +962,13 @@ function captureReceiptRows(
     receipt_count: number;
     invalid_count: number;
   };
-  number(preflight.receipt_count, "capture receipt count");
+  const count = number(preflight.receipt_count, "capture receipt count");
+  if (!Number.isSafeInteger(scanLimit) || scanLimit < 0 || count > scanLimit) {
+    throw new MemoryLocalError(
+      "capacity_exceeded",
+      "Memory capture receipt count exceeds the bounded integrity scan limit.",
+    );
+  }
   if (number(preflight.invalid_count, "invalid capture receipt storage count") !== 0) {
     throw new MemoryLocalError(
       "corrupt_store",

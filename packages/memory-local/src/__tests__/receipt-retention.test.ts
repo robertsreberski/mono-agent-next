@@ -16,6 +16,7 @@ import { MEMORY_LOCAL_DATABASE_FILENAME } from "../index.js";
 import {
   CAPTURE_RECEIPT_LOW_WATERMARK,
   MAX_CAPTURE_RECEIPTS,
+  assertCaptureReceiptIntegrity,
   captureReceiptCount,
   captureReceiptKey,
   getMetadata,
@@ -209,6 +210,29 @@ describe("memory-local capture receipt retention", () => {
     });
     await expect(reopened.forget({ recordId: activeRecord.id, signal })).resolves.toBe(true);
     await reopened.stop();
+  });
+
+  it("bounds integrity scans with an honest capacity error", async () => {
+    const fixture = await createFixture();
+    const initialized = await openMemoryLocal(options(fixture, { capture: { enabled: false } }));
+    await initialized.stop();
+    seedLegacyReceipts(fixture, 3);
+    const database = openBujoDatabase(join(fixture.directory, MEMORY_LOCAL_DATABASE_FILENAME));
+    try {
+      expect(() => assertCaptureReceiptIntegrity(database, undefined, 3)).not.toThrow();
+      let failure: unknown;
+      try {
+        assertCaptureReceiptIntegrity(database, undefined, 2);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toMatchObject({
+        code: "capacity_exceeded",
+        message: expect.not.stringContaining("corrupt"),
+      });
+    } finally {
+      database.close();
+    }
   });
 
   it("fails before the model at capacity, prunes expired v2 receipts, and serializes concurrent admission", async () => {

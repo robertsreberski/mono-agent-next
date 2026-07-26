@@ -218,7 +218,9 @@ admission transactionally evicts expired v2 receipts toward a 90,000-row
 low-water mark. If protected receipts still fill the cap, capture fails with
 `capacity_exceeded` before the model is called, while audit, recall,
 maintenance, and reopen remain usable. Audit and diagnostics report the
-bounded receipt count without exposing receipt content.
+bounded receipt count without exposing receipt content. Reopen and non-strict
+audit remain available above the normal cap; operations that would integrity-
+scan more than 1,000,000 on-disk receipts stop with `capacity_exceeded`.
 
 Non-serving module diagnostics reuse the read-only audit path. A healthy store
 is silent; incomplete FTS/vector/intake/projection state returns bounded

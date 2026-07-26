@@ -17,30 +17,30 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `59066369ab97c18b0fa5a0a48112a22ac70d1dd25030c9034e8dce6fea0d0074`
+Source manifest digest: `d00fedb362def2e1737c0e3859a37779b45bfb6ba8321cd7128424e3b212f1d8`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 311 | 95864 |
-| Tests | 163 | 76204 |
+| Production | 311 | 95873 |
+| Tests | 163 | 76228 |
 | Repository and product tooling | 56 | 18848 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **530** | **190916** |
+| **Total executable source** | **530** | **190949** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 308.2 lines.
+Average production file size is 308.3 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 95864 | 130000 | within limit |
+| repository-production | 95873 | 130000 | within limit |
 | kernel-production | 16174 | 16500 | within limit |
 | durable-protocol-production | 7626 | 9500 | within limit |
 
@@ -50,7 +50,7 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 76204 | 71898 | within limit |
+| test source, at 0.75 of production | 76228 | 71905 | within limit |
 
 The current ratio is 0.795.
 
@@ -61,7 +61,7 @@ The current ratio is 0.795.
 | `@mono-agent/state-local` | 27 | 14355 | 5466 |
 | `@mono-agent/core` | 39 | 12902 | 18232 |
 | `@mono-agent/runtime-pi` | 28 | 8865 | 4978 |
-| `@mono-agent/memory-local` | 19 | 8046 | 4721 |
+| `@mono-agent/memory-local` | 19 | 8055 | 4745 |
 | `@mono-agent/web` | 28 | 7169 | 2507 |
 | `@mono-agent/service-macos` | 22 | 5770 | 2131 |
 | `create-mono-agent` | 11 | 4477 | 1651 |

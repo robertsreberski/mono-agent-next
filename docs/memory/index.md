@@ -77,7 +77,9 @@ transactionally evicts expired v2 receipts toward a 90,000-row low-water mark.
 If current and legacy receipts still fill the cap, capture returns
 `capacity_exceeded` without calling the model. The store stays readable and
 reopenable, and audit plus diagnostics report the bounded count without
-revealing receipt content.
+revealing receipt content. Reopen and non-strict audit remain available above
+the normal cap; operations that would integrity-scan more than 1,000,000
+on-disk receipts stop with `capacity_exceeded`.
 
 With `recallTool.enabled: true`, Core exposes
 `MemoryRecall({ "query": "...", "limit": 8 })` on tool-capable routes. `query`
