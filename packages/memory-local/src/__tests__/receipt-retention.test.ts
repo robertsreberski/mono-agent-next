@@ -238,6 +238,20 @@ describe("memory-local capture receipt retention", () => {
           message: expect.not.stringContaining("corrupt"),
         });
       }
+      setMetadata(
+        database,
+        captureReceiptKey("capacity-000000"),
+        "x".repeat(4_097),
+      );
+      expect(captureReceiptCount(database, 3)).toBe(3);
+      expect(() => verifyBujoSchema(database, 3)).not.toThrow();
+      let integrityFailure: unknown;
+      try {
+        assertCaptureReceiptIntegrity(database, undefined, 3);
+      } catch (error) {
+        integrityFailure = error;
+      }
+      expect(integrityFailure).toMatchObject({ code: "corrupt_store" });
     } finally {
       database.close();
     }

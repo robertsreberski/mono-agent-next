@@ -952,13 +952,7 @@ function captureReceiptRows(
   database: DatabaseSync,
   scanLimit = MAX_CAPTURE_RECEIPT_SCAN_ROWS,
 ): Iterable<{ readonly key: string; readonly value: string }> {
-  const preflight = boundedCaptureReceiptPreflight(database, scanLimit);
-  if (preflight.invalidStorageCount !== 0) {
-    throw new MemoryLocalError(
-      "corrupt_store",
-      "Memory capture receipt storage is invalid.",
-    );
-  }
+  const count = boundedCaptureReceiptCount(database, scanLimit);
   const page = database.prepare(`
     SELECT key, value
     FROM index_metadata
@@ -969,7 +963,7 @@ function captureReceiptRows(
   return {
     *[Symbol.iterator]() {
       let after = "";
-      let remaining = preflight.count;
+      let remaining = count;
       while (remaining > 0) {
         const rows = page.all(
           CAPTURE_RECEIPT_GLOB,
@@ -987,6 +981,7 @@ function captureReceiptRows(
             typeof row.key !== "string"
             || !validCaptureReceiptKey(row.key)
             || typeof row.value !== "string"
+            || Buffer.byteLength(row.value, "utf8") > MAX_CAPTURE_RECEIPT_BYTES
           ) {
             throw new MemoryLocalError(
               "corrupt_store",
@@ -1062,57 +1057,35 @@ export function captureReceiptCount(
   database: DatabaseSync,
   scanLimit = MAX_CAPTURE_RECEIPT_SCAN_ROWS,
 ): number {
-  return boundedCaptureReceiptPreflight(database, scanLimit).count;
+  return boundedCaptureReceiptCount(database, scanLimit);
 }
 
-function boundedCaptureReceiptPreflight(
+function boundedCaptureReceiptCount(
   database: DatabaseSync,
   scanLimit: number,
-): {
-  readonly count: number;
-  readonly invalidStorageCount: number;
-} {
+): number {
   assertScanLimit(scanLimit);
   const row = database.prepare(`
-    WITH bounded_receipts AS (
-      SELECT key, value
+    SELECT COUNT(*) AS count
+    FROM (
+      SELECT key
       FROM index_metadata
       WHERE key GLOB ?
       ORDER BY key
       LIMIT ?
     )
-    SELECT
-      COUNT(*) AS receipt_count,
-      COALESCE(SUM(
-        CASE
-          WHEN typeof(key) != 'text'
-            OR typeof(value) != 'text'
-            OR LENGTH(CAST(key AS BLOB)) > 371
-            OR LENGTH(CAST(value AS BLOB)) > ?
-          THEN 1
-          ELSE 0
-        END
-      ), 0) AS invalid_count
-    FROM bounded_receipts
   `).get(
     CAPTURE_RECEIPT_GLOB,
     scanLimit + 1,
-    MAX_CAPTURE_RECEIPT_BYTES,
-  ) as unknown as { receipt_count: number; invalid_count: number };
-  const count = number(row.receipt_count, "capture receipt count");
+  ) as unknown as { count: number };
+  const count = number(row.count, "capture receipt count");
   if (count > scanLimit) {
     throw new MemoryLocalError(
       "capacity_exceeded",
       "Memory capture receipt count exceeds the bounded integrity scan limit.",
     );
   }
-  return Object.freeze({
-    count,
-    invalidStorageCount: number(
-      row.invalid_count,
-      "invalid capture receipt storage count",
-    ),
-  });
+  return count;
 }
 
 function boundedMetadataCount(database: DatabaseSync, scanLimit: number): number {
