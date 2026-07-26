@@ -17,17 +17,17 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `61337be6c369b114afa84e124daed9ce17762a8a8f5ccebd98a50403f87fc0c7`
+Source manifest digest: `0405fa10d39cf9345e6dd8e660cde8d543aa1521855845d71730e7805aafd84c`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
 | Production | 319 | 100899 |
-| Tests | 167 | 81787 |
-| Repository and product tooling | 56 | 19024 |
+| Tests | 169 | 84515 |
+| Repository and product tooling | 56 | 19263 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **542** | **201710** |
+| **Total executable source** | **544** | **204677** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
@@ -50,15 +50,15 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 81787 | 75675 | within limit |
+| test source, at 0.75 of production | 84515 | 75675 | within limit |
 
-The current ratio is 0.811.
+The current ratio is 0.838.
 
 ## Largest package ownership surfaces
 
 | Package | Production files | Production lines | Test lines |
 | --- | ---: | ---: | ---: |
-| `@mono-agent/state-local` | 27 | 14355 | 5466 |
+| `@mono-agent/state-local` | 27 | 14355 | 7410 |
 | `@mono-agent/core` | 39 | 12929 | 18381 |
 | `@mono-agent/web` | 31 | 8992 | 4666 |
 | `@mono-agent/runtime-pi` | 28 | 8865 | 4978 |
