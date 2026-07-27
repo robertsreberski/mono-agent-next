@@ -329,3 +329,7 @@ pnpm --filter @mono-agent/runtime-pi run typecheck
 pnpm --filter @mono-agent/runtime-pi run build
 pnpm --filter @mono-agent/runtime-pi test
 ```
+
+The shared [runtime verification lane](../../docs/runtime/index.md#runtime-verification)
+runs the in-process profile through the real Pi `AgentHarness` and a faux
+provider, including one complete tool-call and tool-result round trip.

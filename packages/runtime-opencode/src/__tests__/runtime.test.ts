@@ -28,6 +28,10 @@ import type {
   SandboxProcessInput,
   SandboxProcessOutput,
 } from "@mono-agent/module-sdk/internal";
+import {
+  assertRuntimeBehaviorCompliance,
+  type RuntimeBehaviorScenario,
+} from "@mono-agent/module-sdk/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -297,6 +301,7 @@ class FakeOpenCodeApi {
   readonly requests: CapturedRequest[] = [];
   readonly sessions = new Map<string, readonly unknown[]>();
   readonly prompts: CapturedRequest[] = [];
+  onPrompt?: (sessionId: string) => void;
   abortFailure?: Error;
   #nextSession = 1;
   #nextStream = 1;
@@ -385,6 +390,7 @@ class FakeOpenCodeApi {
       }
       if (method === "POST" && action === "prompt_async") {
         this.prompts.push(captured);
+        queueMicrotask(() => this.onPrompt?.(id));
         return new Response(null, { status: 204 });
       }
       if (method === "POST" && action === "abort") {
@@ -573,6 +579,111 @@ function harness(
 }
 
 describe("runtime-opencode", () => {
+  it("satisfies the shared process runtime behavior contract", async () => {
+    const secret = "opencode-runtime-behavior-secret";
+
+    await expect(assertRuntimeBehaviorCompliance({
+      profile: "process",
+      secrets: [secret],
+      timeoutMs: 5_000,
+      create(scenario: RuntimeBehaviorScenario, signal: AbortSignal) {
+        signal.throwIfAborted();
+        const api = new FakeOpenCodeApi();
+        let resolveActive!: () => void;
+        const active = new Promise<void>((resolve) => {
+          resolveActive = resolve;
+        });
+        const fixture = harness(api, true, {
+          environment: { OPENAI_API_KEY: secret },
+        });
+
+        api.onPrompt = (sessionId) => {
+          resolveActive();
+          if (scenario.kind === "completed") {
+            queueMicrotask(() => {
+              api.assistant(
+                sessionId,
+                scenario.marker,
+                "runtime-behavior-completed",
+              );
+            });
+          }
+        };
+
+        return {
+          instance: fixture.runtime,
+          model: "anthropic/claude-sonnet-4-5",
+          async waitUntilActive(waitSignal: AbortSignal) {
+            waitSignal.throwIfAborted();
+            let rejectAbort!: (reason: unknown) => void;
+            const aborted = new Promise<never>((_resolve, reject) => {
+              rejectAbort = reject;
+            });
+            const onAbort = () => {
+              rejectAbort(
+                waitSignal.reason
+                  ?? new DOMException("Runtime behavior wait aborted", "AbortError"),
+              );
+            };
+            waitSignal.addEventListener("abort", onAbort, { once: true });
+            try {
+              if (waitSignal.aborted) onAbort();
+              await Promise.race([active, aborted]);
+            } finally {
+              waitSignal.removeEventListener("abort", onAbort);
+            }
+          },
+          trigger(triggerSignal: AbortSignal) {
+            triggerSignal.throwIfAborted();
+            const child = fixture.serverChild();
+            if (child === undefined || child.closed) {
+              throw new Error("OpenCode behavior server is not active");
+            }
+            if (scenario.kind === "process-exit") {
+              child.emit("error", new Error(scenario.marker));
+              return;
+            }
+            if (scenario.kind === "stdin-error") {
+              child.stdin.emit("error", new Error(scenario.marker));
+              return;
+            }
+            if (scenario.kind === "stderr-exit") {
+              child.stderr.write(scenario.marker);
+              child.closeNow(null, 17);
+              return;
+            }
+            throw new Error(
+              `OpenCode behavior scenario ${scenario.kind} has no trigger`,
+            );
+          },
+          async observe(observeSignal: AbortSignal) {
+            observeSignal.throwIfAborted();
+            const health = await fixture.runtime.health?.({
+              signal: observeSignal,
+            });
+            const activeTurns = health?.details?.activeTurns;
+            if (typeof activeTurns !== "number") {
+              throw new Error(
+                "OpenCode behavior health omitted numeric activeTurns",
+              );
+            }
+            return {
+              activeProviderOperations: activeTurns,
+              liveProcesses: fixture.invocations.filter(
+                ({ child }) => !child.closed,
+              ).length,
+            };
+          },
+          dispose() {
+            for (const { child } of fixture.invocations) {
+              if (!child.closed) child.closeNow("SIGKILL");
+            }
+          },
+        };
+      },
+    })).resolves.toBeUndefined();
+  });
+
   it("uses a minimal Uint8Array sandbox facade for version and server without host fallback", async () => {
     vi.stubEnv("OPENAI_API_KEY", "selected-sandbox-provider-key");
     const api = new FakeOpenCodeApi();
@@ -1816,8 +1927,12 @@ describe("runtime-opencode", () => {
   });
 
   it("quarantines on a post-running server crash", async () => {
+    const secret = "post-running-server-secret";
+    const stderrMarker = "post-running-server-stderr";
     const api = new FakeOpenCodeApi();
-    const { runtime, serverChild } = harness(api, false);
+    const { runtime, serverChild } = harness(api, false, {
+      environment: { OPENAI_API_KEY: secret },
+    });
     await runtime.start?.({ signal: new AbortController().signal });
     const turn = runtime.runTurn(request("before-crash"), context());
     await vi.waitFor(() => expect(api.prompts).toHaveLength(1));
@@ -1827,6 +1942,9 @@ describe("runtime-opencode", () => {
       message: { content: [{ type: "text", text: "completed" }] },
     });
 
+    serverChild()?.stderr.write(
+      `${stderrMarker} ${secret} ${"x".repeat(70_000)}`,
+    );
     serverChild()?.closeNow(null, 1);
 
     await vi.waitFor(() => {
@@ -1847,10 +1965,19 @@ describe("runtime-opencode", () => {
       severity: "error",
       message: expect.stringContaining("SERVER_EXITED"),
     }));
-    await expect(runtime.runTurn(
-      request("after-crash"),
-      context(),
-    )).rejects.toMatchObject({ code: "SERVER_EXITED" });
+    let failure: unknown;
+    try {
+      await runtime.runTurn(request("after-crash"), context());
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(RuntimeOpenCodeError);
+    expect(failure).toMatchObject({ code: "SERVER_EXITED" });
+    const message = (failure as RuntimeOpenCodeError).message;
+    expect(message).toContain(stderrMarker);
+    expect(message).toContain("[stderr truncated]");
+    expect(message).not.toContain(secret);
+    expect(message.length).toBeLessThanOrEqual(4_096);
     await runtime.stop?.({
       signal: new AbortController().signal,
       reason: "shutdown",

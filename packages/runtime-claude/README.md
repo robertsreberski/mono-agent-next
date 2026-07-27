@@ -188,3 +188,7 @@ pnpm --filter @mono-agent/runtime-claude run typecheck
 pnpm --filter @mono-agent/runtime-claude run build
 pnpm --filter @mono-agent/runtime-claude test
 ```
+
+The shared [runtime verification lane](../../docs/runtime/index.md#runtime-verification)
+runs the process profile against an injected Claude JSONL transport without
+provider credentials.

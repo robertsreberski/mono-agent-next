@@ -7,10 +7,12 @@ import {
   MODULE_SCHEMA_SLOT_REFERENCE,
   OPEN_MODULE_KINDS,
   readCrossSlotReference,
+  snapshotRuntimeTurnError,
   type Awaitable, type Channel, type ChannelOutboundMessage, type ChannelModuleDefinition,
-  type Memory, type MemoryModuleDefinition, type ModuleKind, type ModuleSchema,
+  type Memory, type MemoryModuleDefinition, type ModuleHealth, type ModuleInstance,
+  type ModuleKind, type ModuleSchema,
   type ModuleToolBinding, type ModuleToolContribution,
-  type OpenModuleDefinition, type Runtime, type RuntimeModuleDefinition,
+  type OpenModuleDefinition, type Runtime, type RuntimeModuleDefinition, type RuntimeTurnEvent,
 } from "./index.js";
 const RESERVED_DIRECTIVES = new Set(["$schema", "$use", "$env"]);
 const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
@@ -43,6 +45,14 @@ export interface ChannelBehaviorComplianceOptions {
   readonly secrets?: readonly string[];
   readonly timeoutMs?: number;
 }
+export interface RuntimeBehaviorScenario { readonly kind: "completed" | "cancelled" | "process-exit" | "stdin-error" | "stderr-exit"; readonly marker: string; }
+export interface RuntimeBehaviorComplianceOptions { readonly profile: "process" | "in-process";
+  create(scenario: RuntimeBehaviorScenario, signal: AbortSignal): Awaitable<{
+    readonly instance: Runtime; readonly model: string; waitUntilActive(signal: AbortSignal): Awaitable<void>;
+    trigger?(signal: AbortSignal): Awaitable<void>; observe(signal: AbortSignal): Awaitable<{
+      readonly activeProviderOperations: number; readonly liveProcesses?: number }>; dispose?(): Awaitable<void>;
+  }>; readonly secrets?: readonly string[]; readonly timeoutMs?: number;
+}
 /** Reusable channel lane; adapter suites supply normalization/auth probes in `exercise`. */
 export async function assertChannelBehaviorCompliance(options: ChannelBehaviorComplianceOptions): Promise<void> {
   const timeoutMs = options.timeoutMs ?? 5_000;
@@ -73,15 +83,7 @@ export async function assertChannelBehaviorCompliance(options: ChannelBehaviorCo
           fail(`channel delivery result ${String(index)} violates idempotency semantics`);
       }
     }
-    if (instance.health === undefined) fail("channel behavior requires bounded health");
-    results.push(await instance.health({ signal }), ...(await instance.diagnostics?.({ signal, verbose: true }) ?? []));
-    const report = JSON.stringify(results);
-    if (new TextEncoder().encode(report).byteLength > 64 * 1024) fail("channel behavior reports exceed 64 KiB");
-    for (const secret of options.secrets ?? []) {
-      const escapedSecret = JSON.stringify(secret).slice(1, -1);
-      if (secret.length > 0 && (report.includes(secret) || report.includes(escapedSecret)))
-        fail("channel behavior reports contain a configured secret");
-    }
+    await assertBehaviorReport(instance, signal, options.secrets, "channel", timeoutMs, results);
     await instance.drain?.({ signal });
   } finally {
     await instance.stop?.({ signal, reason: "shutdown" });
@@ -89,56 +91,154 @@ export async function assertChannelBehaviorCompliance(options: ChannelBehaviorCo
   }
 }
 
-async function assertChannelStopDuringStart(
-  options: ChannelBehaviorComplianceOptions,
-  timeoutMs: number,
-): Promise<void> {
-  const signal = AbortSignal.timeout(timeoutMs);
-  const instance = await options.create(signal);
+async function assertChannelStopDuringStart(options: ChannelBehaviorComplianceOptions, timeoutMs: number):
+Promise<void> {
+  const signal = AbortSignal.timeout(timeoutMs); const instance = await options.create(signal);
   assertChannelInstanceCompliance(instance);
   if (instance.start === undefined || instance.stop === undefined) return;
-
   const starting = Promise.resolve().then(async () => instance.start!({ signal }));
   const stopping = Promise.resolve().then(async () => instance.stop!({ signal, reason: "shutdown" }));
-  const [, stopResult] = await channelLifecycleWithin(
-    Promise.allSettled([starting, stopping]),
-    timeoutMs,
-    "channel start and concurrent stop",
-  );
-
+  const [, stopResult] = await behaviorWithin(Promise.allSettled([starting, stopping]), timeoutMs,
+    "channel start and concurrent stop");
   if (stopResult.status === "fulfilled") {
-    if (instance.health === undefined) {
-      fail("channel behavior requires bounded health after stop during start");
-    }
-    const health = await channelLifecycleWithin(
-      Promise.resolve(instance.health({ signal })),
-      timeoutMs,
-      "channel health after stop during start",
-    );
-    if (health.status === "healthy") {
+    if (instance.health === undefined) fail("channel behavior requires bounded health after stop during start");
+    const health = await behaviorWithin(Promise.resolve(instance.health({ signal })), timeoutMs,
+      "channel health after stop during start");
+    if (health.status === "healthy")
       fail("channel stop resolved while an unsettled start remained healthy");
-    }
   }
 }
 
-async function channelLifecycleWithin<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  description: string,
-): Promise<T> {
+async function behaviorWithin<T>(promise: Promise<T>, timeoutMs: number, description: string):
+Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => {
-          reject(new ModuleComplianceError(`${description} did not settle within ${String(timeoutMs)} ms`));
-        }, timeoutMs);
+        timer = setTimeout(() =>
+          reject(new ModuleComplianceError(`${description} did not settle within ${String(timeoutMs)} ms`)), timeoutMs);
       }),
     ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
+}
+/** Shared runtime lane; adapters supply protocol-faithful provider fixtures. */
+export async function assertRuntimeBehaviorCompliance(options: RuntimeBehaviorComplianceOptions): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 5_000; const allKinds =
+    ["completed", "cancelled", "process-exit", "stdin-error", "stderr-exit"] as const;
+  const kinds = options.profile === "process" ? allKinds : options.profile === "in-process"
+    ? allKinds.slice(0, 2) : fail("runtime behavior profile is invalid");
+  for (const kind of kinds) {
+    const scenario: RuntimeBehaviorScenario = { kind, marker: `mono-agent-runtime-behavior:${kind}` }; const signal =
+      AbortSignal.timeout(timeoutMs); let failure: { readonly reason: unknown } | undefined;
+    let fixture: Awaited<ReturnType<RuntimeBehaviorComplianceOptions["create"]>> | undefined;
+    try {
+      fixture = await options.create(scenario, signal);
+      const { instance } = fixture;
+      assertRuntimeInstanceCompliance(instance);
+      if (instance.start === undefined || instance.drain === undefined || instance.stop === undefined
+        || instance.health === undefined)
+        fail("runtime behavior requires start, drain, stop, and bounded health");
+      await behaviorWithin(Promise.resolve(instance.start({ signal })), timeoutMs, `${kind} start`);
+      const turnAbort = new AbortController(); const events: RuntimeTurnEvent[] = []; let toolExecutions = 0;
+      const tools = instance.capabilities.tools ? [{ name: "RuntimeComplianceTool",
+        description: "Return the runtime compliance marker.",
+        inputSchema: { type: "object", additionalProperties: false } }] as const : [];
+      const settled = Promise.resolve().then(async () => instance.runTurn({
+        turnId: `runtime-behavior-${kind}`, conversationId: "runtime-behavior",
+        model: fixture!.model, messages: [{ role: "user", content: [{ type: "text", text: scenario.marker }] }],
+        tools, signal: AbortSignal.any([signal, turnAbort.signal]),
+      }, {
+        emit(event) { events.push(event); },
+        async requestApproval(request) { return { interactionId: request.interactionId, decision: "allow_once", decidedAt: new Date().toISOString() }; },
+        async executeTool(call) {
+          toolExecutions += 1; if (call.name !== "RuntimeComplianceTool")
+            fail("runtime behavior received an unexpected tool call");
+          return { callId: call.id, content: [{ type: "text", text: scenario.marker }] };
+        },
+      })).then((result) => ({ result } as const), (error: unknown) => ({ error } as const));
+      if (kind !== "completed") {
+        await behaviorWithin(Promise.resolve(fixture.waitUntilActive(signal)), timeoutMs, `${kind} activation`);
+        const active = await behaviorWithin(Promise.resolve(fixture.observe(signal)), timeoutMs, `${kind} observation`);
+        if (!Number.isSafeInteger(active.activeProviderOperations) || active.activeProviderOperations < 1 || (options.profile === "process"
+          && (!Number.isSafeInteger(active.liveProcesses) || active.liveProcesses! < 1)))
+          fail(`runtime behavior ${kind} did not become active`);
+        if (kind === "cancelled") turnAbort.abort();
+        else {
+          if (fixture.trigger === undefined) fail(`runtime behavior ${kind} requires a trigger`);
+          await behaviorWithin(Promise.resolve(fixture.trigger(signal)), timeoutMs, `${kind} trigger`);
+        }
+      }
+      const outcome = await behaviorWithin(settled, timeoutMs, `${kind} turn`);
+      if (kind === "completed") {
+        if (!("result" in outcome) || outcome.result.status !== "completed"
+          || !events.flatMap((event) => event.type === "text-delta" ? [event.delta] : []).join("").includes(scenario.marker)
+          || !outcome.result.message.content.some((part) => part.type === "text" && part.text.includes(scenario.marker)))
+          fail("runtime behavior completed must emit and return its marker");
+        if (instance.capabilities.tools) {
+          const calls = events.flatMap((event) => event.type === "tool-call"
+            && event.call.name === "RuntimeComplianceTool" ? [event] : []);
+          const results = events.flatMap((event) => event.type === "tool-result"
+            && calls.some((call) => call.call.id === event.result.callId) ? [event] : []);
+          if (toolExecutions !== 1 || calls.length !== 1 || results.length !== 1
+            || !JSON.stringify(results[0]).includes(scenario.marker))
+            fail("runtime behavior RuntimeComplianceTool must execute and emit exactly once");
+        }
+      } else if (kind === "cancelled") {
+        if (!("result" in outcome) || outcome.result.status !== "cancelled")
+          fail("runtime behavior cancelled must settle as cancelled");
+      } else {
+        const snapshot = "error" in outcome ? snapshotRuntimeTurnError(outcome.error) : undefined;
+        if (snapshot === undefined || !snapshot.message.includes(scenario.marker))
+          fail(`runtime behavior ${kind} must throw a typed error containing its marker`);
+      }
+      const observation = await behaviorWithin(Promise.resolve(fixture.observe(signal)), timeoutMs, `${kind} settled observation`);
+      if (observation.activeProviderOperations !== 0)
+        fail(`runtime behavior ${kind} leaked provider operations`);
+      await assertBehaviorReport(instance, signal, options.secrets, "runtime", timeoutMs);
+    } catch (reason) { failure = { reason }; }
+    if (fixture !== undefined) {
+      const { instance } = fixture; const cleanupSignal = AbortSignal.timeout(timeoutMs);
+      const stopped = async (): Promise<void> => {
+        const value = await fixture!.observe(cleanupSignal);
+        if (value.activeProviderOperations !== 0 || (options.profile === "process" && value.liveProcesses !== 0))
+          fail(`runtime behavior ${kind} left provider processes after stop`);
+      };
+      const cleanup = [
+        async () => { await instance.drain?.({ signal: cleanupSignal }); },
+        async () => { if ((await assertBehaviorReport(instance, cleanupSignal, options.secrets, "runtime", timeoutMs)).status === "healthy")
+          fail("runtime behavior remained healthy after drain"); },
+        async () => { await instance.stop?.({ signal: cleanupSignal, reason: "shutdown" }); },
+        stopped,
+        async () => { await instance.stop?.({ signal: cleanupSignal, reason: "shutdown" }); },
+        stopped,
+        async () => { if ((await assertBehaviorReport(instance, cleanupSignal, options.secrets, "runtime", timeoutMs)).status === "healthy")
+          fail("runtime behavior remained healthy after stop"); },
+        async () => { await fixture!.dispose?.(); },
+      ];
+      for (const [index, operation] of cleanup.entries()) {
+        try {
+          await behaviorWithin(operation(), timeoutMs, `${kind} cleanup ${String(index + 1)}`);
+        } catch (reason) { failure ??= { reason }; }
+      }
+    }
+    if (failure !== undefined) throw failure.reason;
   }
+}
+async function assertBehaviorReport(instance: ModuleInstance, signal: AbortSignal, secrets: readonly string[] | undefined,
+  label: string, timeoutMs: number, prefix: readonly unknown[] = []): Promise<ModuleHealth> {
+  if (instance.health === undefined) fail(`${label} behavior requires bounded health`); const health =
+    await behaviorWithin(Promise.resolve(instance.health({ signal })), timeoutMs, `${label} health`);
+  const diagnostics = await behaviorWithin(Promise.resolve(instance.diagnostics?.({ signal, verbose: true }) ?? []), timeoutMs,
+    `${label} diagnostics`);
+  const report = JSON.stringify([...prefix, health, ...diagnostics]);
+  if (new TextEncoder().encode(report).byteLength > 64 * 1024) fail(`${label} behavior reports exceed 64 KiB`);
+  for (const secret of secrets ?? []) {
+    const escapedSecret = JSON.stringify(secret).slice(1, -1); if (secret.length > 0
+      && (report.includes(secret) || report.includes(escapedSecret)))
+      fail(`${label} behavior reports contain a configured secret`);
+  }
+  return health;
 }
 export function assertModuleDefinitionCompliance(value: unknown, options: ModuleComplianceOptions = {}):
 asserts value is OpenModuleDefinition {

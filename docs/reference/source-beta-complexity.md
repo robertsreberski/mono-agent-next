@@ -17,31 +17,31 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `a6229958d494dd0620eddb034be5180ff74fbd681288625d264e5f13c7bc410d`
+Source manifest digest: `0886d8252ada3ceadc84052693f259660d846549da4f8c7bbda22991623f8a70`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 326 | 103668 |
-| Tests | 171 | 88392 |
-| Repository and product tooling | 56 | 19458 |
+| Production | 326 | 103780 |
+| Tests | 174 | 89462 |
+| Repository and product tooling | 56 | 19463 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **553** | **211518** |
+| **Total executable source** | **556** | **212705** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 318.0 lines.
+Average production file size is 318.3 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 103668 | 130000 | within limit |
-| kernel-production | 16377 | 16500 | within limit |
+| repository-production | 103780 | 130000 | within limit |
+| kernel-production | 16477 | 16500 | within limit |
 | durable-protocol-production | 7626 | 9500 | within limit |
 
 One budget binds from below rather than above. Test source may not fall under a
@@ -50,9 +50,9 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 88392 | 77751 | within limit |
+| test source, at 0.75 of production | 89462 | 77835 | within limit |
 
-The current ratio is 0.853.
+The current ratio is 0.862.
 
 ## Largest package ownership surfaces
 
@@ -60,7 +60,7 @@ The current ratio is 0.853.
 | --- | ---: | ---: | ---: |
 | `@mono-agent/state-local` | 27 | 14355 | 7410 |
 | `@mono-agent/core` | 39 | 12955 | 18559 |
-| `@mono-agent/runtime-pi` | 31 | 9864 | 6022 |
+| `@mono-agent/runtime-pi` | 31 | 9864 | 6204 |
 | `@mono-agent/web` | 31 | 8992 | 4666 |
 | `@mono-agent/memory-local` | 19 | 8097 | 4767 |
 | `@mono-agent/service-macos` | 22 | 5770 | 2131 |
@@ -78,7 +78,7 @@ The complete package table is retained in the generated report model exposed by
 | First-party dependency edges | 22 |
 | First-party dependency cycles | 0 |
 | Public code entrypoints | 28 |
-| Public named exports | 1008 |
+| Public named exports | 1011 |
 | Distinct scaffold config paths | 103 |
 
 The first-party package graph is acyclic.

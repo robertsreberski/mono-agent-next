@@ -58,6 +58,10 @@ const SANDBOX_WRAPPER_MARKER = "packed-srt-wrapper-invoked";
 const SANDBOX_WRAPPER_MARKER_PATH = ".mono-agent/packed-srt-invocations.log";
 const SANDBOX_FIXTURE_AUTHORITY =
   "transparent fixture proves Core-to-Pi-to-sandbox-srt routing only; it does not prove operating-system enforcement";
+const RUNTIME_EXECUTION_COVERAGE_AUTHORITY =
+  "Packed system turns execute @mono-agent/runtime-pi only; execution coverage for all four "
+  + "runtimes otherwise lives in credential-free package behavioral conformance lanes because "
+  + "CI has no authenticated Claude, Codex, or OpenCode CLIs.";
 const PERSONAL_WEBHOOK_PROMPT = "Handle this authenticated project webhook request.";
 const PERSONAL_SKILL_PROOF_BYTES = 219_896;
 const WEBHOOK_SECRET = "packed-system-webhook-token";
@@ -291,6 +295,7 @@ async function main() {
     forbiddenNames: FORBIDDEN_PREDECESSOR_PACKAGES,
     expectedTemplates: TEMPLATE_NAMES,
   });
+  console.log(RUNTIME_EXECUTION_COVERAGE_AUTHORITY);
   console.log(JSON.stringify(evidence));
 }
 
