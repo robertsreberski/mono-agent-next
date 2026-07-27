@@ -202,7 +202,7 @@ all-or-none.
 | `@mono-agent/module-sdk` | Public module authors and core | Open runtime, channel, and memory contracts plus schema/provenance, lifecycle, and shared security primitives. |
 | `@mono-agent/module-sdk/secure-fs` | Durable modules and host products | Exact-owner/mode, no-follow file inspection and transactional create/replace helpers. |
 | `@mono-agent/module-sdk/http` | Modules with bounded HTTP clients | HTTPS-or-literal-loopback URL policy, checked redirects, timeout, and bounded response reads. |
-| `@mono-agent/module-sdk/testing` | Module test suites and loaders | Structural compliance assertions for definitions, created instances, static tool contributions, and turn bindings. |
+| `@mono-agent/module-sdk/testing` | Module test suites and loaders | Structural and behavioral compliance assertions for definitions, created instances, runtime turns, static tool contributions, and turn bindings. |
 | `@mono-agent/module-sdk/internal` | First-party monorepo packages only | Reserved state, trigger, exporter, and sandbox definitions pending future promotion. |
 
 `assertChannelBehaviorCompliance` runs an independent immediate
@@ -210,6 +210,14 @@ all-or-none.
 leave the channel non-healthy; a stop rejection is accepted only when it settles
 inside the configured bound. The helper then creates a fresh instance for the
 normal start, exercise, health, drain, and idempotent-stop lane.
+
+`assertRuntimeBehaviorCompliance` creates a fresh runtime per scenario. The
+process profile covers completion, active cancellation, process exit, stdin
+failure, and stderr-backed non-zero exit; the in-process profile covers
+completion and active cancellation. Both profiles prove bounded reports,
+drain/stop health, double-stop behavior, cleanup, and secret redaction. The
+process profile additionally proves that provider processes are gone after
+stop.
 
 The module definition has exactly three load-bearing fields: import-safe
 `manifest`, import-safe executable `schema`, and delayed `create(context)`.
@@ -236,7 +244,7 @@ There is no generic plugin hook or discovery registry.
 | Reference another selected slot | `crossSlotReferenceSchema`, `readCrossSlotReference`, `MODULE_SCHEMA_SLOT_REFERENCE` |
 | Read or atomically replace owner-private data | `readOwnerPrivateFile`, `createOwnerPrivateFile`, `atomicReplaceOwnerPrivateFile` from `@mono-agent/module-sdk/secure-fs` |
 | Make a bounded checked HTTP request | `checkedFetch`, `assertSafeHttpUrl` from `@mono-agent/module-sdk/http` |
-| Test a third-party implementation | `assertRuntimeModuleCompliance`, `assertChannelModuleCompliance`, `assertChannelBehaviorCompliance`, `assertMemoryModuleCompliance`, `assertModuleToolContributionsCompliance`, `assertModuleToolBindingCompliance` from `@mono-agent/module-sdk/testing` |
+| Test a third-party implementation | `assertRuntimeModuleCompliance`, `assertRuntimeBehaviorCompliance`, `RuntimeBehaviorComplianceOptions`, `RuntimeBehaviorScenario`, `assertChannelModuleCompliance`, `assertChannelBehaviorCompliance`, `assertMemoryModuleCompliance`, `assertModuleToolContributionsCompliance`, `assertModuleToolBindingCompliance` from `@mono-agent/module-sdk/testing` |
 
 Reserved-slot definitions are not public extension contracts. They are
 available only from `@mono-agent/module-sdk/internal` for first-party packages.
@@ -637,6 +645,8 @@ readOwnerPrivateFile
 ChannelBehaviorComplianceOptions
 ModuleComplianceError
 ModuleComplianceOptions
+RuntimeBehaviorComplianceOptions
+RuntimeBehaviorScenario
 assertChannelBehaviorCompliance
 assertChannelInstanceCompliance
 assertChannelModuleCompliance
@@ -646,6 +656,7 @@ assertModuleDefinitionCompliance
 assertModuleToolBindingCompliance
 assertModuleToolContributionsCompliance
 assertMonoAgentModuleExport
+assertRuntimeBehaviorCompliance
 assertRuntimeInstanceCompliance
 assertRuntimeModuleCompliance
 assertSchemaCompliance
@@ -696,7 +707,10 @@ pnpm --filter @mono-agent/module-sdk test
 Focused tests cover immutable delayed definitions, all seven typed slots,
 structured config failures, provenance and cross-slot annotations,
 reserved-entrypoint isolation, definition/instance compliance assertions, and
-the shared channel stop-during-start lifecycle race.
+the shared channel stop-during-start lifecycle race. Runtime behavioral
+fixtures prove every completion, cancellation, process-failure, active-leak,
+process-leak, report-bound, redaction, and idempotent-stop assertion can fail
+independently.
 Adversarial helper tests cover exact permissions, symlink rejection,
 no-clobber atomic writes, stale replacement identities, literal-loopback URL
 policy, checked redirects, byte bounds, and whole-request timeouts.

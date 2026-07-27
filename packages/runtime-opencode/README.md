@@ -194,3 +194,7 @@ pnpm --filter @mono-agent/runtime-opencode run typecheck
 pnpm --filter @mono-agent/runtime-opencode run build
 pnpm --filter @mono-agent/runtime-opencode test
 ```
+
+The shared [runtime verification lane](../../docs/runtime/index.md#runtime-verification)
+runs the process profile against an injected OpenCode CLI and loopback server
+without provider credentials.

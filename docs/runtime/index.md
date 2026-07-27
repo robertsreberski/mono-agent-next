@@ -91,5 +91,29 @@ Provider sessions belong to the exact conversation/runtime/model route.
 Mono-agent does not migrate native v0 sessions; canonical transcript state is the
 provider-neutral recovery authority.
 
+## Runtime verification
+
+Every first-party runtime runs the shared behavioral conformance contract
+against a real runtime instance and a credential-free provider boundary.
+Claude, Codex, and OpenCode run the five-scenario process profile against
+protocol-faithful injected processes: completed output, active cancellation,
+provider exit, stdin failure, and stderr-backed non-zero exit. Pi runs the
+completed and active-cancellation in-process profile through its real
+`AgentHarness` and a faux provider; completion includes a real tool-call and
+tool-result round trip.
+
+The lane also proves bounded health and diagnostics, secret redaction,
+drain/stop transitions, sequential idempotent `stop()` calls, zero active
+provider operations after each turn, and zero live provider processes after a
+process runtime stops. Negative fixtures prove that each scenario, leak,
+report bound, redaction check, and stop assertion fails independently.
+
+The packed system proof executes turns through `@mono-agent/runtime-pi` only.
+CI does not provision authenticated Claude, Codex, or OpenCode CLIs, so those
+runtime execution guarantees live in their credential-free package
+conformance lanes. These fixtures prove adapter behavior and protocol
+handling; they do not claim that a real authenticated provider service is
+available or healthy.
+
 Use the [package directory](/reference/packages/) for each runtime's exact auth,
 configuration, capability, lifecycle, and verification contract.

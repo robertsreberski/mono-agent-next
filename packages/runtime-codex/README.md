@@ -208,3 +208,7 @@ pnpm --filter @mono-agent/runtime-codex run typecheck
 pnpm --filter @mono-agent/runtime-codex run build
 pnpm --filter @mono-agent/runtime-codex test
 ```
+
+The shared [runtime verification lane](../../docs/runtime/index.md#runtime-verification)
+runs the process profile against an injected Codex app-server protocol without
+provider credentials.

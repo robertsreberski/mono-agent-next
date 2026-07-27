@@ -5,10 +5,12 @@ import * as publicApi from "../index.js";
 import {
   MODULE_API_VERSION,
   MODULE_SCHEMA_SLOT_REFERENCE,
+  RuntimeTurnError,
   defineChannelModule,
   defineMemoryModule,
   defineModuleSchema,
   defineRuntimeModule,
+  type Runtime,
 } from "../index.js";
 import * as internalApi from "../internal.js";
 import {
@@ -21,9 +23,12 @@ import {
   assertModuleToolBindingCompliance,
   assertModuleToolContributionsCompliance,
   assertMonoAgentModuleExport,
+  assertRuntimeBehaviorCompliance,
   assertRuntimeInstanceCompliance,
   assertRuntimeModuleCompliance,
   snapshotSelectedModuleInstanceCompliance,
+  type RuntimeBehaviorComplianceOptions,
+  type RuntimeBehaviorScenario,
 } from "../testing.js";
 
 const schema = defineModuleSchema({
@@ -597,6 +602,71 @@ describe("public compliance assertions", () => {
     expect(created).toBe(2);
   });
 
+  it("runs every process and in-process runtime behavior scenario with fresh lifecycle cleanup", async () => {
+    const processCalls: string[] = [];
+    await expect(assertRuntimeBehaviorCompliance(runtimeBehaviorOptions({
+      profile: "process", calls: processCalls,
+    }))).resolves.toBeUndefined();
+    expect(processCalls.filter((call) => call.startsWith("create:"))).toEqual([
+      "create:completed", "create:cancelled", "create:process-exit",
+      "create:stdin-error", "create:stderr-exit",
+    ]);
+    expect(processCalls.filter((call) => call.startsWith("stop:"))).toHaveLength(10);
+    expect(processCalls.filter((call) => call.startsWith("dispose:"))).toHaveLength(5);
+
+    const inProcessCalls: string[] = [];
+    await expect(assertRuntimeBehaviorCompliance(runtimeBehaviorOptions({
+      profile: "in-process", calls: inProcessCalls,
+    }))).resolves.toBeUndefined();
+    expect(inProcessCalls.filter((call) => call.startsWith("create:"))).toEqual([
+      "create:completed", "create:cancelled",
+    ]);
+  });
+
+  it.each([
+    ["completed", "completed must emit and return its marker"],
+    ["cancelled", "cancelled must settle as cancelled"],
+    ["process-exit", "process-exit must throw a typed error containing its marker"],
+    ["stdin-error", "stdin-error must throw a typed error containing its marker"],
+    ["stderr-exit", "stderr-exit must throw a typed error containing its marker"],
+  ] as const)("proves the %s runtime behavior scenario bites", async (breakScenario, message) => {
+    await expect(assertRuntimeBehaviorCompliance(runtimeBehaviorOptions({ breakScenario })))
+      .rejects.toThrow(message);
+  });
+
+  it("rejects provider-operation and stopped-process leaks", async () => {
+    await expect(assertRuntimeBehaviorCompliance(runtimeBehaviorOptions({ activeLeak: true })))
+      .rejects.toThrow("completed leaked provider operations");
+    await expect(assertRuntimeBehaviorCompliance(runtimeBehaviorOptions({ processLeak: true })))
+      .rejects.toThrow("completed left provider processes after stop");
+  });
+
+  it.each(["secret", "quote\"slash\\line\n"])(
+    "rejects raw or JSON-escaped secrets in runtime reports",
+    async (reportSecret) => {
+      await expect(assertRuntimeBehaviorCompliance(runtimeBehaviorOptions({ reportSecret })))
+        .rejects.toThrow("runtime behavior reports contain a configured secret");
+    },
+  );
+
+  it("rejects oversized reports and a non-idempotent second stop", async () => {
+    await expect(assertRuntimeBehaviorCompliance(runtimeBehaviorOptions({ oversizedReport: true })))
+      .rejects.toThrow("runtime behavior reports exceed 64 KiB");
+    const calls: string[] = [];
+    await expect(assertRuntimeBehaviorCompliance(runtimeBehaviorOptions({ secondStopFails: true, calls })))
+      .rejects.toThrow("fixture second stop failed");
+    expect(calls.filter((call) => call.startsWith("dispose:"))).toHaveLength(1);
+  });
+
+  it("always finishes cleanup without masking the primary behavior failure", async () => {
+    const calls: string[] = [];
+    await expect(assertRuntimeBehaviorCompliance(runtimeBehaviorOptions({
+      breakScenario: "completed", secondStopFails: true, calls,
+    }))).rejects.toThrow("completed must emit and return its marker");
+    expect(calls.filter((call) => call.startsWith("stop:"))).toHaveLength(2);
+    expect(calls.filter((call) => call.startsWith("dispose:"))).toHaveLength(1);
+  });
+
   it("validates model-visible channel send tools", () => {
     const capabilities = {
       attachments: false, liveInput: false, askUser: false, proactive: true,
@@ -778,6 +848,121 @@ describe("public compliance assertions", () => {
     expect(instanceAccessorCalls).toBe(0);
   });
 });
+
+interface RuntimeBehaviorFixtureOptions {
+  readonly profile?: "process" | "in-process";
+  readonly breakScenario?: RuntimeBehaviorScenario["kind"];
+  readonly activeLeak?: boolean;
+  readonly processLeak?: boolean;
+  readonly reportSecret?: string;
+  readonly oversizedReport?: boolean;
+  readonly secondStopFails?: boolean;
+  readonly calls?: string[];
+}
+
+function runtimeBehaviorOptions(options: RuntimeBehaviorFixtureOptions = {}):
+RuntimeBehaviorComplianceOptions {
+  const profile = options.profile ?? "process";
+  return {
+    profile,
+    timeoutMs: 1_000,
+    ...(options.reportSecret === undefined ? {} : { secrets: [options.reportSecret] }),
+    create(scenario) {
+      options.calls?.push(`create:${scenario.kind}`);
+      let state: "created" | "running" | "draining" | "stopped" = "created";
+      let activeProviderOperations = 0;
+      let liveProcesses = profile === "process" ? 0 : undefined;
+      let stopCalls = 0;
+      let resolveActive!: () => void;
+      let resolveTrigger!: () => void;
+      const active = new Promise<void>((resolve) => { resolveActive = resolve; });
+      const triggered = new Promise<void>((resolve) => { resolveTrigger = resolve; });
+      const instance: Runtime = {
+        capabilities: {
+          tools: true, mcp: false, attachments: false, approvals: false,
+          structuredOutput: false, sandbox: false, sessions: false,
+        },
+        start() {
+          state = "running";
+          if (profile === "process") liveProcesses = 1;
+        },
+        drain() { state = "draining"; },
+        stop() {
+          stopCalls += 1;
+          options.calls?.push(`stop:${scenario.kind}`);
+          if (options.secondStopFails === true && stopCalls === 2) {
+            throw new Error("fixture second stop failed");
+          }
+          state = "stopped";
+          activeProviderOperations = 0;
+          if (options.processLeak !== true && profile === "process") liveProcesses = 0;
+        },
+        health: () => ({
+          status: state === "running" ? "healthy" : state === "draining" ? "degraded" : "unknown",
+          checkedAt: new Date().toISOString(),
+          summary: options.oversizedReport === true
+            ? "x".repeat(64 * 1_024 + 1)
+            : options.reportSecret ?? "safe",
+        }),
+        diagnostics: () => [{ code: "fixture", severity: "info", message: "safe" }],
+        async runTurn(request, context) {
+          activeProviderOperations = 1;
+          resolveActive();
+          try {
+            if (scenario.kind === "completed") {
+              const marker = options.breakScenario === "completed" ? "wrong-marker" : scenario.marker;
+              await context.emit({ type: "text-delta", delta: marker });
+              const call = { id: "runtime-compliance-call", name: "RuntimeComplianceTool", input: {} };
+              await context.emit({ type: "tool-call", call });
+              const result = await context.executeTool(call, request.signal);
+              await context.emit({ type: "tool-result", result });
+              return {
+                status: "completed",
+                message: { role: "assistant", content: [{ type: "text", text: marker }] },
+              };
+            }
+            if (scenario.kind === "cancelled") {
+              await new Promise<void>((resolve) => {
+                if (request.signal.aborted) resolve();
+                else request.signal.addEventListener("abort", () => resolve(), { once: true });
+              });
+              return options.breakScenario === "cancelled"
+                ? {
+                    status: "completed",
+                    message: {
+                      role: "assistant",
+                      content: [{ type: "text", text: scenario.marker }],
+                    },
+                  }
+                : { status: "cancelled" };
+            }
+            await triggered;
+            if (options.breakScenario === scenario.kind) throw new Error(scenario.marker);
+            throw new RuntimeTurnError({
+              code: `fixture_${scenario.kind}`,
+              message: `${scenario.marker} provider failure`,
+              retryability: "not-retryable",
+              sideEffects: "none",
+            });
+          } finally {
+            activeProviderOperations = options.activeLeak === true ? 1 : 0;
+          }
+        },
+      };
+      return {
+        instance,
+        model: "fixture/model",
+        waitUntilActive: () => active,
+        trigger: () => { resolveTrigger(); },
+        observe: () => ({
+          activeProviderOperations,
+          ...(liveProcesses === undefined ? {} : { liveProcesses }),
+        }),
+        dispose: () => { options.calls?.push(`dispose:${scenario.kind}`); },
+      };
+    },
+  };
+}
 
 function validRuntimeInstance(): Record<string, unknown> {
   return {

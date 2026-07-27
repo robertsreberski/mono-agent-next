@@ -1210,12 +1210,24 @@ export function createRuntimeOpenCode(options: CreateRuntimeOpenCodeOptions): Ru
         if (signal.aborted || state !== "starting") throw abortReason(signal);
         version = healthVersion;
         state = "running";
-        void localServer.closed.then((exit) => {
-          if (localServer?.isClosing() || state === "stopped") return;
+        const runningServer = localServer;
+        void runningServer.closed.then((exit) => {
+          if (runningServer.isClosing() || state === "stopped") return;
+          const captured = runningServer.stderr();
+          const stderr = captured.text.trim();
+          const detail = [
+            exit.error === undefined ? undefined : failureMessage(exit.error),
+            stderr === "" ? undefined : `stderr: ${stderr}`,
+          ].filter((entry): entry is string => entry !== undefined).join("; ");
           quarantine(new RuntimeOpenCodeError(
             "SERVER_EXITED",
-            `OpenCode server exited unexpectedly`
-            + (exit.code === null ? "" : ` with code ${exit.code}`),
+            redact(
+              `OpenCode server exited unexpectedly`
+              + (exit.code === null ? "" : ` with code ${exit.code}`)
+              + (captured.truncated ? " [stderr truncated]" : "")
+              + (detail === "" ? "" : `: ${detail}`),
+              secrets(),
+            ),
             {
               retryability: "unknown",
               sideEffects: "unknown",

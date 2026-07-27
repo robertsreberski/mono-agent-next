@@ -111,6 +111,23 @@ describe("packed proof Node and source authority", () => {
     expect(source).toContain("parsed.sandboxWrapperInvocations !== 1");
   });
 
+  test("states where credential-free runtime execution coverage lives", () => {
+    const source = readFileSync(
+      join(process.cwd(), "scripts", "verify", "system.mjs"),
+      "utf8",
+    );
+    expect(source).toContain([
+      "const RUNTIME_EXECUTION_COVERAGE_AUTHORITY =",
+      '  "Packed system turns execute @mono-agent/runtime-pi only; execution coverage for all four "',
+      '  + "runtimes otherwise lives in credential-free package behavioral conformance lanes because "',
+      '  + "CI has no authenticated Claude, Codex, or OpenCode CLIs.";',
+    ].join("\n"));
+    expect(source).toContain([
+      "  console.log(RUNTIME_EXECUTION_COVERAGE_AUTHORITY);",
+      "  console.log(JSON.stringify(evidence));",
+    ].join("\n"));
+  });
+
   test("pins the complete 28-code plus 3-JSON packed public export surface", () => {
     expect(PUBLIC_EXPORT_SPECIFIERS).toHaveLength(31);
     expect(PUBLIC_EXPORT_SPECIFIERS.filter((specifier) =>
