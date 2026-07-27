@@ -17,7 +17,7 @@ An installed agent is more than one JSON file:
 | --- | --- |
 | `mono-agent.config.json` | Agent identity, runtime routes, policy, context, and explicit module selections. |
 | `package.json` | Direct production dependency authority for every `$use`. |
-| `pnpm-lock.yaml` or `package-lock.json` | Root-importer and installed-version proof. |
+| `pnpm-lock.yaml` or `package-lock.json` | Root-importer and installed-version proof; npm's lock records the source-preview tarball locator and integrity expectation. |
 | `AGENTS.md` or another instruction file | Agent instructions selected by `agent.instructions`. |
 | Process environment | Values named by explicit `$env` references. |
 | `.mcp.json` | Optional ordinary project MCP server definitions. |
@@ -70,8 +70,19 @@ Before import, core proves that the package:
 5. exports a matching `monoAgentModule` whose strict schema accepts the selected
    options.
 
-Paths, URLs, package subpaths, aliases, links, patches, implicit registration,
-and dynamic installation are not module mechanisms.
+`$use` never accepts a path, URL, or package subpath. A selected package's
+direct dependency may use the documented source-preview exception
+`file:<project-relative-path>.tgz` when installed through npm; this changes
+package provenance, not module identity. Its `package-lock.json` root entry must
+record the same lexical archive locator, installed version, and a syntactically
+valid canonical SHA-512 SRI. Core validates the installed package directory but
+does not reopen the archive; the documented frozen install and packed verifier
+check its bytes. Pnpm remains supported for registry dependencies, not this
+source-preview exception. Local directories, parent or absolute paths, links,
+workspaces, aliases, patches, Git or HTTP sources, bare archives, implicit
+registration, and dynamic installation are not module mechanisms.
+See the [local-tarball install](/getting-started/install/#install-a-retained-minimal-local-tarball-consumer)
+for the exact boundary.
 
 ## Module slots
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 import { createHash, randomUUID } from "node:crypto";
-import { access, mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -22,6 +22,9 @@ import {
 } from "./fixture.js";
 
 const projects: FixtureProject[] = [];
+const FIXTURE_SHA512_INTEGRITY = `sha512-${createHash("sha512")
+  .update("mono-agent-core-local-tarball-fixture")
+  .digest("base64")}`;
 
 afterEach(async () => {
   await Promise.all(projects.splice(0).map((project) => project.cleanup()));
@@ -1536,6 +1539,128 @@ describe("dependency and package preflight", () => {
     await expectConfigIssue(loadAgentConfig(mismatch.configPath), /mismatched/u);
   });
 
+  it.each([
+    ["file:module.tgz", "file:module.tgz"],
+    ["file:vendor/mono-agent/module.tgz", "file:vendor/mono-agent/module.tgz"],
+    ["file:./.mono-agent/packages/module.tgz", "file:.mono-agent/packages/module.tgz"],
+  ])("loads an npm-installed owner-project tarball dependency: %s", async (dependencySpec, lockResolved) => {
+    const project = await fixture({
+      kind: "runtime",
+      dependencySpec,
+      lockResolved,
+      lockIntegrity: FIXTURE_SHA512_INTEGRITY,
+      controller: { create: () => ({}) },
+    });
+    await project.writeConfig(minimalConfig(project.modules[0]!.name));
+    await expect(loadAgentConfig(project.configPath)).resolves.toMatchObject({
+      modules: [{ packageName: project.modules[0]!.name }],
+    });
+  });
+
+  it("requires npm local-tarball lock metadata to record the exact locator and integrity", async () => {
+    const dependencySpec = "file:.mono-agent/packages/module.tgz";
+    const mismatched = await fixture({
+      kind: "runtime",
+      dependencySpec,
+      lockResolved: "file:.mono-agent/packages/other.tgz",
+      lockIntegrity: FIXTURE_SHA512_INTEGRITY,
+      controller: { create: () => ({}) },
+    });
+    await mismatched.writeConfig(minimalConfig(mismatched.modules[0]!.name));
+    await expectConfigIssue(loadAgentConfig(mismatched.configPath), /mismatched.*npm lockfile/u);
+
+    const missingIntegrity = await fixture({
+      kind: "runtime",
+      dependencySpec,
+      lockResolved: dependencySpec,
+      controller: { create: () => ({}) },
+    });
+    await missingIntegrity.writeConfig(minimalConfig(missingIntegrity.modules[0]!.name));
+    await expectConfigIssue(loadAgentConfig(missingIntegrity.configPath), /mismatched.*npm lockfile/u);
+
+    for (const lockIntegrity of [
+      "sha512-Y29yZQ==",
+      `sha512-${"A".repeat(85)}B==`,
+      `sha256-${"A".repeat(43)}=`,
+    ]) {
+      const malformedIntegrity = await fixture({
+        kind: "runtime",
+        dependencySpec,
+        lockResolved: dependencySpec,
+        lockIntegrity,
+        controller: { create: () => ({}) },
+      });
+      await malformedIntegrity.writeConfig(minimalConfig(malformedIntegrity.modules[0]!.name));
+      await expectConfigIssue(loadAgentConfig(malformedIntegrity.configPath), /mismatched.*npm lockfile/u);
+    }
+
+    const linkedDirectoryShape = await fixture({
+      kind: "runtime",
+      dependencySpec,
+      lockResolved: dependencySpec,
+      lockIntegrity: FIXTURE_SHA512_INTEGRITY,
+      lockLink: true,
+      controller: { create: () => ({}) },
+    });
+    await linkedDirectoryShape.writeConfig(minimalConfig(linkedDirectoryShape.modules[0]!.name));
+    await expectConfigIssue(loadAgentConfig(linkedDirectoryShape.configPath), /mismatched.*npm lockfile/u);
+  });
+
+  it("keeps the source-preview tarball escape npm-only and rejects pnpm evidence before import", async () => {
+    const dependencySpec = "file:.mono-agent/packages/module.tgz";
+    const project = await fixture({
+      kind: "runtime",
+      dependencySpec,
+      controller: { create: () => ({}) },
+    });
+    await project.writeConfig(minimalConfig(project.modules[0]!.name));
+    const packageName = project.modules[0]!.name;
+    const markerPath = join(project.root, "LOCAL_TARBALL_IMPORT_MARKER");
+    await writeFile(
+      join(project.root, "node_modules", ...packageName.split("/"), "index.js"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(markerPath)}, "bad");`,
+    );
+    await rm(join(project.root, "package-lock.json"));
+    await writeFile(join(project.root, "pnpm-lock.yaml"), [
+      "lockfileVersion: '9.0'",
+      "importers:",
+      "  .:",
+      "    dependencies:",
+      `      ${JSON.stringify(packageName)}:`,
+      `        specifier: ${dependencySpec}`,
+      "        version: 1.0.0",
+      "",
+    ].join("\n"));
+
+    await expectConfigIssue(loadAgentConfig(project.configPath), /mismatched.*pnpm lockfile/u);
+    await expect(access(markerPath)).rejects.toThrow();
+  });
+
+  it("rejects a symlinked npm local-tarball package root before import", async () => {
+    const dependencySpec = "file:.mono-agent/packages/module.tgz";
+    const project = await fixture({
+      kind: "runtime",
+      dependencySpec,
+      lockResolved: dependencySpec,
+      lockIntegrity: FIXTURE_SHA512_INTEGRITY,
+      controller: { create: () => ({}) },
+    });
+    await project.writeConfig(minimalConfig(project.modules[0]!.name));
+    const packageName = project.modules[0]!.name;
+    const packageRoot = join(project.root, "node_modules", ...packageName.split("/"));
+    const targetRoot = join(project.root, "local-tarball-package-target");
+    const markerPath = join(project.root, "LOCAL_TARBALL_IMPORT_MARKER");
+    await writeFile(
+      join(packageRoot, "index.js"),
+      `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(markerPath)}, "bad");`,
+    );
+    await rename(packageRoot, targetRoot);
+    await symlink(targetRoot, packageRoot, "dir");
+
+    await expectConfigIssue(loadAgentConfig(project.configPath), /must be installed at .*ancestor node_modules/u);
+    await expect(access(markerPath)).rejects.toThrow();
+  });
+
   it("rejects aliases, local paths, wrong API versions, and wrong kinds", async () => {
     const alias = await fixture({ kind: "runtime", dependencySpec: "npm:other@1.0.0", controller: { create: () => ({}) } });
     await alias.writeConfig(minimalConfig(alias.modules[0]!.name));
@@ -1568,9 +1693,31 @@ describe("dependency and package preflight", () => {
     ["local tar archive", "module.tar"],
     ["local tar.gz archive", "module.tar.gz"],
     ["case-variant local archive", "module.TGZ"],
+    ["owner-project directory", "file:vendor/module"],
+    ["parent tarball", "file:../module.tgz"],
+    ["absolute tarball", "file:/tmp/module.tgz"],
+    ["case-variant file tarball", "file:module.TGZ"],
+    ["non-tgz file archive", "file:module.tar.gz"],
+    ["empty path segment", "file:vendor//module.tgz"],
+    ["space in path", "file:vendor/private module.tgz"],
+    ["file URL", "file://vendor/module.tgz"],
+    ["Windows absolute tarball", "file:C:/vendor/module.tgz"],
+    ["backslash path", "file:vendor\\module.tgz"],
+    ["dot segment", "file:vendor/./module.tgz"],
+    ["fragment", "file:vendor/module.tgz#sha512"],
+    ["query", "file:vendor/module.tgz?download=1"],
+    ["percent-encoded parent", "file:%2e%2e/module.tgz"],
+    ["HTTP tarball", "https://example.invalid/module.tgz"],
+    ["patch dependency", "patch:@mono-agent/runtime@1.0.0#fixture.patch"],
+    ["leading whitespace", " file:vendor/module.tgz"],
+    ["trailing newline", "file:vendor/module.tgz\n"],
+    ["NUL byte", "file:vendor/module\u0000.tgz"],
+    ["overlong spec", `file:${"a".repeat(513)}.tgz`],
+    ["workspace link", "workspace:0.15.0"],
+    ["explicit link", "link:vendor/module"],
     ["numeric JSON value", 1],
     ["object JSON value", { source: "registry" }],
-  ])("rejects non-registry dependency spec: %s", async (_label, dependencySpec) => {
+  ])("rejects unsupported dependency spec: %s", async (_label, dependencySpec) => {
     const project = await fixture({
       kind: "runtime",
       dependencySpec,
@@ -1578,6 +1725,25 @@ describe("dependency and package preflight", () => {
     });
     await project.writeConfig(minimalConfig(project.modules[0]!.name));
     await expectConfigIssue(loadAgentConfig(project.configPath), /forbidden dependency spec/u);
+  });
+
+  it("does not reflect a rejected dependency path in diagnostics", async () => {
+    const sensitivePath = `/private/source-preview-${randomUUID().toLowerCase()}/module.tgz`;
+    const project = await fixture({
+      kind: "runtime",
+      dependencySpec: `file:${sensitivePath}`,
+      controller: { create: () => ({}) },
+    });
+    await project.writeConfig(minimalConfig(project.modules[0]!.name));
+    try {
+      await loadAgentConfig(project.configPath);
+      throw new Error("expected config validation to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AgentConfigError);
+      const configError = error as AgentConfigError;
+      expect(configError.issues[0]?.message).toContain("project-relative file:*.tgz tarball");
+      expect(configError.issues[0]?.message).not.toContain(sensitivePath);
+    }
   });
 
   it("binds npm lock root evidence to the exact authored dependency spec", async () => {

@@ -46,10 +46,15 @@ node packages/create-mono-agent/dist/bin/mono-agent.js install-skill
 ```
 
 The rendered manifest names release versions that are not available from npm
-yet, so source-preview users should inspect the project and use
-`pnpm run verify:minimal` for the hermetic installed proof. Do not pass
-`--install` until those packages have been published and clean-install
-verification is green.
+yet. Do not pass `--install` until those packages have been published and
+clean-install verification is green. Source-preview users may run
+`pnpm run verify:minimal` for the packed proof without external provider
+credentials. For the default minimal template only, follow the
+[retained post-render local-tarball install](../../docs/getting-started/install.md#install-a-retained-minimal-local-tarball-consumer).
+That manual path keeps every `$use` value as a package name and replaces only
+the generated dependency provenance with project-relative `file:*.tgz`
+artifacts. Personal and multi-runtime remain render-and-validate only during the
+source preview.
 
 Explicit post-release installation supports pnpm and npm. Yarn is intentionally
 unavailable until Core can validate its lockfile as part of the module-loading boundary.

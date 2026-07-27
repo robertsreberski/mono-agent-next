@@ -40,6 +40,18 @@ lockfile evidence, verifies the package's capability kind and API version, and
 composes only the selected leaf schemas. Unknown fields, missing or cyclic
 references, wrong-kind packages, and incompatible versions fail validation.
 
+`$use` remains a literal package name regardless of where npm obtained the
+package. During the source preview, only the direct dependency specification
+may use a project-relative `file:*.tgz` archive installed through npm, with
+matching installed-version and canonical SHA-512 SRI metadata in
+`package-lock.json`. Core does not reopen the retained archive; the documented
+frozen install and verifier check its bytes. Pnpm remains supported for registry
+dependencies, not this source-preview exception. Local directories, links,
+workspaces, aliases, Git or HTTP sources, absolute paths, and path-valued
+`$use` selections remain unsupported. Follow the
+[local-tarball install](/getting-started/install/#install-a-retained-minimal-local-tarball-consumer)
+instead of changing agent config.
+
 Secret fields accept only explicit `{"$env":"NAME"}` references. Mono-agent
 does not load `.env` implicitly, and diagnostics report the variable name while
 redacting its value.

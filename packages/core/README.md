@@ -58,7 +58,19 @@ classified `uncertain` and is never replayed.
 
 Configuration is strict JSON. Selecting a package with `$use` never installs
 or scans for code: the package must already be a literal direct dependency and
-must be represented by the project lockfile.
+must be represented by the project lockfile. `$use` is always a bare package
+name. Its direct dependency specification may be a registry version, range, or
+tag, or, for the source-preview escape, a lowercase project-relative
+`file:path/to/package.tgz` archive installed through npm. Its
+`package-lock.json` root must record the same lexical locator, installed
+version, and a syntactically valid canonical SHA-512 SRI before import. Core
+validates the installed package as a real contained npm directory, but does not
+reopen or hash the retained archive; the documented `npm ci` and
+`verify:minimal` flow checks those bytes. Pnpm remains supported for registry
+dependencies, but the source-preview archive escape is deliberately npm-only.
+Local directories, parent or absolute paths, `file://`, `link:`, `workspace:`,
+package aliases, Git sources, HTTP sources, and bare archive paths are rejected.
+A selected module remains trusted executable code.
 
 Module secret and environment annotations are enforced across applicable
 `allOf`, `anyOf`, `oneOf`, and `if`/`then`/`else` branches. Unresolved schema

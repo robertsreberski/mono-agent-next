@@ -175,7 +175,19 @@ describe("project templates", () => {
 
       expect(readme).toContain("not published to npm during the source preview");
       expect(readme).toContain("belong to the predecessor repository");
-      expect(readme).toContain("pnpm run verify:consumers");
+      expect(readme).toContain(
+        "Do not pass `--install` while these generated package pins remain unpublished",
+      );
+      if (template === "minimal") {
+        expect(readme).toContain("For this minimal template only");
+        expect(readme).toContain("`docs/getting-started/install.md`");
+        expect(readme).toContain("explicit post-render source-preview");
+        expect(readme).toContain("local-tarball flow without registry packages or a workspace link");
+      } else {
+        expect(readme).toContain("no retained local-tarball install recipe");
+        expect(readme).toContain("`pnpm run verify:consumers`");
+        expect(readme).not.toContain("`docs/getting-started/install.md`");
+      }
       expect(readme).not.toMatch(/\b(?:npm|pnpm|yarn)\s+(?:i|install|add)\b/iu);
       expect(readme).not.toMatch(/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?start\b/iu);
       expect(readme).not.toMatch(/\bnpx\b/iu);

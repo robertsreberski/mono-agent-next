@@ -11,7 +11,9 @@ packages or changing a live agent.
 
 ## The path
 
-1. [Install and build](/getting-started/install/) the pinned workspace.
+1. [Install and build](/getting-started/install/) the pinned workspace, then
+   choose the packed proof without external provider credentials or the
+   documented minimal local-tarball consumer path.
 2. [Run the first-agent proof](/getting-started/quickstart/) and inspect the
    generated minimal template.
 3. [Read the core concepts](/getting-started/concepts/) before selecting another
@@ -23,10 +25,11 @@ packages or changing a live agent.
 ## What you will prove
 
 The packed minimal verification builds the relevant packages, packs them,
-creates a clean consumer outside the workspace, installs an exact lockfile
-closure, validates its config, starts an authenticated loopback webhook, runs a
-deterministic Pi-native turn against a local test provider, and performs a clean
-signal-driven shutdown.
+creates a clean consumer outside the workspace, installs the five first-party
+dependencies from project-contained local tarballs, proves the exact lockfile
+closure without a workspace link or local registry, validates its config,
+starts an authenticated loopback webhook, runs a deterministic Pi-native turn
+against a local test provider, and performs a clean signal-driven shutdown.
 
 The operator verification separately exercises the authenticated shared
 protocol, durable browser-product restart behavior, and a standalone terminal

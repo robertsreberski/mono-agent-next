@@ -56,7 +56,13 @@ describe("runCreateMonoAgentCli", () => {
     expect(usage).toContain("create-mono-agent [directory]");
     expect(usage).toContain("built mono-agent-next checkout");
     expect(usage).toContain("predecessor repository");
-    expect(usage).toContain("Do not use --install");
+    expect(usage).toContain(
+      "Do not use --install while the generated package pins remain unpublished",
+    );
+    expect(usage).toContain("default minimal template alone");
+    expect(usage).toContain("docs/getting-started/install.md");
+    expect(usage).toContain("local-tarball flow");
+    expect(usage).toContain("Other templates remain render-and-validate only");
     expect(usage).not.toContain("npm create");
     expect(usage).not.toContain("@latest");
   });

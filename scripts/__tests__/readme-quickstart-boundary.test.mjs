@@ -78,13 +78,35 @@ describe("source-only newcomer boundary", () => {
     const install = readRepoFile("docs/getting-started/install.md");
     const firstAgent = readRepoFile("docs/getting-started/quickstart.md");
     const scaffolder = readRepoFile("packages/create-mono-agent/README.md");
+    const scaffoldTemplates = readRepoFile("packages/create-mono-agent/src/templates.ts");
+    const scaffoldCli = readRepoFile("packages/create-mono-agent/src/cli.ts");
 
-    expect(install).toContain("Consumer installation from npm");
+    expect(install).toContain("Registry installation remains a later phase");
+    expect(install).toContain("Install a retained minimal local-tarball consumer");
     expect(firstAgent).toContain("not published to npm");
     expect(firstAgent).toContain("packages/create-mono-agent/dist/bin/create-mono-agent.js");
     expect(scaffolder).toContain("not published during the source preview");
+    expect(scaffolder).toContain("For the default minimal template only");
+    expect(scaffolder).toContain("Personal and multi-runtime remain render-and-validate only");
     expect(scaffolder).not.toContain("npm create mono-agent@0.15.0");
     expect(scaffolder).not.toContain("npm install --global create-mono-agent@0.15.0");
+    for (const [path, source] of [
+      ["packages/create-mono-agent/src/templates.ts", scaffoldTemplates],
+      ["packages/create-mono-agent/src/cli.ts", scaffoldCli],
+    ]) {
+      expect(source, `${path} must forbid installing unpublished pins`).toMatch(
+        /Do not (?:pass `|use )--install/u,
+      );
+      expect(source, `${path} must name the canonical post-render guide`).toContain(
+        "docs/getting-started/install.md",
+      );
+      expect(source, `${path} must name only the bounded source-preview escape`).toContain(
+        "source-preview",
+      );
+      expect(source, `${path} must name only the bounded source-preview escape`).toContain(
+        "local-tarball flow",
+      );
+    }
   });
 
   it("keeps every package README off predecessor registry entry points", () => {
@@ -107,6 +129,7 @@ describe("source-only newcomer boundary", () => {
       "docs/getting-started/quickstart.md",
       "packages/create-mono-agent/README.md",
       "packages/create-mono-agent/src/cli.ts",
+      "packages/create-mono-agent/src/templates.ts",
     ]) {
       const page = readRepoFile(path);
       for (const pattern of registryCommandPatterns) {

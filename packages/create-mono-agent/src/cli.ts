@@ -287,8 +287,10 @@ function createUsage(): string {
     "",
     "Source preview: use this executable from the built mono-agent-next checkout.",
     "Existing registry artifacts under these names belong to the predecessor repository.",
-    "Do not use --install until an authorized release passes clean registry verification.",
-    "The default template is minimal.",
+    "Do not use --install while the generated package pins remain unpublished.",
+    "The default minimal template alone has a retained source-preview install recipe:",
+    "after rendering it, follow docs/getting-started/install.md for the local-tarball flow.",
+    "Other templates remain render-and-validate only until their closures have matching proofs.",
     "Package installation never runs unless --install is supplied.",
     "",
   ].join("\n");

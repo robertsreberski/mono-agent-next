@@ -517,6 +517,17 @@ function projectReadme(displayName: string, template: ProjectTemplate): string {
         ]
       : ["This template is the smallest runnable Pi plus loopback-webhook agent."];
   const environmentNames = TEMPLATE_ENVIRONMENT_NAMES[template].map((name) => `- \`${name}\``);
+  const sourcePreviewInstall = template === "minimal"
+    ? [
+        "For this minimal template only, return to the source checkout and follow",
+        "`docs/getting-started/install.md` for the explicit post-render source-preview",
+        "local-tarball flow without registry packages or a workspace link.",
+      ]
+    : [
+        "This template has no retained local-tarball install recipe during the source preview.",
+        "Return to the source checkout and run `pnpm run verify:consumers` to validate",
+        "the rendered contract without installing or starting this project.",
+      ];
 
   return [
     `# ${displayName}`,
@@ -540,10 +551,9 @@ function projectReadme(displayName: string, template: ProjectTemplate): string {
     "",
     "These package versions are not published to npm during the source preview.",
     "Existing registry artifacts under the same names belong to the predecessor repository.",
-    "Do not install this rendered manifest or start this project from registry packages.",
+    "Do not pass `--install` while these generated package pins remain unpublished.",
     "",
-    "Inspect the generated config and manifest here. Return to the source checkout and",
-    "run `pnpm run verify:consumers` for the hermetic validation of all three templates.",
+    ...sourcePreviewInstall,
     "",
   ].join("\n");
 }

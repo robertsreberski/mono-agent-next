@@ -1,6 +1,6 @@
 ---
 title: "Your First Agent"
-description: "Render a minimal agent from the built source, run its hermetic package proof, and learn the foreground CLI workflow."
+description: "Render a minimal agent, run its packed proof without external credentials, and learn the foreground CLI workflow."
 sidebar:
   order: 2
 ---
@@ -8,8 +8,11 @@ sidebar:
 The packages are not published to npm during the source preview. Existing
 registry artifacts under the same package names belong to the predecessor
 repository, not this source. Start with the built scaffolder to create and
-inspect your agent folder, then use the repository's hermetic packed proof for
-the runnable installed boundary.
+inspect your agent folder, then use the repository's packed proof without
+external provider credentials for the runnable installed boundary. To retain
+the generated project, use the
+[retained minimal local-tarball install](/getting-started/install/#install-a-retained-minimal-local-tarball-consumer);
+do not install its unchanged release-version manifest.
 
 ## Render the minimal template
 
@@ -57,9 +60,12 @@ The verifier:
 
 1. builds and packs the SDK, core, CLI, Pi runtime, webhook channel, and
    scaffolder;
-2. installs the scaffolder into a temporary bootstrap project;
+2. installs the scaffolder into a temporary bootstrap project from freshly
+   packed local tarballs;
 3. renders the default `minimal` template;
-4. installs only the five selected agent-process packages into a clean consumer;
+4. copies the five agent-process tarballs into the clean consumer, installs
+   them as project-relative `file:*.tgz` dependencies, and proves a frozen
+   reinstall without a workspace link or local package registry;
 5. validates the untouched config and composes its selected-module schema;
 6. starts a local OpenAI-compatible test provider and the foreground CLI;
 7. proves unauthenticated webhook rejection, then completes one authenticated
@@ -69,6 +75,10 @@ The verifier:
 Success ends with a single verification message. Temporary files and processes
 are removed in the script's cleanup path. The proof does not publish packages,
 read production credentials, or modify an existing agent.
+
+The verifier removes its temporary project. For a retained local project,
+follow the install page instead and keep its tarballs, `package.json`, and root
+lockfile together.
 
 ## Understand the installed CLI workflow
 
@@ -84,9 +94,13 @@ node ./node_modules/@mono-agent/cli/dist/bin/mono-agent.js validate --config ./m
 ```
 
 Validation parses strict JSON, resolves every selected direct dependency from
-the project, verifies lockfile and module metadata, resolves declared
-environment references, parses each module schema, and checks routes and
-cross-module references. It does not start module instances.
+the project, verifies lockfile and module metadata, and, for local tarballs,
+requires npm's `package-lock.json` to record the project-relative locator and a
+canonical SHA-512 SRI. Core validates the installed package directory but does
+not reopen the archive; `npm ci` and the packed verifier check its bytes. It
+then resolves declared environment references, parses each module schema, and
+checks routes and cross-module references. Validation does not start module
+instances or prove the tarball publisher's identity.
 
 ### Inspect
 
@@ -171,7 +185,7 @@ live adoption.
 ## Phase boundary
 
 Do not repoint an existing service or copy live memory/state into a generated
-project during this source walkthrough. Registry installation, migration,
+project during this source walkthrough. Public registry installation, migration,
 rollback rehearsal, live smoke, soak, observation, and cutover belong to the
 separately authorized delivery phase.
 
