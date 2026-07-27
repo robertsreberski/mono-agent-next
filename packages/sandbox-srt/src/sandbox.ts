@@ -11,7 +11,13 @@ import type {
   ModuleHealthContext,
   ModuleStopContext,
 } from "@mono-agent/module-sdk";
-import type { Sandbox, SandboxCommand, SandboxResult } from "@mono-agent/module-sdk/internal";
+import type {
+  Sandbox,
+  SandboxCommand,
+  SandboxProcess,
+  SandboxResult,
+  SandboxSpawnCommand,
+} from "@mono-agent/module-sdk/internal";
 
 import { boundLaunch, closeBindings } from "./bound-launch.js";
 import {
@@ -34,13 +40,14 @@ import {
   type TrustedFile,
   type TrustedFileBinding,
 } from "./security.js";
+import { StreamingSandboxProcess } from "./streaming-process.js";
 
 export interface OpenSandboxSrtOptions {
   readonly config: unknown;
 }
 
 interface ActiveChild {
-  readonly child: ChildProcessWithoutNullStreams;
+  readonly terminate: (signal: NodeJS.Signals) => void;
   readonly done: Promise<void>;
 }
 
@@ -110,7 +117,10 @@ export class SandboxSrt implements Sandbox {
     const done = new Promise<void>((resolveDonePromise) => {
       resolveDone = resolveDonePromise;
     });
-    const active = { child, done };
+    const active = {
+      terminate: (signal: NodeJS.Signals) => terminate(child, signal),
+      done,
+    };
     this.#active.add(active);
     const result = collectChild(
       child,
@@ -126,6 +136,65 @@ export class SandboxSrt implements Sandbox {
       this.#active.delete(active);
       resolveDone?.();
     }
+  }
+
+  spawn(command: SandboxSpawnCommand): SandboxProcess {
+    this.#assertOpen();
+    const process = new StreamingSandboxProcess({
+      maxInputBytes: this.config.limits.maxInputBytes,
+      maxOutputBytes: this.config.limits.maxOutputBytes,
+      start: async (started) => {
+        const prepared = await this.#prepareSpawn(command);
+        this.#assertOpen();
+        const bindings = await this.#bindSelection();
+        try {
+          this.#assertOpen();
+          const launch = boundLaunch(
+            this.executable,
+            bindings.executable,
+            bindings.settings,
+          );
+          const child = spawn(
+            launch.command,
+            [...launch.arguments, prepared.command, ...prepared.arguments],
+            {
+              cwd: prepared.workingDirectory,
+              env: prepared.environment,
+              shell: false,
+              stdio: [
+                "pipe",
+                "pipe",
+                "pipe",
+                bindings.executable.descriptor,
+                bindings.settings.descriptor,
+              ],
+              windowsHide: true,
+              detached: true,
+            },
+          ) as ChildProcessWithoutNullStreams;
+          started(child);
+        } catch (error) {
+          if (error instanceof SandboxSrtError) throw error;
+          throw new SandboxSrtError(
+            "execution_failed",
+            "SRT process could not be started.",
+          );
+        } finally {
+          await closeBindings(bindings);
+        }
+      },
+    });
+    const active = {
+      terminate: (signal: NodeJS.Signals) => {
+        process.kill(signal);
+      },
+      done: process.done,
+    };
+    this.#active.add(active);
+    void process.done.finally(() => {
+      this.#active.delete(active);
+    });
+    return process;
   }
 
   async health(context: ModuleHealthContext): Promise<ModuleHealth> {
@@ -227,10 +296,10 @@ export class SandboxSrt implements Sandbox {
   async #stopInternal(): Promise<void> {
     this.#closed = true;
     const active = [...this.#active];
-    for (const { child } of active) terminate(child, "SIGTERM");
-    const killTimers = active.map(({ child }) => {
+    for (const child of active) child.terminate("SIGTERM");
+    const killTimers = active.map((child) => {
       const timer = setTimeout(
-        () => terminate(child, "SIGKILL"),
+        () => child.terminate("SIGKILL"),
         SIGKILL_GRACE_MS,
       );
       timer.unref();
@@ -325,6 +394,25 @@ export class SandboxSrt implements Sandbox {
       stdin: command.stdin,
     });
   }
+
+  async #prepareSpawn(command: SandboxSpawnCommand): Promise<{
+    readonly command: string;
+    readonly arguments: readonly string[];
+    readonly workingDirectory: string;
+    readonly environment: Readonly<Record<string, string>>;
+  }> {
+    const signal = new AbortController().signal;
+    const prepared = await this.#prepare({
+      ...command,
+      signal,
+    });
+    return Object.freeze({
+      command: prepared.command,
+      arguments: prepared.arguments,
+      workingDirectory: prepared.workingDirectory,
+      environment: prepared.environment,
+    });
+  }
 }
 
 export async function openSandboxSrt(options: OpenSandboxSrtOptions): Promise<SandboxSrt> {
@@ -414,8 +502,18 @@ async function collectChild(
       }
       target.push(Buffer.from(chunk));
     };
+    const failOutput = (): void => {
+      if (settled || failure !== undefined) return;
+      failure = new SandboxSrtError(
+        "execution_failed",
+        "SRT process output failed.",
+      );
+      beginTermination();
+    };
     child.stdout.on("data", (chunk: Buffer) => collect(stdout, chunk));
     child.stderr.on("data", (chunk: Buffer) => collect(stderr, chunk));
+    child.stdout.once("error", failOutput);
+    child.stderr.once("error", failOutput);
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) onAbort();
     child.once("error", () => {
@@ -425,7 +523,10 @@ async function collectChild(
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      if (killTimer !== undefined) clearTimeout(killTimer);
+      terminate(child, "SIGKILL");
+      if (killTimer !== undefined) {
+        clearTimeout(killTimer);
+      }
       signal.removeEventListener("abort", onAbort);
       if (failure !== undefined) {
         rejectPromise(failure);
@@ -451,7 +552,6 @@ async function collectChild(
 }
 
 function terminate(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
-  if (child.exitCode !== null || child.signalCode !== null) return;
   if (process.platform !== "win32" && child.pid !== undefined) {
     try {
       process.kill(-child.pid, signal);
@@ -460,6 +560,7 @@ function terminate(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals
       // Fall back to the direct child when the process group has already gone away.
     }
   }
+  if (child.exitCode !== null || child.signalCode !== null) return;
   try {
     child.kill(signal);
   } catch {

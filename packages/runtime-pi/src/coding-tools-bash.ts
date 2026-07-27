@@ -20,6 +20,7 @@ import {
   combinedSignal,
   effectiveWorkdir,
   evidence,
+  executionBoundarySummary,
   optionalInteger,
   optionalString,
   outputLimit,
@@ -125,7 +126,11 @@ export function createRuntimePiBashAgentTool(
     const env = new BoundedBashExecutionEnv({ cwd: workdir });
     const executionSignal = combinedSignal(options.turnSignal, signal);
     const summary = [
-      "Allow this unsandboxed shell command with inherited process authority?",
+      executionBoundarySummary(
+        options,
+        "Allow this shell command through the selected Core sandbox?",
+        "Allow this unsandboxed shell command with inherited process authority?",
+      ),
       `workdir: ${JSON.stringify(workdir)}`,
       `timeout_seconds: ${String(timeout)}`,
       evidence("command", command),
@@ -138,6 +143,22 @@ export function createRuntimePiBashAgentTool(
       summary,
       executionSignal,
       async () => {
+        if (options.sandboxTools !== undefined) {
+          return capRuntimePiAgentResult(
+            await options.sandboxTools.execute(
+              runtimePiBashTool.id,
+              {
+                command,
+                timeout,
+                workdir,
+                ...(description === undefined ? {} : { description }),
+                max_output_chars: maxOutputBytes,
+              },
+              executionSignal,
+            ),
+            maxOutputBytes,
+          );
+        }
         try {
           return capRuntimePiAgentResult(
             await tool.execute(

@@ -17,7 +17,7 @@ export const runtimeCodexCapabilities: RuntimeCapabilities = Object.freeze({
   attachments: false,
   approvals: true,
   structuredOutput: true,
-  sandbox: false,
+  sandbox: true,
   sessions: true,
   maxTurns: false,
   maxOutputTokens: false,

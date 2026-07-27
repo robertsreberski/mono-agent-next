@@ -41,11 +41,26 @@ export interface RuntimePiCodingToolsOptions {
   ) => Promise<void>;
   readonly record: (result: RuntimeToolResult) => void;
   readonly onToolAttempt: () => void;
+  readonly sandboxTools?: {
+    execute(
+      toolId: string,
+      params: Readonly<Record<string, unknown>>,
+      signal: AbortSignal,
+    ): Promise<AgentToolResult<unknown>>;
+  };
   readonly glob?: {
     readonly maxVisitedEntries?: number;
     readonly timeoutMs?: number;
   };
   readonly webFetch?: Omit<WebFetchOptions, "signal">;
+}
+
+export function executionBoundarySummary(
+  options: RuntimePiCodingToolsOptions,
+  sandboxed: string,
+  unsandboxed: string,
+): string {
+  return options.sandboxTools === undefined ? unsandboxed : sandboxed;
 }
 
 export function toolError(name: string, message: string): Error {

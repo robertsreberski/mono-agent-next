@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 import type {
   ModuleDiagnostic,
+  RuntimeCapabilities,
   RuntimeModelValidation,
   RuntimeModelValidationRequest,
   RuntimeNativeToolDescriptor,
@@ -15,7 +16,7 @@ export const runtimePiNodeReplTool: RuntimeNativeToolDescriptor = Object.freeze(
   displayName: "Node REPL",
   effects: Object.freeze(["read", "write", "execute", "network"] as const),
   approval: "core-callback",
-  sandbox: "unsupported",
+  sandbox: "core-executor",
 });
 
 export const runtimePiEditTool: RuntimeNativeToolDescriptor = Object.freeze({
@@ -23,7 +24,7 @@ export const runtimePiEditTool: RuntimeNativeToolDescriptor = Object.freeze({
   displayName: "Edit",
   effects: Object.freeze(["read", "write"] as const),
   approval: "core-callback",
-  sandbox: "unsupported",
+  sandbox: "core-executor",
 });
 
 export const runtimePiWebSearchTool: RuntimeNativeToolDescriptor = Object.freeze({
@@ -31,7 +32,7 @@ export const runtimePiWebSearchTool: RuntimeNativeToolDescriptor = Object.freeze
   displayName: "Web Search",
   effects: Object.freeze(["network"] as const),
   approval: "core-callback",
-  sandbox: "unsupported",
+  sandbox: "core-executor",
 });
 
 export const runtimePiNativeTools: readonly RuntimeNativeToolDescriptor[] =
@@ -48,6 +49,25 @@ function diagnostic(message: string): ModuleDiagnostic {
     code: "runtime-pi.model",
     severity: "error",
     message,
+  };
+}
+
+export function runtimePiCapabilities(
+  attachments: boolean,
+  sandbox: boolean,
+): RuntimeCapabilities {
+  return {
+    tools: true,
+    mcp: true,
+    attachments,
+    approvals: true,
+    structuredOutput: true,
+    sandbox,
+    sessions: true,
+    maxTurns: true,
+    maxOutputTokens: true,
+    artifactResults: true,
+    liveInput: true,
   };
 }
 
@@ -73,6 +93,7 @@ export function validateRuntimePiModel(
   const model = runtimePiModelDescriptor(config, request.model);
   return {
     supported: true,
+    capabilities: runtimePiCapabilities(false, true),
     nativeTools: runtimePiNativeTools,
     ...(model === undefined ? {} : { model }),
   };

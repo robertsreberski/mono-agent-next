@@ -35,7 +35,7 @@ describe("runtime-claude model definition", () => {
         attachments: false,
         approvals: false,
         structuredOutput: true,
-        sandbox: false,
+        sandbox: true,
         sessions: true,
         maxTurns: true,
         maxOutputTokens: false,

@@ -17,7 +17,7 @@ export const runtimeOpenCodeCapabilities: RuntimeCapabilities = Object.freeze({
   attachments: false,
   approvals: false,
   structuredOutput: false,
-  sandbox: false,
+  sandbox: true,
   sessions: true,
   maxTurns: false,
   maxOutputTokens: false,

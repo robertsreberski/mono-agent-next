@@ -364,6 +364,9 @@ describe("agent host lifecycle", () => {
                 timedOut: false,
               };
             },
+            spawn() {
+              throw new Error("sandbox spawn is not expected during diagnostics");
+            },
             health() {
               events.push("health:sandbox");
               return {
@@ -399,6 +402,177 @@ describe("agent host lifecycle", () => {
     expect(events).toContain("health:sandbox");
     expect(events).not.toContain("start:runtime");
     expect(events).not.toContain("start:sandbox");
+  });
+
+  it("grants a selected runtime the exact frozen sandbox execute and spawn facet", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-sandbox-grant-${suffix}`;
+    const sandbox = `@fixture/sandbox-grant-${suffix}`;
+    const execute = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: new TextEncoder().encode("core-execute"),
+      stderr: new Uint8Array(),
+      timedOut: false,
+    }));
+    const spawn = vi.fn(() => ({ marker: "stream" }));
+    let grantKeys: PropertyKey[] = [];
+    let grantFrozen = false;
+    let capabilityDeclared = false;
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        capabilities: ["sandbox.execute.v1"],
+        controller: {
+          create(context) {
+            if (!isRecord(context) || !isRecord(context.host)) {
+              throw new Error("runtime sandbox host fixture is unavailable");
+            }
+            const host = context.host;
+            const granted = Reflect.get(host, "grantedCapabilities");
+            const getCapability = Reflect.get(host, "getCapability");
+            if (!(granted instanceof Set) || typeof getCapability !== "function") {
+              throw new Error("runtime sandbox host facet is malformed");
+            }
+            capabilityDeclared = granted.has("sandbox.execute.v1");
+            const executor = Reflect.apply(getCapability, host, ["sandbox.execute.v1"]);
+            if (!isRecord(executor)) throw new Error("sandbox executor grant is absent");
+            grantKeys = Reflect.ownKeys(executor);
+            grantFrozen = Object.isFrozen(executor);
+            const executeGrant = Reflect.get(executor, "execute");
+            const spawnGrant = Reflect.get(executor, "spawn");
+            if (typeof executeGrant !== "function" || typeof spawnGrant !== "function") {
+              throw new Error("sandbox executor grant is incomplete");
+            }
+            return runtimeInstance(async () => {
+              const result = await Reflect.apply(executeGrant, executor, [{
+                command: "/usr/bin/printf",
+                arguments: ["core-execute"],
+                workingDirectory: "/tmp",
+                signal: new AbortController().signal,
+              }]) as { readonly stdout: Uint8Array };
+              const process = Reflect.apply(spawnGrant, executor, [{
+                command: "/bin/cat",
+                arguments: [],
+                workingDirectory: "/tmp",
+              }]) as { readonly marker: string };
+              return completed(
+                `${new TextDecoder().decode(result.stdout)}:${process.marker}`,
+              );
+            });
+          },
+        },
+      },
+      {
+        name: sandbox,
+        kind: "sandbox",
+        controller: {
+          create: () => ({ execute, spawn }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      policy: {
+        tools: { default: "deny", allow: [] },
+        approvals: { default: "allow" },
+        sandbox: { $use: sandbox },
+      },
+    }));
+    const host = await createAgentHost(project.configPath);
+
+    await expect(host.submit({
+      requestId: "sandbox-grant",
+      conversationId: "sandbox-grant",
+      text: "exercise grant",
+    })).resolves.toMatchObject({ text: "core-execute:stream" });
+    expect(capabilityDeclared).toBe(true);
+    expect(grantKeys.sort()).toEqual(["execute", "spawn"]);
+    expect(grantFrozen).toBe(true);
+    expect(execute).toHaveBeenCalledOnce();
+    expect(spawn).toHaveBeenCalledOnce();
+    await host.stop();
+  });
+
+  it("rejects sandbox self-reporting without the exact runtime host grant", async () => {
+    const suffix = randomUUID().toLowerCase();
+    const runtime = `@fixture/runtime-sandbox-undeclared-${suffix}`;
+    const sandbox = `@fixture/sandbox-undeclared-${suffix}`;
+    const execute = vi.fn(async () => ({
+      exitCode: 0,
+      stdout: new Uint8Array(),
+      stderr: new Uint8Array(),
+      timedOut: false,
+    }));
+    const spawn = vi.fn(() => {
+      throw new Error("undeclared sandbox runtime must not spawn");
+    });
+    let runtimeCalls = 0;
+    let grantDeclared = true;
+    const project = await fixture([
+      {
+        name: runtime,
+        kind: "runtime",
+        controller: {
+          create(context) {
+            if (!isRecord(context) || !isRecord(context.host)) {
+              throw new Error("runtime sandbox host fixture is unavailable");
+            }
+            const granted = Reflect.get(context.host, "grantedCapabilities");
+            if (!(granted instanceof Set)) {
+              throw new Error("runtime sandbox host grant set is malformed");
+            }
+            grantDeclared = granted.has("sandbox.execute.v1");
+            const instance = runtimeInstance(async () => {
+              runtimeCalls += 1;
+              return completed("must not run");
+            });
+            return {
+              ...instance,
+              preflightModel() {
+                return {
+                  supported: true,
+                  capabilities: instance.capabilities,
+                };
+              },
+            };
+          },
+        },
+      },
+      {
+        name: sandbox,
+        kind: "sandbox",
+        controller: {
+          create: () => ({ execute, spawn }),
+        },
+      },
+    ]);
+    await project.writeConfig(minimalConfig(runtime, {
+      policy: {
+        tools: { default: "deny", allow: [] },
+        approvals: { default: "allow" },
+        sandbox: { $use: sandbox },
+      },
+    }));
+    const host = await createAgentHost(project.configPath);
+
+    let routeError: unknown;
+    try {
+      await host.submit({
+        requestId: "sandbox-undeclared",
+        conversationId: "sandbox-undeclared",
+        text: "must remain contained",
+      });
+    } catch (error) {
+      routeError = error;
+    }
+    expect(runExecutionRouteErrors(routeError)).toEqual([
+      expect.objectContaining({ message: expect.stringMatching(/sandbox unsupported/u) }),
+    ]);
+    expect(grantDeclared).toBe(false);
+    expect(runtimeCalls).toBe(0);
+    expect(execute).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    await host.stop();
   });
 
   it("diagnoses an incompatible state execution protocol before startup", async () => {

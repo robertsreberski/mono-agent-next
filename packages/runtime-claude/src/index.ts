@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
 import { defineRuntimeModule } from "@mono-agent/module-sdk";
+import {
+  grantedSandboxExecutor,
+  SANDBOX_EXECUTE_CAPABILITY,
+} from "@mono-agent/module-sdk/internal";
 
 import { claudeAuthCommands } from "./auth-command.js";
 import { parseRuntimeClaudeConfig, runtimeClaudeJsonSchema } from "./config.js";
@@ -16,15 +20,18 @@ export const monoAgentModule = defineRuntimeModule({
     apiVersion: 1,
     kind: "runtime",
     responsibility: "Runs Claude-native turns through explicit SDK or CLI transports.",
-    capabilities: [],
+    capabilities: [SANDBOX_EXECUTE_CAPABILITY],
   },
   schema: { jsonSchema: runtimeClaudeJsonSchema, parse: parseRuntimeClaudeConfig },
   validateModel: validateClaudeModel,
   create(context) {
+    const sandboxExecutor = grantedSandboxExecutor(context.host);
     const runtime = createRuntimeClaude({
       config: context.config,
       instanceId: context.instanceId,
       workspaceDirectory: context.workspaceDirectory,
+      dataDirectory: context.dataDirectory,
+      ...(sandboxExecutor === undefined ? {} : { sandboxExecutor }),
     });
     return { ...runtime, commands: claudeAuthCommands(context.config) };
   },

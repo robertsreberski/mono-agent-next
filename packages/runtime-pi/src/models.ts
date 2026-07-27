@@ -91,7 +91,7 @@ export interface RuntimePiModelCapabilities {
   readonly attachments: boolean;
   readonly structuredOutput: true;
   readonly approvals: true;
-  readonly sandbox: false;
+  readonly sandbox: boolean;
   readonly thinkingLevels: readonly string[];
 }
 
@@ -379,6 +379,7 @@ export function createRuntimePiModelRegistry(
   config: RuntimePiConfig,
   credentials: CredentialStore,
   injectedModels?: Models,
+  sandbox = false,
 ): RuntimePiModelRegistry {
   let models: Models;
   const localProviders = new Map<string, LocalProviderRegistration>();
@@ -428,7 +429,7 @@ export function createRuntimePiModelRegistry(
         attachments: model.input.includes("image"),
         structuredOutput: true,
         approvals: true,
-        sandbox: false,
+        sandbox,
         thinkingLevels: getSupportedThinkingLevels(model),
       };
     },

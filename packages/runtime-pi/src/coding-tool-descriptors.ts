@@ -6,7 +6,7 @@ export const runtimePiBashTool: RuntimeNativeToolDescriptor = Object.freeze({
   displayName: "Bash",
   effects: Object.freeze(["read", "write", "execute", "network"] as const),
   approval: "core-callback",
-  sandbox: "unsupported",
+  sandbox: "core-executor",
 });
 
 export const runtimePiReadTool: RuntimeNativeToolDescriptor = Object.freeze({
@@ -14,7 +14,7 @@ export const runtimePiReadTool: RuntimeNativeToolDescriptor = Object.freeze({
   displayName: "Read",
   effects: Object.freeze(["read"] as const),
   approval: "core-callback",
-  sandbox: "unsupported",
+  sandbox: "core-executor",
 });
 
 export const runtimePiWriteTool: RuntimeNativeToolDescriptor = Object.freeze({
@@ -22,7 +22,7 @@ export const runtimePiWriteTool: RuntimeNativeToolDescriptor = Object.freeze({
   displayName: "Write",
   effects: Object.freeze(["write"] as const),
   approval: "core-callback",
-  sandbox: "unsupported",
+  sandbox: "core-executor",
 });
 
 export const runtimePiGlobTool: RuntimeNativeToolDescriptor = Object.freeze({
@@ -30,7 +30,7 @@ export const runtimePiGlobTool: RuntimeNativeToolDescriptor = Object.freeze({
   displayName: "Glob",
   effects: Object.freeze(["read"] as const),
   approval: "core-callback",
-  sandbox: "unsupported",
+  sandbox: "core-executor",
 });
 
 export const runtimePiGrepTool: RuntimeNativeToolDescriptor = Object.freeze({
@@ -38,7 +38,7 @@ export const runtimePiGrepTool: RuntimeNativeToolDescriptor = Object.freeze({
   displayName: "Grep",
   effects: Object.freeze(["read", "execute"] as const),
   approval: "core-callback",
-  sandbox: "unsupported",
+  sandbox: "core-executor",
 });
 
 export const runtimePiWebFetchTool: RuntimeNativeToolDescriptor = Object.freeze({
@@ -46,7 +46,7 @@ export const runtimePiWebFetchTool: RuntimeNativeToolDescriptor = Object.freeze(
   displayName: "Web Fetch",
   effects: Object.freeze(["network"] as const),
   approval: "core-callback",
-  sandbox: "unsupported",
+  sandbox: "core-executor",
 });
 
 export const runtimePiCodingNativeTools: readonly RuntimeNativeToolDescriptor[] =

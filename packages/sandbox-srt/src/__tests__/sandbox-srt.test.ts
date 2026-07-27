@@ -1,16 +1,26 @@
 // SPDX-License-Identifier: MIT
+import {
+  spawn,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
 import { renameSync } from "node:fs";
 import { chmod, chown, link, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough, Writable } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 
 import { parse } from "acorn";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ModuleCommand, ModuleLogger } from "@mono-agent/module-sdk";
-import type { SandboxCommand } from "@mono-agent/module-sdk/internal";
+import type {
+  SandboxCommand,
+  SandboxProcess,
+} from "@mono-agent/module-sdk/internal";
 
 import { boundLaunch } from "../bound-launch.js";
 import {
@@ -20,9 +30,11 @@ import {
   type SandboxSrtConfig,
   type TrustedFile,
 } from "../index.js";
+import { StreamingSandboxProcess } from "../streaming-process.js";
 
 const spawnBoundary = vi.hoisted(() => ({
   beforeSpawn: undefined as (() => void) | undefined,
+  replacement: undefined as ((...arguments_: unknown[]) => unknown) | undefined,
 }));
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -31,6 +43,9 @@ vi.mock("node:child_process", async (importOriginal) => {
     ...actual,
     spawn: (...arguments_: unknown[]) => {
       spawnBoundary.beforeSpawn?.();
+      if (spawnBoundary.replacement !== undefined) {
+        return spawnBoundary.replacement(...arguments_);
+      }
       return Reflect.apply(actual.spawn, actual, arguments_);
     },
   };
@@ -46,6 +61,7 @@ const logger: ModuleLogger = {
 
 afterEach(async () => {
   spawnBoundary.beforeSpawn = undefined;
+  spawnBoundary.replacement = undefined;
   for (const root of roots.splice(0)) {
     await chmod(root, 0o700).catch(() => undefined);
     await rm(root, { recursive: true, force: true });
@@ -55,7 +71,12 @@ afterEach(async () => {
 describe("sandbox-srt", () => {
   it("strictly requires pinned executable and settings configuration", async () => {
     const fixture = await createFixture();
-    expect(parseSandboxSrtConfig(config(fixture)).limits.defaultTimeoutMs).toBe(120_000);
+    const defaults = parseSandboxSrtConfig(config(fixture)).limits;
+    expect(defaults.defaultTimeoutMs).toBe(120_000);
+    expect(defaults.maxOutputBytes).toBe(5 * 1024 * 1024);
+    expect(parseSandboxSrtConfig(config(fixture, {
+      limits: { maxOutputBytes: 4 * 1024 * 1024 },
+    })).limits.maxOutputBytes).toBe(4 * 1024 * 1024);
     expect(() => parseSandboxSrtConfig({ ...config(fixture), unknown: true })).toThrow(/unknown field/u);
     expect(() => parseSandboxSrtConfig({ ...config(fixture), executable: { path: "relative", sha256: "bad" } }))
       .toThrow(/SHA-256/u);
@@ -242,6 +263,272 @@ exit 0`,
       if (previous === undefined) delete process.env.SANDBOX_SRT_INHERITED_TEST;
       else process.env.SANDBOX_SRT_INHERITED_TEST = previous;
     }
+  });
+
+  it("owns one-shot stdout and stderr errors as controlled process failures", async () => {
+    const fixture = await createFixture();
+    const sandbox = await openSandboxSrt({ config: config(fixture) });
+    try {
+      for (const output of ["stdout", "stderr"] as const) {
+        const kill = vi.fn((_signal?: NodeJS.Signals) => true);
+        const child = controlledStreamingChild(new Writable(), kill);
+        spawnBoundary.replacement = () => child;
+        const running = sandbox.execute(
+          command(fixture.root, "/usr/bin/true"),
+        );
+        const outcome = running.then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        await vi.waitFor(() => {
+          expect(child[output].listenerCount("error")).toBeGreaterThan(0);
+        });
+
+        child[output].emit("error", new Error(`${output} secret failure`));
+        await vi.waitFor(() => {
+          expect(kill).toHaveBeenCalledWith("SIGTERM");
+        });
+        child.emit("close", null, "SIGTERM");
+
+        await expect(outcome).resolves.toMatchObject({
+          code: "execution_failed",
+          message: "SRT process output failed.",
+        });
+      }
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
+  it("streams bounded stdio through SRT and fails closed on aggregate limits", async () => {
+    const fixture = await createFixture();
+    const sandbox = await openSandboxSrt({
+      config: config(fixture, {
+        limits: {
+          maxInputBytes: 32,
+          maxOutputBytes: 32,
+        },
+      }),
+    });
+    try {
+      const echo = sandbox.spawn({
+        command: "/bin/cat",
+        arguments: [],
+        workingDirectory: fixture.root,
+      });
+      const echoResult = observeStreamingProcess(echo);
+      echo.stdin.end("streamed through SRT");
+      await expect(echoResult.closed).resolves.toEqual({ code: 0, signal: null });
+      expect(text(Buffer.concat(echoResult.stdout))).toBe("streamed through SRT");
+      expect(echoResult.errors).toEqual([]);
+
+      const inputOverflow = sandbox.spawn({
+        command: "/bin/cat",
+        arguments: [],
+        workingDirectory: fixture.root,
+      });
+      const inputResult = observeStreamingProcess(inputOverflow);
+      inputOverflow.stdin.end("x".repeat(33));
+      await inputResult.closed;
+      expect(inputResult.errors).toHaveLength(1);
+      expect(inputResult.errors[0]).toMatchObject({ code: "invalid_command" });
+
+      const outputOverflow = sandbox.spawn({
+        command: process.execPath,
+        arguments: ["-e", "process.stdout.write('x'.repeat(33))"],
+        workingDirectory: fixture.root,
+      });
+      const outputResult = observeStreamingProcess(outputOverflow);
+      outputOverflow.stdin.end();
+      await outputResult.closed;
+      expect(outputResult.errors).toHaveLength(1);
+      expect(outputResult.errors[0]).toMatchObject({
+        code: "output_limit_exceeded",
+      });
+      expect(Buffer.concat(outputResult.stdout).byteLength).toBeLessThanOrEqual(32);
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
+  it("owns fast child close and spawn-error events before async cleanup settles", async () => {
+    const fast = new StreamingSandboxProcess({
+      maxInputBytes: 32,
+      maxOutputBytes: 32,
+      async start(started) {
+        started(spawn("/usr/bin/true", [], {
+          stdio: ["pipe", "pipe", "pipe"],
+        }));
+        await delay(100);
+      },
+    });
+    const fastResult = observeStreamingProcess(fast);
+    fast.stdin.end();
+    await expect(fastResult.closed).resolves.toEqual({
+      code: 0,
+      signal: null,
+    });
+    await expect(fast.done).resolves.toBeUndefined();
+
+    const missing = new StreamingSandboxProcess({
+      maxInputBytes: 32,
+      maxOutputBytes: 32,
+      async start(started) {
+        started(spawn("/mono-agent-test/missing-srt-command", [], {
+          stdio: ["pipe", "pipe", "pipe"],
+        }));
+        await delay(100);
+      },
+    });
+    const missingResult = observeStreamingProcess(missing);
+    missing.stdin.end();
+    await missingResult.closed;
+    expect(missingResult.errors).toHaveLength(1);
+    expect(missingResult.errors[0]).toMatchObject({ code: "ENOENT" });
+    await expect(missing.done).resolves.toBeUndefined();
+  });
+
+  it("forwards stdin with owned callback, backpressure, and finalization semantics", async () => {
+    let adopt!: () => void;
+    const adoption = new Promise<void>((resolve) => {
+      adopt = resolve;
+    });
+    let acceptWrite: ((error?: Error | null) => void) | undefined;
+    let acceptFinal: ((error?: Error | null) => void) | undefined;
+    const received: Buffer[] = [];
+    const child = controlledStreamingChild(new Writable({
+      write(chunk: Buffer, _encoding, callback) {
+        received.push(Buffer.from(chunk));
+        acceptWrite = callback;
+      },
+      final(callback) {
+        acceptFinal = callback;
+      },
+    }));
+    const running = new StreamingSandboxProcess({
+      maxInputBytes: 65_536,
+      maxOutputBytes: 32,
+      async start(started) {
+        await adoption;
+        started(child);
+      },
+    });
+    const result = observeStreamingProcess(running);
+    const writeCallback = vi.fn();
+    const drained = new Promise<void>((resolve) => {
+      running.stdin.once("drain", resolve);
+    });
+    expect(running.stdin.write(Buffer.alloc(32_768, 7), writeCallback)).toBe(false);
+    await delay(10);
+    expect(writeCallback).not.toHaveBeenCalled();
+    expect(received).toEqual([]);
+
+    adopt();
+    await vi.waitFor(() => expect(acceptWrite).toBeTypeOf("function"));
+    expect(writeCallback).not.toHaveBeenCalled();
+    acceptWrite?.();
+    await drained;
+    expect(writeCallback).toHaveBeenCalledTimes(1);
+    expect(Buffer.concat(received)).toEqual(Buffer.alloc(32_768, 7));
+
+    const endCallback = vi.fn();
+    running.stdin.end(endCallback);
+    await vi.waitFor(() => expect(acceptFinal).toBeTypeOf("function"));
+    expect(endCallback).not.toHaveBeenCalled();
+    acceptFinal?.();
+    await vi.waitFor(() => expect(endCallback).toHaveBeenCalledTimes(1));
+    child.emit("close", 0, null);
+    await expect(result.closed).resolves.toEqual({ code: 0, signal: null });
+  });
+
+  it("forwards end-before-adoption and fails an outstanding stdin callback once", async () => {
+    let adoptEnd!: () => void;
+    const endAdoption = new Promise<void>((resolve) => {
+      adoptEnd = resolve;
+    });
+    const endChunks: Buffer[] = [];
+    const endingChild = controlledStreamingChild(new Writable({
+      write(chunk: Buffer, _encoding, callback) {
+        endChunks.push(Buffer.from(chunk));
+        callback();
+      },
+    }));
+    const ending = new StreamingSandboxProcess({
+      maxInputBytes: 32,
+      maxOutputBytes: 32,
+      async start(started) {
+        await endAdoption;
+        started(endingChild);
+      },
+    });
+    const endingResult = observeStreamingProcess(ending);
+    const endCallback = vi.fn();
+    ending.stdin.end("queued", endCallback);
+    await delay(10);
+    expect(endCallback).not.toHaveBeenCalled();
+    adoptEnd();
+    await vi.waitFor(() => expect(endCallback).toHaveBeenCalledTimes(1));
+    expect(Buffer.concat(endChunks).toString("utf8")).toBe("queued");
+    endingChild.emit("close", 0, null);
+    await endingResult.closed;
+
+    let adoptError!: () => void;
+    const errorAdoption = new Promise<void>((resolve) => {
+      adoptError = resolve;
+    });
+    let childWriteCallback: ((error?: Error | null) => void) | undefined;
+    const failingStdin = new Writable({
+      write(_chunk, _encoding, callback) {
+        childWriteCallback = callback;
+      },
+    });
+    const failingChild = controlledStreamingChild(failingStdin);
+    const failing = new StreamingSandboxProcess({
+      maxInputBytes: 32,
+      maxOutputBytes: 32,
+      async start(started) {
+        await errorAdoption;
+        started(failingChild);
+      },
+    });
+    const failingResult = observeStreamingProcess(failing);
+    const writeCallback = vi.fn();
+    failing.stdin.write("queued", writeCallback);
+    adoptError();
+    await vi.waitFor(() => expect(childWriteCallback).toBeTypeOf("function"));
+    const error = Object.assign(new Error("stdin closed"), { code: "EPIPE" });
+    failingStdin.emit("error", error);
+    childWriteCallback?.(error);
+    await vi.waitFor(() => {
+      expect(writeCallback).toHaveBeenCalledTimes(1);
+      expect(failingResult.errors).toEqual([error]);
+    });
+    failingChild.emit("close", null, "SIGTERM");
+    await failingResult.closed;
+    expect(writeCallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps ownership when startup fails after child adoption", async () => {
+    const child = controlledStreamingChild(new Writable());
+    const running = new StreamingSandboxProcess({
+      maxInputBytes: 32,
+      maxOutputBytes: 32,
+      async start(started) {
+        started(child);
+        throw new Error("binding cleanup failed");
+      },
+    });
+    const result = observeStreamingProcess(running);
+    await vi.waitFor(() => {
+      expect(result.errors).toHaveLength(1);
+      expect(result.errors[0]?.message).toBe("binding cleanup failed");
+    });
+    await expect(Promise.race([
+      running.done.then(() => "closed"),
+      delay(20).then(() => "owned"),
+    ])).resolves.toBe("owned");
+    child.emit("close", null, "SIGKILL");
+    await expect(running.done).resolves.toBeUndefined();
   });
 
   it("builds the boundLaunch Linux native-binary vector", () => {
@@ -606,6 +893,100 @@ export {`,
     }
   });
 
+  it("kill() escalates a stubborn streaming process", async () => {
+    const fixture = await createFixture({ executable: stubbornFakeSrt() });
+    const sandbox = await openSandboxSrt({ config: config(fixture) });
+    try {
+      const running = sandbox.spawn({
+        command: "/bin/sleep",
+        arguments: ["10"],
+        workingDirectory: fixture.root,
+      });
+      const result = observeStreamingProcess(running);
+      running.stdin.end();
+      await vi.waitFor(async () => {
+        await expect(readFile(`${fixture.executable}.ready`, "utf8"))
+          .resolves.toBe("ready");
+      });
+
+      expect(running.kill("SIGTERM")).toBe(true);
+      await expect(result.closed).resolves.toEqual({
+        code: null,
+        signal: "SIGKILL",
+      });
+      expect(running.kill("SIGTERM")).toBe(false);
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
+  it("kill() reaps the process group after its leader exits first", async () => {
+    const fixture = await createFixture();
+    const script = join(fixture.root, "leader-exits-first.mjs");
+    const ready = join(fixture.root, "leader-exits-first-ready");
+    const escaped = join(fixture.root, "leader-exits-first-escaped");
+    await writeFile(
+      script,
+      leaderExitsFirstSource(ready, escaped),
+      { mode: 0o600 },
+    );
+    const sandbox = await openSandboxSrt({ config: config(fixture) });
+    try {
+      const running = sandbox.spawn({
+        command: process.execPath,
+        arguments: [script],
+        workingDirectory: fixture.root,
+      });
+      const result = observeStreamingProcess(running);
+      running.stdin.end();
+      await vi.waitFor(async () => {
+        await expect(readFile(ready, "utf8")).resolves.toBe("ready");
+      });
+
+      expect(running.kill("SIGTERM")).toBe(true);
+      await expect(result.closed).resolves.toMatchObject({ signal: "SIGTERM" });
+      await delay(750);
+      await expect(readFile(escaped, "utf8")).rejects.toThrow();
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
+  it("stop() reaps a stubborn streaming descendant process group", async () => {
+    const fixture = await createFixture({ executable: stubbornFakeSrt() });
+    const script = join(fixture.root, "stubborn-descendant.mjs");
+    const ready = join(fixture.root, "descendant-ready");
+    const escaped = join(fixture.root, "descendant-escaped");
+    await writeFile(
+      script,
+      stubbornDescendantSource(ready, escaped),
+      { mode: 0o600 },
+    );
+    const sandbox = await openSandboxSrt({ config: config(fixture) });
+    try {
+      const running = sandbox.spawn({
+        command: process.execPath,
+        arguments: [script],
+        workingDirectory: fixture.root,
+      });
+      const result = observeStreamingProcess(running);
+      running.stdin.end();
+      await vi.waitFor(async () => {
+        await expect(readFile(ready, "utf8")).resolves.toBe("ready");
+      });
+
+      await sandbox.stop();
+      await expect(result.closed).resolves.toEqual({
+        code: null,
+        signal: "SIGKILL",
+      });
+      await delay(750);
+      await expect(readFile(escaped, "utf8")).rejects.toThrow();
+    } finally {
+      await sandbox.stop();
+    }
+  });
+
   it("fails closed when configured digests, file modes, links, or paths are unsafe", async () => {
     const wrongDigest = await createFixture();
     await expect(openSandboxSrt({
@@ -909,6 +1290,37 @@ function stubbornFakeSrt(): string {
     );
 }
 
+function stubbornDescendantSource(ready: string, escaped: string): string {
+  return `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+if (process.argv[2] === "child") {
+  process.on("SIGTERM", () => {});
+  writeFileSync(${JSON.stringify(ready)}, "ready");
+  setTimeout(() => writeFileSync(${JSON.stringify(escaped)}, "escaped"), 500);
+  setInterval(() => {}, 1_000);
+} else {
+  process.on("SIGTERM", () => {});
+  spawn(process.execPath, [process.argv[1], "child"], { stdio: "ignore" });
+  setInterval(() => {}, 1_000);
+}
+`;
+}
+
+function leaderExitsFirstSource(ready: string, escaped: string): string {
+  return `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+if (process.argv[2] === "child") {
+  process.on("SIGTERM", () => {});
+  writeFileSync(${JSON.stringify(ready)}, "ready");
+  setTimeout(() => writeFileSync(${JSON.stringify(escaped)}, "escaped"), 500);
+  setInterval(() => {}, 1_000);
+} else {
+  spawn(process.execPath, [process.argv[1], "child"], { stdio: "ignore" });
+  setInterval(() => {}, 1_000);
+}
+`;
+}
+
 function dependentFakeSrt(
   importKind:
     | "static"
@@ -1003,6 +1415,46 @@ function command(
     workingDirectory,
     signal: new AbortController().signal,
   };
+}
+
+function observeStreamingProcess(process: SandboxProcess): {
+  readonly stdout: Buffer[];
+  readonly stderr: Buffer[];
+  readonly errors: Error[];
+  readonly closed: Promise<{
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>;
+} {
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  const errors: Error[] = [];
+  process.stdout.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
+  process.stderr.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+  process.once("error", (error) => errors.push(error));
+  const closed = new Promise<{
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>((resolvePromise) => {
+    process.once("close", (code, signal) => resolvePromise({ code, signal }));
+  });
+  return { stdout, stderr, errors, closed };
+}
+
+function controlledStreamingChild(
+  stdin: Writable,
+  kill: (signal?: NodeJS.Signals) => boolean = () => true,
+): ChildProcessWithoutNullStreams {
+  const child = Object.assign(new EventEmitter(), {
+    stdin,
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    pid: undefined,
+    exitCode: null,
+    signalCode: null,
+    kill,
+  });
+  return child as unknown as ChildProcessWithoutNullStreams;
 }
 
 async function sha256(path: string): Promise<string> {

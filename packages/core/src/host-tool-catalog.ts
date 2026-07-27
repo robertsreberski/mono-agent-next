@@ -372,7 +372,7 @@ export function createdModuleToolSnapshot(
       ? ["read", "write", "delete", "list", "compareAndSwap", "transaction", "scan",
           "upsertPresence", "removePresence", "listPresence"] as const
       : kind === "exporter" ? ["export", "flush"] as const
-        : kind === "sandbox" ? ["execute"] as const : [];
+        : kind === "sandbox" ? ["execute", "spawn"] as const : [];
     assertRequiredInstanceFunctions(reserved, required, `${kind} instance`);
     if (kind === "state") assertStateArtifactCompliance(reserved);
   }

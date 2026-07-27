@@ -18,6 +18,7 @@ import type {
   RuntimeTurnRequest,
   RuntimeTurnResult,
 } from "@mono-agent/module-sdk";
+import type { SandboxExecutor } from "@mono-agent/module-sdk/internal";
 
 import { createRuntimePiAuthCommands } from "./auth-command.js";
 import type { RuntimePiConfig } from "./config.js";
@@ -28,6 +29,7 @@ import {
   resolveRuntimePiPath,
 } from "./credentials.js";
 import {
+  runtimePiCapabilities,
   runtimePiNativeTools,
 } from "./model.js";
 import {
@@ -35,7 +37,11 @@ import {
   RuntimePiModelDiscoveryError,
   type RuntimePiModelRegistry,
 } from "./models.js";
-import { createNodeReplController } from "./node-repl.js";
+import {
+  createNodeReplController,
+  type NodeReplController,
+  NodeReplTerminationError,
+} from "./node-repl.js";
 import {
   runtimePiDiagnostic,
   subscribeRuntimePiTurnEvents,
@@ -47,13 +53,13 @@ import {
 } from "./runtime-errors.js";
 import {
   assistantTurnMessage,
-  exactCapabilities,
   finalUser,
   runtimeUsage,
   seedMessages,
   systemPrompt,
   thinkingLevel,
 } from "./runtime-messages.js";
+import { RuntimePiSandboxTools } from "./sandbox-tools.js";
 import {
   editTool,
   nodeReplTool,
@@ -77,6 +83,9 @@ export interface CreateRuntimePiOptions {
   readonly configDirectory: string;
   readonly workspaceDirectory: string;
   readonly models?: RuntimePiModelRegistry["models"];
+  readonly sandboxExecutor?: SandboxExecutor;
+  /** Internal lifecycle bound used by focused process-facade tests. */
+  readonly nodeReplTerminationGraceMs?: number;
 }
 
 export { RuntimePiError } from "./runtime-errors.js";
@@ -203,7 +212,11 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
     options.config,
     credentialStore,
     options.models,
+    options.sandboxExecutor !== undefined,
   );
+  const sandboxTools = options.sandboxExecutor === undefined
+    ? undefined
+    : new RuntimePiSandboxTools(options.sandboxExecutor, cwd);
   const commands = createRuntimePiAuthCommands(credentialStore, registry.models);
   const sessions = new RuntimePiSessionManager({
     cwd,
@@ -213,6 +226,8 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
   let state: RuntimeState = "created";
   let stopRequested = false;
   const active = new Set<AgentHarness>();
+  const activeNodeRepls = new Set<NodeReplController>();
+  let terminationFailure: NodeReplTerminationError | undefined;
   const credentialSecrets = async (): Promise<readonly string[]> => {
     try {
       return await credentialStore.redactionValues();
@@ -220,24 +235,52 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
       return [];
     }
   };
+  const captureTerminationFailure = (error: NodeReplTerminationError): void => {
+    terminationFailure ??= error;
+    stopRequested = true;
+    state = "draining";
+    for (const harness of active) {
+      try {
+        void harness.abort().catch(() => undefined);
+      } catch {
+        // Quarantine remains authoritative if a sibling abort throws.
+      }
+    }
+  };
+  const lifecycleTerminationError = (
+    committedSideEffects = false,
+  ): RuntimePiError => new RuntimePiError(
+    "PROCESS_TERMINATION_FAILED",
+    terminationFailure?.message
+      ?? "Node REPL process termination failed; runtime-pi is quarantined.",
+    {
+      committedSideEffects,
+      retryable: false,
+      ...(terminationFailure === undefined
+        ? {}
+        : { cause: terminationFailure }),
+    },
+  );
+  const closeNodeRepl = async (controller: NodeReplController): Promise<void> => {
+    try {
+      await controller.close();
+      activeNodeRepls.delete(controller);
+    } catch (error) {
+      if (error instanceof NodeReplTerminationError) {
+        captureTerminationFailure(error);
+      }
+      throw error;
+    }
+  };
 
   return {
     commands,
-    capabilities: {
-      tools: true,
-      mcp: true,
-      attachments: false,
-      approvals: true,
-      structuredOutput: true,
-      sandbox: false,
-      sessions: true,
-      maxTurns: true,
-      maxOutputTokens: true,
-      artifactResults: true,
-      liveInput: true,
-    },
+    capabilities: runtimePiCapabilities(false, sandboxTools !== undefined),
 
     async start(_context: ModuleStartContext) {
+      if (terminationFailure !== undefined) {
+        throw lifecycleTerminationError();
+      }
       if (state === "stopped") {
         throw new RuntimePiError(
           "RUNTIME_NOT_RUNNING",
@@ -255,6 +298,9 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
     },
 
     async stop(context: ModuleStopContext) {
+      if (terminationFailure !== undefined && state === "stopped") {
+        throw lifecycleTerminationError();
+      }
       if (state === "stopped") return;
       stopRequested = true;
       state = "draining";
@@ -269,19 +315,33 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
         failures.push(error);
       }
       try {
+        await waitForSettled(
+          [...activeNodeRepls].map((controller) => closeNodeRepl(controller)),
+          context.signal,
+          "runtime-pi Node REPL processes failed to close",
+        );
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
         await sessions.stop(context.signal);
       } catch (error) {
         failures.push(error);
-      } finally {
-        state = "stopped";
       }
+      if (terminationFailure !== undefined) {
+        state = "draining";
+        throw lifecycleTerminationError();
+      }
+      state = "stopped";
       if (failures.length > 0) {
         throw new AggregateError(failures, "runtime-pi failed to stop cleanly");
       }
     },
 
     health(_context: ModuleHealthContext): ModuleHealth {
-      const status = state === "running"
+      const status = terminationFailure !== undefined
+        ? "unhealthy"
+        : state === "running"
         ? "healthy"
         : state === "draining"
           ? "degraded"
@@ -290,7 +350,16 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
         status,
         checkedAt: new Date().toISOString(),
         summary: `runtime-pi is ${state}`,
-        details: { state, activeTurns: active.size },
+        details: {
+          state,
+          activeTurns: active.size,
+          ...(activeNodeRepls.size === 0
+            ? {}
+            : { activeNodeRepls: activeNodeRepls.size }),
+          ...(terminationFailure === undefined
+            ? {}
+            : { quarantineCode: "PROCESS_TERMINATION_FAILED" }),
+        },
       };
     },
 
@@ -300,8 +369,11 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
       const diagnostics: ModuleDiagnostic[] = [
         runtimePiDiagnostic(
           "runtime-pi.lifecycle",
-          "info",
-          `Runtime state: ${state}`,
+          terminationFailure === undefined ? "info" : "error",
+          `Runtime state: ${state}`
+          + (terminationFailure === undefined
+            ? ""
+            : "; Node REPL process termination failed"),
         ),
       ];
       if (context.verbose) {
@@ -329,7 +401,10 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
         const capabilities = await registry.capabilities(model, signal);
         return {
           supported: true,
-          capabilities: exactCapabilities(capabilities.attachments),
+          capabilities: runtimePiCapabilities(
+            capabilities.attachments,
+            capabilities.sandbox,
+          ),
           nativeTools: runtimePiNativeTools,
         };
       } catch (error) {
@@ -350,6 +425,9 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
       request: RuntimeTurnRequest,
       context: RuntimeTurnContext,
     ): Promise<RuntimeTurnResult> {
+      if (terminationFailure !== undefined) {
+        throw lifecycleTerminationError();
+      }
       if (state !== "running") {
         throw new RuntimePiError(
           "RUNTIME_NOT_RUNNING",
@@ -459,7 +537,21 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
             let structuredOutput: JsonValue | undefined;
             const responseSchema = request.options?.responseSchema;
             const authoredSystemPrompt = systemPrompt(request.messages);
-            const nodeRepl = createNodeReplController(cwd);
+            const nodeRepl = createNodeReplController(
+              cwd,
+              {
+                ...(sandboxTools === undefined
+                  ? {}
+                  : { spawnProcess: () => sandboxTools.spawnNodeRepl() }),
+                ...(options.nodeReplTerminationGraceMs === undefined
+                  ? {}
+                  : {
+                      terminationGraceMs:
+                        options.nodeReplTerminationGraceMs,
+                    }),
+              },
+            );
+            activeNodeRepls.add(nodeRepl);
             try {
               const codingTools = responseSchema === undefined
                 ? (await import("./coding-tools.js")).createRuntimePiCodingTools({
@@ -483,6 +575,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                     onToolAttempt: () => {
                       committedSideEffects = true;
                     },
+                    ...(sandboxTools === undefined ? {} : { sandboxTools }),
                   })
                 : [];
               if (stopRequested || request.signal.aborted) {
@@ -512,6 +605,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                         toolResults,
                         request.signal,
                         () => { committedSideEffects = true; },
+                        sandboxTools !== undefined,
                       ),
                       ...codingTools.slice(0, 2),
                       editTool(
@@ -520,6 +614,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                         toolResults,
                         request.signal,
                         () => { committedSideEffects = true; },
+                        sandboxTools,
                       ),
                       ...codingTools.slice(2),
                       webSearchTool(
@@ -527,6 +622,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                         toolResults,
                         request.signal,
                         () => { committedSideEffects = true; },
+                        sandboxTools,
                       ),
                     ]
                   : [
@@ -736,7 +832,7 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
                 active.delete(harness);
               }
             } finally {
-              await nodeRepl.close();
+              await closeNodeRepl(nodeRepl);
             }
           },
         );
@@ -746,6 +842,10 @@ export function createRuntimePi(options: CreateRuntimePiOptions): Runtime {
         }
         return turnResult;
       } catch (error) {
+        if (error instanceof NodeReplTerminationError) {
+          captureTerminationFailure(error);
+          throw lifecycleTerminationError(committedSideEffects);
+        }
         if (request.signal.aborted) return { status: "cancelled" };
         if (error instanceof RuntimePiError) {
           throw withCommittedEffects(error, committedSideEffects);

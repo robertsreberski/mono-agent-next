@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: MIT
+import { EventEmitter } from "node:events";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 
-import { afterEach, describe, expect, it } from "vitest";
+import type { SandboxProcess } from "@mono-agent/module-sdk/internal";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createNodeReplController } from "../node-repl.js";
 
 const roots: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(roots.splice(0).map((root) =>
     rm(root, { recursive: true, force: true })));
 });
@@ -94,6 +99,172 @@ describe("run-scoped Node REPL", () => {
     }
   });
 
+  it("preserves inherited-child stdout without corrupting retained state", async () => {
+    const controller = createNodeReplController(await workspace());
+
+    try {
+      await controller.execute({ code: "let retained = 41" });
+      await expect(controller.execute({
+        code: [
+          "require('node:child_process').spawnSync(",
+          "  process.execPath,",
+          "  ['-e', \"process.stdout.write('child-output\\\\n')\"],",
+          "  { stdio: 'inherit' },",
+          ");",
+          "retained + 1",
+        ].join("\n"),
+      })).resolves.toBe("STDOUT:\nchild-output\n42");
+      await expect(controller.execute({ code: "retained" })).resolves.toBe("41");
+    } finally {
+      await controller.close();
+    }
+  });
+
+  it("bounds inherited-child stdout and resets state after overflow", async () => {
+    const controller = createNodeReplController(await workspace());
+
+    try {
+      await controller.execute({ code: "globalThis.retained = 1" });
+      await expect(controller.execute({
+        code: [
+          "require('node:child_process').spawnSync(",
+          "  process.execPath,",
+          "  ['-e', \"process.stdout.write('x'.repeat(300000))\"],",
+          "  { stdio: 'inherit' },",
+          ");",
+          "retained",
+        ].join("\n"),
+      })).rejects.toThrow("output exceeded 262144 bytes");
+      await expect(controller.execute({ code: "typeof retained" }))
+        .resolves.toBe("'undefined'");
+    } finally {
+      await controller.close();
+    }
+  });
+
+  it("carries delayed stdout into the next response without losing state", async () => {
+    const controller = createNodeReplController(await workspace());
+
+    try {
+      await expect(controller.execute({
+        code: [
+          "globalThis.retained = 7;",
+          "setTimeout(() => process.stdout.write('late-output\\n'), 20);",
+          "retained",
+        ].join("\n"),
+      })).resolves.toBe("7");
+      await delay(50);
+      await expect(controller.execute({ code: "retained + 1" }))
+        .resolves.toBe("STDOUT:\nlate-output\n8");
+      await expect(controller.execute({ code: "retained" })).resolves.toBe("7");
+    } finally {
+      await controller.close();
+    }
+  });
+
+  it("terminates a pid-bearing selected process only through its sandbox facade", async () => {
+    const events = new EventEmitter();
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const kill = vi.fn((signal: NodeJS.Signals | number = "SIGTERM") => {
+      queueMicrotask(() => {
+        stdout.end();
+        stderr.end();
+        events.emit("close", null, signal);
+      });
+      return true;
+    });
+    let buffered = "";
+    stdin.on("data", (chunk: Buffer) => {
+      buffered += chunk.toString("utf8");
+      const newline = buffered.indexOf("\n");
+      if (newline < 0) return;
+      const request = JSON.parse(buffered.slice(0, newline)) as { readonly id: string };
+      queueMicrotask(() => stdout.write(
+        `\u001eMONO_AGENT_NODE_REPL_V1:${JSON.stringify({
+          type: "result",
+          id: request.id,
+          ok: true,
+          text: "sandboxed",
+        })}\n`,
+      ));
+    });
+    const selectedProcess: SandboxProcess = {
+      pid: 424_242,
+      stdin,
+      stdout,
+      stderr,
+      once(event, listener) {
+        events.once(event, listener);
+        return this;
+      },
+      kill,
+    };
+    const hostKill = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw new Error("selected process must not use host process.kill");
+    });
+    const controller = createNodeReplController(await workspace(), {
+      spawnProcess: () => selectedProcess,
+    });
+
+    await expect(controller.execute({ code: "1 + 1" })).resolves.toBe("sandboxed");
+    await controller.close();
+
+    expect(hostKill).not.toHaveBeenCalled();
+    expect(kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("bounds failed selected-process reaping and quarantines the controller", async () => {
+    const events = new EventEmitter();
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const kill = vi.fn((_signal: NodeJS.Signals | number = "SIGTERM") => true);
+    let receivedInput = false;
+    stdin.on("data", () => {
+      receivedInput = true;
+    });
+    const selectedProcess: SandboxProcess = {
+      pid: 424_243,
+      stdin,
+      stdout,
+      stderr,
+      once(event, listener) {
+        events.once(event, listener);
+        return this;
+      },
+      kill,
+    };
+    const controller = createNodeReplController(await workspace(), {
+      spawnProcess: () => selectedProcess,
+      terminationGraceMs: 5,
+    });
+    const cancellation = new AbortController();
+    const evaluation = controller.execute(
+      { code: "new Promise(() => undefined)" },
+      { signal: cancellation.signal },
+    );
+    await vi.waitFor(() => {
+      expect(receivedInput).toBe(true);
+    });
+
+    cancellation.abort(new Error("cancel stubborn REPL"));
+    await expect(Promise.race([
+      evaluation,
+      delay(500).then(() => {
+        throw new Error("stubborn Node REPL evaluation did not settle");
+      }),
+    ])).rejects.toThrow("did not close after SIGKILL");
+    expect(kill.mock.calls.map(([signal]) => signal))
+      .toEqual(["SIGTERM", "SIGKILL"]);
+    await expect(controller.execute({ code: "1 + 1" }))
+      .rejects.toThrow("controller is quarantined");
+    await expect(controller.close())
+      .rejects.toThrow("controller is quarantined");
+    expect(kill).toHaveBeenCalledTimes(2);
+  });
+
   it("bounds input before child creation and refuses use after run settlement", async () => {
     const controller = createNodeReplController(await workspace());
 
@@ -103,5 +274,19 @@ describe("run-scoped Node REPL", () => {
     await controller.close();
     await expect(controller.execute({ code: "1 + 1" }))
       .rejects.toThrow("run has already ended");
+  });
+
+  it.each([
+    ["undefined", undefined],
+    ["null", null],
+    ["malformed", {}],
+  ])("fails closed when the selected sandbox returns %s", async (_name, value) => {
+    const controller = createNodeReplController(await workspace(), {
+      spawnProcess: () => value as never,
+    });
+
+    await expect(controller.execute({ code: "process.pid" }))
+      .rejects.toThrow("Selected sandbox returned an invalid Node REPL process facade");
+    await controller.close();
   });
 });

@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: MIT
 import { defineRuntimeModule } from "@mono-agent/module-sdk";
+import {
+  grantedSandboxExecutor,
+  SANDBOX_EXECUTE_CAPABILITY,
+} from "@mono-agent/module-sdk/internal";
 
 import {
   parseRuntimePiConfig,
@@ -22,7 +26,7 @@ export const monoAgentModule = defineRuntimeModule({
     apiVersion: 1,
     kind: "runtime",
     responsibility: "Runs Pi-native turns with atomic session forks and live steering.",
-    capabilities: [],
+    capabilities: [SANDBOX_EXECUTE_CAPABILITY],
   },
   schema: {
     jsonSchema: runtimePiJsonSchema,
@@ -30,11 +34,13 @@ export const monoAgentModule = defineRuntimeModule({
   },
   validateModel: validateRuntimePiModel,
   create(context) {
+    const sandboxExecutor = grantedSandboxExecutor(context.host);
     return createRuntimePi({
       config: context.config,
       instanceId: context.instanceId,
       configDirectory: context.configDirectory,
       workspaceDirectory: context.workspaceDirectory,
+      ...(sandboxExecutor === undefined ? {} : { sandboxExecutor }),
     });
   },
 });

@@ -1,4 +1,8 @@
 // SPDX-License-Identifier: MIT
+import type {
+  SpawnedProcess,
+  SpawnOptions,
+} from "@anthropic-ai/claude-agent-sdk";
 import type { JsonValue, RuntimeUsage } from "@mono-agent/module-sdk";
 
 import { record, usage } from "./jsonl.js";
@@ -83,6 +87,7 @@ async function defaultQueryFactory(input: Parameters<QueryFactory>[0]): Promise<
 
 export interface ClaudeSdkTransportOptions {
   readonly query?: (input: Parameters<QueryFactory>[0]) => QueryLike | Promise<QueryLike>;
+  readonly spawnClaudeCodeProcess?: (options: SpawnOptions) => SpawnedProcess;
 }
 
 export function createClaudeSdkTransport(options: ClaudeSdkTransportOptions = {}): ClaudeTransport {
@@ -159,6 +164,9 @@ export function createClaudeSdkTransport(options: ClaudeSdkTransportOptions = {}
             permissionMode: "dontAsk",
             settingSources: [],
             tools: [],
+            ...(options.spawnClaudeCodeProcess === undefined
+              ? {}
+              : { spawnClaudeCodeProcess: options.spawnClaudeCodeProcess }),
             ...(request.systemPrompt === undefined ? {} : { systemPrompt: request.systemPrompt }),
             ...(request.sessionId === undefined ? {} : { resume: request.sessionId }),
             ...(request.maxTurns === undefined ? {} : { maxTurns: request.maxTurns }),

@@ -12,7 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 
 import type {
@@ -22,6 +22,11 @@ import type {
   RuntimeTurnEvent,
 } from "@mono-agent/module-sdk";
 import { RUNTIME_SESSION_UNAVAILABLE_CODE } from "@mono-agent/module-sdk";
+import type {
+  SandboxExecutor,
+  SandboxProcessInput,
+  SandboxProcessOutput,
+} from "@mono-agent/module-sdk/internal";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { parseRuntimeCodexConfig, runtimeCodexJsonSchema } from "../config.js";
@@ -91,12 +96,18 @@ class FakeCodexProcess extends EventEmitter implements ProcessLike {
     this.killSignals.push(signal);
     this.#resolveFirstKill(signal);
     if (this.closeOnKill) {
-      queueMicrotask(() => {
-        this.closeEmitted = true;
-        this.emit("close", 0, null);
-      });
+      queueMicrotask(() => this.close(0, null));
     }
     return true;
+  }
+
+  close(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    if (this.closeEmitted) return;
+    this.closeEmitted = true;
+    this.emit("close", code, signal);
   }
 }
 
@@ -114,11 +125,16 @@ class FakeCommandProcess extends EventEmitter implements ProcessLike {
       readonly stderr?: string;
       readonly code?: number;
       readonly hang?: boolean;
+      readonly stdinError?: string;
     } = {},
   ) {
     super();
     this.stdin = new Writable({
       final: (callback) => {
+        if (this.output.stdinError !== undefined) {
+          callback(new Error(this.output.stdinError));
+          return;
+        }
         if (this.output.hang === true) {
           callback();
           return;
@@ -144,8 +160,137 @@ class FakeCommandProcess extends EventEmitter implements ProcessLike {
   }
 }
 
+class MinimalCommandOutput implements SandboxProcessOutput {
+  readonly #dataListeners: Array<(chunk: Uint8Array) => void> = [];
+  readonly #errorListeners: Array<(error: Error) => void> = [];
+
+  on(event: "data", listener: (chunk: Uint8Array) => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(
+    event: "data" | "error",
+    listener: ((chunk: Uint8Array) => void) | ((error: Error) => void),
+  ): this {
+    if (event === "data") {
+      this.#dataListeners.push(listener as (chunk: Uint8Array) => void);
+    } else {
+      this.#errorListeners.push(listener as (error: Error) => void);
+    }
+    return this;
+  }
+
+  emitError(error: Error): void {
+    for (const listener of this.#errorListeners) listener(error);
+  }
+}
+
+class MinimalCommandInput implements SandboxProcessInput {
+  readonly #onEnd: () => void;
+  readonly #errorListeners: Array<(error: Error) => void> = [];
+
+  constructor(onEnd: () => void) {
+    this.#onEnd = onEnd;
+  }
+
+  write(
+    _chunk: string | Uint8Array,
+    callback?: (error?: Error | null) => void,
+  ): boolean;
+  write(
+    _chunk: string,
+    _encoding: BufferEncoding,
+    callback?: (error?: Error | null) => void,
+  ): boolean;
+  write(
+    _chunk: string | Uint8Array,
+    encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+    callback?: (error?: Error | null) => void,
+  ): boolean {
+    const done = typeof encodingOrCallback === "function"
+      ? encodingOrCallback
+      : callback;
+    queueMicrotask(() => done?.());
+    return true;
+  }
+
+  end(callback?: () => void): this;
+  end(_chunk: string | Uint8Array, callback?: () => void): this;
+  end(
+    _chunk: string,
+    _encoding: BufferEncoding,
+    callback?: () => void,
+  ): this;
+  end(
+    chunkOrCallback?: string | Uint8Array | (() => void),
+    encodingOrCallback?: BufferEncoding | (() => void),
+    callback?: () => void,
+  ): this {
+    const done = typeof chunkOrCallback === "function"
+      ? chunkOrCallback
+      : typeof encodingOrCallback === "function"
+        ? encodingOrCallback
+        : callback;
+    queueMicrotask(() => {
+      this.#onEnd();
+      done?.();
+    });
+    return this;
+  }
+
+  on(event: "drain", _listener: () => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(
+    event: "drain" | "error",
+    listener: (() => void) | ((error: Error) => void),
+  ): this {
+    if (event === "error") {
+      this.#errorListeners.push(listener as (error: Error) => void);
+    }
+    return this;
+  }
+}
+
+class MinimalFailingCommandProcess
+  extends EventEmitter
+  implements ProcessLike {
+  readonly pid = 4_323;
+  readonly stdout = new MinimalCommandOutput();
+  readonly stderr = new MinimalCommandOutput();
+  readonly stdin: MinimalCommandInput;
+  readonly killSignals: NodeJS.Signals[] = [];
+  #closed = false;
+
+  constructor(
+    stream: "stdout" | "stderr",
+    private readonly closeOnKill = true,
+  ) {
+    super();
+    this.stdin = new MinimalCommandInput(() => {
+      this[stream].emitError(new Error(`minimal preflight ${stream} failed`));
+    });
+  }
+
+  kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+    this.killSignals.push(signal);
+    if (this.#closed) return false;
+    if (this.closeOnKill) {
+      queueMicrotask(() => this.close(null, signal));
+    }
+    return true;
+  }
+
+  close(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.emit("close", code, signal);
+  }
+}
+
 interface FakeLaunchOptions {
   readonly version?: string;
+  readonly versionStdinError?: string;
   readonly mcpOutputs?: readonly string[];
   readonly strictProbe?: {
     readonly stdout?: string;
@@ -165,6 +310,9 @@ function runtimeLaunch(
     if (args[0] === "--version") {
       return new FakeCommandProcess({
         stdout: `${options.version ?? "codex-cli 0.145.0"}\n`,
+        ...(options.versionStdinError === undefined
+          ? {}
+          : { stdinError: options.versionStdinError }),
       });
     }
     if (args[0] === "mcp") {
@@ -191,6 +339,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await rm(testRoot, { recursive: true, force: true });
 });
 
@@ -302,7 +451,7 @@ describe("runtime-codex", () => {
         attachments: false,
         approvals: true,
         structuredOutput: true,
-        sandbox: false,
+        sandbox: true,
         sessions: true,
         maxTurns: false,
         maxOutputTokens: false,
@@ -482,6 +631,9 @@ describe("runtime-codex", () => {
     ]));
     expect(launchOptions?.cwd).not.toBe(launchOptions?.env.CODEX_HOME);
     expect(launchOptions?.cwd).not.toBe(process.cwd());
+    expect(dirname(String(launchOptions?.cwd))).toBe(tmpdir());
+    expect(String(launchOptions?.cwd).startsWith(testDataDirectory("direct")))
+      .toBe(false);
     await expect(lstat(String(launchOptions?.cwd))).rejects.toMatchObject({
       code: "ENOENT",
     });
@@ -662,7 +814,7 @@ describe("runtime-codex", () => {
       signal: new AbortController().signal,
       reason: "shutdown",
     });
-    expect(blockedPreflight.killSignals).toContain("SIGKILL");
+    expect(blockedPreflight.killSignals).toEqual(["SIGTERM"]);
     expect(launch.mock.calls.filter((call) =>
       call[1][0] === "app-server")).toHaveLength(1);
     expect(runtime.health?.({
@@ -887,7 +1039,7 @@ describe("runtime-codex", () => {
     });
   });
 
-  it("does not let close cleanup mask a completed turn", async () => {
+  it("preserves a completed turn but quarantines an unreaped provider process", async () => {
     const child = new FakeCodexProcess(undefined, false);
     const launch = runtimeLaunch([child]);
     const runtime = createRuntimeCodex({
@@ -923,8 +1075,25 @@ describe("runtime-codex", () => {
     expect(child.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
     const turnLaunch = [...launch.mock.calls].reverse().find((call) =>
       call[1][0] === "app-server");
-    await expect(lstat(String(turnLaunch?.[2].cwd))).rejects.toMatchObject({
-      code: "ENOENT",
+    await expect(lstat(String(turnLaunch?.[2].cwd))).resolves.toBeDefined();
+    expect(runtime.health?.({
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      status: "unhealthy",
+      details: {
+        state: "draining",
+        quarantineCode: "PROCESS_TERMINATION_FAILED",
+      },
+    });
+    await expect(runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    })).rejects.toMatchObject({ code: "PROCESS_TERMINATION_FAILED" });
+    child.close(null, "SIGKILL");
+    await vi.waitFor(async () => {
+      await expect(lstat(String(turnLaunch?.[2].cwd))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     });
   });
 
@@ -1110,6 +1279,82 @@ describe("runtime-codex", () => {
     }
   });
 
+  it("preserves an output failure while surfacing unreaped termination in lifecycle", async () => {
+    const child = new FakeCodexProcess((request, process) => {
+      if (request.method !== "turn/start") return false;
+      process.send({
+        id: request.id,
+        result: { turn: { id: "turn-output-failure" } },
+      });
+      queueMicrotask(() => {
+        process.stdout.emit("error", new Error("persistent stdout failed"));
+      });
+      return true;
+    }, false);
+    const launch = runtimeLaunch([child]);
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("persistent-output-failure"),
+      spawnProcess: launch,
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+
+    vi.useFakeTimers();
+    try {
+      const pending = runtime.runTurn({
+        turnId: "turn",
+        conversationId: "conversation",
+        model: "gpt-5.6-codex",
+        messages: [{
+          role: "user",
+          content: [{ type: "text", text: "fail" }],
+        }],
+        tools: [],
+        signal: new AbortController().signal,
+      }, {
+        emit() {},
+        async executeTool(call) {
+          return { callId: call.id, content: [] };
+        },
+      });
+
+      const rejected = expect(pending).rejects.toMatchObject({
+        code: "PROVIDER_FAILED",
+        message: "persistent stdout failed",
+      });
+      await child.firstKill;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(runtime.health?.({
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      status: "unhealthy",
+      details: {
+        state: "draining",
+        quarantineCode: "PROCESS_TERMINATION_FAILED",
+      },
+    });
+    await expect(runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    })).rejects.toMatchObject({ code: "PROCESS_TERMINATION_FAILED" });
+    const turnLaunch = [...launch.mock.calls].reverse().find((call) =>
+      call[1][0] === "app-server");
+    await expect(lstat(String(turnLaunch?.[2].cwd))).resolves.toBeDefined();
+    child.close(null, "SIGKILL");
+    await vi.waitFor(async () => {
+      await expect(lstat(String(turnLaunch?.[2].cwd))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  });
+
   it("bridges v2 command approvals through Core before Codex continues", async () => {
     const fixture = approvalProcess(
       "item/commandExecution/requestApproval",
@@ -1203,6 +1448,185 @@ describe("runtime-codex", () => {
       method: "turn/start",
       params: expect.objectContaining({ approvalPolicy: "on-request" }),
     }));
+  });
+
+  it("routes every CLI child through the selected Core sandbox without host-spawn fallback", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "test-api-key");
+    const dataDirectory = testDataDirectory("selected-sandbox");
+    const child = new FakeCodexProcess();
+    const sandboxLaunch = runtimeLaunch([child]);
+    const sandboxSpawn = vi.fn<SandboxExecutor["spawn"]>((command) =>
+      sandboxLaunch(
+        command.command,
+        command.arguments,
+        {
+          cwd: command.workingDirectory,
+          env: { ...command.environment },
+          shell: false,
+        },
+      ) as unknown as ReturnType<SandboxExecutor["spawn"]>);
+    const sandboxExecutor: SandboxExecutor = {
+      async execute() {
+        throw new Error("one-shot sandbox execution is not expected");
+      },
+      spawn: sandboxSpawn,
+    };
+    const hostSpawn = vi.fn<SpawnProcess>(() => {
+      throw new Error("host spawn must not run");
+    });
+    const runtime = createRuntimeCodex({
+      config: explicitConfig({ binary: process.execPath }),
+      instanceId: "codex-sandbox-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory,
+      spawnProcess: hostSpawn,
+      sandboxExecutor,
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+
+    await expect(runtime.runTurn({
+      turnId: "sandbox-turn",
+      conversationId: "sandbox-conversation",
+      model: "gpt-5.6-codex",
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      tools: [],
+      signal: new AbortController().signal,
+    }, {
+      emit() {},
+      async executeTool(call) {
+        return { callId: call.id, content: [] };
+      },
+    })).resolves.toMatchObject({
+      status: "completed",
+      message: { content: [{ type: "text", text: "hello" }] },
+    });
+
+    expect(runtime.capabilities.sandbox).toBe(true);
+    expect(hostSpawn).not.toHaveBeenCalled();
+    const commands = sandboxSpawn.mock.calls.map(([command]) => command.arguments[0]);
+    expect(commands).toEqual(expect.arrayContaining(["--version", "mcp", "app-server"]));
+    expect(commands.filter((command) => command === "app-server")).toHaveLength(2);
+    expect(sandboxSpawn.mock.calls.every(([command]) =>
+      command.command === process.execPath
+      && command.workingDirectory.length > 0
+      && !Object.prototype.hasOwnProperty.call(command.environment, "PATH")
+      && command.environment?.OPENAI_API_KEY === "test-api-key"
+      && typeof command.environment.CODEX_HOME === "string"))
+      .toBe(true);
+    const processDirectories = [...new Set(sandboxSpawn.mock.calls.map(
+      ([command]) => command.workingDirectory,
+    ))];
+    expect(processDirectories).toHaveLength(2);
+    for (const directory of processDirectories) {
+      expect(dirname(directory)).toBe(dataDirectory);
+      expect(directory).not.toBe(process.cwd());
+      await expect(lstat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    expect(sandboxSpawn.mock.calls.every(([command]) =>
+      command.environment?.CODEX_HOME === join(dataDirectory, "codex-home")))
+      .toBe(true);
+    expect((await lstat(dirname(dataDirectory))).mode & 0o777).toBe(0o700);
+    expect((await lstat(dataDirectory)).mode & 0o777).toBe(0o700);
+    await runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    });
+  });
+
+  it("rejects a PATH-resolved binary before a selected sandbox can run", () => {
+    const executor: SandboxExecutor = {
+      async execute() {
+        throw new Error("not reached");
+      },
+      spawn() {
+        throw new Error("not reached");
+      },
+    };
+    expect(() => createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-sandbox-relative-binary",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("relative-sandbox-binary"),
+      sandboxExecutor: executor,
+    })).toThrow("config.binary must be an absolute path when a Core sandbox is selected");
+  });
+
+  it.each([
+    {
+      name: "relative",
+      prepare: async () => join("relative", "codex-data"),
+      message: "must be a canonical absolute path",
+    },
+    {
+      name: "non-canonical",
+      prepare: async () =>
+        `${join(testRoot, "sandbox-data-parent")}/../sandbox-data`,
+      message: "must be a canonical absolute path",
+    },
+    {
+      name: "symlinked",
+      prepare: async () => {
+        const target = join(testRoot, "sandbox-data-target");
+        const authored = join(testRoot, "sandbox-data-link");
+        await mkdir(target, { mode: 0o700 });
+        await symlink(target, authored);
+        return authored;
+      },
+      message: "not a symbolic link",
+    },
+    {
+      name: "non-private",
+      prepare: async () => {
+        const authored = join(testRoot, "sandbox-data-public");
+        await mkdir(authored, { mode: 0o755 });
+        await chmod(authored, 0o755);
+        return authored;
+      },
+      message: "must have mode 0700",
+    },
+    {
+      name: "unsafe ancestor",
+      prepare: async () => {
+        const ancestor = join(testRoot, "sandbox-data-unsafe-ancestor");
+        await mkdir(ancestor, { mode: 0o777 });
+        await chmod(ancestor, 0o777);
+        return join(ancestor, "missing", "codex-data");
+      },
+      message: "must not be group/world writable",
+    },
+  ])("rejects a $name sandbox data root before any process spawn", async ({
+    prepare,
+    message,
+  }) => {
+    const sandboxSpawn = vi.fn<SandboxExecutor["spawn"]>(() => {
+      throw new Error("sandbox spawn must not run");
+    });
+    const hostSpawn = vi.fn<SpawnProcess>(() => {
+      throw new Error("host spawn must not run");
+    });
+    const dataDirectory = await prepare();
+    const runtime = createRuntimeCodex({
+      config: explicitConfig({ binary: process.execPath }),
+      instanceId: "codex-sandbox-data-root",
+      workspaceDirectory: process.cwd(),
+      dataDirectory,
+      spawnProcess: hostSpawn,
+      sandboxExecutor: {
+        async execute() {
+          throw new Error("sandbox execute must not run");
+        },
+        spawn: sandboxSpawn,
+      },
+    });
+
+    await expect(runtime.start?.({
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({
+      code: "RUNTIME_PREFLIGHT_FAILED",
+      message: expect.stringContaining(message),
+    });
+    expect(sandboxSpawn).not.toHaveBeenCalled();
+    expect(hostSpawn).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -1527,6 +1951,205 @@ describe("runtime-codex", () => {
     });
     expect(launch).toHaveBeenCalledOnce();
     expect(launch.mock.calls[0]?.[1]).toEqual(["--version"]);
+  });
+
+  it("owns an asynchronous stdin failure during direct process preflight", async () => {
+    const launch = runtimeLaunch([], {
+      versionStdinError: "codex preflight stdin EPIPE",
+    });
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("preflight-stdin-error"),
+      spawnProcess: launch,
+    });
+
+    await expect(runtime.start?.({
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({
+      code: "RUNTIME_PREFLIGHT_FAILED",
+      message: "codex preflight stdin EPIPE",
+    });
+    expect(launch).toHaveBeenCalledOnce();
+  });
+
+  it.each(["stdout", "stderr"] as const)(
+    "owns a minimal selected-sandbox %s failure during process preflight",
+    async (stream) => {
+      const child = new MinimalFailingCommandProcess(stream);
+      const sandboxSpawn = vi.fn<SandboxExecutor["spawn"]>(() => child);
+      const hostSpawn = vi.fn<SpawnProcess>(() => {
+        throw new Error("host spawn must not run");
+      });
+      const runtime = createRuntimeCodex({
+        config: explicitConfig({ binary: process.execPath }),
+        instanceId: `codex-minimal-${stream}-failure`,
+        workspaceDirectory: process.cwd(),
+        dataDirectory: testDataDirectory(`minimal-${stream}-failure`),
+        spawnProcess: hostSpawn,
+        sandboxExecutor: {
+          async execute() {
+            throw new Error("one-shot execution is not expected");
+          },
+          spawn: sandboxSpawn,
+        },
+      });
+
+      await expect(runtime.start?.({
+        signal: new AbortController().signal,
+      })).rejects.toMatchObject({
+        code: "RUNTIME_PREFLIGHT_FAILED",
+        message: `minimal preflight ${stream} failed`,
+      });
+      expect(child.killSignals).toEqual(["SIGTERM"]);
+      expect(sandboxSpawn).toHaveBeenCalledOnce();
+      expect(hostSpawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it("quarantines a stubborn start preflight and cleans after late close", async () => {
+    const child = new MinimalFailingCommandProcess("stdout", false);
+    let resolveSpawned!: (cwd: string) => void;
+    const spawned = new Promise<string>((resolve) => {
+      resolveSpawned = resolve;
+    });
+    const sandboxSpawn = vi.fn<SandboxExecutor["spawn"]>((command) => {
+      resolveSpawned(command.workingDirectory);
+      return child;
+    });
+    const runtime = createRuntimeCodex({
+      config: explicitConfig({ binary: process.execPath }),
+      instanceId: "codex-stubborn-start-preflight",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("stubborn-start-preflight"),
+      sandboxExecutor: {
+        async execute() {
+          throw new Error("one-shot execution is not expected");
+        },
+        spawn: sandboxSpawn,
+      },
+    });
+
+    vi.useFakeTimers();
+    let processDirectory = "";
+    try {
+      const starting = runtime.start?.({
+        signal: new AbortController().signal,
+      });
+      const rejected = expect(starting).rejects.toMatchObject({
+        code: "PROCESS_TERMINATION_FAILED",
+      });
+      processDirectory = await spawned;
+      await vi.advanceTimersByTimeAsync(2_000);
+      await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(child.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    await expect(lstat(processDirectory)).resolves.toBeDefined();
+    expect(runtime.health?.({
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      status: "unhealthy",
+      details: {
+        state: "draining",
+        quarantineCode: "PROCESS_TERMINATION_FAILED",
+      },
+    });
+    await expect(runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    })).rejects.toMatchObject({ code: "PROCESS_TERMINATION_FAILED" });
+
+    child.close(null, "SIGKILL");
+    await vi.waitFor(async () => {
+      await expect(lstat(processDirectory)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
+  });
+
+  it("does not let cancellation mask a stubborn turn preflight", async () => {
+    const child = new MinimalFailingCommandProcess("stderr", false);
+    const baseLaunch = runtimeLaunch([]);
+    let failTurnPreflight = false;
+    let resolveSpawned!: (cwd: string) => void;
+    const spawned = new Promise<string>((resolve) => {
+      resolveSpawned = resolve;
+    });
+    const launch = vi.fn<SpawnProcess>((command, args, options) => {
+      if (failTurnPreflight && args[0] === "--version") {
+        resolveSpawned(options.cwd);
+        return child;
+      }
+      return baseLaunch(command, args, options);
+    });
+    const runtime = createRuntimeCodex({
+      config: explicitConfig(),
+      instanceId: "codex-stubborn-turn-preflight",
+      workspaceDirectory: process.cwd(),
+      dataDirectory: testDataDirectory("stubborn-turn-preflight"),
+      spawnProcess: launch,
+    });
+    await runtime.start?.({ signal: new AbortController().signal });
+    failTurnPreflight = true;
+    const controller = new AbortController();
+
+    vi.useFakeTimers();
+    let processDirectory = "";
+    try {
+      const inFlight = runtime.runTurn({
+        turnId: "turn",
+        conversationId: "conversation",
+        model: "gpt-5.6-codex",
+        messages: [{
+          role: "user",
+          content: [{ type: "text", text: "cancel" }],
+        }],
+        tools: [],
+        signal: controller.signal,
+      }, {
+        emit() {},
+        async executeTool(call) {
+          return { callId: call.id, content: [] };
+        },
+      });
+      const rejected = expect(inFlight).rejects.toMatchObject({
+        code: "PROCESS_TERMINATION_FAILED",
+      });
+      processDirectory = await spawned;
+      controller.abort(new Error("operator cancelled"));
+      await vi.advanceTimersByTimeAsync(2_000);
+      await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(child.killSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    await expect(lstat(processDirectory)).resolves.toBeDefined();
+    expect(runtime.health?.({
+      signal: new AbortController().signal,
+    })).toMatchObject({
+      status: "unhealthy",
+      details: {
+        state: "draining",
+        activeTurns: 0,
+        quarantineCode: "PROCESS_TERMINATION_FAILED",
+      },
+    });
+    await expect(runtime.stop?.({
+      signal: new AbortController().signal,
+      reason: "shutdown",
+    })).rejects.toMatchObject({ code: "PROCESS_TERMINATION_FAILED" });
+
+    child.close(null, "SIGKILL");
+    await vi.waitFor(async () => {
+      await expect(lstat(processDirectory)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    });
   });
 
   it("TOML-quotes hostile MCP names and proves every frozen server disabled", async () => {

@@ -1,10 +1,19 @@
 // SPDX-License-Identifier: MIT
 import { EventEmitter } from "node:events";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, relative } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 
 import type {
@@ -13,7 +22,13 @@ import type {
   RuntimeTurnRequest,
 } from "@mono-agent/module-sdk";
 import { RUNTIME_SESSION_UNAVAILABLE_CODE } from "@mono-agent/module-sdk";
-import { describe, expect, it, vi } from "vitest";
+import type {
+  SandboxExecutor,
+  SandboxProcess,
+  SandboxProcessInput,
+  SandboxProcessOutput,
+} from "@mono-agent/module-sdk/internal";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   OPEN_CODE_SECURE_SERVER_VERSION,
@@ -24,8 +39,17 @@ import {
   OPEN_CODE_TOOL_FREE_AGENT,
   openCodeProcessEnvironment,
 } from "../environment.js";
-import type { ProcessLike, SpawnProcess } from "../process.js";
+import {
+  OpenCodeProcessTerminationError,
+  startOpenCodeServerProcess,
+  type ProcessLike,
+  type SpawnProcess,
+} from "../process.js";
 import { createRuntimeOpenCode, RuntimeOpenCodeError } from "../runtime.js";
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 class FakeProcess extends EventEmitter implements ProcessLike {
   readonly pid = 4321;
@@ -78,6 +102,177 @@ class FakeProcess extends EventEmitter implements ProcessLike {
     this.stdout.end();
     this.stderr.end();
     this.emit("close", code, signal);
+  }
+}
+
+class MinimalSandboxInput implements SandboxProcessInput {
+  readonly #onEnd: () => void;
+  readonly #errorListeners: Array<(error: Error) => void> = [];
+  #ended = false;
+
+  constructor(onEnd: () => void) {
+    this.#onEnd = onEnd;
+  }
+
+  write(
+    _chunk: string | Uint8Array,
+    callback?: (error?: Error | null) => void,
+  ): boolean;
+  write(
+    _chunk: string,
+    _encoding: BufferEncoding,
+    callback?: (error?: Error | null) => void,
+  ): boolean;
+  write(
+    _chunk: string | Uint8Array,
+    encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
+    callback?: (error?: Error | null) => void,
+  ): boolean {
+    const done = typeof encodingOrCallback === "function"
+      ? encodingOrCallback
+      : callback;
+    queueMicrotask(() => done?.());
+    return true;
+  }
+
+  end(callback?: () => void): this;
+  end(_chunk: string | Uint8Array, callback?: () => void): this;
+  end(
+    _chunk: string,
+    _encoding: BufferEncoding,
+    callback?: () => void,
+  ): this;
+  end(
+    chunkOrCallback?: string | Uint8Array | (() => void),
+    encodingOrCallback?: BufferEncoding | (() => void),
+    callback?: () => void,
+  ): this {
+    const done = typeof chunkOrCallback === "function"
+      ? chunkOrCallback
+      : typeof encodingOrCallback === "function"
+        ? encodingOrCallback
+        : callback;
+    if (!this.#ended) {
+      this.#ended = true;
+      queueMicrotask(this.#onEnd);
+    }
+    queueMicrotask(() => done?.());
+    return this;
+  }
+
+  on(event: "drain", _listener: () => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(
+    event: "drain" | "error",
+    listener: (() => void) | ((error: Error) => void),
+  ): this {
+    if (event === "error") {
+      this.#errorListeners.push(listener as (error: Error) => void);
+    }
+    return this;
+  }
+
+  emitError(error: Error): void {
+    for (const listener of this.#errorListeners) listener(error);
+  }
+}
+
+class MinimalSandboxOutput implements SandboxProcessOutput {
+  readonly #dataListeners: Array<(chunk: Uint8Array) => void> = [];
+  readonly #errorListeners: Array<(error: Error) => void> = [];
+
+  on(event: "data", listener: (chunk: Uint8Array) => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  on(
+    event: "data" | "error",
+    listener: ((chunk: Uint8Array) => void) | ((error: Error) => void),
+  ): this {
+    if (event === "data") {
+      this.#dataListeners.push(listener as (chunk: Uint8Array) => void);
+    } else {
+      this.#errorListeners.push(listener as (error: Error) => void);
+    }
+    return this;
+  }
+
+  emitData(text: string): void {
+    const bytes = new TextEncoder().encode(text);
+    for (const listener of this.#dataListeners) listener(bytes);
+  }
+}
+
+class MinimalOpenCodeSandboxProcess implements SandboxProcess {
+  readonly pid = 4_322;
+  readonly stdin: MinimalSandboxInput;
+  readonly stdout = new MinimalSandboxOutput();
+  readonly stderr = new MinimalSandboxOutput();
+  readonly signals: NodeJS.Signals[] = [];
+  readonly #errorListeners: Array<(error: Error) => void> = [];
+  readonly #closeListeners: Array<(
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ) => void> = [];
+  readonly #closeOnKill: boolean;
+  #closed = false;
+
+  constructor(kind: "version" | "server" | "silent", closeOnKill = true) {
+    this.#closeOnKill = closeOnKill;
+    this.stdin = new MinimalSandboxInput(() => {
+      if (kind === "version") {
+        this.stdout.emitData(`${OPEN_CODE_SECURE_SERVER_VERSION}\n`);
+        this.close(0, null);
+      } else if (kind === "server") {
+        this.stdout.emitData(
+          "opencode server listening on http://127.0.0.1:43123\n",
+        );
+      }
+    });
+  }
+
+  once(event: "error", listener: (error: Error) => void): this;
+  once(
+    event: "close",
+    listener: (
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ) => void,
+  ): this;
+  once(
+    event: "error" | "close",
+    listener: ((error: Error) => void) | ((
+      code: number | null,
+      signal: NodeJS.Signals | null,
+    ) => void),
+  ): this {
+    if (event === "error") {
+      this.#errorListeners.push(listener as (error: Error) => void);
+    } else {
+      this.#closeListeners.push(listener as (
+        code: number | null,
+        signal: NodeJS.Signals | null,
+      ) => void);
+    }
+    return this;
+  }
+
+  kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
+    this.signals.push(signal);
+    if (this.#closeOnKill) queueMicrotask(() => this.close(null, signal));
+    return true;
+  }
+
+  emitProcessError(error: Error): void {
+    for (const listener of this.#errorListeners.splice(0)) {
+      listener(error);
+    }
+  }
+
+  close(code: number | null, signal: NodeJS.Signals | null): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    for (const listener of this.#closeListeners.splice(0)) {
+      listener(code, signal);
+    }
   }
 }
 
@@ -318,6 +513,14 @@ function context(events: RuntimeTurnEvent[] = []) {
   };
 }
 
+function isPathWithin(root: string, candidate: string): boolean {
+  const path = relative(root, candidate);
+  return path !== ""
+    && path !== ".."
+    && !path.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
+    && !isAbsolute(path);
+}
+
 function harness(
   api: FakeOpenCodeApi,
   autoClose = true,
@@ -370,6 +573,439 @@ function harness(
 }
 
 describe("runtime-opencode", () => {
+  it("uses a minimal Uint8Array sandbox facade for version and server without host fallback", async () => {
+    vi.stubEnv("OPENAI_API_KEY", "selected-sandbox-provider-key");
+    const api = new FakeOpenCodeApi();
+    const testRoot = await realpath(
+      await mkdtemp(join(tmpdir(), "runtime-opencode-sandbox-")),
+    );
+    const dataDirectory = join(testRoot, "instance", "data");
+    const sandboxSpawn = vi.fn<SandboxExecutor["spawn"]>((command) => {
+      return new MinimalOpenCodeSandboxProcess(
+        command.arguments[0] === "--version" ? "version" : "server",
+      );
+    });
+    const sandboxExecutor: SandboxExecutor = {
+      async execute() {
+        throw new Error("one-shot sandbox execution is not expected");
+      },
+      spawn: sandboxSpawn,
+    };
+    const hostSpawn = vi.fn<SpawnProcess>(() => {
+      throw new Error("host spawn must not run");
+    });
+    const runtime = createRuntimeOpenCode({
+      config: parseRuntimeOpenCodeConfig({
+        binary: process.execPath,
+        environment: { OPENAI_API_KEY: "selected-sandbox-provider-key" },
+        timeoutMs: 5_000,
+      }),
+      instanceId: "opencode-sandbox-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory,
+      spawnProcess: hostSpawn,
+      sandboxExecutor,
+      fetch: api.fetch,
+      terminationGraceMs: 500,
+    });
+
+    try {
+      await runtime.start?.({ signal: new AbortController().signal });
+      expect(runtime.capabilities.sandbox).toBe(true);
+      expect(hostSpawn).not.toHaveBeenCalled();
+      expect(sandboxSpawn.mock.calls.map(([command]) => command.arguments[0]))
+        .toEqual(["--version", "serve"]);
+      expect(sandboxSpawn.mock.calls.every(([command]) =>
+        command.command === process.execPath
+        && command.workingDirectory.length > 0
+        && !Object.prototype.hasOwnProperty.call(command.environment, "PATH")
+        && command.environment?.OPENAI_API_KEY === "selected-sandbox-provider-key"))
+        .toBe(true);
+
+      const environments = sandboxSpawn.mock.calls.map(
+        ([command]) => command.environment ?? {},
+      );
+      const isolationRoots = new Set(environments.map(
+        (environment) => dirname(String(environment.HOME)),
+      ));
+      expect(isolationRoots.size).toBe(1);
+      const isolationRoot = [...isolationRoots][0] ?? "";
+      expect(isPathWithin(dataDirectory, isolationRoot)).toBe(true);
+      expect((await lstat(dataDirectory)).mode & 0o777).toBe(0o700);
+      expect((await lstat(isolationRoot)).mode & 0o777).toBe(0o700);
+      for (const environment of environments) {
+        for (const name of [
+          "HOME",
+          "XDG_CONFIG_HOME",
+          "XDG_DATA_HOME",
+          "XDG_CACHE_HOME",
+          "XDG_STATE_HOME",
+        ] as const) {
+          const directory = String(environment[name]);
+          expect(isPathWithin(isolationRoot, directory)).toBe(true);
+          expect((await lstat(directory)).mode & 0o777).toBe(0o700);
+        }
+      }
+
+      await runtime.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      });
+      await expect(lstat(isolationRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      expect((await lstat(dataDirectory)).mode & 0o777).toBe(0o700);
+    } finally {
+      await rm(testRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("owns persistent stdin errors from a minimal server-process facade", async () => {
+    const child = new MinimalOpenCodeSandboxProcess("server");
+    const server = await startOpenCodeServerProcess({
+      command: process.execPath,
+      args: ["serve"],
+      cwd: process.cwd(),
+      env: {},
+      signal: new AbortController().signal,
+      timeoutMs: 1_000,
+      maxLineBytes: 16_384,
+      maxStderrBytes: 4_096,
+      terminationGraceMs: 500,
+      spawnProcess: () => child,
+    });
+    const inputFailure = new Error("minimal stdin failed");
+
+    child.stdin.emitError(inputFailure);
+
+    await expect(server.closed).resolves.toMatchObject({
+      signal: "SIGTERM",
+      error: inputFailure,
+    });
+    expect(child.signals).toEqual(["SIGTERM"]);
+    expect(server.isClosing()).toBe(false);
+  });
+
+  it("owns a post-ready process error from a minimal server-process facade", async () => {
+    const child = new MinimalOpenCodeSandboxProcess("server");
+    const server = await startOpenCodeServerProcess({
+      command: process.execPath,
+      args: ["serve"],
+      cwd: process.cwd(),
+      env: {},
+      signal: new AbortController().signal,
+      timeoutMs: 1_000,
+      maxLineBytes: 16_384,
+      maxStderrBytes: 4_096,
+      terminationGraceMs: 500,
+      spawnProcess: () => child,
+    });
+    const processFailure = new Error("minimal process failed");
+
+    child.emitProcessError(processFailure);
+
+    await expect(server.closed).resolves.toMatchObject({
+      signal: "SIGTERM",
+      error: processFailure,
+    });
+    expect(child.signals).toEqual(["SIGTERM"]);
+    expect(server.isClosing()).toBe(false);
+  });
+
+  it("reports a stubborn post-ready process error without faking reaping", async () => {
+    const child = new MinimalOpenCodeSandboxProcess("server", false);
+    const server = await startOpenCodeServerProcess({
+      command: process.execPath,
+      args: ["serve"],
+      cwd: process.cwd(),
+      env: {},
+      signal: new AbortController().signal,
+      timeoutMs: 1_000,
+      maxLineBytes: 16_384,
+      maxStderrBytes: 4_096,
+      terminationGraceMs: 5,
+      spawnProcess: () => child,
+    });
+    let closed = false;
+    void server.closed.then(() => {
+      closed = true;
+    });
+
+    const processFailure = new Error("stubborn process failed");
+    child.emitProcessError(processFailure);
+
+    const terminationError = await server.terminationFailed;
+    expect(terminationError).toBeInstanceOf(
+      OpenCodeProcessTerminationError,
+    );
+    expect(terminationError.cause).toBe(processFailure);
+    expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(closed).toBe(false);
+    expect(server.isClosing()).toBe(false);
+    await expect(server.close()).rejects.toBeInstanceOf(
+      OpenCodeProcessTerminationError,
+    );
+  });
+
+  it("preserves a startup-timeout cause when the child cannot be reaped", async () => {
+    vi.useFakeTimers();
+    const child = new MinimalOpenCodeSandboxProcess("silent", false);
+    try {
+      const pending = startOpenCodeServerProcess({
+        command: process.execPath,
+        args: ["serve"],
+        cwd: process.cwd(),
+        env: {},
+        signal: new AbortController().signal,
+        timeoutMs: 5,
+        maxLineBytes: 16_384,
+        maxStderrBytes: 4_096,
+        terminationGraceMs: 5,
+        spawnProcess: () => child,
+      });
+      const failure = pending.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      await vi.advanceTimersByTimeAsync(15);
+      const terminationError = await failure;
+      expect(terminationError).toBeInstanceOf(
+        OpenCodeProcessTerminationError,
+      );
+      expect((terminationError as Error).cause).toMatchObject({
+        message: "OpenCode server startup timed out after 5ms",
+      });
+      expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+    } finally {
+      child.close(null, "SIGKILL");
+      vi.useRealTimers();
+    }
+  });
+
+  it("quarantines when a stubborn post-ready process error cannot be reaped", async () => {
+    const api = new FakeOpenCodeApi();
+    const testRoot = await realpath(
+      await mkdtemp(join(tmpdir(), "runtime-opencode-stubborn-sandbox-")),
+    );
+    const dataDirectory = join(testRoot, "instance", "data");
+    let serverChild: MinimalOpenCodeSandboxProcess | undefined;
+    let isolationRoot: string | undefined;
+    const sandboxExecutor: SandboxExecutor = {
+      async execute() {
+        throw new Error("one-shot sandbox execution is not expected");
+      },
+      spawn(command) {
+        const home = command.environment?.HOME;
+        if (typeof home !== "string") {
+          throw new Error("sandbox HOME is missing");
+        }
+        isolationRoot = dirname(home);
+        if (command.arguments[0] === "--version") {
+          return new MinimalOpenCodeSandboxProcess("version");
+        }
+        serverChild = new MinimalOpenCodeSandboxProcess("server", false);
+        return serverChild;
+      },
+    };
+    const runtime = createRuntimeOpenCode({
+      config: parseRuntimeOpenCodeConfig({
+        binary: process.execPath,
+        timeoutMs: 1_000,
+      }),
+      instanceId: "opencode-stubborn-sandbox-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory,
+      sandboxExecutor,
+      fetch: api.fetch,
+      terminationGraceMs: 5,
+    });
+
+    try {
+      await runtime.start?.({ signal: new AbortController().signal });
+      serverChild?.emitProcessError(new Error("stubborn process failed"));
+
+      await vi.waitFor(() => {
+        expect(runtime.health?.({
+          signal: new AbortController().signal,
+        })).toMatchObject({
+          status: "unhealthy",
+          details: {
+            state: "draining",
+            quarantineCode: "PROCESS_TERMINATION_FAILED",
+          },
+        });
+      });
+      expect(serverChild?.signals).toEqual(["SIGTERM", "SIGKILL"]);
+      await expect(runtime.stop?.({
+        signal: new AbortController().signal,
+        reason: "shutdown",
+      })).rejects.toMatchObject({ code: "PROCESS_TERMINATION_FAILED" });
+      expect(await lstat(dataDirectory)).toBeDefined();
+      expect(isolationRoot).toBeDefined();
+      await expect(lstat(isolationRoot as string)).resolves.toBeDefined();
+
+      serverChild?.close(null, "SIGKILL");
+      await vi.waitFor(async () => {
+        await expect(lstat(isolationRoot as string)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      });
+      expect(await lstat(dataDirectory)).toBeDefined();
+    } finally {
+      serverChild?.close(null, "SIGKILL");
+      await rm(testRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unsafe selected-sandbox data roots before any child can spawn", async () => {
+    const testRoot = await realpath(
+      await mkdtemp(join(tmpdir(), "runtime-opencode-unsafe-data-")),
+    );
+    const nonPrivate = join(testRoot, "non-private");
+    const symlinkTarget = join(testRoot, "symlink-target");
+    const symlinkRoot = join(testRoot, "symlink-root");
+    const unsafeAncestor = join(testRoot, "unsafe-ancestor");
+    await mkdir(nonPrivate, { mode: 0o755 });
+    await chmod(nonPrivate, 0o755);
+    await mkdir(symlinkTarget, { mode: 0o700 });
+    await symlink(symlinkTarget, symlinkRoot);
+    await mkdir(unsafeAncestor, { mode: 0o700 });
+    await chmod(unsafeAncestor, 0o777);
+
+    try {
+      const cases = [
+        {
+          dataDirectory: undefined,
+          message: "requires a data directory",
+        },
+        {
+          dataDirectory: join("relative", "data"),
+          message: "absolute canonical path",
+        },
+        {
+          dataDirectory: nonPrivate,
+          message: "mode 0700",
+        },
+        {
+          dataDirectory: symlinkRoot,
+          message: "canonical directory",
+        },
+        {
+          dataDirectory: join(unsafeAncestor, "missing", "data"),
+          message: "must not be group/world writable",
+        },
+      ] as const;
+
+      for (const entry of cases) {
+        const sandboxSpawn = vi.fn<SandboxExecutor["spawn"]>(() => {
+          throw new Error("sandbox spawn must not run");
+        });
+        const sandboxExecutor: SandboxExecutor = {
+          async execute() {
+            throw new Error("sandbox execute must not run");
+          },
+          spawn: sandboxSpawn,
+        };
+        const hostSpawn = vi.fn<SpawnProcess>(() => {
+          throw new Error("host spawn must not run");
+        });
+        const runtime = createRuntimeOpenCode({
+          config: parseRuntimeOpenCodeConfig({ binary: process.execPath }),
+          instanceId: `opencode-unsafe-${entry.message}`,
+          workspaceDirectory: process.cwd(),
+          ...(entry.dataDirectory === undefined
+            ? {}
+            : { dataDirectory: entry.dataDirectory }),
+          spawnProcess: hostSpawn,
+          sandboxExecutor,
+        });
+
+        await expect(runtime.start?.({
+          signal: new AbortController().signal,
+        })).rejects.toMatchObject({
+          code: "START_FAILED",
+          message: expect.stringContaining(entry.message),
+        });
+        expect(sandboxSpawn).not.toHaveBeenCalled();
+        expect(hostSpawn).not.toHaveBeenCalled();
+      }
+    } finally {
+      await chmod(unsafeAncestor, 0o700);
+      await rm(testRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("removes selected-sandbox isolation when server startup fails", async () => {
+    const testRoot = await realpath(
+      await mkdtemp(join(tmpdir(), "runtime-opencode-start-failure-")),
+    );
+    const dataDirectory = join(testRoot, "instance-data");
+    let isolationRoot: string | undefined;
+    const sandboxSpawn = vi.fn<SandboxExecutor["spawn"]>((command) => {
+      const child = new FakeProcess();
+      if (command.arguments[0] === "--version") {
+        child.complete(`${OPEN_CODE_SECURE_SERVER_VERSION}\n`);
+      } else {
+        isolationRoot = dirname(String(command.environment?.HOME));
+        queueMicrotask(() => {
+          child.stdout.write(
+            "opencode server listening on http://0.0.0.0:1234\n",
+          );
+        });
+      }
+      return child as unknown as ReturnType<SandboxExecutor["spawn"]>;
+    });
+    const runtime = createRuntimeOpenCode({
+      config: parseRuntimeOpenCodeConfig({
+        binary: process.execPath,
+        timeoutMs: 2_000,
+      }),
+      instanceId: "opencode-selected-start-failure",
+      workspaceDirectory: process.cwd(),
+      dataDirectory,
+      sandboxExecutor: {
+        async execute() {
+          throw new Error("one-shot sandbox execution is not expected");
+        },
+        spawn: sandboxSpawn,
+      },
+      terminationGraceMs: 500,
+    });
+
+    try {
+      await expect(runtime.start?.({
+        signal: new AbortController().signal,
+      })).rejects.toMatchObject({
+        code: "START_FAILED",
+        message: expect.stringContaining("loopback HTTP endpoint"),
+      });
+      expect(sandboxSpawn).toHaveBeenCalledTimes(2);
+      expect(isolationRoot).toBeDefined();
+      await expect(lstat(String(isolationRoot))).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+      expect((await lstat(dataDirectory)).mode & 0o777).toBe(0o700);
+    } finally {
+      await rm(testRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a PATH-resolved binary before a selected sandbox can run", () => {
+    const executor: SandboxExecutor = {
+      async execute() {
+        throw new Error("not reached");
+      },
+      spawn() {
+        throw new Error("not reached");
+      },
+    };
+    expect(() => createRuntimeOpenCode({
+      config: parseRuntimeOpenCodeConfig({}),
+      instanceId: "opencode-sandbox-relative-binary",
+      workspaceDirectory: process.cwd(),
+      sandboxExecutor: executor,
+    })).toThrow("config.binary must be an absolute path when a Core sandbox is selected");
+  });
+
   it("validates the 1.15.13 security floor and constructs an isolated owned environment", async () => {
     const definition = await import("../index.js");
     const config = parseRuntimeOpenCodeConfig({});
@@ -692,12 +1328,20 @@ describe("runtime-opencode", () => {
       ),
     ).toBe(true);
     expect(serverInvocation?.env.HOME).not.toBe(process.env.HOME);
+    const directIsolationRoot = dirname(String(serverInvocation?.env.HOME));
+    expect(
+      directIsolationRoot.startsWith(join(tmpdir(), "mono-agent-opencode-")),
+    ).toBe(true);
+    expect((await lstat(directIsolationRoot)).mode & 0o777).toBe(0o700);
 
     await runtime.stop?.({
       signal: new AbortController().signal,
       reason: "shutdown",
     });
     expect(serverChild()?.signals).toEqual(["SIGTERM"]);
+    await expect(lstat(directIsolationRoot)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("reaches stopped with a classified error when isolation cleanup rejects", async () => {

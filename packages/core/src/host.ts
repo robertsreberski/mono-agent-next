@@ -17,7 +17,18 @@ import {
   type RuntimeTurnErrorSnapshot, type RuntimeToolCall,
   type RuntimeToolResult, type RuntimeTurnEvent, type RuntimeTurnResult, type TurnMessage,
 } from "@mono-agent/module-sdk";
-import type { Exporter, ReservedModuleDefinition, Sandbox, StateStore, TriggerEvent, TriggerHost } from "@mono-agent/module-sdk/internal";
+import {
+  SANDBOX_EXECUTE_CAPABILITY,
+  type Exporter,
+  type ReservedModuleDefinition,
+  type Sandbox,
+  type SandboxCommand,
+  type SandboxExecutor,
+  type SandboxSpawnCommand,
+  type StateStore,
+  type TriggerEvent,
+  type TriggerHost,
+} from "@mono-agent/module-sdk/internal";
 import { ensureLoadedAgentConfig, environmentFor } from "./config.js";
 import { cloneIntrinsicUint8Array } from "./binary.js";
 import { assertOwnKeys, ownDataRecord as boundedOwnDataRecord } from "./bounded-value.js";
@@ -130,6 +141,7 @@ class AgentHostImplementation implements AgentHost {
   readonly #hostAbort = new AbortController();
   readonly #runtimeInstances = new Map<string, Runtime>();
   readonly #runtimeCapabilities = new Map<string, Readonly<Runtime["capabilities"]>>();
+  readonly #sandboxGrantedRuntimeInstances = new Set<string>();
   readonly #createdRuntimeCapabilities = new WeakMap<object, Readonly<Runtime["capabilities"]>>();
   readonly #channelInstances = new Map<string, Channel>();
   readonly #channelCapabilities = new Map<string, Readonly<ChannelCapabilities>>();
@@ -509,6 +521,12 @@ class AgentHostImplementation implements AgentHost {
         }
         this.#runtimeInstances.set(module.instanceId, runtime);
         this.#runtimeCapabilities.set(module.instanceId, capabilities);
+        if (
+          this.#sandbox !== undefined
+          && declaresHostCapability(module, SANDBOX_EXECUTE_CAPABILITY)
+        ) {
+          this.#sandboxGrantedRuntimeInstances.add(module.instanceId);
+        }
       }
       if (kind === "channel") {
         const channel = instance as Channel;
@@ -656,10 +674,15 @@ class AgentHostImplementation implements AgentHost {
         createRuntimeRouteValidationGrant(this.config),
       );
     }
-    if (module.slot === "runtime" && this.#sandbox !== undefined && declaresHostCapability(module, "sandbox.execute.v1")) {
-      capabilityValues.set("sandbox.execute.v1", {
-        execute: (command: unknown) => this.#sandbox?.execute(command as never),
+    if (module.slot === "runtime"
+      && this.#sandbox !== undefined
+      && declaresHostCapability(module, SANDBOX_EXECUTE_CAPABILITY)) {
+      const sandbox = this.#sandbox;
+      const executor: SandboxExecutor = Object.freeze({
+        execute: (command: SandboxCommand) => sandbox.execute(command),
+        spawn: (command: SandboxSpawnCommand) => sandbox.spawn(command),
       });
+      capabilityValues.set(SANDBOX_EXECUTE_CAPABILITY, executor);
     }
     if (module.slot === "memory" && declaresHostCapability(module, HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE)) {
       capabilityValues.set(HOST_CAPABILITY_MEMORY_RUNTIME_CAPTURE, {
@@ -1450,6 +1473,7 @@ class AgentHostImplementation implements AgentHost {
         tools,
         [...requiredCapabilities],
         this.config,
+        this.#sandboxGrantedRuntimeInstances.has(route.runtime),
         hasInteractionHandler,
       );
       if (eligibility !== undefined) {
@@ -2194,6 +2218,7 @@ class AgentHostImplementation implements AgentHost {
     this.#running.length = 0;
     this.#runtimeInstances.clear();
     this.#runtimeCapabilities.clear();
+    this.#sandboxGrantedRuntimeInstances.clear();
     this.#channelInstances.clear();
     this.#channelCapabilities.clear();
     this.#moduleTools = [];

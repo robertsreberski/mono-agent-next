@@ -22,6 +22,7 @@ import {
   combinedSignal,
   displayPath,
   effectiveWorkdir,
+  executionBoundarySummary,
   optionalInteger,
   outputLimit,
   ownRecord,
@@ -138,19 +139,39 @@ export function createRuntimePiReadAgentTool(
     const maxOutputBytes = outputLimit(input, "Read");
     const tool = createReadTool();
     const env = new BoundedReadExecutionEnv({ cwd: workdir });
+    const absolutePath = displayPath(path, workdir);
     const executionSignal = combinedSignal(options.turnSignal, signal);
     return approvedExecution(
       options,
       runtimePiReadTool,
       toolCallId,
       [
-        "Allow this unsandboxed file read?",
-        `path: ${JSON.stringify(displayPath(path, workdir))}`,
+        executionBoundarySummary(
+          options,
+          "Allow this file read through the selected Core sandbox?",
+          "Allow this unsandboxed file read?",
+        ),
+        `path: ${JSON.stringify(absolutePath)}`,
         `start_line: ${String(upstreamOffset ?? 1)}`,
         `limit: ${limit === undefined ? "<default>" : String(limit)}`,
       ].join("\n"),
       executionSignal,
       async () => {
+        if (options.sandboxTools !== undefined) {
+          return capRuntimePiAgentResult(
+            await options.sandboxTools.execute(
+              runtimePiReadTool.id,
+              {
+                path: absolutePath,
+                ...(upstreamOffset === undefined ? {} : { start_line: upstreamOffset }),
+                ...(limit === undefined ? {} : { limit }),
+                max_output_chars: maxOutputBytes,
+              },
+              executionSignal,
+            ),
+            maxOutputBytes,
+          );
+        }
         try {
           return capRuntimePiAgentResult(
             await tool.execute(

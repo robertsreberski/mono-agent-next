@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+import { isAbsolute } from "node:path";
+
 import { RUNTIME_SESSION_UNAVAILABLE_CODE, RuntimeTurnError } from "@mono-agent/module-sdk";
 import type {
   JsonObject,
@@ -18,22 +20,32 @@ import type {
   RuntimeTurnResult,
   TurnMessage,
 } from "@mono-agent/module-sdk";
+import type { SandboxExecutor } from "@mono-agent/module-sdk/internal";
 
 import { captureApprovalEvidence, handleCodexServerRequest, type CodexItemEvidence } from "./approvals.js";
 import type { RuntimeCodexConfig } from "./config.js";
 import { approvalPolicy, containedCodexConfig, type EffectiveCodexMcpServer } from "./containment.js";
 import { codexProcessEnvironment } from "./environment.js";
-import { JsonRpcProcess, JsonRpcRequestError, type JsonRpcMessage, type SpawnProcess } from "./json-rpc.js";
+import {
+  JsonRpcProcess,
+  JsonRpcProcessTerminationError,
+  JsonRpcRequestError,
+  type JsonRpcMessage,
+  type SpawnProcess,
+} from "./json-rpc.js";
 import { isRuntimeCodexModel, runtimeCodexCapabilities, validateRuntimeCodexModel } from "./model.js";
 import {
   assertFrozenAppServerMcpConfig,
   cancellationError,
+  CodexPreflightTerminationError,
   codexAppServerArguments,
   createProcessWorkingDirectory,
   preflightCodexProcess,
   preparePersistentCodexHome,
+  prepareSandboxDataDirectory,
   resolveNativeCodexHome,
 } from "./preflight.js";
+import { codexSandboxSpawn } from "./sandbox.js";
 
 type RuntimeState = "created" | "running" | "draining" | "stopped";
 
@@ -70,6 +82,7 @@ export interface CreateRuntimeCodexOptions {
   readonly workspaceDirectory: string;
   readonly dataDirectory: string;
   readonly spawnProcess?: SpawnProcess;
+  readonly sandboxExecutor?: SandboxExecutor;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -219,17 +232,62 @@ function emitIsolated(context: RuntimeTurnContext, event: Parameters<RuntimeTurn
 }
 
 export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime {
+  if (
+    options.sandboxExecutor !== undefined
+    && !isAbsolute(options.config.binary)
+  ) {
+    throw new TypeError(
+      "runtime-codex config.binary must be an absolute path when a Core sandbox is selected",
+    );
+  }
   let state: RuntimeState = "created";
   const active = new Set<ActiveTurnAttempt>();
   let codexHome: string | undefined;
+  let sandboxDataDirectory: string | undefined;
   let startMcpServers: readonly EffectiveCodexMcpServer[] | undefined;
+  let terminationFailure: JsonRpcProcessTerminationError | undefined;
+  const spawnProcess = options.sandboxExecutor === undefined
+    ? options.spawnProcess
+    : codexSandboxSpawn(options.sandboxExecutor);
 
   const processEnvironment = (home: string): NodeJS.ProcessEnv => ({
-    ...codexProcessEnvironment(options.config.auth === undefined
-      ? {}
-      : { OPENAI_API_KEY: options.config.auth.apiKey }),
+    ...codexProcessEnvironment(
+      options.config.auth === undefined
+        ? {}
+        : { OPENAI_API_KEY: options.config.auth.apiKey },
+      options.sandboxExecutor === undefined ? process.env : {},
+    ),
     CODEX_HOME: home,
   });
+
+  const captureTerminationFailure = (error: unknown): void => {
+    terminationFailure ??= error instanceof JsonRpcProcessTerminationError
+      ? error
+      : new JsonRpcProcessTerminationError(
+          redact(error, options.config.auth?.apiKey),
+          { cause: safeErrorCause(error, options.config.auth?.apiKey) },
+        );
+    if (state !== "stopped") state = "draining";
+  };
+
+  const lifecycleTerminationError = (
+    sideEffects: RuntimeSideEffectStatus,
+  ): RuntimeCodexError => new RuntimeCodexError(
+    "PROCESS_TERMINATION_FAILED",
+    redact(terminationFailure, options.config.auth?.apiKey),
+    {
+      retryability: "not-retryable",
+      sideEffects,
+      cause: safeErrorCause(terminationFailure, options.config.auth?.apiKey),
+    },
+  );
+
+  const cleanupAfterClose = (
+    closed: Promise<unknown>,
+    cleanup: () => Promise<void>,
+  ): void => {
+    void closed.then(cleanup).catch(() => undefined);
+  };
 
   const newClient = (processDirectory: string, home: string,
     mcpServers: readonly EffectiveCodexMcpServer[]): JsonRpcProcess => new JsonRpcProcess({
@@ -240,36 +298,61 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
     timeoutMs: options.config.requestTimeoutMs,
     maxLineBytes: options.config.maxLineBytes,
     maxStderrBytes: options.config.maxStderrBytes,
-    ...(options.spawnProcess === undefined ? {} : { spawnProcess: options.spawnProcess }),
+    ...(spawnProcess === undefined ? {} : { spawnProcess }),
   });
 
   return {
-    capabilities: runtimeCodexCapabilities,
+    capabilities: Object.freeze({
+      ...runtimeCodexCapabilities,
+      sandbox: options.sandboxExecutor !== undefined,
+    }),
 
     async start(context: ModuleStartContext) {
+      if (terminationFailure !== undefined) {
+        throw lifecycleTerminationError("none");
+      }
       if (state === "stopped") throw new RuntimeCodexError("RUNTIME_NOT_RUNNING", "runtime-codex cannot restart after stop", { retryability: "not-retryable" });
       if (state === "running") return;
       let processDirectory:
         | Awaited<ReturnType<typeof createProcessWorkingDirectory>>
         | undefined;
+      let retainProcessDirectory = false;
       try {
+        const preparedSandboxDataDirectory = options.sandboxExecutor === undefined
+          ? undefined
+          : await prepareSandboxDataDirectory(options.dataDirectory);
         const preparedHome = options.config.auth === undefined
           ? await resolveNativeCodexHome()
           : await preparePersistentCodexHome(options.dataDirectory);
-        processDirectory = await createProcessWorkingDirectory();
+        processDirectory = await createProcessWorkingDirectory(
+          preparedSandboxDataDirectory,
+        );
         startMcpServers = await preflightCodexProcess({
           command: options.config.binary,
           cwd: processDirectory.directory,
           env: processEnvironment(preparedHome),
           timeoutMs: Math.min(options.config.requestTimeoutMs, 15_000),
           signal: context.signal,
-          ...(options.spawnProcess === undefined
+          ...(spawnProcess === undefined
             ? {}
-            : { spawnProcess: options.spawnProcess }),
+            : { spawnProcess }),
           probeStrictConfig: true,
         });
         codexHome = preparedHome;
+        sandboxDataDirectory = preparedSandboxDataDirectory;
       } catch (error) {
+        if (error instanceof CodexPreflightTerminationError) {
+          captureTerminationFailure(error);
+          if (processDirectory !== undefined) {
+            retainProcessDirectory = true;
+            const retainedDirectory = processDirectory;
+            cleanupAfterClose(
+              error.closed,
+              async () => retainedDirectory.cleanup(),
+            );
+          }
+          throw lifecycleTerminationError("none");
+        }
         throw new RuntimeCodexError(
           "RUNTIME_PREFLIGHT_FAILED",
           redact(error, options.config.auth?.apiKey),
@@ -280,7 +363,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
           },
         );
       } finally {
-        await processDirectory?.cleanup();
+        if (!retainProcessDirectory) await processDirectory?.cleanup();
       }
       state = "running";
     },
@@ -294,35 +377,70 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
       state = "draining";
       const turns = [...active];
       for (const turn of turns) turn.cancel();
-      await Promise.allSettled(turns.flatMap(
+      const shutdownResults = await Promise.allSettled(turns.flatMap(
         (turn) => [
           ...(turn.client === undefined ? [] : [turn.client.close()]),
           turn.settled,
         ],
       ));
+      for (const result of shutdownResults) {
+        if (result.status === "rejected") {
+          captureTerminationFailure(result.reason);
+        }
+      }
       active.clear();
+      if (terminationFailure !== undefined) {
+        state = "draining";
+        throw lifecycleTerminationError("unknown");
+      }
       state = "stopped";
     },
 
     health(_context: ModuleHealthContext): ModuleHealth {
       return {
-        status: state === "running" ? "healthy" : state === "draining" ? "degraded" : "unknown",
+        status: terminationFailure !== undefined
+          ? "unhealthy"
+          : state === "running"
+            ? "healthy"
+            : state === "draining"
+              ? "degraded"
+              : "unknown",
         checkedAt: new Date().toISOString(),
         summary: `runtime-codex is ${state}`,
-        details: { state, activeTurns: active.size },
+        details: {
+          state,
+          activeTurns: active.size,
+          ...(terminationFailure === undefined
+            ? {}
+            : { quarantineCode: "PROCESS_TERMINATION_FAILED" }),
+        },
       };
     },
 
     diagnostics(_context: ModuleDiagnosticsContext): readonly ModuleDiagnostic[] {
-      return [diagnostic("runtime-codex.lifecycle", "info", `Runtime state: ${state}`)];
+      return [diagnostic(
+        "runtime-codex.lifecycle",
+        terminationFailure === undefined ? "info" : "error",
+        `Runtime state: ${state}`
+        + (terminationFailure === undefined ? "" : "; process termination failed"),
+      )];
     },
 
     preflightModel(request) {
       request.signal.throwIfAborted();
-      return validateRuntimeCodexModel({
+      const validation = validateRuntimeCodexModel({
         model: request.model,
         config: options.config,
       });
+      return validation.capabilities === undefined
+        ? validation
+        : {
+            ...validation,
+            capabilities: Object.freeze({
+              ...validation.capabilities,
+              sandbox: options.sandboxExecutor !== undefined,
+            }),
+          };
     },
 
     async runTurn(request: RuntimeTurnRequest, context: RuntimeTurnContext): Promise<RuntimeTurnResult> {
@@ -359,19 +477,33 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         | Awaited<ReturnType<typeof createProcessWorkingDirectory>>
         | undefined;
       try {
-        processDirectory = await createProcessWorkingDirectory();
+        processDirectory = await createProcessWorkingDirectory(
+          sandboxDataDirectory,
+        );
         turnMcpServers = await preflightCodexProcess({
           command: options.config.binary,
           cwd: processDirectory.directory,
           env: processEnvironment(preparedHome),
           timeoutMs: Math.min(options.config.requestTimeoutMs, 15_000),
           signal: turnSignal,
-          ...(options.spawnProcess === undefined
+          ...(spawnProcess === undefined
             ? {}
-            : { spawnProcess: options.spawnProcess }),
+            : { spawnProcess }),
           probeStrictConfig: false,
         });
       } catch (error) {
+        if (error instanceof CodexPreflightTerminationError) {
+          const retainedDirectory = processDirectory;
+          captureTerminationFailure(error);
+          if (retainedDirectory !== undefined) {
+            cleanupAfterClose(
+              error.closed,
+              async () => retainedDirectory.cleanup(),
+            );
+          }
+          settleAttempt();
+          throw lifecycleTerminationError("none");
+        }
         await processDirectory?.cleanup().catch(() => undefined);
         settleAttempt();
         if (turnSignal.aborted) return { status: "cancelled" };
@@ -501,7 +633,7 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
       };
       const onAbort = (): void => {
         settleCancellation();
-        void client.close().catch(() => undefined);
+        void client.close().catch(captureTerminationFailure);
       };
       turnSignal.addEventListener("abort", onAbort, { once: true });
       if (turnSignal.aborted) onAbort();
@@ -689,8 +821,21 @@ export function createRuntimeCodex(options: CreateRuntimeCodexOptions): Runtime 
         } catch {
           // Cleanup is best effort and must not replace the turn result.
         }
-        await client.close().catch(() => undefined);
-        await processDirectory.cleanup().catch(() => undefined);
+        let retainProcessDirectory = false;
+        try {
+          await client.close();
+        } catch (error) {
+          retainProcessDirectory = true;
+          captureTerminationFailure(error);
+          const retainedDirectory = processDirectory;
+          cleanupAfterClose(
+            client.closed,
+            async () => retainedDirectory.cleanup(),
+          );
+        }
+        if (!retainProcessDirectory) {
+          await processDirectory.cleanup().catch(() => undefined);
+        }
         settleAttempt();
       }
     },

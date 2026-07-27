@@ -8,6 +8,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  realpath,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -48,6 +49,15 @@ const ASK_USER_COMPLETION = "packed AskUser answer observed";
 const RUN_HISTORY_QUERY = "packed-run-history-query-c63e";
 const RUN_HISTORY_CALL_ID = "packed-run-history-call";
 const RUN_HISTORY_COMPLETION = "packed RunHistory result observed";
+const SANDBOX_QUERY = "packed-selected-sandbox-query-d74f";
+const SANDBOX_CALL_ID = "packed-selected-sandbox-call";
+const SANDBOX_COMPLETION = "packed selected sandbox result observed";
+const SANDBOX_MARKER = "packed-sandbox-ok";
+const SANDBOX_MARKER_PATH = ".mono-agent/packed-sandbox-proof.txt";
+const SANDBOX_WRAPPER_MARKER = "packed-srt-wrapper-invoked";
+const SANDBOX_WRAPPER_MARKER_PATH = ".mono-agent/packed-srt-invocations.log";
+const SANDBOX_FIXTURE_AUTHORITY =
+  "transparent fixture proves Core-to-Pi-to-sandbox-srt routing only; it does not prove operating-system enforcement";
 const PERSONAL_WEBHOOK_PROMPT = "Handle this authenticated project webhook request.";
 const PERSONAL_SKILL_PROOF_BYTES = 219_896;
 const WEBHOOK_SECRET = "packed-system-webhook-token";
@@ -1583,8 +1593,82 @@ maxRunMs: 10000
 
 Run the packed system cron proof.
 `, "utf8");
-  await writeJson(join(directory, "mono-agent.config.json"), packedSystemConfig(endpoints));
+  const sandbox = await writePackedSandboxFixture(directory);
+  await writeJson(
+    join(directory, "mono-agent.config.json"),
+    packedSystemConfig({ ...endpoints, sandbox }),
+  );
   await writeFile(join(directory, "system-scenario.mjs"), consumerScenarioSource(), "utf8");
+}
+
+async function writePackedSandboxFixture(directory) {
+  const canonicalDirectory = await realpath(directory);
+  const executablePath = join(canonicalDirectory, ".mono-agent", "packed-srt.mjs");
+  const settingsPath = join(canonicalDirectory, ".mono-agent", "packed-srt-settings.json");
+  const invocationPath = join(canonicalDirectory, SANDBOX_WRAPPER_MARKER_PATH);
+  // This fixture intentionally forwards the child without applying policy. It
+  // writes wrapper-owned invocation evidence before forwarding, which proves
+  // selected-sandbox plumbing only. Real SRT enforcement needs a separate
+  // focused proof with a provisioned upstream runtime.
+  const executable = `#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { appendFileSync } from "node:fs";
+
+const arguments_ = process.argv.slice(2);
+if (arguments_[0] !== "--settings" || arguments_.length < 3) {
+  process.stderr.write("invalid packed SRT invocation");
+  process.exit(97);
+}
+appendFileSync(
+  ${JSON.stringify(invocationPath)},
+  ${JSON.stringify(`${SANDBOX_WRAPPER_MARKER}\n`)},
+  { encoding: "utf8", flag: "a", mode: 0o600 },
+);
+const child = spawn(arguments_[2], arguments_.slice(3), {
+  env: process.env,
+  stdio: "inherit",
+});
+child.once("error", () => process.exit(126));
+child.once("exit", (code, signal) => {
+  if (signal !== null) {
+    process.kill(process.pid, signal);
+    return;
+  }
+  process.exit(code ?? 1);
+});
+`;
+  const settings = `${JSON.stringify({
+    fixture: "packed-selected-sandbox",
+    filesystem: "transparent-test-boundary",
+    proofAuthority: SANDBOX_FIXTURE_AUTHORITY,
+    wrapperInvocationMarker: SANDBOX_WRAPPER_MARKER,
+  })}\n`;
+  await Promise.all([
+    writeFile(executablePath, executable, { encoding: "utf8", mode: 0o700 }),
+    writeFile(settingsPath, settings, { encoding: "utf8", mode: 0o600 }),
+  ]);
+  return Object.freeze({
+    $use: "@mono-agent/sandbox-srt",
+    executable: {
+      path: executablePath,
+      sha256: sha256Hex(executable),
+    },
+    settings: {
+      path: settingsPath,
+      sha256: sha256Hex(settings),
+    },
+    limits: {
+      defaultTimeoutMs: 10_000,
+      maxTimeoutMs: 10_000,
+      maxOutputBytes: 4 * 1024 * 1024,
+      maxInputBytes: 1024 * 1024,
+    },
+    environment: { inherit: ["PATH"], allow: [] },
+  });
+}
+
+function sha256Hex(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function dormantCronExpression() {
@@ -1592,7 +1676,7 @@ function dormantCronExpression() {
   return `0 0 ${String(target.getUTCDate())} ${String(target.getUTCMonth() + 1)} *`;
 }
 
-function packedSystemConfig({ providerBaseUrl, otlpEndpoint, deliveryEndpoint }) {
+function packedSystemConfig({ providerBaseUrl, otlpEndpoint, deliveryEndpoint, sandbox }) {
   return {
     configVersion: 1,
     agent: {
@@ -1687,9 +1771,9 @@ function packedSystemConfig({ providerBaseUrl, otlpEndpoint, deliveryEndpoint })
       },
     },
     policy: {
-      tools: { default: "deny", allow: ["AskUser", "MemoryRecall", "RunHistory"] },
+      tools: { default: "deny", allow: ["AskUser", "Bash", "MemoryRecall", "RunHistory"] },
       approvals: { default: "allow" },
-      sandbox: { mode: "off" },
+      sandbox,
     },
   };
 }
@@ -1697,6 +1781,7 @@ function packedSystemConfig({ providerBaseUrl, otlpEndpoint, deliveryEndpoint })
 function consumerScenarioSource() {
   return String.raw`import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1720,6 +1805,13 @@ const ASK_USER_COMPLETION = "packed AskUser answer observed";
 const RUN_HISTORY_QUERY = "packed-run-history-query-c63e";
 const RUN_HISTORY_CALL_ID = "packed-run-history-call";
 const RUN_HISTORY_COMPLETION = "packed RunHistory result observed";
+const SANDBOX_QUERY = "packed-selected-sandbox-query-d74f";
+const SANDBOX_CALL_ID = "packed-selected-sandbox-call";
+const SANDBOX_COMPLETION = "packed selected sandbox result observed";
+const SANDBOX_MARKER = "packed-sandbox-ok";
+const SANDBOX_MARKER_PATH = ".mono-agent/packed-sandbox-proof.txt";
+const SANDBOX_WRAPPER_MARKER = "packed-srt-wrapper-invoked";
+const SANDBOX_WRAPPER_MARKER_PATH = ".mono-agent/packed-srt-invocations.log";
 const configPath = resolve(process.argv[2] ?? "mono-agent.config.json");
 const configDirectory = dirname(configPath);
 const webhookSecret = requiredEnvironment("SYSTEM_WEBHOOK_TOKEN");
@@ -1852,6 +1944,37 @@ try {
   assert.equal(historyContent.includes(currentRun.runId), false);
   assert.equal(historyFrames.some((frame) => frame.type === "approval"), false);
 
+  const sandboxFrames = [];
+  for await (const frame of persisted.client.streamTurn({
+    conversationId: "packed-selected-sandbox",
+    input: { text: SANDBOX_QUERY },
+  })) {
+    sandboxFrames.push(frame);
+  }
+  const sandboxCompleted = sandboxFrames.find((frame) => frame.type === "completed");
+  assert.equal(sandboxCompleted?.finalMessage.text, SANDBOX_COMPLETION);
+  const sandboxToolCall = sandboxFrames.find((frame) =>
+    frame.type === "tool_call" && frame.call.name === "Bash");
+  assert.equal(sandboxToolCall?.call.input.command,
+    "printf '%s' packed-sandbox-ok > .mono-agent/packed-sandbox-proof.txt && printf '%s' packed-sandbox-ok");
+  const sandboxToolResult = sandboxFrames.find((frame) =>
+    frame.type === "tool_result" && frame.result.callId === SANDBOX_CALL_ID);
+  assert.equal(sandboxToolResult?.result.contentOmitted, false);
+  assert.ok(JSON.stringify(sandboxToolResult?.result.content).includes(SANDBOX_MARKER));
+  assert.equal(
+    await readFile(resolve(configDirectory, SANDBOX_MARKER_PATH), "utf8"),
+    SANDBOX_MARKER,
+  );
+  const sandboxWrapperMarkers = (
+    await readFile(resolve(configDirectory, SANDBOX_WRAPPER_MARKER_PATH), "utf8")
+  ).split("\n").filter(Boolean);
+  assert.deepEqual(
+    sandboxWrapperMarkers,
+    [SANDBOX_WRAPPER_MARKER],
+    "selected sandbox wrapper must own exactly one invocation marker",
+  );
+  assert.equal(sandboxFrames.some((frame) => frame.type === "approval"), false);
+
   const duplicate = await secondHost.runModuleCommand("cron", "trigger-cron:invoke", {
     jobId: "packed-system",
     scheduledAt: cronInstant,
@@ -1891,6 +2014,10 @@ try {
     webQuoteProof,
     askFrames: askFrames.map((frame) => frame.type),
     historyFrames: historyFrames.map((frame) => frame.type),
+    sandboxFrames: sandboxFrames.map((frame) => frame.type),
+    sandboxMarker: await readFile(resolve(configDirectory, SANDBOX_MARKER_PATH), "utf8"),
+    sandboxWrapperInvocations: sandboxWrapperMarkers.length,
+    sandboxWrapperMarker: sandboxWrapperMarkers[0],
   }) + "\n");
 } finally {
   if (webServer !== undefined) await within(webServer.stop(), 5000, "web server failure cleanup").catch(() => undefined);
@@ -2143,6 +2270,14 @@ function assertScenarioOutput(stdout) {
     || !parsed.historyFrames.includes("tool_result")) {
     throw new Error(`Packed scenario did not stream the state-local RunHistory round trip: ${stdout}`);
   }
+  if (!parsed.sandboxFrames?.includes("completed")
+    || !parsed.sandboxFrames.includes("tool_call")
+    || !parsed.sandboxFrames.includes("tool_result")
+    || parsed.sandboxMarker !== SANDBOX_MARKER
+    || parsed.sandboxWrapperInvocations !== 1
+    || parsed.sandboxWrapperMarker !== SANDBOX_WRAPPER_MARKER) {
+    throw new Error(`Packed scenario did not route Pi Bash through the transparent selected-sandbox plumbing fixture: ${stdout}`);
+  }
   return {
     expectedCronKey: expectedKey,
     webConversationId: parsed.webQuoteProof.conversationId,
@@ -2161,9 +2296,9 @@ function assertProviderRequests(requests, scenarioProof) {
   }
   const captureRequests = requests.filter((request) => isStructuredCaptureRequest(request.parsed));
   const userRequests = requests.filter((request) => !isStructuredCaptureRequest(request.parsed));
-  if (captureRequests.length !== 7 || userRequests.length !== 14) {
+  if (captureRequests.length !== 8 || userRequests.length !== 16) {
     throw new Error(
-      `Fake provider expected fourteen agent turns and seven memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
+      `Fake provider expected sixteen agent turns and eight memory-capture turns; received ${String(userRequests.length)} and ${String(captureRequests.length)}`,
     );
   }
   const userInputs = userRequests.map((request) => finalProviderUserText(request.parsed));
@@ -2200,6 +2335,8 @@ function assertProviderRequests(requests, scenarioProof) {
     ASK_USER_QUERY,
     RUN_HISTORY_QUERY,
     RUN_HISTORY_QUERY,
+    SANDBOX_QUERY,
+    SANDBOX_QUERY,
   ])) {
     throw new Error(`Packed interactive provider inputs were not exact: ${JSON.stringify(userInputs.slice(10))}`);
   }
@@ -2247,11 +2384,24 @@ function assertProviderRequests(requests, scenarioProof) {
     || !historyResult.content.includes("packed-system")) {
     throw new Error("Pi did not continue after executing RunHistory against packed state-local");
   }
+  const sandboxRequest = userRequests[14];
+  if (!hasProviderTool(sandboxRequest.parsed, "Bash")) {
+    throw new Error("Provider request did not receive Pi's selected-sandbox-routed Bash tool");
+  }
+  const sandboxContinuation = userRequests[15];
+  const sandboxResult = sandboxContinuation.parsed.messages?.find((message) =>
+    message?.role === "tool" && message.tool_call_id === SANDBOX_CALL_ID);
+  if (!hasProviderTool(sandboxContinuation.parsed, "Bash")
+    || typeof sandboxResult?.content !== "string"
+    || !sandboxResult.content.includes(SANDBOX_MARKER)) {
+    throw new Error("Pi did not continue after Bash traversed the transparent selected-sandbox plumbing fixture");
+  }
   const capturedReplies = [];
   for (const request of captureRequests) {
     if (hasProviderTool(request.parsed, "MemoryRecall")
       || hasProviderTool(request.parsed, "AskUser")
-      || hasProviderTool(request.parsed, "RunHistory")) {
+      || hasProviderTool(request.parsed, "RunHistory")
+      || hasProviderTool(request.parsed, "Bash")) {
       throw new Error("Tool-free memory capture unexpectedly received an interactive Core tool");
     }
     const input = finalProviderUserText(request.parsed);
@@ -2263,6 +2413,9 @@ function assertProviderRequests(requests, scenarioProof) {
     else if (input.endsWith(`Assistant: ${RUN_HISTORY_COMPLETION}`)) {
       capturedReplies.push(RUN_HISTORY_COMPLETION);
     }
+    else if (input.endsWith(`Assistant: ${SANDBOX_COMPLETION}`)) {
+      capturedReplies.push(SANDBOX_COMPLETION);
+    }
     else throw new Error(`Memory capture received an unexpected completion: ${JSON.stringify(input)}`);
   }
   const expectedCapturedReplies = [
@@ -2273,6 +2426,7 @@ function assertProviderRequests(requests, scenarioProof) {
     EXPECTED_REPLY,
     ASK_USER_COMPLETION,
     RUN_HISTORY_COMPLETION,
+    SANDBOX_COMPLETION,
   ].sort();
   if (JSON.stringify(capturedReplies.sort()) !== JSON.stringify(expectedCapturedReplies)) {
     throw new Error(`Memory capture completions must be ${JSON.stringify(expectedCapturedReplies)}; found ${JSON.stringify(capturedReplies)}`);
@@ -2533,6 +2687,8 @@ async function startOpenAiCompatibleProvider() {
         message?.role === "tool" && message.tool_call_id === ASK_USER_CALL_ID);
       const hasRunHistoryResult = parsed.messages?.some((message) =>
         message?.role === "tool" && message.tool_call_id === RUN_HISTORY_CALL_ID);
+      const hasSandboxResult = parsed.messages?.some((message) =>
+        message?.role === "tool" && message.tool_call_id === SANDBOX_CALL_ID);
       if (!hasAskUserResult
         && finalProviderUserText(parsed) === ASK_USER_QUERY
         && hasProviderTool(parsed, "AskUser")) {
@@ -2655,6 +2811,43 @@ async function startOpenAiCompatibleProvider() {
         response.end("data: [DONE]\n\n");
         return;
       }
+      if (!hasSandboxResult
+        && finalProviderUserText(parsed) === SANDBOX_QUERY
+        && hasProviderTool(parsed, "Bash")) {
+        response.write(sse({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: "echo",
+          choices: [{
+            index: 0,
+            delta: {
+              tool_calls: [{
+                index: 0,
+                id: SANDBOX_CALL_ID,
+                type: "function",
+                function: {
+                  name: "Bash",
+                  arguments: JSON.stringify({
+                    command: "printf '%s' packed-sandbox-ok > .mono-agent/packed-sandbox-proof.txt && printf '%s' packed-sandbox-ok",
+                  }),
+                },
+              }],
+            },
+            finish_reason: null,
+          }],
+        }));
+        response.write(sse({
+          id,
+          object: "chat.completion.chunk",
+          created,
+          model: "echo",
+          choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+          usage: { prompt_tokens: 8, completion_tokens: 8, total_tokens: 16 },
+        }));
+        response.end("data: [DONE]\n\n");
+        return;
+      }
       response.write(sse({
         id,
         object: "chat.completion.chunk",
@@ -2665,7 +2858,9 @@ async function startOpenAiCompatibleProvider() {
           delta: {
             content: hasAskUserResult
               ? ASK_USER_COMPLETION
-              : hasRunHistoryResult ? RUN_HISTORY_COMPLETION : EXPECTED_REPLY,
+              : hasRunHistoryResult
+                ? RUN_HISTORY_COMPLETION
+                : hasSandboxResult ? SANDBOX_COMPLETION : EXPECTED_REPLY,
           },
           finish_reason: null,
         }],

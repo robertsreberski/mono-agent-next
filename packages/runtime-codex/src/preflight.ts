@@ -2,7 +2,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 import {
   codexProcessConfigArguments,
@@ -11,12 +11,32 @@ import {
   tomlBasicString,
   type EffectiveCodexMcpServer,
 } from "./containment.js";
-import type { ProcessLike, SpawnProcess } from "./json-rpc.js";
+import {
+  JsonRpcProcessTerminationError,
+  type ProcessLike,
+  type SpawnProcess,
+} from "./json-rpc.js";
 
 const SUPPORTED_CODEX_VERSION = "codex-cli 0.145.0";
 const PREFLIGHT_OUTPUT_MAX_BYTES = 65_536;
+const PREFLIGHT_TERMINATION_GRACE_MS = 1_000;
 const MAX_EFFECTIVE_MCP_SERVERS = 64;
 const MAX_MCP_SERVER_NAME_BYTES = 256;
+
+export class CodexPreflightTerminationError
+  extends JsonRpcProcessTerminationError {
+  readonly closed: Promise<void>;
+
+  constructor(
+    message: string,
+    closed: Promise<void>,
+    options: ErrorOptions = {},
+  ) {
+    super(message, options);
+    this.name = "CodexPreflightTerminationError";
+    this.closed = closed;
+  }
+}
 
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -88,6 +108,25 @@ async function prepareDataDirectory(authoredPath: string): Promise<string> {
   return root;
 }
 
+export async function prepareSandboxDataDirectory(
+  authoredPath: string,
+): Promise<string> {
+  if (!isAbsolute(authoredPath) || resolve(authoredPath) !== authoredPath) {
+    throw new Error(
+      "runtime-codex sandbox data directory must be a canonical absolute path",
+    );
+  }
+  const root = await prepareDataDirectory(authoredPath);
+  const prepared = await lstat(root);
+  assertOwnedDirectory(prepared, root, true);
+  if (await realpath(root) !== root) {
+    throw new Error(
+      "runtime-codex sandbox data directory must be a canonical non-symlink path",
+    );
+  }
+  return root;
+}
+
 export async function preparePersistentCodexHome(
   dataDirectory: string,
 ): Promise<string> {
@@ -138,13 +177,35 @@ export async function resolveNativeCodexHome(): Promise<string> {
   return canonical;
 }
 
-export async function createProcessWorkingDirectory(): Promise<{
+export async function createProcessWorkingDirectory(
+  dataDirectory?: string,
+): Promise<{
   readonly directory: string;
   cleanup(): Promise<void>;
 }> {
-  const directory = await mkdtemp(join(tmpdir(), "mono-agent-codex-process-"));
-  const info = await lstat(directory);
-  assertOwnedDirectory(info, directory, true);
+  const root = dataDirectory === undefined
+    ? undefined
+    : await prepareSandboxDataDirectory(dataDirectory);
+  const directory = await mkdtemp(
+    root === undefined
+      ? join(tmpdir(), "mono-agent-codex-process-")
+      : join(root, "process-"),
+  );
+  try {
+    const info = await lstat(directory);
+    assertOwnedDirectory(info, directory, true);
+    if (
+      root !== undefined
+      && dirname(await realpath(directory)) !== root
+    ) {
+      throw new Error(
+        "runtime-codex process directory escaped the sandbox data directory",
+      );
+    }
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    throw error;
+  }
   return {
     directory,
     async cleanup() {
@@ -198,9 +259,19 @@ async function runBoundedProcess(options: {
     shell: false,
   });
   return new Promise<DirectProcessResult>((resolveResult, rejectResult) => {
-    let stdout = "";
-    let stderr = "";
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
     let settled = false;
+    let closed = false;
+    let failure: Error | undefined;
+    let terminateTimer: NodeJS.Timeout | undefined;
+    let forceTimer: NodeJS.Timeout | undefined;
+    let resolveClosed!: () => void;
+    const processClosed = new Promise<void>((resolve) => {
+      resolveClosed = resolve;
+    });
     const finish = (
       result: DirectProcessResult | undefined,
       error?: Error,
@@ -208,51 +279,125 @@ async function runBoundedProcess(options: {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (terminateTimer !== undefined) clearTimeout(terminateTimer);
+      if (forceTimer !== undefined) clearTimeout(forceTimer);
       options.signal.removeEventListener("abort", onAbort);
       if (error !== undefined) rejectResult(error);
       else if (result !== undefined) resolveResult(result);
     };
+    const kill = (signal: NodeJS.Signals): void => {
+      try {
+        child.kill(signal);
+      } catch {
+        // Close or the bounded post-SIGKILL deadline remains authoritative.
+      }
+    };
+    const terminate = (error: Error): void => {
+      if (settled || failure !== undefined) return;
+      failure = error;
+      try {
+        child.stdin.end();
+      } catch {
+        // Signal escalation remains authoritative.
+      }
+      if (closed) {
+        finish(undefined, error);
+        return;
+      }
+      kill("SIGTERM");
+      if (closed || settled) return;
+      terminateTimer = setTimeout(() => {
+        if (closed || settled) return;
+        kill("SIGKILL");
+        if (closed || settled) return;
+        forceTimer = setTimeout(() => {
+          if (closed || settled) return;
+          finish(
+            undefined,
+            new CodexPreflightTerminationError(
+              "Codex preflight process did not exit after SIGKILL",
+              processClosed,
+              { cause: error },
+            ),
+          );
+        }, PREFLIGHT_TERMINATION_GRACE_MS);
+        forceTimer.unref?.();
+      }, PREFLIGHT_TERMINATION_GRACE_MS);
+      terminateTimer.unref?.();
+    };
     const append = (
       stream: "stdout" | "stderr",
-      chunk: Buffer | string,
+      chunk: Uint8Array,
     ): void => {
-      const value = typeof chunk === "string" ? chunk : chunk.toString("utf8");
-      if (stream === "stdout") stdout += value;
-      else stderr += value;
+      if (failure !== undefined) return;
+      const bytes = Buffer.from(chunk);
+      if (stream === "stdout") {
+        stdoutBytes += bytes.length;
+        if (stdoutBytes <= PREFLIGHT_OUTPUT_MAX_BYTES) {
+          stdout.push(bytes);
+        }
+      } else {
+        stderrBytes += bytes.length;
+        if (stderrBytes <= PREFLIGHT_OUTPUT_MAX_BYTES) {
+          stderr.push(bytes);
+        }
+      }
       if (
-        Buffer.byteLength(stream === "stdout" ? stdout : stderr, "utf8")
+        (stream === "stdout" ? stdoutBytes : stderrBytes)
         > PREFLIGHT_OUTPUT_MAX_BYTES
       ) {
-        child.kill("SIGKILL");
-        finish(
-          undefined,
+        terminate(
           new Error(`Codex ${stream} exceeded the preflight output limit`),
         );
       }
     };
     const onAbort = (): void => {
-      child.kill("SIGKILL");
-      finish(undefined, cancellationError(options.signal));
+      terminate(cancellationError(options.signal));
     };
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
-      finish(undefined, new Error("Codex preflight timed out"));
+      terminate(new Error("Codex preflight timed out"));
     }, options.timeoutMs);
     timer.unref?.();
     child.stdout.on(
       "data",
-      (chunk: Buffer | string) => append("stdout", chunk),
+      (chunk) => append("stdout", chunk),
     );
     child.stderr.on(
       "data",
-      (chunk: Buffer | string) => append("stderr", chunk),
+      (chunk) => append("stderr", chunk),
     );
-    child.once("error", (error) => finish(undefined, error));
+    child.stdout.on("error", (error) => terminate(error));
+    child.stderr.on("error", (error) => terminate(error));
+    child.stdin.on("error", (error) => {
+      terminate(error);
+    });
+    child.once("error", (error) => {
+      if (child.pid === undefined) {
+        finish(undefined, error);
+        return;
+      }
+      terminate(error);
+    });
     child.once("close", (code, signal) => {
-      finish({ code, signal, stdout, stderr });
+      closed = true;
+      resolveClosed();
+      if (failure !== undefined) {
+        finish(undefined, failure);
+        return;
+      }
+      finish({
+        code,
+        signal,
+        stdout: Buffer.concat(stdout, stdoutBytes).toString("utf8"),
+        stderr: Buffer.concat(stderr, stderrBytes).toString("utf8"),
+      });
     });
     options.signal.addEventListener("abort", onAbort, { once: true });
-    child.stdin.end();
+    try {
+      child.stdin.end();
+    } catch (error) {
+      terminate(error instanceof Error ? error : new Error(String(error)));
+    }
     if (options.signal.aborted) onAbort();
   });
 }

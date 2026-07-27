@@ -18,7 +18,7 @@ pnpm run generate:source-beta-docs
 
 | Package | Public entrypoints | Named exports | Package API |
 | --- | ---: | ---: | --- |
-| `@mono-agent/module-sdk` | 5 | 347 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
+| `@mono-agent/module-sdk` | 5 | 354 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/module-sdk/README.md) |
 | `@mono-agent/core` | 1 | 60 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/core/README.md) |
 | `@mono-agent/cli` | 1 | 4 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/cli/README.md) |
 | `@mono-agent/runtime-pi` | 1 | 6 | [README](https://github.com/robertsreberski/mono-agent-next/blob/main/packages/runtime-pi/README.md) |
@@ -329,12 +329,18 @@ RESERVED_MODULE_KINDS
 ReservedModuleDefinition
 ReservedModuleKind
 ReservedModuleManifest
+SANDBOX_EXECUTE_CAPABILITY
 Sandbox
 SandboxCommand
+SandboxExecutor
 SandboxHost
 SandboxModuleCreateContext
 SandboxModuleDefinition
+SandboxProcess
+SandboxProcessInput
+SandboxProcessOutput
 SandboxResult
+SandboxSpawnCommand
 StateCompareAndSwapRequest
 StateCompareAndSwapResult
 StateDeleteArtifactRequest
@@ -375,6 +381,7 @@ TriggerHost
 TriggerModuleCreateContext
 TriggerModuleDefinition
 TriggerReceipt
+grantedSandboxExecutor
 ```
 
 ### `@mono-agent/module-sdk/secure-fs`

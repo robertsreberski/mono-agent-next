@@ -98,11 +98,13 @@ refresh and is the only command path that may access provider model endpoints.
 provide Pi's interactive `AuthInteraction` prompt surface. Command results
 never contain keys, tokens, or raw provider/storage errors.
 
-This runtime reports `approvals: true`, `structuredOutput: true`,
-`maxOutputTokens: true`, and `sandbox: false`, both globally and for exact
-model routes. Core-owned tools, including an enabled `MemoryRecall`, are
-forwarded to Pi unchanged and still execute through Core. This includes the
-policy-filtered `AskUser` tool whenever the active Core attempt has an
+This runtime reports `approvals: true`, `structuredOutput: true`, and
+`maxOutputTokens: true` globally and for exact model routes. Its actual
+`sandbox` capability is `true` when Core selected and granted
+`sandbox.execute.v1`, and `false` when policy explicitly selects
+`sandbox.mode: "off"`. Core-owned tools, including an enabled `MemoryRecall`,
+are forwarded to Pi unchanged and still execute through Core. This includes
+the policy-filtered `AskUser` tool whenever the active Core attempt has an
 interaction bridge. Pi can call it, wait while Core routes the canonical
 one-to-three-question interaction, receive the bounded structured answer as its
 tool result, and continue the same provider turn without a separate approval
@@ -120,13 +122,14 @@ dispatch:
 - `WebSearch`: `network`.
 
 Every descriptor uses `approval: "core-callback"` and
-`sandbox: "unsupported"`. Core must accept each exact descriptor under the
+`sandbox: "core-executor"`. Core must accept each exact descriptor under the
 configured and request-level tool policies and supply
-`RuntimeTurnContext.requestApproval` for every turn. Automatic allow/deny
-policies return their decision through that same callback; interactive policy
-uses the configured interaction handler. A missing or mismatched approval
-bridge fails before provider access, and denial happens before filesystem,
-process, or network effects.
+`RuntimeTurnContext.requestApproval` for every turn. When a sandbox is
+selected, Core also supplies the exact executor grant before provider access.
+Automatic allow/deny policies return their decision through the approval
+callback; interactive policy uses the configured interaction handler. A
+missing or mismatched approval or sandbox bridge fails before provider access,
+and denial happens before filesystem, process, or network effects.
 
 Approval summaries bind decisions to exact paths, workdirs, queries, commands,
 limits, and `replace_all`, plus complete UTF-8 byte lengths, SHA-256 digests,
@@ -151,7 +154,7 @@ processing and omits BMP images. Images are additionally capped at 4.5 MiB of
 encoded payload before the result reaches provider context or runtime
 recording; an oversized image is omitted with an explicit tool-result notice.
 Bash accepts legacy millisecond timeouts, caps every command at 600 seconds,
-kills the process tree on cancellation, keeps the provider preview within Pi's
+kills the worker process group on cancellation, keeps the provider preview within Pi's
 2,000-line/50-KiB output bound, and kills output-flooding commands above a
 1-MiB hard capture limit without persisting unbounded full output. `Glob` uses
 a cancellation-aware local traversal capped at 100,000 filesystem entries and
@@ -160,6 +163,11 @@ a cancellation-aware local traversal capped at 100,000 filesystem entries and
 an explicit `PARTIAL` diagnostic when the bounded search reaches its match or
 raw-stream or formatted-byte limit, so a dense early file cannot make an
 incomplete projection appear exhaustive.
+
+Process-group termination covers ordinary descendants. Code that deliberately
+creates a new session or process group can outlive cancellation; with a selected
+sandbox it remains confined by that sandbox's policy, while sandbox-off execution
+retains host authority.
 
 `Edit` remains deliberately narrower: it accepts only an existing,
 owner-controlled, single-link regular UTF-8 file below the workspace, rejects
@@ -178,12 +186,23 @@ bounded response and output sizes, checked same-origin redirects, a
 whole-request timeout, strict content type and UTF-8 decoding, and distinguishes
 a recognized empty result page from transport, HTTP, or parser failure.
 
-The REPL child inherits the host's `process.env`; approved code can inspect
-environment values in addition to the declared filesystem, subprocess, and
-network authority. Because this package does not implement a sandbox boundary,
-routes using these native tools require `sandbox.mode: "off"`. Operators should
-treat an approved REPL call as granting the code full authority within the
+With a selected sandbox, `NodeRepl` uses the executor's long-lived process
+boundary and the other eight tools use bounded one-shot executor calls. The
+runtime never retries those calls through host execution when sandbox startup,
+policy, I/O, or shutdown fails. With `sandbox.mode: "off"`, the existing host
+paths remain explicit: the REPL child inherits the host's `process.env`, and
+approved code can inspect environment values in addition to the declared
+filesystem, subprocess, and network authority. Operators should treat an
+approved sandbox-off REPL call as granting the code full authority within the
 runtime process's operating-system permissions.
+One-shot worker responses carry only model-visible content and are capped at
+5 MiB, preserving the 4.5-MiB encoded-image limit plus its bounded JSON
+envelope. A selected sandbox configured with a stricter output limit can reject
+an otherwise valid large-image result and remains authoritative.
+If a selected `NodeRepl` process does not report closure after bounded
+`SIGTERM` and `SIGKILL` phases, the runtime quarantines the instance: health is
+unhealthy, new turns fail with `PROCESS_TERMINATION_FAILED`, and stop cannot
+report clean shutdown.
 
 Schema-constrained turns use a narrower execution path. When Core supplies
 `RuntimeTurnRequest.options.responseSchema`, the runtime removes all nine
@@ -207,14 +226,16 @@ model's own maximum.
 2. The runtime resolves the `provider:model` route through Pi's built-in model
    registry or an explicitly configured local provider.
 3. For an ordinary turn, Core's pre-provider negotiation accepts the nine exact
-   authority descriptors and supplies the fail-closed approval callback. For a
+   authority descriptors, supplies the fail-closed approval callback, and,
+   when selected, supplies the exact sandbox executor grant. For a
    schema-constrained turn, the runtime suppresses those native tools and
    substitutes its terminating schema tool.
 4. A fresh native Pi `AgentHarness` attempt is seeded from Core's canonical
    messages, or an explicitly linked native session is forked for continuation.
 5. The harness exposes the nine governed native tools. The Node.js REPL child
    is lazy and run-scoped; every coding and web adapter independently validates
-   and bounds each approved call.
+   and bounds each approved call. A selected sandbox carries all nine through
+   Core's executor, while sandbox-off uses the explicit host paths.
 6. Persistent attempts create an owner-private reservation before the Pi JSONL
    session, bind the reservation token into the session header, and atomically
    commit the marker only after successful settlement. Startup removes only
@@ -241,6 +262,8 @@ before model resolution or any provider request.
 | `edit.ts` | Bounded literal workspace editing with no-follow identity checks and atomic replacement. |
 | `models.ts` | Built-in models plus bounded, redirect-safe local-provider discovery. |
 | `node-repl.ts`, `node-repl-worker.ts` | Bounded run-scoped Node REPL child lifecycle and evaluation. |
+| `sandbox-tools.ts`, `sandbox-tools-worker.ts` | Fail-closed Core executor facade and bounded one-shot native-tool worker. |
+| `typescript-source-loader.mjs` | Source-checkout worker import resolver; published dist workers do not use it. |
 | `session-storage.ts`, `session-manager.ts`, `sessions.ts` | Guarded owner-private session storage, reservation/attempt lifecycle, and the stable internal facade. |
 | `runtime.ts`, `runtime-errors.ts` | Native harness lifecycle, classified failures, session settlement, and live-input cleanup. |
 | `runtime-messages.ts`, `runtime-events.ts`, `runtime-tools.ts` | Message translation, Pi-event normalization, and governed runtime tool adapters. |
@@ -285,11 +308,12 @@ adapter, core host, channels, state implementations, or products.
 
 It does not choose cross-runtime fallbacks, persist the canonical transcript,
 load agent configuration, run channels, install packages, own MCP processes,
-render approval interactions, implement sandboxing, or widen tool policy. Core
-retains those responsibilities. The runtime requests a correlated Core decision
-for every runtime-owned native-tool call on an ordinary turn and never
-interprets provider output as approval. Schema-constrained turns deliberately
-remove those native tools rather than silently approving them.
+render approval interactions, select or implement sandbox policy, or widen tool
+policy. Core and the selected sandbox module retain those responsibilities.
+The runtime consumes only Core's exact executor grant, requests a correlated
+Core decision for every runtime-owned native-tool call on an ordinary turn,
+and never interprets provider output as approval. Schema-constrained turns
+deliberately remove those native tools rather than silently approving them.
 
 ## Related Documentation
 

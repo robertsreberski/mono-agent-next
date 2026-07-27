@@ -411,7 +411,7 @@ Kind: `sandbox`. Canonical selected path: `policy.sandbox`.
 | `policy.sandbox.limits.maxEnvironmentBytes` | `integer` | no | `65536` | `maximum 1048576; minimum 0` | no | no | — |
 | `policy.sandbox.limits.maxEnvironmentVariables` | `integer` | no | `64` | `maximum 256; minimum 0` | no | no | — |
 | `policy.sandbox.limits.maxInputBytes` | `integer` | no | `1048576` | `maximum 16777216; minimum 0` | no | no | — |
-| `policy.sandbox.limits.maxOutputBytes` | `integer` | no | `4194304` | `maximum 67108864; minimum 1` | no | no | — |
+| `policy.sandbox.limits.maxOutputBytes` | `integer` | no | `5242880` | `maximum 67108864; minimum 1` | no | no | — |
 | `policy.sandbox.limits.maxTimeoutMs` | `integer` | no | `600000` | `maximum 3600000; minimum 1` | no | no | — |
 | `policy.sandbox.settings` | `object` | yes | — | `closed object` | no | no | — |
 | `policy.sandbox.settings.path` | `string` | yes | — | `minLength 1` | no | no | — |

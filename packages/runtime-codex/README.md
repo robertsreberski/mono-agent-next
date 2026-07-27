@@ -55,9 +55,33 @@ That home persists across process restarts so native thread continuation
 survives, but it must have mode `0700` and may not contain `config.toml`.
 
 The runtime requires exactly `codex-cli 0.145.0`. It starts
-`codex app-server --listen stdio:// --strict-config` directly, without a shell,
-from a fresh non-project process directory, and fails closed on malformed or
-oversized protocol output.
+`codex app-server --listen stdio:// --strict-config` without a shell, from a
+fresh non-project process directory, and fails closed on malformed or oversized
+protocol output. With a selected Core sandbox, the version, MCP, config-probe,
+and app-server children all use the granted executor. With
+`sandbox.mode: "off"`, they use the direct host process path. A selected
+sandbox failure never falls back to that host path. Selected-sandbox config
+must set `binary` to the absolute Codex executable path and allow `CODEX_HOME`
+in the sandbox environment. When module API-key auth is configured, also allow
+`OPENAI_API_KEY`. Put unchanged operational names such as `PATH`,
+`HOME`, `TMPDIR`, and `LANG` in `inherit` as needed.
+
+For selected execution, Core's per-instance runtime data directory is a
+required canonical, current-user-owned `0700` root. Every fresh non-project
+Codex process working directory is created and removed below that root; the
+module-auth `codex-home` remains persistent there. With sandboxing off, fresh
+process working directories retain their direct host location under the
+operating system temporary directory.
+
+Restrictive SRT filesystem rules must use canonical absolute paths. Relative
+rules such as `"."` resolve from the wrapper working directory, and Codex uses
+both fresh process directories and the requested workspace during preflight.
+Allow read access to the canonical workspace and Codex runtime data roots, and
+allow the runtime data root to be written. Grant the intended canonical
+workspace write scope only when Codex mutations are allowed. Ambient native
+authentication also requires the canonical native `CODEX_HOME` outside the
+runtime data root, with only the read/write scope needed for login and native
+thread continuation.
 
 The selected instance exposes `codex:auth` before it starts. Its default
 `status` action reports only whether module-config API-key auth or unverified
@@ -95,9 +119,11 @@ native surfaces. Command execution is conservatively
 classified as read/write/execute even though the intrinsic sandbox remains
 read-only. Command and file-change escalations are advertised as exact
 Core-callback surfaces, so each app-server approval request maps one-to-one to
-the descriptor Core validates. This runtime-owned narrowing boundary is not an
-implementation of the selected Core sandbox slot, so the runtime advertises
-approval support but does not advertise Core sandbox support.
+the descriptor Core validates. This runtime-owned narrowing boundary is
+independent of Core's selected sandbox slot. The runtime advertises both
+approval and sandbox compatibility: when selected, Core wraps the complete
+Codex CLI process tree in the granted sandbox executor while Codex retains its
+stricter intrinsic descriptors.
 
 Missing, invalid, timed-out, mismatched, or failed approval callbacks are
 denied. App-server permission-profile escalation requests always receive an
@@ -128,6 +154,7 @@ apply the configured session-unavailable policy deterministically.
 | `json-rpc.ts` | Bounded, timeout-aware, direct-process JSON-RPC client. |
 | `model.ts` | Public model validation and runtime capability metadata. |
 | `preflight.ts` | Process-home preparation, direct probes, and effective-config verification. |
+| `sandbox.ts` | Adapter from Core's exact sandbox executor grant to the owned process seam. |
 | `runtime.ts` | Turn orchestration, cancellation, live input, and event normalization. |
 | `index.ts` | Typed module definition. |
 
@@ -165,9 +192,9 @@ runtime.
 
 ## What This Package Does Not Own
 
-It does not choose fallback, execute Core tools, decide approval policy, claim a
-Core sandbox boundary, persist the canonical transcript, or migrate a Codex
-thread to another runtime.
+It does not choose fallback, execute Core tools, decide approval or sandbox
+policy, persist the canonical transcript, or migrate a Codex thread to another
+runtime.
 
 ## Related Documentation
 

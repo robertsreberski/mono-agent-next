@@ -237,8 +237,87 @@ export interface SandboxResult {
   readonly stderr: Uint8Array;
   readonly timedOut: boolean;
 }
+export interface SandboxSpawnCommand {
+  readonly command: string;
+  readonly arguments: readonly string[];
+  readonly workingDirectory: string;
+  readonly environment?: Readonly<Record<string, string>>;
+}
+export interface SandboxProcessInput {
+  write(chunk: string | Uint8Array, callback?: (error?: Error | null) => void): boolean;
+  write(chunk: string, encoding: BufferEncoding, callback?: (error?: Error | null) => void): boolean;
+  end(callback?: () => void): this;
+  end(chunk: string | Uint8Array, callback?: () => void): this;
+  end(chunk: string, encoding: BufferEncoding, callback?: () => void): this;
+  on(event: "drain", listener: () => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+}
+export interface SandboxProcessOutput {
+  on(event: "data", listener: (chunk: Uint8Array) => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+}
+/**
+ * First-party streaming child facade for runtime adapter protocols.
+ *
+ * It deliberately exposes only the stdio, close, and signal surface shared by
+ * the shipped CLI adapters. The selected sandbox retains process ownership,
+ * aggregate input/output limits, and bounded signal escalation.
+ */
+export interface SandboxProcess {
+  readonly pid: number | undefined;
+  readonly stdin: SandboxProcessInput;
+  readonly stdout: SandboxProcessOutput;
+  readonly stderr: SandboxProcessOutput;
+  once(event: "error", listener: (error: Error) => void): this;
+  once(
+    event: "close",
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): this;
+  kill(signal?: NodeJS.Signals): boolean;
+}
+export const SANDBOX_EXECUTE_CAPABILITY = "sandbox.execute.v1" as const;
+export interface SandboxExecutor {
+  execute(command: SandboxCommand): Promise<SandboxResult>;
+  spawn(command: SandboxSpawnCommand): SandboxProcess;
+}
+export function grantedSandboxExecutor(
+  host: ModuleHost,
+): SandboxExecutor | undefined {
+  if (!host.grantedCapabilities.has(SANDBOX_EXECUTE_CAPABILITY)) return undefined;
+  const value = host.getCapability(SANDBOX_EXECUTE_CAPABILITY);
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("sandbox.execute.v1 grant must be an object");
+  }
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.length !== 2
+    || !keys.includes("execute")
+    || !keys.includes("spawn")
+  ) {
+    throw new TypeError("sandbox.execute.v1 grant must expose exact execute and spawn methods");
+  }
+  const executeDescriptor = Object.getOwnPropertyDescriptor(value, "execute");
+  const spawnDescriptor = Object.getOwnPropertyDescriptor(value, "spawn");
+  if (
+    executeDescriptor === undefined
+    || !("value" in executeDescriptor)
+    || typeof executeDescriptor.value !== "function"
+    || spawnDescriptor === undefined
+    || !("value" in spawnDescriptor)
+    || typeof spawnDescriptor.value !== "function"
+  ) {
+    throw new TypeError("sandbox.execute.v1 grant methods must be own data functions");
+  }
+  const executor = value as SandboxExecutor;
+  const result: SandboxExecutor = {
+    execute: (command) => executor.execute(command),
+    spawn: (command) => executor.spawn(command),
+  };
+  return Object.freeze(result);
+}
 export interface Sandbox extends ModuleInstance {
   execute(command: SandboxCommand): Promise<SandboxResult>;
+  spawn(command: SandboxSpawnCommand): SandboxProcess;
 }
 export type SandboxHost = ModuleHost;
 export type SandboxModuleCreateContext<TConfig> = ModuleCreateContext<TConfig, SandboxHost>;

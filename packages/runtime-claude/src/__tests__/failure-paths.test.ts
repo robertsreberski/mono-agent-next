@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 
 import {
@@ -8,9 +10,14 @@ import {
   type RuntimeTurnContext,
   type RuntimeTurnRequest,
 } from "@mono-agent/module-sdk";
+import type {
+  SandboxExecutor,
+  SandboxProcess,
+} from "@mono-agent/module-sdk/internal";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  ClaudeCliProcessTerminationError,
   createClaudeCliTransport,
   type ProcessLike,
 } from "../cli.js";
@@ -132,11 +139,14 @@ function cliOptions(spawnProcess: () => ProcessLike) {
 describe("runtime-claude failure paths", () => {
   it("contains an asynchronous CLI stdin EPIPE to the failed turn", async () => {
     const brokenPipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
-    const child = new ControlledClaudeProcess(new Writable({
+    let child!: ControlledClaudeProcess;
+    child = new ControlledClaudeProcess(new Writable({
       write(_chunk, _encoding, callback) {
         callback(brokenPipe);
       },
-    }));
+    }), (signal) => {
+      queueMicrotask(() => child.emit("close", null, signal));
+    });
     const transport = createClaudeCliTransport(cliOptions(() => child));
 
     await expect(transport.run(transportRequest(), transportEvents))
@@ -147,7 +157,10 @@ describe("runtime-claude failure paths", () => {
   it.each(["stdout", "stderr"] as const)(
     "contains a CLI %s stream error to the failed turn",
     async (stream) => {
-      const child = new ControlledClaudeProcess();
+      let child!: ControlledClaudeProcess;
+      child = new ControlledClaudeProcess(undefined, (signal) => {
+        queueMicrotask(() => child.emit("close", null, signal));
+      });
       let didLaunch!: () => void;
       const launched = new Promise<void>((resolve) => {
         didLaunch = resolve;
@@ -204,7 +217,12 @@ describe("runtime-claude failure paths", () => {
   it("cli transport escalates SIGTERM then SIGKILL on timeout", async () => {
     vi.useFakeTimers();
     try {
-      const child = new ControlledClaudeProcess();
+      let child!: ControlledClaudeProcess;
+      child = new ControlledClaudeProcess(undefined, (signal) => {
+        if (signal === "SIGKILL") {
+          queueMicrotask(() => child.emit("close", null, signal));
+        }
+      });
       let promptPath: string | undefined;
       let didLaunch!: () => void;
       const launched = new Promise<void>((resolve) => {
@@ -251,13 +269,86 @@ describe("runtime-claude failure paths", () => {
     }
   });
 
+  it("requires close after SIGKILL and retains isolation until a late close", async () => {
+    vi.useFakeTimers();
+    const dataDirectory = realpathSync(mkdtempSync(
+      join(tmpdir(), "runtime-claude-stubborn-cli-"),
+    ));
+    let child: ControlledClaudeProcess | undefined;
+    try {
+      child = new ControlledClaudeProcess();
+      let promptPath: string | undefined;
+      let didLaunch!: () => void;
+      const launched = new Promise<void>((resolve) => {
+        didLaunch = resolve;
+      });
+      const transport = createClaudeCliTransport({
+        ...cliOptions(() => child as ControlledClaudeProcess),
+        timeoutMs: 5,
+        terminationGraceMs: 5,
+        dataDirectory,
+        spawnProcess(_command, args) {
+          promptPath = args[args.indexOf("--system-prompt-file") + 1];
+          didLaunch();
+          return child as ControlledClaudeProcess;
+        },
+      });
+      const pending = transport.run(
+        { ...transportRequest(), systemPrompt: "private instructions" },
+        transportEvents,
+      );
+      const failure = pending.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+
+      await launched;
+      await vi.advanceTimersByTimeAsync(5);
+      expect(child.signals).toEqual(["SIGTERM"]);
+      await vi.advanceTimersByTimeAsync(5);
+      expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+      await vi.advanceTimersByTimeAsync(5);
+      const terminationError = await failure;
+      expect(terminationError).toBeInstanceOf(
+        ClaudeCliProcessTerminationError,
+      );
+      expect((terminationError as Error).cause).toMatchObject({
+        message: "Claude CLI timed out after 5ms",
+      });
+
+      expect(promptPath).toBeDefined();
+      expect(existsSync(promptPath as string)).toBe(true);
+      vi.useRealTimers();
+      child.emit("close", null, "SIGKILL");
+      await vi.waitFor(() => {
+        expect(existsSync(promptPath as string)).toBe(false);
+      });
+    } finally {
+      child?.emit("close", null, "SIGKILL");
+      rmSync(dataDirectory, { recursive: true, force: true });
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects an invalid CLI termination grace", () => {
+    expect(() => createClaudeCliTransport({
+      ...cliOptions(() => new ControlledClaudeProcess()),
+      terminationGraceMs: 0,
+    })).toThrow("terminationGraceMs must be a positive safe integer");
+  });
+
   it.each(["abort", "timeout"] as const)(
     "bounds %s when an active CLI event callback never settles",
     async (trigger) => {
       vi.useFakeTimers();
       try {
         const controller = new AbortController();
-        const child = new ControlledClaudeProcess();
+        let child!: ControlledClaudeProcess;
+        child = new ControlledClaudeProcess(undefined, (signal) => {
+          if (signal === "SIGKILL") {
+            queueMicrotask(() => child.emit("close", null, signal));
+          }
+        });
         let didLaunch!: () => void;
         const launched = new Promise<void>((resolve) => {
           didLaunch = resolve;
@@ -1092,10 +1183,112 @@ describe("runtime-claude failure paths", () => {
     }
   });
 
+  it("quarantines cancellation when a sandboxed CLI child remains live", async () => {
+    vi.useFakeTimers();
+    const dataDirectory = realpathSync(mkdtempSync(
+      join(tmpdir(), "runtime-claude-stubborn-sandbox-"),
+    ));
+    const child = new ControlledClaudeProcess();
+    let promptPath: string | undefined;
+    let didLaunch!: () => void;
+    const launched = new Promise<void>((resolve) => {
+      didLaunch = resolve;
+    });
+    const sandboxExecutor: SandboxExecutor = {
+      async execute() {
+        throw new Error("one-shot sandbox execution is not expected");
+      },
+      spawn(command) {
+        promptPath = command.arguments[
+          command.arguments.indexOf("--system-prompt-file") + 1
+        ];
+        didLaunch();
+        return child as unknown as SandboxProcess;
+      },
+    };
+    const runtime = createRuntimeClaude({
+      config: parseRuntimeClaudeConfig({
+        mode: "cli",
+        binary: process.execPath,
+        timeoutMs: 5_000,
+      }),
+      instanceId: "claude-stubborn-sandbox-runtime",
+      workspaceDirectory: process.cwd(),
+      dataDirectory,
+      sandboxExecutor,
+      terminationGraceMs: 5,
+    });
+    const controller = new AbortController();
+    const signal = new AbortController().signal;
+
+    try {
+      await runtime.start?.({ signal });
+      const inFlight = runtime.runTurn({
+        ...turnRequest(controller.signal),
+        messages: [
+          {
+            role: "system",
+            content: [{ type: "text", text: "private instructions" }],
+          },
+          {
+            role: "user",
+            content: [{ type: "text", text: "hello" }],
+          },
+        ],
+      }, runtimeContext);
+      const turnRejected = expect(inFlight).rejects.toMatchObject({
+        code: "PROCESS_TERMINATION_FAILED",
+      });
+      await launched;
+      expect(promptPath).toBeDefined();
+      expect(existsSync(promptPath as string)).toBe(true);
+
+      controller.abort(new Error("operator cancelled"));
+      const stopping = Promise.resolve(runtime.stop?.({
+        signal,
+        reason: "shutdown",
+      }));
+      const stopRejected = expect(stopping).rejects.toMatchObject({
+        code: "PROCESS_TERMINATION_FAILED",
+      });
+      expect(child.signals).toEqual(["SIGTERM"]);
+
+      await vi.advanceTimersByTimeAsync(5);
+      expect(child.signals).toEqual(["SIGTERM", "SIGKILL"]);
+      await vi.advanceTimersByTimeAsync(5);
+      await Promise.all([turnRejected, stopRejected]);
+
+      expect(await runtime.health?.({ signal })).toMatchObject({
+        status: "unhealthy",
+        details: {
+          state: "draining",
+          activeTurns: 0,
+          quarantineCode: "PROCESS_TERMINATION_FAILED",
+        },
+      });
+      expect(existsSync(promptPath as string)).toBe(true);
+
+      vi.useRealTimers();
+      child.emit("close", null, "SIGKILL");
+      await vi.waitFor(() => {
+        expect(existsSync(promptPath as string)).toBe(false);
+      });
+    } finally {
+      child.emit("close", null, "SIGKILL");
+      rmSync(dataDirectory, { recursive: true, force: true });
+      vi.useRealTimers();
+    }
+  });
+
   it("keeps a timed-out CLI turn owned until the SIGKILL barrier", async () => {
     vi.useFakeTimers();
     try {
-      const child = new ControlledClaudeProcess();
+      let child!: ControlledClaudeProcess;
+      child = new ControlledClaudeProcess(undefined, (signal) => {
+        if (signal === "SIGKILL") {
+          queueMicrotask(() => child.emit("close", null, signal));
+        }
+      });
       let didLaunch!: () => void;
       const launched = new Promise<void>((resolve) => {
         didLaunch = resolve;
