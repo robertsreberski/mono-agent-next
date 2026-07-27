@@ -107,11 +107,18 @@ Every selected object starts with `$use`:
 }
 ```
 
-The package name must be a literal bare npm name. Paths, subpaths, aliases,
-links, patches, Git sources, and HTTP sources are rejected. A selected package
-must be in `dependencies` or `optionalDependencies`, not only
-`devDependencies`, and the npm or pnpm root lockfile must prove the same direct
-installed version.
+The `$use` package name must be a literal bare npm name. A selected package must
+be in `dependencies` or `optionalDependencies`, not only `devDependencies`, and
+the npm or pnpm root lockfile must prove the same direct installed version.
+Registry versions, ranges, and tags remain supported. The sole source-preview
+exception is a lowercase `file:<project-relative-path>.tgz` direct dependency
+installed through npm; its `package-lock.json` entry must record the same
+lexical locator, installed version, and a syntactically valid canonical SHA-512
+SRI. Core validates the installed package directory but does not reopen the
+retained archive; `npm ci` and `verify:minimal` check its bytes. Pnpm remains
+supported for registry dependencies, not this source-preview exception. Local
+directories, parent or absolute paths, `file://`, subpaths, aliases, links,
+workspaces, patches, Git sources, HTTP sources, and bare archives are rejected.
 
 After safe path resolution, core verifies package manifest identity, entry
 containment, API version, kind, responsibility, and the exported
@@ -326,8 +333,11 @@ record; it never receives the bearer-token value.
   diagnostics redact resolved values.
 - Direct manifest plus lockfile proof, realpath-contained package entry, and
   matching package/export metadata before import.
-- No dynamic install, path module, implicit self-registration, or arbitrary
-  code fallback.
+- A source-preview tarball locator and canonical SHA-512 SRI are recorded in
+  `package-lock.json`; Core does not treat that metadata as publisher or byte
+  attestation.
+- No dynamic install, path-valued `$use`, mutable local-directory module,
+  implicit self-registration, or arbitrary code fallback.
 
 ### Transport
 
@@ -371,7 +381,7 @@ they name; they are not evidence that every historical behavior was retained.
 | --- | --- | --- |
 | Architecture and 23-package roster | Implemented | This page, `scripts/lib/package-catalog.mjs`, generated package docs, and `check:architecture`. |
 | Strict config, module selection, and public APIs | Implemented | Package contracts, focused tests, generated config/API docs, and packed consumer proofs. |
-| Source build and clean packed execution | Implemented | `verify:minimal`, `verify:operator-products`, and `verify:system`. |
+| Source build, local-tarball consumer install, and clean packed execution | Implemented | `verify:minimal`, `verify:operator-products`, and `verify:system`. |
 | npm publication and clean registry install | Not completed | Release guard, pack/consumer checks, and a later explicitly authorized release. |
 | Consumer data adoption and service changes | Not performed by this source milestone | Package-specific safety contracts and a separately reviewed adoption plan. |
 

@@ -4,10 +4,22 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { publicNpmEnvironment } from "../release/publish-release.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const VERSION = "0.15.0";
@@ -34,6 +46,13 @@ const RUNTIME_DEPENDENCIES = Object.freeze([
   "@mono-agent/channel-webhook",
 ]);
 
+const BOOTSTRAP_DEPENDENCIES = Object.freeze([
+  "create-mono-agent",
+  "@mono-agent/module-sdk",
+  "@mono-agent/core",
+  "@mono-agent/cli",
+]);
+
 const FORBIDDEN_V0_PACKAGES = Object.freeze([
   "@mono-agent/agent-app",
   "@mono-agent/agent-runtime",
@@ -49,7 +68,7 @@ async function main() {
   const consumerDirectory = join(temporaryRoot, "consumer");
   let runningCli;
   let provider;
-  let packageRegistry;
+  let registrySentinel;
 
   try {
     await Promise.all([
@@ -59,8 +78,8 @@ async function main() {
 
     buildPackages();
     const tarballs = packPackages(tarballDirectory);
-    packageRegistry = await startPackageRegistry(tarballs);
-    await installScaffolder(bootstrapDirectory, tarballs, packageRegistry.url);
+    registrySentinel = await startRegistrySentinel();
+    await installScaffolder(bootstrapDirectory, tarballs, registrySentinel.url);
     run(
       join(bootstrapDirectory, "node_modules", ".bin", "create-mono-agent"),
       [consumerDirectory],
@@ -71,8 +90,9 @@ async function main() {
     const scaffoldManifest = await readJson(scaffoldManifestPath);
     assertScaffoldDependencies(scaffoldManifest);
 
-    await installPackedRuntime(consumerDirectory, packageRegistry.url);
-    await assertCleanInstalledClosure(consumerDirectory);
+    const localSpecs = await installPackedRuntime(consumerDirectory, tarballs, registrySentinel.url);
+    await assertCleanInstalledClosure(consumerDirectory, localSpecs);
+    registrySentinel.assertUnused();
 
     provider = await startOpenAiCompatibleProvider();
     const configPath = join(consumerDirectory, "mono-agent.config.json");
@@ -183,14 +203,15 @@ async function main() {
     }
 
     console.log(
-      `Verified scaffold, packed five-package runtime closure, authenticated webhook, Pi-native turn, and graceful shutdown on Node.js ${process.versions.node}.`,
+      `Verified scaffold, real local-tarball five-package install, authenticated webhook, `
+      + `Pi-native turn, and graceful shutdown on Node.js ${process.versions.node}.`,
     );
   } finally {
     if (runningCli !== undefined) {
       await terminateRunningCli(runningCli);
     }
     await provider?.close();
-    await packageRegistry?.close();
+    await registrySentinel?.close();
     await rm(temporaryRoot, { recursive: true, force: true });
   }
 }
@@ -247,20 +268,28 @@ function parsePackJson(output) {
   return parsed;
 }
 
-async function installScaffolder(directory, tarballs, registryUrl) {
+async function installScaffolder(directory, tarballs, sentinelUrl) {
+  const localSpecs = await stagePackedArtifacts(directory, tarballs, BOOTSTRAP_DEPENDENCIES);
   await writeJson(join(directory, "package.json"), {
     name: "mono-agent-next-scaffold-bootstrap",
     version: "0.0.0",
     private: true,
     type: "module",
-    dependencies: { "create-mono-agent": `file:${tarballs.get("create-mono-agent")}` },
+    dependencies: Object.fromEntries(localSpecs),
+    overrides: npmLocalOverrides(localSpecs),
   });
-  await writeRegistryConfig(directory, registryUrl);
+  await writeRegistrySentinelConfig(directory, sentinelUrl);
   await runAsync(
-    "pnpm",
-    ["install", "--ignore-scripts", "--no-frozen-lockfile"],
+    "npm",
+    ["install", "--ignore-scripts", "--no-audit", "--no-fund"],
     directory,
-    installEnvironment(),
+    installEnvironment(sentinelUrl),
+  );
+  await runAsync(
+    "npm",
+    ["ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+    directory,
+    installEnvironment(sentinelUrl),
   );
 }
 
@@ -277,23 +306,61 @@ function assertScaffoldDependencies(manifest) {
   }
 }
 
-async function installPackedRuntime(directory, registryUrl) {
-  await writeRegistryConfig(directory, registryUrl);
-  const environment = installEnvironment();
-  await runAsync("pnpm", ["install", "--ignore-scripts", "--no-frozen-lockfile"], directory, environment);
-  await runAsync("pnpm", ["install", "--ignore-scripts", "--frozen-lockfile"], directory, environment);
+async function installPackedRuntime(directory, tarballs, sentinelUrl) {
+  const localSpecs = await stagePackedArtifacts(directory, tarballs, RUNTIME_DEPENDENCIES);
+  const manifestPath = join(directory, "package.json");
+  const manifest = await readJson(manifestPath);
+  manifest.dependencies = Object.fromEntries(localSpecs);
+  manifest.overrides = npmLocalOverrides(localSpecs);
+  await writeJson(manifestPath, manifest);
+  await writeRegistrySentinelConfig(directory, sentinelUrl);
+  const environment = installEnvironment(sentinelUrl);
+  await runAsync("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund"], directory, environment);
+  await runAsync("npm", ["ci", "--ignore-scripts", "--no-audit", "--no-fund"], directory, environment);
+  return localSpecs;
 }
 
-async function assertCleanInstalledClosure(directory) {
-  const lockPath = join(directory, "pnpm-lock.yaml");
-  const lock = await readFile(lockPath, "utf8");
+async function stagePackedArtifacts(directory, tarballs, packageNames) {
+  const packageDirectory = join(directory, ".mono-agent", "packages");
+  await mkdir(packageDirectory, { recursive: true });
+  const localSpecs = new Map();
+  for (const packageName of packageNames) {
+    const source = tarballs.get(packageName);
+    if (source === undefined) throw new Error(`Missing packed tarball for ${packageName}`);
+    const filename = basename(source);
+    await copyFile(source, join(packageDirectory, filename));
+    localSpecs.set(packageName, `file:.mono-agent/packages/${filename}`);
+  }
+  return localSpecs;
+}
+
+function npmLocalOverrides(localSpecs) {
+  return Object.fromEntries([...localSpecs.keys()]
+    .filter((packageName) => packageName.startsWith("@mono-agent/"))
+    .map((packageName) => [packageName, `$${packageName}`]));
+}
+
+async function writeRegistrySentinelConfig(directory, sentinelUrl) {
+  await writeFile(join(directory, ".npmrc"), [
+    `@mono-agent:registry=${sentinelUrl}`,
+    "fetch-retries=0",
+    "fetch-retry-mintimeout=1",
+    "fetch-retry-maxtimeout=1",
+    "",
+  ].join("\n"), "utf8");
+}
+
+async function assertCleanInstalledClosure(directory, localSpecs) {
+  const manifest = await readJson(join(directory, "package.json"));
+  const lock = await readJson(join(directory, "package-lock.json"));
+  const lockText = JSON.stringify(lock);
   for (const forbidden of FORBIDDEN_V0_PACKAGES) {
-    if (lock.includes(forbidden)) {
+    if (lockText.includes(forbidden)) {
       throw new Error(`Packed project lockfile contains predecessor package ${forbidden}`);
     }
   }
 
-  const listed = run("pnpm", ["list", "--prod", "--depth", "Infinity", "--json"], directory).stdout;
+  const listed = run("npm", ["ls", "--omit=dev", "--all", "--json"], directory).stdout;
   for (const forbidden of FORBIDDEN_V0_PACKAGES) {
     if (listed.includes(forbidden)) {
       throw new Error(`Packed project installed predecessor package ${forbidden}`);
@@ -316,12 +383,81 @@ async function assertCleanInstalledClosure(directory) {
     throw new Error(`Packed project unexpectedly installed native addons: ${nativeAddons.join(", ")}`);
   }
 
+  const lockPackages = lock !== null && typeof lock === "object" && !Array.isArray(lock)
+    && lock.packages !== null && typeof lock.packages === "object" && !Array.isArray(lock.packages)
+    ? lock.packages
+    : {};
+  const rootLock = lockPackages[""];
+  const lockedMonoAgentRoots = Object.keys(lockPackages)
+    .filter((path) => path.startsWith("node_modules/@mono-agent/"))
+    .map((path) => path.slice("node_modules/".length))
+    .sort();
+  if (JSON.stringify(lockedMonoAgentRoots) !== JSON.stringify(expectedMonoAgentPackages)) {
+    throw new Error(
+      `Packed project lockfile @mono-agent roots must be exactly ${expectedMonoAgentPackages.join(", ")}; `
+      + `found ${lockedMonoAgentRoots.join(", ")}`,
+    );
+  }
+
+  const realConsumerDirectory = await realpath(directory);
   for (const packageName of RUNTIME_DEPENDENCIES) {
-    const installed = await readJson(join(directory, "node_modules", ...packageName.split("/"), "package.json"));
+    const expectedSpec = localSpecs.get(packageName);
+    if (typeof expectedSpec !== "string") throw new Error(`Missing local spec for ${packageName}`);
+    const archivePath = join(directory, expectedSpec.slice("file:".length));
+    const archiveStat = await lstat(archivePath);
+    const realArchivePath = await realpath(archivePath);
+    if (
+      !archiveStat.isFile()
+      || archiveStat.isSymbolicLink()
+      || !isContainedPath(realConsumerDirectory, realArchivePath)
+    ) {
+      throw new Error(`Project-local tarball for ${packageName} is not a real contained file`);
+    }
+    const expectedIntegrity = `sha512-${createHash("sha512")
+      .update(await readFile(archivePath))
+      .digest("base64")}`;
+    if (manifest.dependencies?.[packageName] !== expectedSpec) {
+      throw new Error(`Project manifest did not retain the local tarball for ${packageName}`);
+    }
+    if (manifest.overrides?.[packageName] !== `$${packageName}`) {
+      throw new Error(`Project manifest did not override transitive ${packageName} to its direct local tarball`);
+    }
+    if (rootLock?.dependencies?.[packageName] !== expectedSpec) {
+      throw new Error(`Project lockfile root did not retain the local tarball for ${packageName}`);
+    }
+    const locked = lockPackages[`node_modules/${packageName}`];
+    if (
+      locked?.version !== VERSION
+      || locked.resolved !== expectedSpec
+      || locked.integrity !== expectedIntegrity
+      || locked.link === true
+    ) {
+      throw new Error(`Project lockfile did not bind ${packageName} to its exact local tarball and integrity`);
+    }
+    const installedRoot = join(directory, "node_modules", ...packageName.split("/"));
+    const installedStat = await lstat(installedRoot);
+    const realInstalledRoot = await realpath(installedRoot);
+    if (
+      !installedStat.isDirectory()
+      || installedStat.isSymbolicLink()
+      || !isContainedPath(realConsumerDirectory, realInstalledRoot)
+    ) {
+      throw new Error(`Installed ${packageName} is not a real consumer-contained package directory`);
+    }
+    const installed = await readJson(join(installedRoot, "package.json"));
     if (installed.name !== packageName || installed.version !== VERSION) {
       throw new Error(`Installed package identity mismatch for ${packageName}`);
     }
   }
+}
+
+function isContainedPath(root, target) {
+  const relativePath = relative(root, target);
+  return relativePath.length > 0
+    && !isAbsolute(relativePath)
+    && relativePath !== ".."
+    && !relativePath.startsWith("../")
+    && !relativePath.startsWith("..\\");
 }
 
 function collectPackageNames(value, output = new Set()) {
@@ -351,16 +487,16 @@ function assertScaffoldSchemaBoundary(schema) {
   }
 }
 
-async function writeRegistryConfig(directory, registryUrl) {
-  await writeFile(join(directory, ".npmrc"), `@mono-agent:registry=${registryUrl}\n`, "utf8");
-}
-
-function installEnvironment() {
-  return {
-    ...process.env,
-    NPM_CONFIG_REGISTRY: "https://registry.npmjs.org/",
-    NPM_CONFIG_USERCONFIG: "/dev/null",
-  };
+function installEnvironment(sentinelUrl, source = process.env) {
+  const environment = publicNpmEnvironment(source, { authenticated: false });
+  for (const key of Object.keys(environment)) {
+    const normalized = key.toLowerCase();
+    if (normalized === "npm_config_noproxy" || normalized === "no_proxy") delete environment[key];
+  }
+  environment.NO_PROXY = "127.0.0.1,localhost";
+  environment.npm_config_noproxy = "127.0.0.1,localhost";
+  environment["npm_config_@mono-agent:registry"] = sentinelUrl;
+  return environment;
 }
 
 function packedSmokeConfig(providerBaseUrl) {
@@ -410,94 +546,33 @@ function packedSmokeConfig(providerBaseUrl) {
   };
 }
 
-async function startPackageRegistry(tarballs) {
-  const packages = new Map();
-  for (const packageName of RUNTIME_DEPENDENCIES) {
-    const tarballPath = tarballs.get(packageName);
-    if (tarballPath === undefined) throw new Error(`Missing packed tarball for ${packageName}`);
-    const bytes = await readFile(tarballPath);
-    const manifest = readPackedManifest(tarballPath);
-    packages.set(packageName, {
-      bytes,
-      manifest,
-      shasum: createHash("sha1").update(bytes).digest("hex"),
-      integrity: `sha512-${createHash("sha512").update(bytes).digest("base64")}`,
-    });
-  }
-
-  let registryUrl;
+async function startRegistrySentinel() {
+  const requests = [];
   const server = createServer((request, response) => {
-    try {
-      if (request.method !== "GET") {
-        response.writeHead(405, { allow: "GET" });
-        response.end();
-        return;
-      }
-      const pathname = decodeURIComponent(new URL(request.url ?? "/", "http://registry.invalid").pathname);
-      if (pathname.startsWith("/tarballs/")) {
-        const packageName = pathname.slice("/tarballs/".length, -`.tgz`.length);
-        const entry = packages.get(packageName);
-        if (entry === undefined) {
-          response.writeHead(404);
-          response.end();
-          return;
-        }
-        response.writeHead(200, {
-          "content-length": String(entry.bytes.length),
-          "content-type": "application/octet-stream",
-        });
-        response.end(entry.bytes);
-        return;
-      }
-      const packageName = pathname.replace(/^\//u, "");
-      const entry = packages.get(packageName);
-      if (entry === undefined || registryUrl === undefined) {
-        response.writeHead(404, { "content-type": "application/json" });
-        response.end(JSON.stringify({ error: "not found" }));
-        return;
-      }
-      const tarball = `${registryUrl}tarballs/${packageName}.tgz`;
-      const versionManifest = {
-        ...entry.manifest,
-        dist: { tarball, shasum: entry.shasum, integrity: entry.integrity },
-      };
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({
-        name: packageName,
-        "dist-tags": { latest: VERSION },
-        versions: { [VERSION]: versionManifest },
-      }));
-    } catch {
-      if (!response.headersSent) response.writeHead(500, { "content-type": "application/json" });
-      response.end(JSON.stringify({ error: "registry fixture failed" }));
-    }
+    requests.push(`${request.method ?? "UNKNOWN"} ${request.url ?? "/"}`);
+    response.writeHead(502, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "first-party registry access is forbidden in the tarball proof" }));
   });
   await new Promise((resolvePromise, rejectPromise) => {
     server.once("error", rejectPromise);
     server.listen(0, "127.0.0.1", resolvePromise);
   });
   const address = server.address();
-  if (address === null || typeof address === "string") throw new Error("Package registry fixture did not bind a port");
-  registryUrl = `http://127.0.0.1:${String(address.port)}/`;
+  if (address === null || typeof address === "string") {
+    throw new Error("First-party registry sentinel did not bind a TCP port");
+  }
   return {
-    url: registryUrl,
+    url: `http://127.0.0.1:${String(address.port)}/`,
+    assertUnused() {
+      if (requests.length > 0) {
+        throw new Error(`Tarball proof attempted first-party registry access: ${requests.join(", ")}`);
+      }
+    },
     async close() {
       server.closeAllConnections();
       await new Promise((resolvePromise) => server.close(resolvePromise));
     },
   };
-}
-
-function readPackedManifest(tarballPath) {
-  const result = spawnSync("tar", ["-xOf", tarballPath, "package/package.json"], {
-    encoding: "utf8",
-    shell: false,
-    timeout: COMMAND_TIMEOUT_MS,
-  });
-  if (result.error !== undefined || result.status !== 0) {
-    throw new Error(`Could not read packed manifest from ${tarballPath}: ${result.stderr ?? result.error?.message}`);
-  }
-  return JSON.parse(result.stdout);
 }
 
 async function startOpenAiCompatibleProvider() {

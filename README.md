@@ -39,14 +39,22 @@ node packages/create-mono-agent/dist/bin/create-mono-agent.js \
 ```
 
 The rendered project is ready to inspect, but its release-version dependencies
-cannot be installed from npm during the source preview. Run the hermetic packed
-proof to build those packages, install them into a temporary clean consumer,
+cannot be installed from npm during the source preview. Run the packed proof
+without external provider credentials to build those packages, install them into a temporary clean consumer,
 start an authenticated loopback webhook, complete one deterministic turn, and
 prove graceful shutdown:
 
 ```bash
 pnpm run verify:minimal
 ```
+
+`verify:minimal` proves the same supported source-preview boundary without a
+workspace link or local package registry: it installs the five agent packages
+from project-contained tarballs and verifies the resulting lock evidence. To
+retain a runnable consumer, follow the
+[retained minimal local-tarball install](./docs/getting-started/install.md#install-a-retained-minimal-local-tarball-consumer).
+That path does not publish packages or make the predecessor registry artifacts
+eligible.
 
 For contributor checks and the other bounded proofs:
 
@@ -137,10 +145,15 @@ Every module selection uses a literal bare npm package name:
 Selection is not discovery. Each `$use` package must be a direct production
 dependency of the agent project, be present in the root importer of its npm or
 pnpm lockfile, resolve inside its installed package root, and expose matching
-metadata. Core rejects unknown envelope fields, mismatched kinds or versions,
-unsafe dependency specifications, unresolved cross-module references, and
-invalid module options. Secret fields require an explicit `{"$env":"NAME"}`
-reference; mono-agent does not implicitly load `.env` files.
+metadata. `$use` always remains a literal package name. During the source
+preview, its direct dependency may use an npm-managed, project-relative
+`file:*.tgz` specification whose locator, installed version, and SHA-512
+SRI are recorded by `package-lock.json`; the frozen install and packed verifier
+check the retained archive bytes. Pnpm remains supported for registry
+dependencies. Core rejects other local paths and unsafe dependency
+specifications, unresolved cross-module references, and invalid module options.
+Secret fields require an explicit `{"$env":"NAME"}` reference; mono-agent does
+not implicitly load `.env` files.
 
 ## Scaffolding
 
@@ -166,7 +179,9 @@ node packages/create-mono-agent/dist/bin/create-mono-agent.js \
 
 The scaffolder does not run package installation unless `--install` is supplied,
 does not overwrite an existing target, and never writes credential values.
-Registry installation remains part of the later release phase.
+Do not pass `--install` during the source preview. A retained local-tarball
+consumer is installed manually only for the minimal template after rendering;
+registry installation remains part of the later release phase.
 
 ## CLI contract
 

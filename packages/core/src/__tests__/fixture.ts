@@ -30,6 +30,9 @@ export interface FixtureModuleOptions {
   readonly dependencySpec?: unknown;
   readonly dependencyField?: "dependencies" | "optionalDependencies" | "devDependencies";
   readonly lockVersion?: string;
+  readonly lockResolved?: string;
+  readonly lockIntegrity?: string;
+  readonly lockLink?: boolean;
   readonly omitFromLock?: boolean;
   readonly packageMetadata?: false;
   readonly entrySource?: string;
@@ -136,7 +139,12 @@ export const monoAgentModule = {
     if (!option.omitFromLock) {
       const lockTarget = field === "dependencies" ? lockDependencies : field === "optionalDependencies" ? lockOptional : lockDev;
       lockTarget[name] = spec;
-      lockPackages[`node_modules/${name}`] = { version: option.lockVersion ?? version };
+      lockPackages[`node_modules/${name}`] = {
+        version: option.lockVersion ?? version,
+        ...(option.lockResolved === undefined ? {} : { resolved: option.lockResolved }),
+        ...(option.lockIntegrity === undefined ? {} : { integrity: option.lockIntegrity }),
+        ...(option.lockLink === undefined ? {} : { link: option.lockLink }),
+      };
     }
     modules.push({ name: requestedName, kind: option.kind, version });
   }

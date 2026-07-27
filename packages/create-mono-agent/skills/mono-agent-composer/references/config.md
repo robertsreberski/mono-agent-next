@@ -9,9 +9,14 @@ Mono-agent uses one strict JSON envelope:
   begins with a literal `$use` package name.
 - Selected packages must be direct production dependencies and must match the
   root npm or pnpm lockfile.
-- Unknown fields, package aliases, paths, Git/HTTP sources, undeclared
-  environment interpolation, inline secrets, and invalid cross-slot references
-  fail validation.
+- `$use` never accepts a path. The source-preview dependency exception is only a
+  project-relative lowercase `file:*.tgz` locator installed through npm, with
+  matching locator, installed version, and canonical SHA-512 SRI metadata in
+  `package-lock.json`. Core does not attest retained archive bytes at startup.
+  Pnpm remains supported for registry dependencies.
+- Unknown fields, package aliases, local directories, parent or absolute paths,
+  links, workspaces, Git/HTTP sources, undeclared environment interpolation,
+  inline secrets, and invalid cross-slot references fail validation.
 - A selected package may expose bounded module-owned tools after startup. Do
   not add a `plugins`, `tools`, or contribution config key; selection remains
   the existing `$use`, and ordinary project/domain tools remain `.mcp.json`

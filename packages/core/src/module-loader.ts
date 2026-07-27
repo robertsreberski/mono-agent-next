@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-import { readFile, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -24,6 +24,7 @@ import type { AgentConfigIssue } from "./errors.js";
 
 const REGISTRY_TAG_PATTERN = /^[A-Za-z][A-Za-z0-9._-]{0,127}$/u;
 const REGISTRY_RANGE_TOKEN_PATTERN = /^(?:\^|~|>=?|<=?|=)?v?(?:\d+|[xX*])(?:\.(?:\d+|[xX*])){0,2}(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+const LOCAL_ARCHIVE_DEPENDENCY_PATTERN = /^file:(?:\.\/)?[0-9A-Za-z@._+-]+(?:\/[0-9A-Za-z@._+-]+)*\.tgz$/u;
 const moduleConfigs = new WeakMap<LoadedAgentModule, unknown>();
 const MODULE_CONFIG_SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
 const MODULE_CONFIG_SNAPSHOT_MAX_DEPTH = 64;
@@ -106,6 +107,7 @@ async function readProjectLock(projectRoot: string): Promise<ProjectLock> {
     return {
       kind: "pnpm",
       hasDirect(packageName, dependencySpec, installedVersion) {
+        if (isLocalArchiveDependencySpec(dependencySpec)) return false;
         return ["dependencies", "optionalDependencies"].some((field) => {
           const entries = importer[field];
           if (!isRecord(entries) || !Object.hasOwn(entries, packageName)) return false;
@@ -114,9 +116,8 @@ async function readProjectLock(projectRoot: string): Promise<ProjectLock> {
             return dependencySpec === installedVersion && locked === installedVersion;
           }
           if (!isRecord(locked) || locked.specifier !== dependencySpec) return false;
-          const resolved = isRecord(locked) ? locked.version : locked;
-          return typeof resolved === "string"
-            && (resolved === installedVersion || resolved.startsWith(`${installedVersion}(`));
+          return typeof locked.version === "string"
+            && (locked.version === installedVersion || locked.version.startsWith(`${installedVersion}(`));
         });
       },
     };
@@ -137,7 +138,12 @@ async function readProjectLock(projectRoot: string): Promise<ProjectLock> {
           return isRecord(entries) && entries[packageName] === dependencySpec;
         });
         const installed = packages[`node_modules/${packageName}`];
-        return declared && isRecord(installed) && installed.version === installedVersion;
+        if (!declared || !isRecord(installed) || installed.version !== installedVersion) return false;
+        const resolved = installed.resolved;
+        return !isLocalArchiveDependencySpec(dependencySpec)
+          || (installed.link !== true && typeof resolved === "string" && isLocalArchiveDependencySpec(resolved)
+            && canonicalLocalArchiveDependencySpec(resolved) === canonicalLocalArchiveDependencySpec(dependencySpec)
+            && isSha512Integrity(installed.integrity));
       },
     };
   } catch (error) {
@@ -173,13 +179,20 @@ async function preflightModule(
   if (dependencySpec === undefined) {
     throw moduleIssue(selection, `${packageName} must be a direct project dependency`);
   }
-  if (!isRegistryDependencySpec(dependencySpec)) {
-    throw moduleIssue(selection, `${packageName} uses forbidden dependency spec ${JSON.stringify(dependencySpec)}`);
-  }
+  if (!isPermittedDependencySpec(dependencySpec)) throw moduleIssue(
+    selection, `${packageName} uses a forbidden dependency spec; expected registry or npm project-relative file:*.tgz tarball`,
+  );
   const localPackageRoot = join(projectRoot, "node_modules", ...packageName.split("/"));
   let realPackageRoot: string;
   try {
     realPackageRoot = await realpath(localPackageRoot);
+    if (isLocalArchiveDependencySpec(dependencySpec)) {
+      const packageRelative = relative(await realpath(projectRoot), realPackageRoot);
+      if ((await lstat(localPackageRoot)).isSymbolicLink()
+        || packageRelative.startsWith("..") || isAbsolute(packageRelative)) {
+        throw new Error("local tarball install root is not a real project-contained directory");
+      }
+    }
   } catch (error) {
     throw moduleIssue(
       selection,
@@ -224,24 +237,15 @@ async function preflightModule(
     throw moduleIssue(selection, `${packageName} mono-agent.responsibility must be non-empty`);
   }
   return {
-    selection,
-    packageName,
-    packageVersion: manifest.version,
-    packageRoot: realPackageRoot,
-    packageEntry: realPackageEntry,
+    selection, packageName, packageVersion: manifest.version,
+    packageRoot: realPackageRoot, packageEntry: realPackageEntry,
   };
 }
 
-function isRegistryDependencySpec(value: unknown): value is string {
-  if (
-    typeof value !== "string"
-    || value.length === 0
-    || value.length > 512
-    || value !== value.trim()
-    || /\.(?:tgz|tar(?:\.gz)?)$/iu.test(value)
-  ) {
-    return false;
-  }
+function isPermittedDependencySpec(value: unknown): value is string {
+  if (typeof value !== "string" || value.length > 512 || value !== value.trim()) return false;
+  if (isLocalArchiveDependencySpec(value)) return true;
+  if (/\.(?:tgz|tar(?:\.gz)?)$/iu.test(value)) return false;
   if (REGISTRY_TAG_PATTERN.test(value)) return true;
   return value.split(/\s*\|\|\s*/u).every((clause) => {
     const tokens = clause.split(/\s+/u);
@@ -249,6 +253,20 @@ function isRegistryDependencySpec(value: unknown): value is string {
       REGISTRY_RANGE_TOKEN_PATTERN.test(token)
       || (token === "-" && index > 0 && index < tokens.length - 1));
   });
+}
+
+function isLocalArchiveDependencySpec(value: string): boolean {
+  return LOCAL_ARCHIVE_DEPENDENCY_PATTERN.test(value)
+    && canonicalLocalArchiveDependencySpec(value).slice("file:".length, -".tgz".length)
+      .split("/").every((segment) => segment !== "." && segment !== "..");
+}
+
+function canonicalLocalArchiveDependencySpec(value: string): string {
+  return value.startsWith("file:./") ? `file:${value.slice(7)}` : value;
+}
+
+function isSha512Integrity(value: unknown): value is string {
+  return typeof value === "string" && /^sha512-[0-9A-Za-z+/]{85}[AQgw]==$/u.test(value);
 }
 
 function packageImportTarget(manifest: PackageManifest): string | undefined {

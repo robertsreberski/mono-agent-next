@@ -17,9 +17,21 @@ root-lockfile evidence. Core refuses undeclared, wrong-kind, incompatible,
 path-escaped, or unstable package resolution. Loading and validation never
 install packages, authenticate a provider, start a product, or mutate the host.
 
+The source-preview exception accepts only a lexically project-relative,
+lowercase `file:*.tgz` locator installed through npm. `package-lock.json` must
+record the same locator, installed version, and syntactically valid canonical
+SHA-512 SRI. Core validates the installed package root as a real contained npm
+directory; it does not reopen or attest the retained archive bytes at startup.
+The documented `npm ci` and `verify:minimal` proof check those bytes. Pnpm
+remains supported for registry dependencies, not this source-preview exception.
+Selected modules are trusted executable code; reject unreviewed archives just
+as you would reject unreviewed registry packages.
+
 Scaffolds contain names-only `.env.example` files. They never write credentials
 or a lockfile. Review package versions and create the lockfile with lifecycle
-scripts disabled when building an untrusted closure.
+scripts disabled when building an untrusted closure. A retained local-tarball
+consumer keeps its archives, manifest, and lockfile together so a frozen
+install can reproduce the selected closure.
 
 ## Secrets
 
