@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -31,6 +31,7 @@ import {
   diagnoseAgent,
   runAgentModuleCommand,
 } from "../index.js";
+import { openCurrentRunWorkspace } from "../current-run-workspace.js";
 import {
   completed,
   createFixtureProject,
@@ -1124,6 +1125,104 @@ describe("agent host lifecycle", () => {
       "stop:channel:a",
       "stop:runtime",
     ]);
+  });
+
+  it("acquires current-run ownership before creating any selected module", async () => {
+    const events: string[] = [];
+    const runtime = `@fixture/runtime-${randomUUID().toLowerCase()}`;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create() {
+          events.push("create:runtime");
+          return runtimeInstance(async () => completed("unused"));
+        },
+      },
+    }]);
+    await project.writeMcp({
+      mcpServers: {
+        scoped: {
+          type: "stdio",
+          command: process.execPath,
+          args: ["-e", "setInterval(() => {}, 1000)"],
+        },
+      },
+    });
+    await project.writeConfig(minimalConfig(runtime, {
+      context: {
+        mcp: {
+          configPath: "./.mcp.json",
+          requestContextServers: ["scoped"],
+        },
+      },
+    }));
+    const owner = await openCurrentRunWorkspace({ projectRoot: project.root });
+    let message = "";
+    try {
+      await createAgentHost(project.configPath);
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toMatch(/already owned by another live host/u);
+    expect(message).not.toContain(project.root);
+    expect(events).toEqual([]);
+    await owner.close();
+  });
+
+  it("releases current-run ownership after a later startup failure", async () => {
+    const runtime = `@fixture/runtime-${randomUUID().toLowerCase()}`;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create() {
+          throw new Error("fixture startup failed after lease");
+        },
+      },
+    }]);
+    await project.writeMcp({
+      mcpServers: {
+        scoped: {
+          type: "stdio",
+          command: process.execPath,
+          args: ["-e", "setInterval(() => {}, 1000)"],
+        },
+      },
+    });
+    await project.writeConfig(minimalConfig(runtime, {
+      context: {
+        mcp: {
+          configPath: "./.mcp.json",
+          requestContextServers: ["scoped"],
+        },
+      },
+    }));
+
+    await expect(createAgentHost(project.configPath))
+      .rejects.toThrow(/startup failed after lease/u);
+    const nextOwner = await openCurrentRunWorkspace({ projectRoot: project.root });
+    await nextOwner.close();
+  });
+
+  it("does not create current-run storage when request context is disabled", async () => {
+    const runtime = `@fixture/runtime-${randomUUID().toLowerCase()}`;
+    const project = await fixture([{
+      name: runtime,
+      kind: "runtime",
+      controller: {
+        create() {
+          return runtimeInstance(async () => completed("unused"));
+        },
+      },
+    }]);
+    await project.writeConfig(minimalConfig(runtime));
+
+    const host = await createAgentHost(project.configPath);
+    await host.stop();
+    await expect(access(join(project.root, ".mono-agent")))
+      .rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("redacts resolved environment values from module startup failures", async () => {

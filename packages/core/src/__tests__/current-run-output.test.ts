@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createCurrentRunFiles,
+  ensureCurrentRunRoot,
   readCurrentRunOutputAttachment,
 } from "../current-run-output.js";
 
@@ -149,11 +150,11 @@ describe("current-run output reads", () => {
   it("withholds bytes after a cross-run output directory swap", async () => {
     const projectRoot = await fixtureRoot();
     const first = await createCurrentRunFiles({
-      projectRoot, runId: "run-first", conversationId: "first",
+      root: await ensureCurrentRunRoot(projectRoot), runId: "run-first", conversationId: "first",
       attachments: [], signal: new AbortController().signal,
     });
     const second = await createCurrentRunFiles({
-      projectRoot, runId: "run-second", conversationId: "second",
+      root: await ensureCurrentRunRoot(projectRoot), runId: "run-second", conversationId: "second",
       attachments: [], signal: new AbortController().signal,
     });
     await writeFile(join(first.runOutputDir, "result.txt"), "first");
@@ -202,7 +203,7 @@ describe("current-run MCP files", () => {
   it("stages private attachments with opaque paths and a deeply frozen context", async () => {
     const projectRoot = await fixtureRoot();
     const files = await createCurrentRunFiles({
-      projectRoot,
+      root: await ensureCurrentRunRoot(projectRoot),
       runId: "run-safe",
       conversationId: "telegram:42",
       attachments: [attachment(
@@ -276,15 +277,20 @@ describe("current-run MCP files", () => {
     const duplicate = attachment("same", "voice.ogg", "audio/ogg", Uint8Array.of(1));
 
     await expect(createCurrentRunFiles({
-      projectRoot,
+      root: await ensureCurrentRunRoot(projectRoot),
       runId: "run-duplicate",
       conversationId: "telegram:42",
       attachments: [duplicate, duplicate],
       signal: new AbortController().signal,
     })).rejects.toThrow(/ids must be unique/u);
-    await expect(access(join(projectRoot, ".mono-agent"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    await expect(access(join(
+      projectRoot,
+      ".mono-agent",
+      "data",
+      "core",
+      "mcp-runs",
+      "run-duplicate",
+    ))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("rejects a symbolic-link ancestor instead of staging outside Core data", async () => {
@@ -292,11 +298,8 @@ describe("current-run MCP files", () => {
     const outside = await fixtureRoot();
     await mkdir(join(projectRoot, ".mono-agent"));
     await symlink(outside, join(projectRoot, ".mono-agent", "data"));
-    await expect(createCurrentRunFiles({
-      projectRoot, runId: "run-symbolic", conversationId: "telegram:42",
-      attachments: [attachment("voice", "voice.ogg", "audio/ogg", Uint8Array.of(1))],
-      signal: new AbortController().signal,
-    })).rejects.toThrow(/must not traverse symbolic links/u);
+    await expect(ensureCurrentRunRoot(projectRoot))
+      .rejects.toThrow(/must not traverse symbolic links/u);
     await expect(access(join(outside, "core"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
@@ -306,8 +309,10 @@ describe("current-run MCP files", () => {
     { label: "sanitized dot", name: ".\u0000" },
     { label: "sanitized dot-dot", name: "..\u007f" },
   ])("uses an opaque display fallback for $label", async ({ name }) => {
+    const projectRoot = await fixtureRoot();
     const files = await createCurrentRunFiles({
-      projectRoot: await fixtureRoot(), runId: `run-${Buffer.from(name).toString("hex")}`,
+      root: await ensureCurrentRunRoot(projectRoot),
+      runId: `run-${Buffer.from(name).toString("hex")}`,
       conversationId: "telegram:42",
       attachments: [attachment("voice", name, "audio/ogg", Uint8Array.of(1))],
       signal: new AbortController().signal,
@@ -319,7 +324,7 @@ describe("current-run MCP files", () => {
   it("never unlinks a staged pathname whose identity was replaced", async () => {
     const projectRoot = await fixtureRoot();
     const files = await createCurrentRunFiles({
-      projectRoot,
+      root: await ensureCurrentRunRoot(projectRoot),
       runId: "run-replaced",
       conversationId: "telegram:42",
       attachments: [
@@ -341,7 +346,7 @@ describe("current-run MCP files", () => {
   it("does not unlink a staged file after its link count changes", async () => {
     const projectRoot = await fixtureRoot();
     const files = await createCurrentRunFiles({
-      projectRoot,
+      root: await ensureCurrentRunRoot(projectRoot),
       runId: "run-linked",
       conversationId: "telegram:42",
       attachments: [
@@ -362,7 +367,7 @@ describe("current-run MCP files", () => {
   it("removes ordinary bounded run outputs before removing the run root", async () => {
     const projectRoot = await fixtureRoot();
     const files = await createCurrentRunFiles({
-      projectRoot,
+      root: await ensureCurrentRunRoot(projectRoot),
       runId: "run-output",
       conversationId: "telegram:42",
       attachments: [],
@@ -385,7 +390,7 @@ describe("current-run MCP files", () => {
   it("preserves unsafe output entries without following or deleting outside targets", async () => {
     const projectRoot = await fixtureRoot();
     const files = await createCurrentRunFiles({
-      projectRoot,
+      root: await ensureCurrentRunRoot(projectRoot),
       runId: "run-unsafe-output",
       conversationId: "telegram:42",
       attachments: [],
@@ -417,7 +422,8 @@ describe("current-run MCP files", () => {
     let raced = false;
     const originalPath = join(projectRoot, "owned-original.bin");
     const files = await createCurrentRunFiles({
-      projectRoot, runId: "run-cleanup-race", conversationId: "cleanup-race",
+      root: await ensureCurrentRunRoot(projectRoot),
+      runId: "run-cleanup-race", conversationId: "cleanup-race",
       attachments: [attachment("voice", "voice.bin", "application/octet-stream", Uint8Array.of(9))],
       signal: new AbortController().signal,
       async testHook(phase, path) {
@@ -444,7 +450,8 @@ describe("current-run MCP files", () => {
       const projectRoot = await fixtureRoot();
       const runRoot = join(projectRoot, ".mono-agent", "data", "core", "mcp-runs", `run-${phase}`);
       await expect(createCurrentRunFiles({
-        projectRoot, runId: `run-${phase}`, conversationId: "fault",
+        root: await ensureCurrentRunRoot(projectRoot),
+        runId: `run-${phase}`, conversationId: "fault",
         attachments: [attachment("sensitive", "secret.bin", "application/octet-stream", Uint8Array.of(1, 2, 3))],
         signal: new AbortController().signal,
         testHook(hookPhase, path) {
@@ -461,7 +468,8 @@ describe("current-run MCP files", () => {
     const projectRoot = await fixtureRoot();
     const runRoot = join(projectRoot, ".mono-agent", "data", "core", "mcp-runs", "run-directory-fault");
     await expect(createCurrentRunFiles({
-      projectRoot, runId: "run-directory-fault", conversationId: "fault",
+      root: await ensureCurrentRunRoot(projectRoot),
+      runId: "run-directory-fault", conversationId: "fault",
       attachments: [], signal: new AbortController().signal,
       testHook(phase, path) {
         if (phase === "directory" && path === runRoot) throw new Error("injected directory failure");
@@ -474,6 +482,7 @@ describe("current-run MCP files", () => {
     const getUid = Reflect.get(process, "geteuid") as unknown;
     if (typeof getUid !== "function") return;
     const projectRoot = await fixtureRoot();
+    const root = await ensureCurrentRunRoot(projectRoot);
     const actual = (getUid as () => number)();
     const owner = vi.spyOn(
       process as unknown as { geteuid(): number },
@@ -481,7 +490,7 @@ describe("current-run MCP files", () => {
     ).mockReturnValue(actual + 1);
     try {
       await expect(createCurrentRunFiles({
-        projectRoot, runId: "run-wrong-owner", conversationId: "owner",
+        root, runId: "run-wrong-owner", conversationId: "owner",
         attachments: [], signal: new AbortController().signal,
       })).rejects.toThrow(/owned by the effective user/u);
     } finally {

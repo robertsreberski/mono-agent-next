@@ -23,7 +23,10 @@ export const SOURCE_BETA_LINE_BUDGETS = Object.freeze([
   }),
   Object.freeze({
     id: "kernel-production",
-    maximumLines: 16_500,
+    // The crash-recovery lease adds a kernel-owned safety boundary that cannot
+    // move behind Module SDK without widening the public contract. The 17,500
+    // ceiling is a one-time rebaseline; current source should remain <= 17,000.
+    maximumLines: 17_500,
   }),
   /**
    * The reserved state module's execution protocol crosses Module SDK as

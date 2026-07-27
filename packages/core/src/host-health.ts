@@ -111,3 +111,37 @@ export function moduleHealthSummary(detail: JsonValue | undefined): string | und
   const summary = (detail as JsonObject).summary;
   return typeof summary === "string" && summary.length > 0 ? summary : undefined;
 }
+export function channelHealthProjection(
+  health: AgentHealth, checkedAt = new Date().toISOString()): ModuleHealth {
+  const unhealthy = health.modules.filter((module) => module.status !== "healthy");
+  return {
+    status: health.status === "healthy"
+      ? "healthy"
+      : health.status === "degraded" || health.status === "stopping"
+        ? "degraded"
+        : "unhealthy",
+    checkedAt,
+    summary: unhealthy.length === 0
+      ? `${health.active} active, ${health.pending} pending`
+      : unhealthy
+          .map((module) => `${module.instanceId} ${module.status}${
+            moduleHealthSummary(module.detail) === undefined
+              ? ""
+              : `: ${moduleHealthSummary(module.detail)!}`
+          }`)
+          .join("; "),
+    details: {
+      accepting: health.accepting,
+      active: health.active,
+      pending: health.pending,
+      modules: health.modules.map((module) => ({
+        kind: module.kind,
+        instanceId: module.instanceId,
+        status: module.status,
+        ...(moduleHealthSummary(module.detail) === undefined
+          ? {}
+          : { summary: moduleHealthSummary(module.detail)! }),
+      })),
+    },
+  };
+}

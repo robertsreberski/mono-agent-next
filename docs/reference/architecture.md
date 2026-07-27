@@ -179,12 +179,29 @@ reported as degraded health, and safe source-path restoration can still be
 impossible after an adversarial race.
 
 Cleanup runs on normal, failed, and cancelled turns. `SIGKILL`, power loss, or
-host crash can retain owner-only run residue. Restart intentionally avoids
-unsafe PID/age staleness inference and automatic deletion until a
-cross-process-lease-backed recovery path lands before GA. Interim maintenance
-requires all project hosts proven stopped plus exact, explicitly selected run
-ids and owner/non-symlink/directory verification; roots, globs, discovered
-ranges, and age-based removal are forbidden.
+host crash can retain owner-only run residue. For a non-empty
+`requestContextServers` selection, Core acquires an owner-private macOS/Linux,
+descriptor-anchored SQLite lease at
+`.mono-agent/data/core/mcp-runs/.mono-agent-current-run.lease.sqlite` before
+instructions, module creation, or MCP connection. One live owner is permitted
+per project root; process death releases the OS lock.
+
+The new owner preflights the complete known run/cleanup-claim tree under that
+lock, revalidates all identities, and deletes verified residue bottom-up.
+Recovery is bounded at 4,096 root entries, 65,536 total entries, and depth 8.
+Unknown layouts, symbolic or multiple-linked entries, identity changes, SQLite
+sidecars, and exceeded bounds fail startup without recovery deletion. PID and
+age are never staleness evidence. Lease-free legacy residue is also left
+untouched, so every older project host must be stopped and each exact legacy
+run verified and removed before first adoption.
+
+Shutdown first waits for active-run cleanup. It removes the lease only when the
+root otherwise became empty and retains it with any residue for the next
+recovery. An omitted or empty selection does not create or mutate the
+workspace. If the feature is permanently disabled, the exact lease file may be
+removed only after every project host is stopped and all residue is gone.
+Module diagnostics do not scan dormant current-run storage, and Core has no
+root-wide purge operation.
 
 ## CLI and authoring boundary
 
@@ -359,8 +376,10 @@ record; it never receives the bearer-token value.
   swaps, corrupt payloads, and unknown versions are rejected without mutation.
 - MCP request attachments and current-run outputs use owner-private directories,
   no-follow regular single-link files, exact device/inode checks, bounded reads,
-  and replacement-safe cleanup. Channels receive normalized bytes rather than
-  path authority.
+  replacement-safe cleanup, and one descriptor-anchored project-root lease.
+  Startup recovery accepts only the bounded known tree shape and mutates
+  nothing when static preflight fails. Channels receive normalized bytes rather
+  than path authority.
 - State records use atomic same-directory replacement, directory synchronization,
   compare-and-swap versions, deterministic listing, and a process writer lease.
   Ambiguous post-rename durability poisons the open store until reopen.

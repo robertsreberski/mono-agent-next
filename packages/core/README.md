@@ -155,12 +155,31 @@ cryptographic provenance or malicious same-UID races. Unprovable cleanup is
 retained, degrades host health (currently a status-only public signal), and can
 leave a source path relocated when safe no-overwrite restoration is impossible.
 Normal completion, failure, and cancellation clean staged runs, but `SIGKILL`,
-power loss, or host crash may retain owner-only residue. Restart does not infer
-staleness from PID or age and never auto-deletes without a cross-process lease.
-Until lease-backed recovery lands before GA, maintenance requires all project
-hosts proven stopped, an explicit exact run id, and owner/non-symlink/directory
-verification; broad roots, globs, discovery, and age-based deletion are
-forbidden.
+power loss, or host crash may retain owner-only residue. When
+`requestContextServers` is non-empty, Core acquires one project-root-scoped
+lease before reading instructions, creating modules, or connecting MCP. The
+owner-private 4 KiB SQLite lease on macOS and Linux is
+`.mono-agent/data/core/mcp-runs/.mono-agent-current-run.lease.sqlite`; an
+exclusive descriptor-anchored transaction permits only one live owner and the
+OS releases it when a process dies.
+
+After acquiring the lease, restart preflights only the known run and cleanup
+claim layouts, revalidates every identity, and then removes verified residue
+bottom-up. Discovery is capped at 4,096 root entries, 65,536 total entries,
+and depth 8. Symlinks, hard links, unknown shapes, identity changes, SQLite
+sidecars, or exceeded bounds fail startup without recovery deletion. Existing
+run residue with no lease is treated as legacy and left untouched: stop every
+older host for that project and remove only explicitly verified legacy run
+directories before first adoption. PID and age are never evidence of
+staleness.
+
+Clean shutdown waits for active run cleanup and removes the lease when it is
+the root's only entry; cleanup failure retains both evidence and lease for the
+next recovery. If `requestContextServers` is omitted or empty, Core does not
+create or mutate this workspace. If the feature is permanently disabled, an
+operator may remove the exact lease file only after every project host is
+stopped and all run residue is removed. Module diagnostics do not inspect
+dormant current-run residue, and Core exposes no broad purge command.
 
 A selected producer returns one safe `outputName` basename, optionally with
 bounded identifiers and metadata, but no absolute-path field. Host-bound
@@ -297,6 +316,8 @@ resent.
 | `module-loader.ts` | Dependency, lockfile, manifest, kind, and API checks. |
 | `schema.ts` | Exact schema composition and redacted explanation. |
 | `mcp.ts` | Ordinary project stdio and HTTP MCP clients plus opt-in selected-stdio per-call request context. |
+| `current-run-output.ts` | Identity-bound per-run staging, output reads, cleanup claims, and bounded residue recovery. |
+| `current-run-workspace.ts` | Project-root lease ownership, startup recovery, and quiescent shutdown for current-run storage. |
 | `native-tool-policy.ts` | Runtime-owned tool, approval, request-narrowing, and sandbox-policy intersection. |
 | `state-execution-client.ts` | Typed, bounded, fail-closed client for the state module's opaque execution protocol. Durable storage formats remain state-owned. |
 | `bounded-value.ts` | Shared descriptor-safe snapshots and exact object/array boundary checks. |
