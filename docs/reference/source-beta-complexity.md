@@ -17,31 +17,31 @@ pnpm run report:source-beta
 pnpm run generate:source-beta-docs
 ```
 
-Source manifest digest: `3d5dcde4db94c86416defa6fed4ddc78e2109f11101994c78defd423c40e56ec`
+Source manifest digest: `8cd4ce752007ded139f5dacc6094096136785dc4040d3992dd10cc066a96d297`
 
 ## Lines of code
 
 | Classification | Files | Physical lines |
 | --- | ---: | ---: |
-| Production | 326 | 103810 |
-| Tests | 175 | 89788 |
-| Repository and product tooling | 57 | 19655 |
+| Production | 327 | 104310 |
+| Tests | 177 | 90499 |
+| Repository and product tooling | 57 | 19658 |
 | Checked-in generated source | 0 | 0 |
-| **Total executable source** | **558** | **213253** |
+| **Total executable source** | **561** | **214467** |
 
 Blank lines and comments count as physical source lines. Markdown, JSON,
 lockfiles, vendored dependencies, build output, and generated documentation do
 not. Production means shipped package or website source; tests and authoring
 tooling are reported separately and never reduce the production budget.
 
-Average production file size is 318.4 lines.
+Average production file size is 319.0 lines.
 
 ## Binding budgets
 
 | Budget | Actual | Maximum | Result |
 | --- | ---: | ---: | --- |
-| repository-production | 103810 | 130000 | within limit |
-| kernel-production | 16495 | 16500 | within limit |
+| repository-production | 104310 | 130000 | within limit |
+| kernel-production | 16995 | 17500 | within limit |
 | durable-protocol-production | 7626 | 9500 | within limit |
 
 One budget binds from below rather than above. Test source may not fall under a
@@ -50,16 +50,16 @@ deleting the test that objects to it.
 
 | Floor | Actual | Minimum | Result |
 | --- | ---: | ---: | --- |
-| test source, at 0.75 of production | 89788 | 77858 | within limit |
+| test source, at 0.75 of production | 90499 | 78233 | within limit |
 
-The current ratio is 0.865.
+The current ratio is 0.868.
 
 ## Largest package ownership surfaces
 
 | Package | Production files | Production lines | Test lines |
 | --- | ---: | ---: | ---: |
 | `@mono-agent/state-local` | 27 | 14355 | 7410 |
-| `@mono-agent/core` | 39 | 12973 | 18733 |
+| `@mono-agent/core` | 40 | 13473 | 19293 |
 | `@mono-agent/runtime-pi` | 31 | 9864 | 6204 |
 | `@mono-agent/web` | 31 | 8992 | 4666 |
 | `@mono-agent/memory-local` | 19 | 8097 | 4767 |

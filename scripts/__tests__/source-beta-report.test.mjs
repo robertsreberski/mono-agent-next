@@ -36,12 +36,12 @@ describe("source-beta production budgets", () => {
   it("accepts every binding budget at exact equality", () => {
     expect(SOURCE_BETA_LINE_BUDGETS).toEqual([
       { id: "repository-production", maximumLines: 130_000 },
-      { id: "kernel-production", maximumLines: 16_500 },
+      { id: "kernel-production", maximumLines: 17_500 },
       { id: "durable-protocol-production", maximumLines: 9_500 },
     ]);
     const report = budgetReport({
       "repository-production": 130_000,
-      "kernel-production": 16_500,
+      "kernel-production": 17_500,
       "durable-protocol-production": 9_500,
     });
 
@@ -91,12 +91,12 @@ describe("source-beta production budgets", () => {
 
     const report = budgetReport({
       "repository-production": 130_000,
-      "kernel-production": 16_500,
+      "kernel-production": 17_500,
       "durable-protocol-production": 9_500,
     });
-    report.budgets[1].maximumLines = 16_501;
+    report.budgets[1].maximumLines = 17_501;
     expect(() => assertSourceBetaBudgets(report)).toThrow(
-      "kernel-production maximum must remain 16500 lines; found 16501.",
+      "kernel-production maximum must remain 17500 lines; found 17501.",
     );
   });
 

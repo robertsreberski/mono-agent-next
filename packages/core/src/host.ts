@@ -11,7 +11,7 @@ import {
   type ChannelInboundRequest, type ChannelModuleDefinition, type ChannelOpenConversationRequest,
   type ChannelOpenConversationResult, type ChannelOutboundMessage, type ChannelReplySink,
   type ChannelReplayRequest, type ChannelReplayResult, type ChannelSendTool, type ChannelTurnResult, type JsonObject, type JsonValue, type Memory, type MemoryHost, type MemoryModuleDefinition, type MemoryRecord,
-  type MemoryRuntimeCaptureRequest, type ModuleHost, type ModuleHealth, type ModuleInstance, type Runtime, type RuntimeLiveInputHandler,
+  type MemoryRuntimeCaptureRequest, type ModuleHost, type ModuleInstance, type Runtime, type RuntimeLiveInputHandler,
   type ModuleToolContribution, type RuntimeModuleDefinition,
   type RuntimeNativeToolDescriptor, type RuntimeSession,
   type RuntimeTurnErrorSnapshot, type RuntimeToolCall,
@@ -74,8 +74,8 @@ import {
   HostDelivery,
 } from "./host-delivery.js";
 import {
+  channelHealthProjection,
   HostHealthMonitor,
-  moduleHealthSummary,
   redactJson,
   type HostLifecycleState,
 } from "./host-health.js";
@@ -92,7 +92,10 @@ import {
   ActiveTurn, boundedRuntimeFailureMessage, isSafeRuntimeFallback, turnExecutionError,
 } from "./host-turn.js";
 import { connectProjectMcpTools, type ConnectedMcpTools, type CoreRuntimeTool } from "./mcp.js";
-import { createCurrentRunFiles } from "./current-run-output.js";
+import {
+  openCurrentRunWorkspace,
+  type CurrentRunWorkspace,
+} from "./current-run-workspace.js";
 import { moduleConfigFor } from "./module-loader.js";
 import { runtimeNativeToolPolicyIssue } from "./native-tool-policy.js";
 import { StateExecutionClient, type DurableFingerprint, type CanonicalTranscript } from "./state-execution-client.js";
@@ -179,6 +182,7 @@ class AgentHostImplementation implements AgentHost {
   readonly #delivery: HostDelivery;
   readonly #redactionValues: readonly string[];
   #mcp: ConnectedMcpTools = { tools: [], async close() {} };
+  #currentRunWorkspace: CurrentRunWorkspace | undefined;
   #memory: Memory | undefined;
   #memoryRecallEnabled = false;
   #stateStore: StateStore | undefined;
@@ -434,6 +438,12 @@ class AgentHostImplementation implements AgentHost {
   async #startInternal(): Promise<void> {
     this.#state = "starting";
     try {
+      if ((this.config.raw.context?.mcp?.requestContextServers?.length ?? 0) > 0) {
+        this.#currentRunWorkspace = await openCurrentRunWorkspace({
+          projectRoot: this.config.projectRoot,
+          signal: this.#hostAbort.signal,
+        });
+      }
       const loadedInstructions = await readInstructions(this.config);
       this.#instructions = loadedInstructions.text;
       this.#instructionTools = loadedInstructions.tools;
@@ -499,6 +509,15 @@ class AgentHostImplementation implements AgentHost {
       } catch {
         // Preserve the original startup failure after bounded best-effort cleanup.
       }
+      try {
+        await this.#lifecycle.cleanup(
+          "current-run workspace close after startup failure",
+          () => this.#currentRunWorkspace?.close(),
+        );
+      } catch {
+        // Preserve the original startup failure after bounded best-effort cleanup.
+      }
+      this.#currentRunWorkspace = undefined;
       throw redactedError;
     }
   }
@@ -783,7 +802,10 @@ class AgentHostImplementation implements AgentHost {
       listConversations: (request) => this.#listChannelConversations(request),
       readReplay: (request) => this.#readChannelReplay(request),
       readConfig: async (signal) => { throwIfAborted(signal); return toJsonValue(this.config.raw); },
-      readHealth: (signal) => this.#readChannelHealth(signal),
+      readHealth: async (signal) => {
+        throwIfAborted(signal);
+        return channelHealthProjection(await this.health());
+      },
       openConversation: (request) => this.#openConversation(request),
     };
   }
@@ -820,45 +842,6 @@ class AgentHostImplementation implements AgentHost {
       entries,
       ...(next < replay.messages.length ? { cursor: encodePageCursor(next) } : {}),
     });
-  }
-  async #readChannelHealth(signal: AbortSignal): Promise<ModuleHealth> {
-    throwIfAborted(signal);
-    const health = await this.health();
-    // The per-module entries and the modules' own summaries used to be dropped
-    // here, so an operator saw a degraded agent with a counter for a summary and
-    // no way to attribute the degradation to a module. A module that reports
-    // "Telegram polling is degraded." must reach the operator saying that.
-    const unhealthy = health.modules.filter((module) => module.status !== "healthy");
-    return {
-      status: health.status === "healthy"
-        ? "healthy"
-        : health.status === "degraded" || health.status === "stopping"
-          ? "degraded"
-          : "unhealthy",
-      checkedAt: new Date().toISOString(),
-      summary: unhealthy.length === 0
-        ? `${health.active} active, ${health.pending} pending`
-        : unhealthy
-            .map((module) => `${module.instanceId} ${module.status}${
-              moduleHealthSummary(module.detail) === undefined
-                ? ""
-                : `: ${moduleHealthSummary(module.detail)!}`
-            }`)
-            .join("; "),
-      details: {
-        accepting: health.accepting,
-        active: health.active,
-        pending: health.pending,
-        modules: health.modules.map((module) => ({
-          kind: module.kind,
-          instanceId: module.instanceId,
-          status: module.status,
-          ...(moduleHealthSummary(module.detail) === undefined
-            ? {}
-            : { summary: moduleHealthSummary(module.detail)! }),
-        })),
-      },
-    };
   }
   async #openConversation(request: ChannelOpenConversationRequest): Promise<ChannelOpenConversationResult> {
     throwIfAborted(request.signal);
@@ -1086,8 +1069,10 @@ class AgentHostImplementation implements AgentHost {
               try {
                 try {
                   if ((this.config.raw.context?.mcp?.requestContextServers?.length ?? 0) > 0) {
-                    active.currentRunFiles = await createCurrentRunFiles({
-                      projectRoot: this.config.projectRoot, runId: active.id,
+                    if (this.#currentRunWorkspace === undefined)
+                      throw new Error("Core current-run workspace is unavailable");
+                    active.currentRunFiles = await this.#currentRunWorkspace.createRunFiles({
+                      runId: active.id,
                       conversationId: input.conversationId, attachments: input.attachments ?? [], signal,
                     });
                   }
@@ -2199,6 +2184,15 @@ class AgentHostImplementation implements AgentHost {
     } catch (error) {
       failures.push(error);
     }
+    try {
+      await this.#lifecycle.cleanup(
+        "current-run workspace close",
+        () => this.#currentRunWorkspace?.close(),
+      );
+    } catch (error) {
+      failures.push(error);
+    }
+    this.#currentRunWorkspace = undefined;
     this.#state = "stopped";
     if (failures.length > 0) throw new AggregateError(failures, "Agent host stopped with lifecycle errors");
   }

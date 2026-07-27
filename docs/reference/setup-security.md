@@ -110,13 +110,29 @@ errors, progress, previews, and offloaded envelopes, but encoded or binary
 exfiltration cannot be detected reliably.
 
 Normal completion, failure, and cancellation clean staged runs. A `SIGKILL`,
-power loss, or host crash may leave owner-only residue. Restart does not use
-PID/age guesses and performs no automatic stale deletion without a
-cross-process lease. Pre-GA lease-backed recovery remains required. Interim
-maintenance is permitted only after all project hosts are proven stopped, for
-explicit exact run ids whose targets are verified owner-owned non-symlink
-directories; broad roots, globs, recursive discovery, and age selection are
-outside this contract.
+power loss, or host crash may leave owner-only residue. With at least one
+`requestContextServers` selection on macOS or Linux, startup first acquires the owner-private
+4 KiB SQLite lease
+`.mono-agent/data/core/mcp-runs/.mono-agent-current-run.lease.sqlite`. Its
+descriptor-anchored exclusive transaction admits one live owner per project
+root and is released by the OS on process death.
+
+While holding that lease, startup discovers the complete known run and cleanup
+claim layouts before deletion, revalidates every pathname identity, and removes
+verified residue bottom-up. Discovery stops at 4,096 root entries, 65,536 total
+entries, or depth 8. Unknown shapes, symlinks, hard links, identity changes,
+SQLite sidecars, and limit violations fail closed without recovery deletion.
+PID and age are not staleness evidence.
+
+Lease-free residue predates this ownership contract and is left untouched.
+Before first adoption, stop all older hosts for that project and remove only
+exact run directories after owner, type, and no-symlink verification. Clean
+shutdown waits for active cleanup and removes an otherwise solitary lease;
+residue retains it for the next recovery. An omitted or empty selection does
+not create or mutate the workspace. If permanently disabling the feature,
+remove the exact lease only after all project hosts are stopped and all residue
+is gone. `diagnose` checks configured module diagnostics, not dormant
+current-run storage; no broad Core purge command is provided.
 
 Current-run file delivery remains host-bound. A channel tool may request one
 safe basename through `readCurrentRunOutput`; Core performs the stable bounded

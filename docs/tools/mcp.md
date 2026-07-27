@@ -167,12 +167,30 @@ hardening, not an adversarial filesystem sandbox.
 
 Normal completion, failure, and cancellation run this cleanup. `SIGKILL`,
 power loss, or a host crash can leave owner-only `0700`/`0600` residue beneath
-`.mono-agent/data/core/mcp-runs/<runId>`. Restart deliberately does not infer
-staleness from age or PID and does not auto-delete it without a cross-process
-lease. Until lease-backed recovery lands before GA, maintenance must first
-prove every host for the project is stopped, select exact run ids (never a
-root, glob, or age range), and reject any target that is not an owner-owned,
-non-symlink directory before removing that explicit run only.
+`.mono-agent/data/core/mcp-runs/<runId>`. A non-empty
+`requestContextServers` selection on macOS or Linux makes startup acquire
+`.mono-agent/data/core/mcp-runs/.mono-agent-current-run.lease.sqlite` before
+instructions, module creation, or MCP connection. This owner-private 4 KiB
+SQLite file holds a descriptor-anchored exclusive transaction, so only one live
+host owns current-run storage for a project root and process death releases the
+lock.
+
+After lock acquisition, Core first discovers the complete known run and cleanup
+claim layouts, capped at 4,096 root entries, 65,536 total entries, and depth 8.
+It revalidates every identity before deleting verified residue bottom-up.
+Unknown entries, symlinks, hard links, identity changes, SQLite sidecars, or
+limit violations fail startup without recovery deletion. Core never uses age or
+PID as staleness evidence.
+
+Residue without a lease is a legacy state and remains untouched. Stop all older
+hosts for the project, then verify and remove only each exact legacy run
+directory before first adoption. Clean shutdown waits for active cleanup and
+removes the lease only when no residue remains; otherwise the lease remains as
+recovery evidence. An omitted or empty `requestContextServers` selection does
+not create or mutate this workspace. If permanently disabling the feature,
+remove the exact lease only after all project hosts are stopped and all residue
+is gone. Module diagnostics do not inspect dormant current-run storage, and
+there is no broad purge command.
 
 The Personal source-beta proof exercises its real `transcribe` server with a
 staged audio attachment id, concurrent-call isolation, bounded progress, an

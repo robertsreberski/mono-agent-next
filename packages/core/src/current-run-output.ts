@@ -1,26 +1,25 @@
 // SPDX-License-Identifier: MIT
 import { createHash, randomUUID } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
-import { link, lstat, mkdir, open, readdir, rename, rmdir, unlink, type FileHandle } from "node:fs/promises";
+import { link, lstat, mkdir, open, opendir, readdir, rename, rmdir, unlink, type FileHandle } from "node:fs/promises";
 import { dirname, extname, isAbsolute, join, resolve } from "node:path";
 import type { ChannelAttachment, NormalizedAttachment } from "@mono-agent/module-sdk";
 import { readAuthorityFile } from "./authority-read.js";
 export const CURRENT_RUN_OUTPUT_MAX_BYTES = 25_000_000;
+export const CURRENT_RUN_ROOT_MAX_ENTRIES = 4_096;
+export const CURRENT_RUN_RECOVERY_MAX_ENTRIES = 65_536;
+export const CURRENT_RUN_RECOVERY_MAX_DEPTH = 8;
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
-type Identity = {
-  readonly path: string;
-  readonly dev: bigint;
-  readonly ino: bigint;
-  readonly type: "file" | "directory";
+export type CurrentRunRoot = {
+  readonly path: string; readonly dev: bigint; readonly ino: bigint; readonly type: "directory";
+};
+type Identity = CurrentRunRoot | {
+  readonly path: string; readonly dev: bigint; readonly ino: bigint; readonly type: "file";
 };
 type StagedAttachment = {
-  readonly id: string;
-  readonly name: string;
-  readonly mediaType: string;
-  readonly path: string;
-  readonly dev: string;
-  readonly ino: string;
+  readonly id: string; readonly name: string; readonly mediaType: string;
+  readonly path: string; readonly dev: string; readonly ino: string;
 };
 export interface McpRequestContextV1 {
   readonly schemaVersion: 1;
@@ -36,16 +35,11 @@ export interface McpRequestContextV1 {
   }[];
   readonly attachments: readonly StagedAttachment[];
 }
-type CurrentRunHook = (
-  phase: "directory" | "write" | "sync" | "stat" | "path" | "cleanup",
-  path: string,
-) => void | Promise<void>;
+type CurrentRunHook = (phase: "directory" | "write" | "sync" | "stat" | "path" | "cleanup",
+  path: string) => void | Promise<void>;
 export interface CreateCurrentRunFilesOptions {
-  readonly projectRoot: string;
-  readonly runId: string;
-  readonly conversationId: string;
-  readonly attachments: readonly NormalizedAttachment[];
-  readonly signal: AbortSignal;
+  readonly root: CurrentRunRoot; readonly runId: string; readonly conversationId: string;
+  readonly attachments: readonly NormalizedAttachment[]; readonly signal: AbortSignal;
   /** Security-test seam. */
   readonly testHook?: CurrentRunHook;
 }
@@ -56,17 +50,35 @@ export interface CurrentRunFiles {
   cleanup(): Promise<void>;
 }
 export interface ReadCurrentRunOutputOptions {
-  readonly maxBytes: number;
-  readonly signal: AbortSignal;
+  readonly maxBytes: number; readonly signal: AbortSignal;
   readonly beforePathIdentityCheck?: () => void | Promise<void>;
 }
+export interface RecoverCurrentRunRootOptions {
+  readonly signal?: AbortSignal;
+  /** Security-test seam invoked after discovery and before identity revalidation. */
+  readonly afterPreflight?: () => void | Promise<void>;
+  /** Security-test seam invoked after revalidation and before each removal claim. */
+  readonly beforeDelete?: (path: string) => void | Promise<void>;
+}
+export async function ensureCurrentRunRoot(projectRootValue: string, signal?: AbortSignal): Promise<CurrentRunRoot> {
+  const projectRoot = absolute(projectRootValue);
+  signal?.throwIfAborted();
+  let basePath = projectRoot;
+  for (const name of [".mono-agent", "data", "core", "mcp-runs"]) {
+    basePath = join(basePath, name);
+    await ensureDirectory(basePath);
+    signal?.throwIfAborted();
+  }
+  return directory(basePath, false);
+}
 export async function createCurrentRunFiles(options: CreateCurrentRunFilesOptions): Promise<CurrentRunFiles> {
-  const projectRoot = absolute(options.projectRoot); const runId = segment(options.runId);
+  const runId = segment(options.runId);
   if (new Set(options.attachments.map((item) => item.id)).size !== options.attachments.length)
     throw new TypeError("Current-run attachment ids must be unique");
-  options.signal.throwIfAborted(); let basePath = projectRoot;
-  for (const name of [".mono-agent", "data", "core", "mcp-runs"]) { basePath = join(basePath, name); await ensureDirectory(basePath); }
-  const base = await directory(basePath, true); const runRoot = join(basePath, runId); const owned: Identity[] = [];
+  options.signal.throwIfAborted();
+  const base = await directory(options.root.path, false);
+  assertSame(options.root, base);
+  const runRoot = join(base.path, runId); const owned: Identity[] = [];
   const own = (identity: Identity): void => { owned.push(identity); };
   try {
     await createDirectory(runRoot, own, options.testHook); const attachmentsRoot = join(runRoot, "attachments");
@@ -79,7 +91,7 @@ export async function createCurrentRunFiles(options: CreateCurrentRunFilesOption
       staged.push(Object.freeze({ id: attachment.id, name: displayName(attachment.name, index),
         mediaType: attachment.mediaType, path: identity.path, dev: identity.dev.toString(), ino: identity.ino.toString() }));
     }
-    assertSame(base, await directory(basePath, false)); const paths = Object.freeze(staged.map((item) => item.path));
+    assertSame(base, await directory(base.path, false)); const paths = Object.freeze(staged.map((item) => item.path));
     const identities = Object.freeze(staged.map(({ path, dev, ino }) => Object.freeze({ path, dev, ino })));
     const requestContext: McpRequestContextV1 = Object.freeze({ schemaVersion: 1,
       conversationId: options.conversationId, runId, runOutputDir, attachmentsRoot,
@@ -93,6 +105,168 @@ export async function createCurrentRunFiles(options: CreateCurrentRunFilesOption
     catch (cleanupError) {
       throw new AggregateError([error, cleanupError], "Current-run setup failed and cleanup was incomplete");
     } throw error; }
+}
+type RecoveryDirectory = { readonly identity: CurrentRunRoot; readonly entries: readonly string[] };
+type RecoveryInventory = {
+  readonly nodes: Identity[]; readonly anchors: Identity[];
+  readonly directories: RecoveryDirectory[]; entries: number;
+};
+type RecoveryShape = "root" | "run" | "payload";
+export async function recoverCurrentRunRoot(
+  root: CurrentRunRoot, leaseFilenameValue: string, options: RecoverCurrentRunRootOptions = {},
+): Promise<void> {
+  const leaseFilename = safeName(leaseFilenameValue);
+  options.signal?.throwIfAborted();
+  const boundRoot = await directory(root.path, false);
+  assertSame(root, boundRoot);
+  const inventory: RecoveryInventory = { nodes: [], anchors: [], directories: [], entries: 0 };
+  await scanRecoveryDirectory(boundRoot, "root", 0, leaseFilename, inventory, options.signal);
+  options.signal?.throwIfAborted();
+  await options.afterPreflight?.();
+  options.signal?.throwIfAborted();
+  await revalidateRecoveryInventory(inventory);
+  options.signal?.throwIfAborted();
+  for (const node of [...inventory.nodes].reverse()) {
+    options.signal?.throwIfAborted();
+    await options.beforeDelete?.(node.path);
+    await claimAndDelete(node);
+  }
+  assertSame(boundRoot, await directory(boundRoot.path, false));
+  const remaining = await boundedCurrentRunEntries(
+    boundRoot.path, 1, "Current-run recovery did not leave only the active lease");
+  if (remaining[0] !== leaseFilename)
+    throw new Error("Current-run recovery did not leave only the active lease");
+}
+async function scanRecoveryDirectory(
+  identity: CurrentRunRoot, shape: RecoveryShape, depth: number,
+  leaseFilename: string, inventory: RecoveryInventory, signal?: AbortSignal,
+): Promise<void> {
+  if (depth > CURRENT_RUN_RECOVERY_MAX_DEPTH)
+    throw new Error("Current-run recovery exceeds the depth limit");
+  signal?.throwIfAborted();
+  assertSame(identity, await directory(identity.path, false));
+  const remaining = CURRENT_RUN_RECOVERY_MAX_ENTRIES - inventory.entries;
+  const maximum = shape === "root" ? Math.min(CURRENT_RUN_ROOT_MAX_ENTRIES, remaining) : remaining;
+  const entries = await boundedCurrentRunEntries(identity.path, maximum,
+    shape === "root" ? "Current-run recovery root exceeds the entry limit"
+      : "Current-run recovery exceeds the total entry limit");
+  inventory.directories.push({ identity, entries });
+  for (const name of entries) {
+    signal?.throwIfAborted();
+    inventory.entries += 1;
+    if (inventory.entries > CURRENT_RUN_RECOVERY_MAX_ENTRIES)
+      throw new Error("Current-run recovery exceeds the total entry limit");
+    const path = join(identity.path, name);
+    const stat = await lstat(path, { bigint: true });
+    if (shape === "root" && name === leaseFilename) {
+      inventory.anchors.push(recoveryFile(path, stat));
+      continue;
+    }
+    if (shape === "root") {
+      if (cleanupSegment(name)) {
+        await scanRecoveryClaim(path, stat, "run", depth + 1, leaseFilename, inventory, signal);
+        continue;
+      }
+      if (!runSegment(name)) throw new Error("Current-run recovery found an unknown root entry");
+      const child = await recoveryDirectory(path, stat);
+      inventory.nodes.push(child);
+      await scanRecoveryDirectory(child, "run", depth + 1, leaseFilename, inventory, signal);
+      continue;
+    }
+    if (shape === "run") {
+      if (cleanupSegment(name)) {
+        await scanRecoveryClaim(path, stat, "payload", depth + 1, leaseFilename, inventory, signal);
+        continue;
+      }
+      if (name !== "attachments" && name !== "outbound")
+        throw new Error("Current-run recovery found an unknown run entry");
+      const child = await recoveryDirectory(path, stat);
+      inventory.nodes.push(child);
+      await scanRecoveryDirectory(child, "payload", depth + 1, leaseFilename, inventory, signal);
+      continue;
+    }
+    if (stat.isDirectory() && !stat.isSymbolicLink()) {
+      if (!cleanupSegment(name))
+        throw new Error("Current-run recovery found an unknown payload directory");
+      await scanRecoveryClaim(path, stat, "file", depth + 1, leaseFilename, inventory, signal);
+      continue;
+    }
+    inventory.nodes.push(recoveryFile(path, stat));
+  }
+}
+async function scanRecoveryClaim(
+  path: string, stat: BigIntStats, entryShape: "run" | "payload" | "file",
+  depth: number, leaseFilename: string, inventory: RecoveryInventory, signal?: AbortSignal,
+): Promise<void> {
+  const claim = await recoveryDirectory(path, stat);
+  inventory.nodes.push(claim);
+  if (depth > CURRENT_RUN_RECOVERY_MAX_DEPTH)
+    throw new Error("Current-run recovery exceeds the depth limit");
+  const entries = await boundedCurrentRunEntries(
+    path, 1, "Current-run recovery found an invalid cleanup claim");
+  inventory.directories.push({ identity: claim, entries });
+  if (entries.length > 1 || (entries.length === 1 && entries[0] !== "entry"))
+    throw new Error("Current-run recovery found an invalid cleanup claim");
+  if (entries.length === 0) return;
+  signal?.throwIfAborted();
+  inventory.entries += 1;
+  if (inventory.entries > CURRENT_RUN_RECOVERY_MAX_ENTRIES)
+    throw new Error("Current-run recovery exceeds the total entry limit");
+  const entryPath = join(path, "entry");
+  const entryStat = await lstat(entryPath, { bigint: true });
+  if (entryShape === "file") {
+    inventory.nodes.push(recoveryFile(entryPath, entryStat));
+    return;
+  }
+  const entry = await recoveryDirectory(entryPath, entryStat);
+  inventory.nodes.push(entry);
+  await scanRecoveryDirectory(entry, entryShape, depth + 1, leaseFilename, inventory, signal);
+}
+async function revalidateRecoveryInventory(inventory: RecoveryInventory): Promise<void> {
+  for (const snapshot of inventory.directories) {
+    assertSame(snapshot.identity, await directory(snapshot.identity.path, false));
+    const entries = await boundedCurrentRunEntries(snapshot.identity.path,
+      snapshot.entries.length, "Current-run recovery tree changed after discovery");
+    if (entries.length !== snapshot.entries.length
+      || entries.some((entry, index) => entry !== snapshot.entries[index]))
+      throw new Error("Current-run recovery tree changed after discovery");
+  }
+  for (const identity of [...inventory.anchors, ...inventory.nodes]) {
+    assertIdentityStat(identity, await lstat(identity.path, { bigint: true }));
+  }
+}
+async function recoveryDirectory(path: string, stat: BigIntStats): Promise<CurrentRunRoot> {
+  if (!stat.isDirectory() || stat.isSymbolicLink())
+    throw new Error("Current-run recovery found an unsafe directory");
+  assertOwned(stat);
+  const identity: CurrentRunRoot = { path, dev: stat.dev, ino: stat.ino, type: "directory" };
+  assertSame(identity, await directory(path, false));
+  return identity;
+}
+function recoveryFile(path: string, stat: BigIntStats): Identity {
+  assertOwned(stat);
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n)
+    throw new Error("Current-run recovery found an unsafe file");
+  return { path, dev: stat.dev, ino: stat.ino, type: "file" };
+}
+function cleanupSegment(value: string): boolean {
+  return /^\.cleanup-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
+    .test(value);
+}
+function runSegment(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value);
+}
+export async function boundedCurrentRunEntries(
+  path: string, maximum: number, message: string): Promise<readonly string[]> {
+  const handle = await opendir(path); const entries: string[] = [];
+  try {
+    while (true) {
+      const entry = await handle.read();
+      if (entry === null) return entries.sort();
+      if (entries.length >= maximum) throw new Error(message);
+      entries.push(entry.name);
+    }
+  } finally { await handle.close(); }
 }
 export async function readCurrentRunOutputAttachment(outputDirectory: string, outputName: string,
   options: ReadCurrentRunOutputOptions): Promise<ChannelAttachment> {
@@ -121,9 +295,10 @@ async function createDirectory(path: string, own: (identity: Identity) => void, 
   const verified = await directory(path, true); assertSame(identity, verified); return verified;
 }
 async function ensureDirectory(path: string): Promise<void> {
-  try { await mkdir(path, { mode: DIR_MODE }); }
+  let created = false;
+  try { await mkdir(path, { mode: DIR_MODE }); created = true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
-  try { await directory(path, true); }
+  try { await directory(path, created); }
   catch (error) {
     throw new Error(
       "Current-run files root must be owned by the effective user, be owner-private, and must not traverse symbolic links",
@@ -131,7 +306,7 @@ async function ensureDirectory(path: string): Promise<void> {
     );
   }
 }
-async function directory(path: string, setPrivate: boolean): Promise<Identity> {
+async function directory(path: string, setPrivate: boolean): Promise<CurrentRunRoot> {
   let handle: FileHandle | undefined; try {
     const before = await lstat(path, { bigint: true });
     handle = await open(path, flags("directory"));
