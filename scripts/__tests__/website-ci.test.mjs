@@ -88,7 +88,7 @@ describe("website CI contract", () => {
       step.run === "pnpm run verify:minimal");
     expect(minimalProofSteps).toEqual([minimalProof]);
     expect(verify.steps.indexOf(minimalProofSteps[0])).toBeLessThan(
-      verify.steps.findIndex((step) => step.run === "pnpm run verify:system"),
+      verify.steps.findIndex((step) => step.run === "pnpm run verify:personal-successor"),
     );
 
     const verdict = workflow.jobs.verdict;

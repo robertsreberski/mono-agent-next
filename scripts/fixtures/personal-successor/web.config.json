@@ -1,0 +1,19 @@
+{
+  "configVersion": 1,
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 0
+  },
+  "auth": {
+    "token": {
+      "$env": "MONO_AGENT_WEB_TOKEN"
+    }
+  },
+  "allowInsecureHttp": false,
+  "dataDirectory": "./.mono-agent/web",
+  "agentRegistries": [
+    "./.mono-agent/trace-sources"
+  ],
+  "allowedHosts": [],
+  "externalOrigins": []
+}

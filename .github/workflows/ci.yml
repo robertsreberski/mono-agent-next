@@ -104,9 +104,6 @@ jobs:
         if: ${{ matrix.node-version == '22.19.0' }}
         run: pnpm run release:test:unit
 
-      - name: Prove standalone operator products
-        run: pnpm run verify:operator-products
-
       - name: Install the browser lane's browser
         if: ${{ matrix.node-version == '22.19.0' }}
         run: pnpm exec playwright install --with-deps chromium
@@ -119,9 +116,8 @@ jobs:
         if: ${{ matrix.node-version == '22.19.0' }}
         run: pnpm run verify:minimal
 
-      - name: Prove packed complete system
-        if: ${{ matrix.node-version == '22.19.0' }}
-        run: pnpm run verify:system
+      - name: Prove clean-room personal successor
+        run: pnpm run verify:personal-successor
 
       - name: Check generated contracts and whitespace
         run: git diff --exit-code && git diff --check

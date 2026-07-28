@@ -1,0 +1,46 @@
+{
+  "schema": "mono-agent.personal-successor-blueprint.v1",
+  "template": "personal",
+  "projectName": "personal-agent-next",
+  "packageVersion": "0.15.0",
+  "directDependencies": [
+    "@mono-agent/channel-openai-api",
+    "@mono-agent/channel-operator",
+    "@mono-agent/channel-telegram",
+    "@mono-agent/channel-webhook",
+    "@mono-agent/cli",
+    "@mono-agent/core",
+    "@mono-agent/docs-mcp",
+    "@mono-agent/exporter-otlp",
+    "@mono-agent/memory-local",
+    "@mono-agent/module-sdk",
+    "@mono-agent/operator",
+    "@mono-agent/runtime-pi",
+    "@mono-agent/service-macos",
+    "@mono-agent/state-local",
+    "@mono-agent/trigger-cron",
+    "@mono-agent/tui",
+    "@mono-agent/web"
+  ],
+  "excludedPackages": [
+    "@mono-agent/channel-slack",
+    "@mono-agent/runtime-claude",
+    "@mono-agent/runtime-codex",
+    "@mono-agent/runtime-opencode",
+    "@mono-agent/sandbox-srt",
+    "create-mono-agent"
+  ],
+  "products": {
+    "agent": "mono-agent.config.json",
+    "docsMcp": "node_modules/.bin/mono-agent-docs-mcp",
+    "serviceMacosTemplate": "service-macos.template.json",
+    "tui": "node_modules/.bin/mono-agent-tui",
+    "web": "web.config.json"
+  },
+  "proofs": {
+    "browser": "pnpm run test:browser",
+    "operatorProducts": "pnpm run verify:operator-products",
+    "packedSystem": "pnpm run verify:system",
+    "serviceLifecycle": "pnpm --filter @mono-agent/service-macos test"
+  }
+}
