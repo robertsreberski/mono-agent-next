@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createAgentHost, validateAgentConfig } from "@mono-agent/core";
 import { parseWebConfig, startWebServer } from "@mono-agent/web";
 
+import { isLocalArchiveDependencySpec } from "./dependency.js";
 import { loadProtectedEnvironment } from "./environment.js";
 import { readServiceInput } from "./input.js";
 import { digest, isRecord } from "./internal-fs.js";
@@ -74,10 +75,11 @@ export async function runForegroundService(
       ? activation.binding.directDependencyName !== "@mono-agent/core"
       : activation.binding.directDependencyName !== "@mono-agent/web"
     )
-    || readDirectDependency(
+    || !directDependencyMatchesBinding(
       before[1]!.source,
       activation.binding.directDependencyName,
-    ) !== activation.binding.directDependencyVersion
+      activation.binding.directDependencyVersion,
+    )
   ) {
     throw new Error("Runner target does not match its planned direct dependency.");
   }
@@ -336,6 +338,19 @@ function readDirectDependency(
   } catch {
     return undefined;
   }
+}
+
+function directDependencyMatchesBinding(
+  source: Uint8Array,
+  name: "@mono-agent/core" | "@mono-agent/web",
+  version: string,
+): boolean {
+  const dependency = readDirectDependency(source, name);
+  return dependency === version
+    || (
+      typeof dependency === "string"
+      && isLocalArchiveDependencySpec(dependency)
+    );
 }
 
 function waitForSignal(signals: ServiceSignalSource): {

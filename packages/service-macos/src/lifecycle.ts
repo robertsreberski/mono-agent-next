@@ -1,11 +1,23 @@
 // SPDX-License-Identifier: MIT
-import { dirname, join } from "node:path";
+import { lstat, realpath } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 
 import type { CommandRunner } from "./command.js";
 import type { ServiceMacosServiceConfig } from "./config.js";
+import {
+  canonicalLocalArchiveDependencySpec,
+  isCanonicalSha512Integrity,
+  isExactDependencyVersion,
+  isLocalArchiveDependencySpec,
+} from "./dependency.js";
 import { loadProtectedEnvironment } from "./environment.js";
 import { ServiceMacosDriftError } from "./errors.js";
-import { digest, isErrno, processIsAlive } from "./internal-fs.js";
+import {
+  digest,
+  isErrno,
+  isRecord,
+  processIsAlive,
+} from "./internal-fs.js";
 import { readServiceInput } from "./input.js";
 import {
   assertServiceLogRetention,
@@ -82,12 +94,14 @@ export async function createServiceBinding(
   const directDependencyName = service.target.kind === "agent"
     ? "@mono-agent/core"
     : "@mono-agent/web";
-  const directDependencyVersion = readExactDirectDependency(
+  const lock = await readFirstLockfile(root);
+  const directDependencyVersion = await readBoundDirectDependencyVersion(
     packageSource.source,
     packagePath,
     directDependencyName,
+    root,
+    lock,
   );
-  const lock = await readFirstLockfile(root);
   const [nodeSource, runnerSource] = await Promise.all([
     readServiceInput(runtime.nodePath, 268_435_456),
     readServiceInput(runtime.runnerScriptPath, 8_388_608),
@@ -525,10 +539,7 @@ async function stopService(
 
 async function readFirstLockfile(
   root: string,
-): Promise<{
-  readonly path: string;
-  readonly source: Awaited<ReturnType<typeof readServiceInput>>;
-}> {
+): Promise<ProtectedLockfile> {
   for (const name of ["pnpm-lock.yaml", "package-lock.json"] as const) {
     const path = join(root, name);
     try {
@@ -545,44 +556,142 @@ async function readFirstLockfile(
   );
 }
 
-function readExactDirectDependency(
+interface ProtectedLockfile {
+  readonly path: string;
+  readonly source: Awaited<ReturnType<typeof readServiceInput>>;
+}
+
+async function readBoundDirectDependencyVersion(
+  source: Uint8Array,
+  packagePath: string,
+  dependencyName: "@mono-agent/core" | "@mono-agent/web",
+  projectRoot: string,
+  lock: ProtectedLockfile,
+): Promise<string> {
+  const dependencySpec = readDirectDependencySpec(
+    source,
+    packagePath,
+    dependencyName,
+  );
+  if (isExactDependencyVersion(dependencySpec)) {
+    return dependencySpec;
+  }
+  if (basename(lock.path) !== "package-lock.json") {
+    throw new Error(
+      `${packagePath} local archive dependency ${dependencyName} requires package-lock.json.`,
+    );
+  }
+  const lockJson = parseJsonObject(
+    lock.source.source,
+    lock.path,
+  );
+  const packages = isRecord(lockJson.packages) ? lockJson.packages : undefined;
+  const root = packages !== undefined && isRecord(packages[""])
+    ? packages[""]
+    : undefined;
+  const rootDependencies = root !== undefined && isRecord(root.dependencies)
+    ? root.dependencies
+    : undefined;
+  const installedCandidate =
+    packages?.[`node_modules/${dependencyName}`];
+  const installed = isRecord(installedCandidate)
+    ? installedCandidate
+    : undefined;
+  if (
+    rootDependencies?.[dependencyName] !== dependencySpec
+    || installed === undefined
+    || !isExactDependencyVersion(installed.version)
+    || !isLocalArchiveDependencySpec(installed.resolved)
+    || canonicalLocalArchiveDependencySpec(installed.resolved)
+      !== canonicalLocalArchiveDependencySpec(dependencySpec)
+    || !isCanonicalSha512Integrity(installed.integrity)
+    || installed.link === true
+  ) {
+    throw new Error(
+      `${lock.path} must bind ${dependencyName} to its exact local archive, installed version, and SHA-512 integrity.`,
+    );
+  }
+
+  const packageRoot = join(
+    projectRoot,
+    "node_modules",
+    ...dependencyName.split("/"),
+  );
+  const [projectRealPath, packageRealPath, packageStats] = await Promise.all([
+    realpath(projectRoot),
+    realpath(packageRoot),
+    lstat(packageRoot),
+  ]);
+  const packageRelativePath = relative(projectRealPath, packageRealPath);
+  if (
+    !packageStats.isDirectory()
+    || packageStats.isSymbolicLink()
+    || packageRelativePath.length === 0
+    || packageRelativePath === ".."
+    || packageRelativePath.startsWith("../")
+    || packageRelativePath.startsWith("..\\")
+    || isAbsolute(packageRelativePath)
+  ) {
+    throw new Error(
+      `${packageRoot} must be a real project-contained package directory.`,
+    );
+  }
+  const installedManifestPath = join(packageRoot, "package.json");
+  const installedManifestSource = await readServiceInput(
+    installedManifestPath,
+    8_388_608,
+  );
+  const installedManifest = parseJsonObject(
+    installedManifestSource.source,
+    installedManifestPath,
+  );
+  if (
+    installedManifest.name !== dependencyName
+    || installedManifest.version !== installed.version
+  ) {
+    throw new Error(
+      `${installedManifestPath} must match the locked ${dependencyName}@${installed.version}.`,
+    );
+  }
+  return installed.version;
+}
+
+function readDirectDependencySpec(
   source: Uint8Array,
   packagePath: string,
   dependencyName: "@mono-agent/core" | "@mono-agent/web",
 ): string {
-  let manifest: unknown;
-  try {
-    manifest = JSON.parse(Buffer.from(source).toString("utf8")) as unknown;
-  } catch {
-    throw new Error(`${packagePath} must contain strict JSON.`);
-  }
-  if (
-    typeof manifest !== "object"
-    || manifest === null
-    || Array.isArray(manifest)
-  ) {
-    throw new Error(`${packagePath} must contain a package object.`);
-  }
-  const dependencies =
-    (manifest as Record<string, unknown>).dependencies;
-  if (
-    typeof dependencies !== "object"
-    || dependencies === null
-    || Array.isArray(dependencies)
-  ) {
+  const manifest = parseJsonObject(source, packagePath);
+  const dependencies = manifest.dependencies;
+  if (!isRecord(dependencies)) {
     throw new Error(
       `${packagePath} must declare ${dependencyName} as a direct dependency.`,
     );
   }
-  const version =
-    (dependencies as Record<string, unknown>)[dependencyName];
+  const dependencySpec = dependencies[dependencyName];
   if (
-    typeof version !== "string"
-    || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(version)
+    !isExactDependencyVersion(dependencySpec)
+    && !isLocalArchiveDependencySpec(dependencySpec)
   ) {
     throw new Error(
-      `${packagePath} must pin ${dependencyName} to one exact semantic version.`,
+      `${packagePath} must pin ${dependencyName} to one exact semantic version or npm project-relative file:*.tgz archive.`,
     );
   }
-  return version;
+  return dependencySpec;
+}
+
+function parseJsonObject(
+  source: Uint8Array,
+  path: string,
+): Record<string, unknown> {
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(Buffer.from(source).toString("utf8")) as unknown;
+  } catch {
+    throw new Error(`${path} must contain strict JSON.`);
+  }
+  if (!isRecord(manifest)) {
+    throw new Error(`${path} must contain a JSON object.`);
+  }
+  return manifest;
 }

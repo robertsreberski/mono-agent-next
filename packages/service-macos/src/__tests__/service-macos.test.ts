@@ -68,6 +68,7 @@ import { runForegroundService } from "../runner.js";
 
 const validAgent = async (): Promise<AgentValidationResult> => ({ ok: true, issues: [] });
 const FAKE_SERVICE_PID = 2_147_483_647;
+const LOCAL_ARCHIVE_INTEGRITY = `sha512-${"A".repeat(86)}==`;
 const execFile = promisify(execFileCallback);
 
 afterEach(() => {
@@ -287,6 +288,94 @@ describe("service-macos reconciliation", () => {
     expect(plan.fingerprint).toMatch(/^service-macos:v1:[a-f0-9]{64}$/u);
     expect(plan.entries[0]?.desiredPlist).toContain(`<string>${fixture.runtime.nodePath}</string>`);
     expect(fixture.runner.calls.every((call) => call.command === LAUNCHCTL_PATH && call.arguments_[0] === "print")).toBe(true);
+  });
+
+  it("binds an npm project-local core archive to its locked installed version without mutation", async () => {
+    const fixture = await createFixture();
+    await writeLocalArchiveDependency(fixture);
+    const before = await snapshot(fixture.root);
+
+    const plan = await planServiceMacos(fixture.configPath, {
+      runtime: fixture.runtime,
+      runner: fixture.runner,
+      validateAgent: validAgent,
+    });
+
+    expect(await snapshot(fixture.root)).toEqual(before);
+    expect(plan.entries[0]?.binding).toMatchObject({
+      directDependencyName: "@mono-agent/core",
+      directDependencyVersion: "0.15.0",
+      lockfilePath: join(fixture.root, "agent", "package-lock.json"),
+    });
+  });
+
+  it("rejects incomplete or mismatched npm local-archive evidence", async () => {
+    const missingIntegrity = await createFixture();
+    await writeLocalArchiveDependency(missingIntegrity, { integrity: null });
+    await expect(planServiceMacos(missingIntegrity.configPath, {
+      runtime: missingIntegrity.runtime,
+      runner: missingIntegrity.runner,
+      validateAgent: validAgent,
+    })).rejects.toThrow(/exact local archive, installed version, and SHA-512 integrity/u);
+
+    const mismatchedLocator = await createFixture();
+    await writeLocalArchiveDependency(mismatchedLocator, {
+      lockResolved: "file:vendor/other-core.tgz",
+    });
+    await expect(planServiceMacos(mismatchedLocator.configPath, {
+      runtime: mismatchedLocator.runtime,
+      runner: mismatchedLocator.runner,
+      validateAgent: validAgent,
+    })).rejects.toThrow(/exact local archive, installed version, and SHA-512 integrity/u);
+
+    const mismatchedIdentity = await createFixture();
+    await writeLocalArchiveDependency(mismatchedIdentity, {
+      installedName: "@mono-agent/not-core",
+    });
+    await expect(planServiceMacos(mismatchedIdentity.configPath, {
+      runtime: mismatchedIdentity.runtime,
+      runner: mismatchedIdentity.runner,
+      validateAgent: validAgent,
+    })).rejects.toThrow(/must match the locked @mono-agent\/core@0\.15\.0/u);
+  });
+
+  it("keeps local archive service bindings npm-only and project-relative", async () => {
+    const pnpm = await createFixture();
+    await writeFile(
+      join(pnpm.root, "agent", "package.json"),
+      `${JSON.stringify({
+        dependencies: {
+          "@mono-agent/core": "file:vendor/mono-agent-core-0.15.0.tgz",
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    await expect(planServiceMacos(pnpm.configPath, {
+      runtime: pnpm.runtime,
+      runner: pnpm.runner,
+      validateAgent: validAgent,
+    })).rejects.toThrow(/requires package-lock\.json/u);
+
+    for (const dependencySpec of [
+      "file:../mono-agent-core-0.15.0.tgz",
+      "file:/tmp/mono-agent-core-0.15.0.tgz",
+      "file:vendor/../mono-agent-core-0.15.0.tgz",
+      "file:vendor/mono-agent-core-0.15.0.TGZ",
+    ]) {
+      const unsafe = await createFixture();
+      await writeFile(
+        join(unsafe.root, "agent", "package.json"),
+        `${JSON.stringify({
+          dependencies: { "@mono-agent/core": dependencySpec },
+        })}\n`,
+        { mode: 0o600 },
+      );
+      await expect(planServiceMacos(unsafe.configPath, {
+        runtime: unsafe.runtime,
+        runner: unsafe.runner,
+        validateAgent: validAgent,
+      })).rejects.toThrow(/exact semantic version or npm project-relative file:\*\.tgz archive/u);
+    }
   });
 
   it("isolates per-service read-only drift while strict planning fails closed", async () => {
@@ -583,9 +672,9 @@ describe("service-macos reconciliation", () => {
       dataDirectory: join(fixture.root, "web-state"),
       agentRegistries: [registry],
     })}\n`, { mode: 0o600 });
-    await writeFile(join(project, "package.json"), `${JSON.stringify({
-      dependencies: { "@mono-agent/web": "0.15.0" },
-    })}\n`, { mode: 0o600 });
+    await writeLocalArchiveDependency(fixture, {
+      dependencyName: "@mono-agent/web",
+    });
     const serviceConfig = JSON.parse(await readFile(fixture.configPath, "utf8")) as {
       services: Record<string, Record<string, unknown>>;
     };
@@ -1953,6 +2042,68 @@ async function createFixture(): Promise<Fixture> {
     runtime: { nodePath, runnerScriptPath, launchAgentsDirectory, uid },
     runner: new FakeRunner(),
   };
+}
+
+async function writeLocalArchiveDependency(
+  fixture: Fixture,
+  options: {
+    readonly dependencyName?: "@mono-agent/core" | "@mono-agent/web";
+    readonly dependencySpec?: string;
+    readonly lockResolved?: string;
+    readonly integrity?: string | null;
+    readonly installedName?: string;
+    readonly installedVersion?: string;
+  } = {},
+): Promise<void> {
+  const project = join(fixture.root, "agent");
+  const dependencyName = options.dependencyName ?? "@mono-agent/core";
+  const dependencySpec = options.dependencySpec
+    ?? `file:vendor/${dependencyName.replace(/^@/u, "").replace("/", "-")}-0.15.0.tgz`;
+  const installedVersion = options.installedVersion ?? "0.15.0";
+  await writeFile(
+    join(project, "package.json"),
+    `${JSON.stringify({
+      dependencies: { [dependencyName]: dependencySpec },
+    })}\n`,
+    { mode: 0o600 },
+  );
+  await unlink(join(project, "pnpm-lock.yaml"));
+  const installedRoot = join(
+    project,
+    "node_modules",
+    ...dependencyName.split("/"),
+  );
+  await mkdir(installedRoot, { recursive: true, mode: 0o700 });
+  await writeFile(
+    join(installedRoot, "package.json"),
+    `${JSON.stringify({
+      name: options.installedName ?? dependencyName,
+      version: installedVersion,
+    })}\n`,
+    { mode: 0o600 },
+  );
+  const installedLock = {
+    version: installedVersion,
+    resolved: options.lockResolved ?? dependencySpec,
+    ...(options.integrity === null
+      ? {}
+      : { integrity: options.integrity ?? LOCAL_ARCHIVE_INTEGRITY }),
+  };
+  await writeFile(
+    join(project, "package-lock.json"),
+    `${JSON.stringify({
+      name: "service-local-archive-fixture",
+      version: "0.0.0",
+      lockfileVersion: 3,
+      packages: {
+        "": {
+          dependencies: { [dependencyName]: dependencySpec },
+        },
+        [`node_modules/${dependencyName}`]: installedLock,
+      },
+    })}\n`,
+    { mode: 0o600 },
+  );
 }
 
 async function installManagedFixture(fixture: Fixture): Promise<Awaited<ReturnType<typeof planServiceMacos>>> {

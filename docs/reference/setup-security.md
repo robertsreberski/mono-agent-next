@@ -33,6 +33,13 @@ scripts disabled when building an untrusted closure. A retained local-tarball
 consumer keeps its archives, manifest, and lockfile together so a frozen
 install can reproduce the selected closure.
 
+When service-macos manages a retained source-preview agent or web project, it
+accepts that same npm local-archive form for the target's direct
+`@mono-agent/core` or `@mono-agent/web` dependency. Planning independently
+checks the root lock locator, canonical SHA-512 integrity, and installed
+package identity/version before binding the service. It does not extend the
+exception to pnpm local archives.
+
 ## Secrets
 
 Schema-marked secret fields accept explicit `{"$env":"NAME"}` references only.

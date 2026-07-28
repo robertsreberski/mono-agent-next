@@ -34,6 +34,14 @@ Build the product and its workspace dependencies:
 pnpm --filter @mono-agent/service-macos... run build
 ```
 
+The target project normally pins `@mono-agent/core` or `@mono-agent/web` to
+one exact semantic version. A retained source-preview project may instead use
+the documented npm project-relative `file:*.tgz` dependency. In that case,
+service planning requires `package-lock.json` to bind the same archive
+locator, a canonical SHA-512 integrity, and a real project-contained installed
+package whose identity and semantic version match the lock. Pnpm local-archive
+evidence remains unsupported.
+
 Author its separate strict JSON file, then inspect and plan without mutation:
 
 ```bash
