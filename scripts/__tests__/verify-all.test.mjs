@@ -104,9 +104,16 @@ describe("verify-all", () => {
     const manifest = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8"));
 
     /** Gates CI covers by another name or on another workflow. */
+    const successorGate = readFileSync(
+      resolve(repoRoot, "scripts/verify/personal-successor.mjs"),
+      "utf8",
+    );
     const coveredElsewhere = new Map([
       ["check:pnpm-policy", () => manifest.scripts.preinstall.includes("pnpm-release-age-policy.mjs")],
       ["check:secrets", () => workflow.includes("ghcr.io/gitleaks/gitleaks")],
+      ["verify:operator-products", () =>
+        workflow.includes("pnpm run verify:personal-successor")
+        && successorGate.includes('"verify:operator-products"')],
       ["release:validate", () => releaseWorkflow.includes("pnpm run release:validate")],
       ["release:pack", () => releaseWorkflow.includes("pnpm run release:pack")],
       ["release:consumer", () => releaseWorkflow.includes("pnpm run release:consumer")],

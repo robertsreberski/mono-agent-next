@@ -1,0 +1,33 @@
+{
+  "configVersion": 1,
+  "services": {
+    "personal-agent-next": {
+      "target": {
+        "kind": "agent",
+        "config": "__PROJECT_ROOT__/mono-agent.config.json"
+      },
+      "startAtLogin": false,
+      "restartPolicy": "on-failure",
+      "environmentFile": "__PROJECT_ROOT__/.env",
+      "logs": {
+        "directory": "__PROJECT_ROOT__/.mono-agent/logs/agent",
+        "maxBytes": 10485760,
+        "retainFiles": 5
+      }
+    },
+    "personal-agent-next-web": {
+      "target": {
+        "kind": "web",
+        "config": "__PROJECT_ROOT__/web.config.json"
+      },
+      "startAtLogin": false,
+      "restartPolicy": "on-failure",
+      "environmentFile": "__PROJECT_ROOT__/.env",
+      "logs": {
+        "directory": "__PROJECT_ROOT__/.mono-agent/logs/web",
+        "maxBytes": 10485760,
+        "retainFiles": 5
+      }
+    }
+  }
+}
