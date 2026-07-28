@@ -47,7 +47,7 @@
   "dependencies": {
     "@mono-agent/module-sdk": "workspace:0.15.0",
     "@opentelemetry/otlp-transformer": "0.219.0",
-    "@opentelemetry/sdk-trace-base": "2.8.0"
+    "@opentelemetry/sdk-trace-base": "2.10.0"
   },
   "publishConfig": {
     "access": "public"
